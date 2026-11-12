@@ -277,6 +277,98 @@ fn parse_stall_patience(raw: &str) -> Result<usize, String> {
 /// primal and dual step lengths, and the ratio-test state — the instrument the
 /// #1013 diagnosis runs on (`scratchpad/i1013/trace_report.py`). Off by default
 /// and read once per process; when off the trace costs one relaxed load per pivot.
+/// Diagnostic: `DISCOPT_LP_DUMP_UNCERTIFIED=<dir>` writes the first few warm dual
+/// solves that ended in an uncertified Farkas ray as JSON (the `testdata` fixture
+/// layout plus the ray `rho`), in the space the loop solved (scaled when the caller
+/// scaled). For investigating why a ray fails certification; no effect when unset.
+#[allow(clippy::too_many_arguments)]
+fn dump_uncertified_lp(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    rho: &[f64],
+    delta: f64,
+    x_leave: f64,
+    start_basic: &[usize],
+    start_stat: &[i8],
+) {
+    static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let Some(dir) = DIR
+        .get_or_init(|| std::env::var("DISCOPT_LP_DUMP_UNCERTIFIED").ok())
+        .as_ref()
+    else {
+        return;
+    };
+    let k = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if k >= 8 {
+        return;
+    }
+    let (mut col_ptr, mut row_idx, mut vals) = (vec![0usize], Vec::new(), Vec::new());
+    for j in 0..n {
+        let (r, v) = sp.col(j);
+        row_idx.extend_from_slice(r);
+        vals.extend_from_slice(v);
+        col_ptr.push(row_idx.len());
+    }
+    let f = |v: &[f64]| {
+        let s: Vec<String> = v.iter().map(|x| format!("{x:e}")).collect();
+        format!("[{}]", s.join(","))
+    };
+    let u_ = |v: &[usize]| {
+        let s: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+        format!("[{}]", s.join(","))
+    };
+    let json = format!(
+        "{{\"m\": {m}, \"n\": {n}, \"col_ptr\": {}, \"row_idx\": {}, \"vals\": {}, \"c\": {}, \"l\": {}, \"u\": {}, \"b\": {}, \"rho\": {}, \"delta\": {delta:e}, \"x_leave\": {x_leave:e}{}}}",
+        u_(&col_ptr),
+        u_(&row_idx),
+        f(&vals),
+        f(c),
+        f(l),
+        f(u),
+        f(b),
+        f(rho),
+        {
+            let st: Vec<String> = start_stat.iter().map(|x| x.to_string()).collect();
+            format!(
+                ", \"basic_vars\": {}, \"col_status\": [{}]",
+                u_(start_basic),
+                st.join(",")
+            )
+        }
+    );
+    let path = format!("{dir}/uncertified_{k}.json");
+    if let Err(e) = std::fs::write(&path, json) {
+        eprintln!("DISCOPT_LP_DUMP_UNCERTIFIED: could not write {path}: {e}");
+    }
+}
+
+/// HiGHS's `primal_feasibility_tolerance` default: the largest leaving-row violation
+/// `DISCOPT_LP_DUAL_NOISE_ROWS` tolerates when nothing can repair it.
+const NOISE_ROW_TOL: f64 = 1e-7;
+
+/// Default for [`SimplexOptions::dual_noise_rows`] from `DISCOPT_LP_DUAL_NOISE_ROWS`
+/// (default OFF): see the empty-ratio-test arm of the warm dual loop. Garbage is
+/// refused.
+pub(super) fn noise_rows_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_NOISE_ROWS") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_LP_DUAL_NOISE_ROWS={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    })
+}
+
 fn dual_trace_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("DISCOPT_LP_DUAL_TRACE").is_some())
@@ -1766,6 +1858,9 @@ impl<'a> PreparedDual<'a> {
         // A productive pivot resets the count. Without this the only cycle escape
         // was the iteration cap → cold fallback; Bland resolves it in place.
         let mut stall = 0usize;
+        // Basic variables tolerated at the noise level (`DISCOPT_LP_DUAL_NOISE_ROWS`);
+        // allocated on first use.
+        let mut tolerated: Option<Vec<bool>> = None;
         let bland_threshold = 2 * (n + 1);
         let trace = dual_trace_enabled();
         // #928: in-place recoveries from a near-zero pivot, attempted only on a
@@ -1846,103 +1941,127 @@ impl<'a> PreparedDual<'a> {
             // feasibility, confirm with an *exact* recompute before declaring
             // optimality, and verify dual feasibility on *exact* reduced costs —
             // so a drifted increment can never return a wrong optimum.
-            let (r, to_lower, delta) =
-                match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
-                    Some(sel) => sel,
-                    None => {
-                        xb = tagged(
-                            recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
-                            crate::profile::Ctr::DualExitXbSolveFail,
-                        )?;
-                        since_refresh = 0;
-                        match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
-                            Some(sel) => sel,
-                            None => {
-                                dvec = refresh_rc!();
-                                if dual_feasible(n, &stat, l, u, &dvec, tol) {
-                                    // In-engine refined recovery (discopt#364): if the
-                                    // working factor's growth signal flags possible digit
-                                    // loss, recompute x_B from a fresh, refinement-polished
-                                    // factorization and re-verify primal feasibility on the
-                                    // sharper values. If the sharper x_B reveals an
-                                    // infeasibility the drifted one hid, hand to the robust
-                                    // cold solve rather than certify a wrong optimum;
-                                    // otherwise certify with the sharper x_B. Sound either
-                                    // way — the decision is only ever made *more* accurate,
-                                    // and the common (benign-growth) path is untouched.
-                                    //
-                                    // growth is one-sided (see KAPPA_REFINE_TRIGGER): it
-                                    // cannot see a near-singular basis that elimination
-                                    // never had to fight. When the κ₁ check is enabled it
-                                    // covers that blind spot, and is evaluated *only* if
-                                    // growth stayed quiet — the 0.2% that already recover
-                                    // must not pay for an estimate whose answer they do
-                                    // not use.
-                                    let unstable =
-                                        lu.growth().is_some_and(|g| g > GROWTH_REFINE_TRIGGER)
-                                            || kappa_refine_trigger().is_some_and(|line| {
-                                                basis_condition(&mut lu, sp, m, &basis)
-                                                    .is_some_and(|k| k > line)
-                                            });
-                                    let refined_xb: Option<Vec<f64>> = if unstable {
-                                        crate::profile::incr(
-                                            crate::profile::Ctr::RefinedRecoveryAttemptsDual,
-                                        );
-                                        match refined_basic_values(sp, b, n, m, l, u, &basis, &stat)
-                                        {
-                                            Some(xb_r) => {
-                                                if select_leaving(
-                                                    m, &basis, l, u, &gamma, &xb_r, tol, bland,
-                                                )
-                                                .is_some()
-                                                {
-                                                    crate::profile::incr(
+            let (r, to_lower, delta) = match select_leaving(
+                m,
+                &basis,
+                l,
+                u,
+                &gamma,
+                &xb,
+                tol,
+                bland,
+                tolerated.as_deref(),
+            ) {
+                Some(sel) => sel,
+                None => {
+                    xb = tagged(
+                        recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
+                        crate::profile::Ctr::DualExitXbSolveFail,
+                    )?;
+                    since_refresh = 0;
+                    match select_leaving(
+                        m,
+                        &basis,
+                        l,
+                        u,
+                        &gamma,
+                        &xb,
+                        tol,
+                        bland,
+                        tolerated.as_deref(),
+                    ) {
+                        Some(sel) => sel,
+                        None => {
+                            dvec = refresh_rc!();
+                            if dual_feasible(n, &stat, l, u, &dvec, tol) {
+                                // In-engine refined recovery (discopt#364): if the
+                                // working factor's growth signal flags possible digit
+                                // loss, recompute x_B from a fresh, refinement-polished
+                                // factorization and re-verify primal feasibility on the
+                                // sharper values. If the sharper x_B reveals an
+                                // infeasibility the drifted one hid, hand to the robust
+                                // cold solve rather than certify a wrong optimum;
+                                // otherwise certify with the sharper x_B. Sound either
+                                // way — the decision is only ever made *more* accurate,
+                                // and the common (benign-growth) path is untouched.
+                                //
+                                // growth is one-sided (see KAPPA_REFINE_TRIGGER): it
+                                // cannot see a near-singular basis that elimination
+                                // never had to fight. When the κ₁ check is enabled it
+                                // covers that blind spot, and is evaluated *only* if
+                                // growth stayed quiet — the 0.2% that already recover
+                                // must not pay for an estimate whose answer they do
+                                // not use.
+                                let unstable =
+                                    lu.growth().is_some_and(|g| g > GROWTH_REFINE_TRIGGER)
+                                        || kappa_refine_trigger().is_some_and(|line| {
+                                            basis_condition(&mut lu, sp, m, &basis)
+                                                .is_some_and(|k| k > line)
+                                        });
+                                let refined_xb: Option<Vec<f64>> = if unstable {
+                                    crate::profile::incr(
+                                        crate::profile::Ctr::RefinedRecoveryAttemptsDual,
+                                    );
+                                    match refined_basic_values(sp, b, n, m, l, u, &basis, &stat) {
+                                        Some(xb_r) => {
+                                            if select_leaving(
+                                                m,
+                                                &basis,
+                                                l,
+                                                u,
+                                                &gamma,
+                                                &xb_r,
+                                                tol,
+                                                bland,
+                                                tolerated.as_deref(),
+                                            )
+                                            .is_some()
+                                            {
+                                                crate::profile::incr(
                                                     crate::profile::Ctr::RefinedRecoveryRescuesDual,
                                                 );
-                                                    return None; // sharper x_B infeasible → cold fallback
-                                                }
-                                                Some(xb_r)
+                                                return None; // sharper x_B infeasible → cold fallback
                                             }
-                                            None => None, // fresh factor failed; keep the exact x_B
+                                            Some(xb_r)
                                         }
-                                    } else {
-                                        None
-                                    };
-                                    let xb_final: &[f64] = refined_xb.as_deref().unwrap_or(&xb);
-                                    // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
-                                    // empty (caller falls back) if the btran fails.
-                                    let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
-                                    let dual = if lu.btran(&mut y).is_ok() {
-                                        y
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    return Some(assemble(
-                                        n,
-                                        m,
-                                        &basis,
-                                        &slot_of,
-                                        &stat,
-                                        xb_final,
-                                        c,
-                                        l,
-                                        u,
-                                        LpStatus::Optimal,
-                                        pivots,
-                                        dual,
-                                        Vec::new(),
-                                    ));
-                                }
-                                // Exact reduced costs reveal dual infeasibility (a drifted
-                                // pivot): hand off to the robust cold solve.
-                                crate::profile::incr(
-                                    crate::profile::Ctr::DualExitDualInfeasAtOptimum,
-                                );
-                                return None;
+                                        None => None, // fresh factor failed; keep the exact x_B
+                                    }
+                                } else {
+                                    None
+                                };
+                                let xb_final: &[f64] = refined_xb.as_deref().unwrap_or(&xb);
+                                // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
+                                // empty (caller falls back) if the btran fails.
+                                let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+                                let dual = if lu.btran(&mut y).is_ok() {
+                                    y
+                                } else {
+                                    Vec::new()
+                                };
+                                return Some(assemble(
+                                    n,
+                                    m,
+                                    &basis,
+                                    &slot_of,
+                                    &stat,
+                                    xb_final,
+                                    c,
+                                    l,
+                                    u,
+                                    LpStatus::Optimal,
+                                    pivots,
+                                    dual,
+                                    Vec::new(),
+                                ));
                             }
+                            // Exact reduced costs reveal dual infeasibility (a drifted
+                            // pivot): hand off to the robust cold solve.
+                            crate::profile::incr(crate::profile::Ctr::DualExitDualInfeasAtOptimum);
+                            return None;
                         }
                     }
-                };
+                }
+            };
 
             // #1013: a stalled warm loop hands the LP to the cold solve. `stall` is
             // the run of consecutive degenerate pivots — pivots that raise no dual
@@ -2023,7 +2142,35 @@ impl<'a> PreparedDual<'a> {
                             Vec::new(),
                         ));
                     }
+                    if opts.dual_noise_rows && delta <= NOISE_ROW_TOL {
+                        // The leaving row is violated by no more than HiGHS's primal
+                        // feasibility tolerance, no column can repair it (empty ratio
+                        // test) and its ray proves nothing: the LP is feasible to that
+                        // tolerance along this row (measured on neos17's cut LP: every
+                        // such exit was a basic variable at 1.0e-9 / 1.96e-9 above a
+                        // bound of 0 on an LP HiGHS solves to optimality). Leave the
+                        // row out instead of sending a feasible LP cold. The bound the
+                        // caller takes is the Neumaier-Shcherbina bound on the duals,
+                        // valid whatever the primal residual.
+                        crate::profile::incr(crate::profile::Ctr::DualNoiseRowTolerated);
+                        tolerated.get_or_insert_with(|| vec![false; n])[basis[r]] = true;
+                        continue;
+                    }
                     crate::profile::incr(crate::profile::Ctr::DualExitFarkasUncertified);
+                    dump_uncertified_lp(
+                        sp,
+                        m,
+                        n,
+                        c,
+                        l,
+                        u,
+                        b,
+                        &rho,
+                        delta,
+                        xb[r],
+                        &self.basis,
+                        &self.stat,
+                    );
                     return None;
                 }
             }
@@ -2578,6 +2725,7 @@ fn select_leaving(
     xb: &[f64],
     tol: f64,
     bland: bool,
+    tolerated: Option<&[bool]>,
 ) -> Option<(usize, bool, f64)> {
     let mut r = None;
     let mut best_score = 0.0f64;
@@ -2597,6 +2745,11 @@ fn select_leaving(
         } else {
             None
         };
+        // A row tolerated at the noise level (`NOISE_ROW_TOL`, see the empty-ratio-test
+        // arm of the loop) stays out while its violation stays that small.
+        let viol = viol.filter(|&(v, _)| {
+            !(v <= NOISE_ROW_TOL && tolerated.is_some_and(|t| t.get(bi).copied().unwrap_or(false)))
+        });
         if let Some((v, lo)) = viol {
             // Bland (anti-cycling): smallest variable index. Devex (default):
             // largest bound-violation steepest-edge score. Either choice is a
@@ -2986,18 +3139,18 @@ mod tests {
         let xb = [-1.0, -1.0];
 
         // Devex: equal scores, so the first infeasible slot (0) wins.
-        let dev = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, false).unwrap();
+        let dev = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, false, None).unwrap();
         assert_eq!(dev.0, 0, "Devex should take the first equal-score slot");
         assert!(dev.1, "both violate the lower bound → leave toward lower");
 
         // Bland: the smallest *variable* index wins — variable 2 sits in slot 1.
-        let bl = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, true).unwrap();
+        let bl = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, true, None).unwrap();
         assert_eq!(bl.0, 1, "Bland must pick slot 1 (variable 2 < variable 5)");
 
         // Both modes agree there is no leaving row once feasible.
         let feasible = [1.0, 1.0];
-        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, false).is_none());
-        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, true).is_none());
+        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, false, None).is_none());
+        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, true, None).is_none());
     }
 
     // #928: a deadline that is already spent when the warm re-solve starts must
@@ -3710,6 +3863,81 @@ mod tests {
             checked, 11,
             "false-Optimal probe did not run every assertion"
         );
+    }
+
+    /// neos17 under the step-2 search cut LP (`DISCOPT_HIGHS_SEARCH_CUT_LP=1` with
+    /// node separation): a warm dual solve from this start basis picks a leaving row
+    /// violated by 1.96e-9 (a basic column at 1.96e-9 above its bound of 0), finds no
+    /// entering column and a ray that cannot certify -- yet the LP is feasible: HiGHS
+    /// solves it to 0.14346408641211014 with primal infeasibility 6e-17, at 1e-7 and
+    /// 1e-9 tolerances alike. Without `dual_noise_rows` the loop exits uncertified
+    /// (and the caller went cold; on neos17 those cold solves ran to the iteration
+    /// limit, ~90 % of a 5,000-node run). With it the row is tolerated and the loop
+    /// reaches HiGHS's optimum.
+    #[test]
+    fn noise_level_leaving_row_is_tolerated_not_sent_cold() {
+        let json = include_str!("testdata/neos17_cut_lp_noise_row_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+        let highs = 0.14346408641211014f64;
+        let _guard = crate::profile::test_guard();
+        let count = |name: &str| {
+            crate::profile::counter_snapshot()
+                .into_iter()
+                .find(|(k, _)| *k == name)
+                .map_or(0, |(_, v)| v)
+        };
+        let mut checked = 0usize;
+        for noise in [false, true] {
+            let mut o = opts();
+            o.dual_noise_rows = noise;
+            o.dual_cost_perturb = 0.0;
+            crate::profile::reset_totals();
+            crate::profile::set_enabled(true);
+            let p = PreparedDual::prepare_cols(&sp, m, n, &c, &l, &u, &start, &o)
+                .expect("the captured start basis is accepted");
+            let mut banked = Vec::new();
+            let sol = p.run_dual(&l, &u, &b, &o, &mut banked);
+            let (unc, tolerated) = (
+                count("DualExitFarkasUncertified"),
+                count("DualNoiseRowTolerated"),
+            );
+            crate::profile::set_enabled(false);
+            if !noise {
+                // The mechanism reproduces: the warm loop gives up uncertified.
+                assert!(sol.is_none(), "the fixture no longer reproduces the exit");
+                assert!(unc >= 1, "uncertified exit not reached");
+                checked += 2;
+            } else {
+                let sol = sol.expect("the tolerated loop finishes");
+                assert!(tolerated >= 1, "no row was tolerated");
+                assert_eq!(unc, 0);
+                assert_eq!(sol.status, LpStatus::Optimal);
+                assert!(
+                    (sol.obj - highs).abs() <= 1e-9 * (1.0 + highs.abs()),
+                    "objective {} vs HiGHS {highs}",
+                    sol.obj
+                );
+                // Primal residual within the tolerated level, on rows and bounds.
+                let mut ax = vec![0.0; m];
+                for j in 0..n {
+                    let (rows, v) = sp.col(j);
+                    for (&r, &a) in rows.iter().zip(v) {
+                        ax[r] += a * sol.x[j];
+                    }
+                    assert!(sol.x[j] >= l[j] - NOISE_ROW_TOL && sol.x[j] <= u[j] + NOISE_ROW_TOL);
+                }
+                let row = (0..m).map(|i| (ax[i] - b[i]).abs()).fold(0.0, f64::max);
+                assert!(row <= 1e-9, "row residual {row:e}");
+                checked += 5;
+            }
+        }
+        assert_eq!(checked, 7, "probe did not run every assertion");
     }
 
     fn parse_stall_fixture(

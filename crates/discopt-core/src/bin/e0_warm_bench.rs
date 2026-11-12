@@ -164,6 +164,7 @@ fn main() -> ExitCode {
         recover_unstable_pivot: false,
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
         cold_dual_start: false,
         warm_flip_boxed: false,
     };

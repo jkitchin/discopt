@@ -500,6 +500,8 @@ counters!(
     DualCostPerturbRejected,
     // Perturbed attempts whose certified Farkas ray settled the true LP infeasible.
     DualCostPerturbInfeasible,
+    // Leaving rows tolerated at the noise level (DISCOPT_LP_DUAL_NOISE_ROWS).
+    DualNoiseRowTolerated,
     // THRU-5: split the primal refactorization trigger into its three causes so the
     // wide-McCormick refactor thrash can be attributed. RefacFtFail = the FT
     // (product-form) update returned Err (numerical bump breakdown → forced

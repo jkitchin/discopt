@@ -354,6 +354,7 @@ pub fn solve_lp_py<'py>(
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
         cold_dual_start: false,
         warm_flip_boxed: false,
     };
@@ -495,6 +496,7 @@ pub fn solve_lp_warm_py<'py>(
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
         cold_dual_start: false,
         warm_flip_boxed: false,
     };
@@ -619,6 +621,7 @@ pub fn solve_lp_warm_csc_py<'py>(
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
         cold_dual_start: false,
         // #1935: see `SimplexOptions::warm_flip_boxed` (default off).
         warm_flip_boxed,
@@ -759,6 +762,7 @@ pub fn solve_lp_batch_py<'py>(
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
         cold_dual_start: false,
         warm_flip_boxed: false,
     };
@@ -2168,6 +2172,7 @@ pub(crate) fn milp_options(
             // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
             dual_stall_patience: SimplexOptions::default().dual_stall_patience,
             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+            dual_noise_rows: SimplexOptions::default().dual_noise_rows,
             cold_dual_start: false,
             warm_flip_boxed: false,
         },

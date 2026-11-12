@@ -235,6 +235,11 @@ pub struct SimplexOptions {
     /// `DISCOPT_LP_DUAL_COST_PERTURB=0` opts out and restores the previous path
     /// exactly; a float sets a specific size.
     pub dual_cost_perturb: f64,
+    /// Tolerate a leaving row whose violation is at most `1e-7` (HiGHS's primal
+    /// feasibility tolerance) when the dual ratio test is empty and its Farkas ray
+    /// does not certify, instead of sending the LP cold. Default from
+    /// `DISCOPT_LP_DUAL_NOISE_ROWS` (OFF).
+    pub dual_noise_rows: bool,
     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
     /// slack basis instead of the cold two-phase primal.
     ///
@@ -326,6 +331,7 @@ impl Default for SimplexOptions {
             recover_unstable_pivot: false,
             dual_stall_patience: dual::stall_patience_default(),
             dual_cost_perturb: dual::cost_perturb_default(),
+            dual_noise_rows: dual::noise_rows_default(),
             cold_dual_start: false,
             warm_flip_boxed: false,
         }
