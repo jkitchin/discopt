@@ -1,0 +1,101 @@
+--- MILP phase profile (count, total ms) ---
+  RootCutLoop           10 calls    3411.49 ms
+  RootSolve             81 calls     149.17 ms
+  SepCmir               79 calls     532.39 ms
+  SepGomory              9 calls      60.63 ms
+  DiveRepair             8 calls     117.14 ms
+  SubMip                 9 calls    5713.04 ms
+  RandRound              2 calls      18.77 ms
+  NodeGmiScan            9 calls       0.19 ms
+  NodeGmiAugment       765 calls      63.39 ms
+  NodeGmiLp            765 calls    1879.03 ms
+  NodeGmiNs            765 calls     170.39 ms
+  NodeGmiSep           401 calls    3238.10 ms
+  NodeLpSolve         9032 calls   26582.63 ms
+  StrongBranch           1 calls       9.42 ms
+  SearchLoop            10 calls   42569.22 ms
+  Fbbt                  10 calls      22.22 ms
+  NodeReduce            10 calls      16.64 ms
+  PriceBtran          1378 calls       4.96 ms
+  PriceSweep          1378 calls      25.42 ms
+  AlphaFtran          1366 calls       8.66 ms
+  FtUpdate             737 calls      14.26 ms
+  Refactorize           10 calls      11.87 ms
+  DualPrepare        10206 calls    8721.24 ms
+  DualRecompute      10217 calls     403.71 ms
+  DualPivotLoop      10217 calls   18274.89 ms
+  RedCostFix            58 calls     104.72 ms
+  LuSymbolic         14996 calls      15.96 ms
+  LuNumeric          14996 calls   11313.20 ms
+--- simplex pivot categorization ---
+  DiveRuns                    8
+  RootHighsPropagated         46
+  HighsSepaVarBounds         61
+  HighsSepaCutoffBox        451
+  DiveSteps                 219
+  DiveHitIntegral             8
+  NodeNsBound              9032
+  Phase2Pivots             1366
+  DegeneratePivots         1178
+  BoundFlips                629
+  Refactorizations           10
+  DualDegeneratePivots        264
+  ExpandMinSteps            160
+  RcFixDualReuse           6591
+  NodeLpOptimal            9032
+  NodeLpIters            288838
+  NodeLpOverInc            1749
+  NodeLpItersOverInc     154252
+  NodeGmiNodes                9
+  NodeGmiRaw               1298
+  NodeGmiCuts              1298
+  NodeGmiNsAbstain          639
+  NodeGmiNsAbstainKept        639
+  NodeGmiLifted               8
+  NodeGmiInheritSolves        377
+  P1ExpelPasses              12
+  SubMipRensRun               9
+  SubMipSubNodes           1021
+  SubMipImproved              4
+  RandRoundRuns               2
+  RandRoundFound              2
+  RootPoolSeeded            311
+  MilpPresolveRuns            1
+  MilpPresolveColsRemoved         16
+  MilpPresolveRowsRemoved        120
+  RootRensRuns                4
+  RootRensImproved            2
+  RcFixCalls                  9
+  RcFixNodesHit               2
+  RcFixCols                   2
+  DualWarmSolves          10217
+  DualDegenerateRunMax          5
+  RefacCap                   10
+  LpVerdictOptimal           12
+  WarmSubtolRepair           12
+  HighsMipSearchRuns         10
+  HighsSearchCutRowsAdded        932
+  HighsSearchCutRowsDeleted        350
+  HighsSearchCutEpochs         56
+  HighsSearchPoolSeeded       7182
+  HighsMipSearchNodes       6020
+  HighsMipSearchBranched       2923
+  HighsMipSearchSbIters       2703
+  HighsMipSearchCommits         36
+  HighsMipSearchHeuristicHits         15
+  HighsMipSearchSepCalls        382
+  HighsMipSearchSepLifts        107
+  HighsMipSearchBasisFits      52013
+  SepCmirCuts              7182
+  EntryColsWarm              12
+  RootCutRounds              81
+  RootCutWarmReopt           71
+  RootCutsGenerated         600
+  RootCutsKept              289
+  RootCutsSubstDropped        261
+  DualPrepAccept          10206
+  LuSparseFactorizations      14996
+  LuBasisNnz           35855607
+  LuFactorNnz          36002022
+  DualRefactorizations       4288
+  DualRefacCap             4288

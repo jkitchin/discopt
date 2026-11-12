@@ -1,0 +1,16 @@
+{"name": "mik-250-20-75-1", "solver": "C", "budget": 1000, "opt": -49716.0, "status": "feasible", "bound": -50632.35079940269, "objective": -48176.0, "nodes": 999, "wall": 7.407975979000071}
+{"name": "mik-250-20-75-1", "solver": "C", "budget": 5000, "opt": -49716.0, "status": "feasible", "bound": -50408.506364220826, "objective": -48176.0, "nodes": 4999, "wall": 26.38234700700002}
+{"name": "mik-250-20-75-2", "solver": "C", "budget": 1000, "opt": -50768.00000000001, "status": "feasible", "bound": -51216.42510077663, "objective": -50737.08, "nodes": 999, "wall": 10.129410085000018}
+{"name": "mik-250-20-75-2", "solver": "C", "budget": 5000, "opt": -50768.00000000001, "status": "feasible", "bound": -50794.988119307316, "objective": -50768.0, "nodes": 4999, "wall": 37.50978011500001}
+{"name": "mik-250-20-75-3", "solver": "C", "budget": 1000, "opt": -52242.0, "status": "feasible", "bound": -53192.0571250351, "objective": -51942.0, "nodes": 999, "wall": 6.842112859999929}
+{"name": "mik-250-20-75-3", "solver": "C", "budget": 5000, "opt": -52242.0, "status": "feasible", "bound": -53000.84504999468, "objective": -51942.0, "nodes": 4999, "wall": 27.15181665800003}
+{"name": "mik-250-20-75-5", "solver": "C", "budget": 1000, "opt": -51532.0, "status": "feasible", "bound": -52264.30563405269, "objective": -50884.0, "nodes": 999, "wall": 7.832952428999988}
+{"name": "mik-250-20-75-5", "solver": "C", "budget": 5000, "opt": -51532.0, "status": "feasible", "bound": -52099.317672377016, "objective": -50884.0, "nodes": 4999, "wall": 33.590912540999966}
+{"name": "neos17", "solver": "C", "budget": 1000, "opt": 0.1500025774, "status": "feasible", "bound": 0.14529540644518119, "objective": 0.15225913086924972, "nodes": 999, "wall": 15.416026163999959}
+{"name": "neos17", "solver": "C", "budget": 5000, "opt": 0.1500025774, "status": "feasible", "bound": 0.14967687936474416, "objective": 0.1500025774225779, "nodes": 3859, "wall": 300.49386587000004}
+{"name": "neos-911970", "solver": "C", "budget": 1000, "opt": 54.76, "status": "feasible", "bound": 53.60402646423412, "objective": 58.33, "nodes": 999, "wall": 47.02768530100002}
+{"name": "neos-911970", "solver": "C", "budget": 5000, "opt": 54.76, "status": "feasible", "bound": 54.60353736863229, "objective": 54.76000000315531, "nodes": 4999, "wall": 215.91051147899998}
+{"name": "b-ball", "solver": "C", "budget": 1000, "opt": -1.50000000000001, "status": "feasible", "bound": -1.5024904387579587, "objective": -1.5, "nodes": 999, "wall": 0.6378402749999168}
+{"name": "b-ball", "solver": "C", "budget": 5000, "opt": -1.50000000000001, "status": "feasible", "bound": -1.5019114187524465, "objective": -1.5, "nodes": 4999, "wall": 1.554420379000021}
+{"name": "enlight_hard", "solver": "C", "budget": 1000, "opt": 37.0, "status": "optimal", "bound": 37.0, "objective": 37.0, "nodes": 878, "wall": 24.32583363399999}
+{"name": "enlight_hard", "solver": "C", "budget": 5000, "opt": 37.0, "status": "optimal", "bound": 37.0, "objective": 37.0, "nodes": 878, "wall": 24.090581910000083}
