@@ -504,6 +504,9 @@ counters!(
     DualNoiseRowTolerated,
     // Objective lattices that needed the interval (inequality) rule.
     ObjLatticeInterval,
+    // DISCOPT_LP_SUBTOL_LADDER: extra rungs tried / vertex certified by them.
+    SubtolLadderTried,
+    SubtolLadderCertified,
     // THRU-5: split the primal refactorization trigger into its three causes so the
     // wide-McCormick refactor thrash can be attributed. RefacFtFail = the FT
     // (product-form) update returned Err (numerical bump breakdown → forced

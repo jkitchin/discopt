@@ -996,6 +996,19 @@ fn subtol_noise_global_enabled() -> bool {
 /// that tolerance whatever the suspects' true signs. Only a failed certificate
 /// pays for the dual refinement that settles them (#1953).
 #[allow(clippy::too_many_arguments)]
+///
+/// With `ladder` (`SimplexOptions::subtol_ladder`), two more rigorous bounds are
+/// tried before declaring the vertex uncertified, the cheap rungs of the B&B
+/// driver's own node-bound ladder (`node_ns_bound`): the NS bound over the box with
+/// each open single-entry slack's upper side closed by the bound its own row
+/// implies ([`slack_upper_bounds`]; every feasible point lies in that box, so the
+/// bound over it is still a lower bound on the LP), and the NS bound from the
+/// open-column dual repair (`scaled_dual_for_open_columns_csc`, valid for any dual).
+/// Measured on neos-911970 (2,000 nodes): 2,730 repairs from this check alone,
+/// 374k primal pivots, the repaired objective equal to the dual's to 1e-12 in
+/// 2,380 of them -- the vertex was optimal, only the plain bound could not say so
+/// (open slacks with reduced costs of -1e-15 times infinite room).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn subtol_suspects_matter(
     cols: &SparseCols,
     m: usize,
@@ -1007,30 +1020,73 @@ pub(super) fn subtol_suspects_matter(
     y: &[f64],
     obj: f64,
     floor: f64,
+    ladder: bool,
 ) -> bool {
     let (col_ptr, row_idx, vals) = cols.raw();
     if col_ptr.len() < n_real + 1 || y.len() != m || b.len() < m {
         return true;
     }
-    match super::refine::ns_safe_bound_csc(
+    // NaN gap counts as "can matter": only a proven `obj - g <= floor` clears it.
+    let certifies = |g: Option<f64>| {
+        g.is_some_and(|g| {
+            matches!(
+                (obj - g).partial_cmp(&floor),
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            )
+        })
+    };
+    let ns = |y: &[f64], lb: &[f64], ub: &[f64]| {
+        super::refine::ns_safe_bound_csc(
+            y,
+            &cost[..n_real],
+            &col_ptr[..n_real + 1],
+            row_idx,
+            vals,
+            m,
+            n_real,
+            &b[..m],
+            &lb[..n_real],
+            &ub[..n_real],
+        )
+    };
+    if certifies(ns(y, lb, ub)) {
+        return false;
+    }
+    if !ladder || lb.len() < n_real || ub.len() < n_real || cols.ncols() < n_real {
+        return true;
+    }
+    crate::profile::incr(crate::profile::Ctr::SubtolLadderTried);
+    // Rung 1: open single-entry slacks closed by the bound their row implies.
+    let sub = slack_upper_bounds(cols, m, n_real, b, lb, ub);
+    let mut ub2 = ub[..n_real].to_vec();
+    let mut closed = false;
+    for j in 0..n_real {
+        if ub2[j] >= INF && sub[j] < INF {
+            ub2[j] = sub[j];
+            closed = true;
+        }
+    }
+    if closed && certifies(ns(y, &lb[..n_real], &ub2)) {
+        crate::profile::incr(crate::profile::Ctr::SubtolLadderCertified);
+        return false;
+    }
+    // Rung 2: the open-column dual repair, over the original and the closed box.
+    if let Some(y2) = super::refine::scaled_dual_for_open_columns_csc(
         y,
         &cost[..n_real],
         &col_ptr[..n_real + 1],
         row_idx,
         vals,
-        m,
         n_real,
-        &b[..m],
         &lb[..n_real],
         &ub[..n_real],
     ) {
-        // NaN gap counts as "can matter": only a proven `obj - g <= floor` clears it.
-        Some(g) => !matches!(
-            (obj - g).partial_cmp(&floor),
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        ),
-        None => true,
+        if certifies(ns(&y2, lb, ub)) || (closed && certifies(ns(&y2, &lb[..n_real], &ub2))) {
+            crate::profile::incr(crate::profile::Ctr::SubtolLadderCertified);
+            return false;
+        }
     }
+    true
 }
 
 // The dot-product error factor lives in `crate::numeric` so the reduced-cost fixing
@@ -1539,6 +1595,8 @@ struct Simplex<'a> {
     /// zero-valued-basic-artificial finalization pass so warm-start gets a full
     /// basis. Default `false` (bound-changing; kernel path opts in).
     expel_zero_artificials: bool,
+    /// Copied from [`SimplexOptions::subtol_ladder`].
+    subtol_ladder: bool,
     /// Suppress the EXPAND bound relaxation entirely (#956 T2'). EXPAND lets each
     /// pivot violate a bound by up to `EXPAND_MAX` (1e-7, ABSOLUTE), which made it
     /// the obvious suspect behind the bound excursions that downgrade solves to
@@ -1622,6 +1680,7 @@ impl<'a> Simplex<'a> {
             ub,
             unbounded_ray: Vec::new(),
             expel_zero_artificials: opts.expel_zero_artificials,
+            subtol_ladder: opts.subtol_ladder,
             no_expand: false,
             last_xb: Vec::new(),
             xb_refresh: xb_refresh_cadence(),
@@ -2787,7 +2846,17 @@ impl<'a> Simplex<'a> {
         // NS bound from `y` fails to certify the vertex in the first place.
         if !suspects.is_empty()
             && subtol_suspects_matter(
-                &self.cols, self.m, self.n, cost, &self.lb, &self.ub, self.b, y, obj, floor,
+                &self.cols,
+                self.m,
+                self.n,
+                cost,
+                &self.lb,
+                &self.ub,
+                self.b,
+                y,
+                obj,
+                floor,
+                self.subtol_ladder,
             )
         {
             cands.extend(self.confirm_suspects(cost, y, art_sign, &suspects)?);
@@ -5475,5 +5544,50 @@ mod tests {
         }
         assert_eq!(raw.status, LpStatus::Optimal);
         assert!(raw.obj <= -0.5 + 1e-9);
+    }
+
+    /// `DISCOPT_LP_SUBTOL_LADDER`: `min -x` s.t. `x + s1 = 1`, `x + s2 = 1`, `x` in
+    /// `[0, 2]`, slacks in `[0, inf)` -- optimum `-1` at a degenerate vertex. Duals
+    /// `y = (-1, 1e-15)` are optimal up to noise, but `s2`'s reduced cost `-1e-15`
+    /// times its infinite room makes the plain NS bound `-inf`, so the vertex reads
+    /// "uncertified" and would be sent to a primal repair. The ladder closes `s2` at
+    /// the `1` its row implies and certifies `-1`; it still refuses a vertex that is
+    /// not optimal (`obj = -0.5`).
+    #[test]
+    fn subtol_ladder_certifies_noise_on_open_slacks_and_nothing_more() {
+        // Columns: x, s1, s2.
+        let cols = SparseCols::from_dense(&[1.0, 1.0, 0.0, 1.0, 0.0, 1.0], 2, 3);
+        let cost = [-1.0, 0.0, 0.0];
+        let lb = [0.0, 0.0, 0.0];
+        let ub = [2.0, INF, INF];
+        let b = [1.0, 1.0];
+        let y = [-1.0, 1e-15];
+        let obj = -1.0;
+        let floor = subtol_impact_floor(obj);
+        assert!(
+            subtol_suspects_matter(&cols, 2, 3, &cost, &lb, &ub, &b, &y, obj, floor, false),
+            "the plain bound must fail to certify (the fixture's premise)"
+        );
+        assert!(
+            !subtol_suspects_matter(&cols, 2, 3, &cost, &lb, &ub, &b, &y, obj, floor, true),
+            "the ladder certifies the optimal vertex"
+        );
+        let worse = -0.5;
+        assert!(
+            subtol_suspects_matter(
+                &cols,
+                2,
+                3,
+                &cost,
+                &lb,
+                &ub,
+                &b,
+                &y,
+                worse,
+                subtol_impact_floor(worse),
+                true
+            ),
+            "the ladder must not certify a non-optimal vertex"
+        );
     }
 }

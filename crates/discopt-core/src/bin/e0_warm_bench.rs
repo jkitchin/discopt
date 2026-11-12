@@ -166,6 +166,7 @@ fn main() -> ExitCode {
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         dual_noise_rows: SimplexOptions::default().dual_noise_rows,
         dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+        subtol_ladder: SimplexOptions::default().subtol_ladder,
         cold_dual_start: false,
         warm_flip_boxed: false,
     };

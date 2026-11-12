@@ -244,6 +244,11 @@ pub struct SimplexOptions {
     /// solve, as HiGHS does, instead of after a degenerate run of `PERTURB_ARM_RUN`
     /// pivots. Default from `DISCOPT_LP_DUAL_PERTURB_FIRST` (OFF).
     pub dual_perturb_first: bool,
+    /// Let the #1953 sub-tolerance check certify a vertex through the cheap rigorous
+    /// rungs of the node-bound ladder (implied slack bounds, open-column dual
+    /// repair) before handing it to a primal repair. Default from
+    /// `DISCOPT_LP_SUBTOL_LADDER` (OFF).
+    pub subtol_ladder: bool,
     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
     /// slack basis instead of the cold two-phase primal.
     ///
@@ -337,6 +342,7 @@ impl Default for SimplexOptions {
             dual_cost_perturb: dual::cost_perturb_default(),
             dual_noise_rows: dual::noise_rows_default(),
             dual_perturb_first: dual::perturb_first_default(),
+            subtol_ladder: dual::subtol_ladder_default(),
             cold_dual_start: false,
             warm_flip_boxed: false,
         }

@@ -371,6 +371,22 @@ pub(super) fn perturb_first_default() -> bool {
     })
 }
 
+/// Default for [`SimplexOptions::subtol_ladder`] from `DISCOPT_LP_SUBTOL_LADDER`
+/// (default OFF): see `primal::subtol_suspects_matter`. Garbage is refused.
+pub(super) fn subtol_ladder_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_SUBTOL_LADDER") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_LP_SUBTOL_LADDER={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    })
+}
+
 pub(super) fn noise_rows_default() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_NOISE_ROWS") {
@@ -1221,7 +1237,17 @@ fn repair_subtol_dual_optimum(
     if cands.is_empty()
         && (suspects.is_empty()
             || !super::primal::subtol_suspects_matter(
-                sp, m, n, c, l, u, b, &sol.dual, sol.obj, floor,
+                sp,
+                m,
+                n,
+                c,
+                l,
+                u,
+                b,
+                &sol.dual,
+                sol.obj,
+                floor,
+                opts.subtol_ladder,
             ))
     {
         return sol;
