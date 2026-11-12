@@ -387,6 +387,27 @@ pub(super) fn subtol_ladder_default() -> bool {
     })
 }
 
+/// Default for [`SimplexOptions::warm_flip_boxed`] from `DISCOPT_LP_WARM_FLIP_BOXED`
+/// (default OFF; a member of `DISCOPT_HIGHS_CONFIG`). HiGHS corrects a warm start's
+/// dual infeasibilities on boxed columns by flipping them to their other bound
+/// (`HEkk` `correctDual`) instead of abandoning the basis; measured on p0201 under the
+/// HiGHS configuration, all 162 rejected warm starts in 100 nodes had their dual
+/// infeasibilities on boxed columns only (median |d_j| ~ 600), each one a primal
+/// phase 1 (56 to the iteration limit). Garbage is refused.
+pub(super) fn warm_flip_boxed_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_WARM_FLIP_BOXED") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_LP_WARM_FLIP_BOXED={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    })
+}
+
 pub(super) fn noise_rows_default() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_NOISE_ROWS") {
@@ -2178,7 +2199,15 @@ impl<'a> PreparedDual<'a> {
                     // caller cold-falls-back to the trusted two-phase primal solve
                     // (which self-verifies its own phase-1 verdict), never emitting a
                     // false `Infeasible`.
-                    if super::primal::farkas_ray_certifies_cols(&rho, sp, n, m, b, l, u) {
+                    // A noise-level row (`dual_noise_rows`) is tolerated when its ray does
+                    // not certify, so only the floating-point rungs are worth paying for.
+                    let noise_row = opts.dual_noise_rows && delta <= NOISE_ROW_TOL;
+                    let certified = if noise_row {
+                        super::primal::farkas_ray_certifies_cols_float(&rho, sp, n, m, b, l, u)
+                    } else {
+                        super::primal::farkas_ray_certifies_cols(&rho, sp, n, m, b, l, u)
+                    };
+                    if certified {
                         return Some(assemble(
                             n,
                             m,

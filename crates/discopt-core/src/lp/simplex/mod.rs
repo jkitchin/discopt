@@ -344,7 +344,7 @@ impl Default for SimplexOptions {
             dual_perturb_first: dual::perturb_first_default(),
             subtol_ladder: dual::subtol_ladder_default(),
             cold_dual_start: false,
-            warm_flip_boxed: false,
+            warm_flip_boxed: dual::warm_flip_boxed_default(),
         }
     }
 }

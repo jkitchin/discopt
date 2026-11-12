@@ -2184,7 +2184,7 @@ pub(crate) fn milp_options(
             dual_perturb_first: SimplexOptions::default().dual_perturb_first,
             subtol_ladder: SimplexOptions::default().subtol_ladder,
             cold_dual_start: false,
-            warm_flip_boxed: false,
+            warm_flip_boxed: SimplexOptions::default().warm_flip_boxed,
         },
     })
 }

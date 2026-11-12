@@ -1289,6 +1289,27 @@ fn slack_upper_bounds(
 /// #1355: when the ray as computed does not certify, and
 /// `DISCOPT_FARKAS_RAY_CLEANUP` is on, the verifier is re-run once on a copy of
 /// `y` with its rounding-noise entries zeroed ([`farkas_ray_certifies_cleaned`]).
+/// [`farkas_ray_certifies_cols`] without its exact-rational rung: the raw and the
+/// cleaned floating-point checks only. For a leaving row whose violation is already
+/// at the noise level (`dual_noise_rows`), where a failure to certify is answered by
+/// tolerating the row (the bound taken is still the NS bound on the duals), so the
+/// exact decision -- measured at ~4 ms per call on p0201's 134x323 node LP, 2,518
+/// calls per 100 nodes -- cannot change what is returned soundly.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn farkas_ray_certifies_cols_float(
+    y: &[f64],
+    cols: &SparseCols,
+    n: usize,
+    m: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    farkas_ray_certifies_raw(y, cols, n, m, b, l, u)
+        || (farkas_ray_cleanup_enabled()
+            && farkas_ray_certifies_cleaned(y, cols, n, m, b, l, u, FARKAS_RAY_NOISE_REL))
+}
+
 pub(super) fn farkas_ray_certifies_cols(
     y: &[f64],
     cols: &SparseCols,
