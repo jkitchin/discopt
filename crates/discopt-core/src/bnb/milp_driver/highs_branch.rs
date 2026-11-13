@@ -1059,6 +1059,7 @@ pub(super) mod e2e {
             heuristics: false,
             strong_branch: true,
             stall_at: None,
+            stall_keeps_searching: false,
             heur_effort: false,
             submip: false,
             iters_before: 0,

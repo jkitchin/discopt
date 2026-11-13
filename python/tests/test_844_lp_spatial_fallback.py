@@ -54,12 +54,15 @@ def fb(monkeypatch):
 
 
 def _pure_integer_min() -> dm.Model:
-    """In scope for the engine: all-integer, MINIMIZE. Optimum 6 at x=2, y=0."""
+    """In scope for the #844 fallback: all-integer, MINIMIZE, and NONLINEAR -- an
+    integer product, the class the fallback branches on. (A linear pure-integer model
+    takes no reserve: the MILP engine is the primary, see
+    ``test_linear_pure_integer_model_keeps_the_whole_budget``.) Optimum 6 at x=2, y=0."""
     m = dm.Model("pure_int_min")
     x = m.integer("x", lb=0, ub=5)
     y = m.integer("y", lb=0, ub=5)
     m.minimize(3 * x + 5 * y)
-    m.subject_to(x + y >= 2)
+    m.subject_to(x * y + x + y >= 2)
     return m
 
 

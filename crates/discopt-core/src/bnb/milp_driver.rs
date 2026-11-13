@@ -3822,6 +3822,9 @@ pub fn solve_milp_node_hooked(
     lazy: Option<&dyn MilpLazyHook>,
     node: Option<&dyn MilpNodeHook>,
 ) -> MilpResult {
+    // The caller's wall-time budgets run from here: entry preparation and MILP presolve
+    // spend them too (`clock_from`).
+    let t0 = std::time::Instant::now();
     let prep = prepare_entry(csc_w, m, n, c, l, u, b, opts);
     let l = prep.l.as_deref().unwrap_or(l);
     let u = prep.u.as_deref().unwrap_or(u);
@@ -3844,7 +3847,7 @@ pub fn solve_milp_node_hooked(
         && opts.bound_hook.is_none()
         && (MILP_DEPTH.with(|d| d.get()) == 0 || (in_sub_mip() && submip_presolve_enabled()))
     {
-        if let Some(mut res) = solve_presolved(&prep.csc, m, n, c, l, u, b, obj_const, opts) {
+        if let Some(mut res) = solve_presolved(&prep.csc, m, n, c, l, u, b, obj_const, opts, t0) {
             crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
             if unscalable {
                 // Counted for the top-level solve only (see below).
@@ -3856,6 +3859,9 @@ pub fn solve_milp_node_hooked(
             return res;
         }
     }
+    // Presolve may have run and declined (no reduction, a refused or unverified
+    // reduced solve): the original search gets what is left of the budget, not all of it.
+    let opts = &clock_from(opts, t0);
     let mut res = solve_milp_node_search(
         prep.csc, m, n, c, l, u, b, obj_const, opts, hook, lazy, node,
     );
@@ -3968,6 +3974,31 @@ fn assert_implied_subset(opts: &MilpOptions) {
     }
 }
 
+/// Whether the stall guard (`MilpOptions::stall_time_s`) stops a search that has no
+/// incumbent at the slice. Not when the caller offered `extend_no_incumbent_s`: that
+/// asks for the opposite (keep searching without an incumbent), and the guard firing
+/// first made the offer dead -- the Python engine passes both, so every no-incumbent
+/// solve stopped at half its budget (16 of 112 rows of the 2026-11-13 population panel,
+/// 8.6-17.7 s on a 20 s limit) under a route label claiming it had searched the whole
+/// budget. The guard's other role, the stall re-solve with an incumbent, is unchanged.
+fn stall_stops(opts: &MilpOptions) -> bool {
+    opts.extend_no_incumbent_s.is_none()
+}
+
+/// `opts` with its wall-time budgets counted from `t0` rather than from now:
+/// `time_limit_s`, `stall_time_s` and `extend_no_incumbent_s` (each "seconds from the
+/// start") lose the time already spent, floored at zero. `root_cut_time_s` is a budget
+/// of the root's own, measured from the root, and is unchanged.
+fn clock_from(opts: &MilpOptions, t0: std::time::Instant) -> MilpOptions {
+    let spent = t0.elapsed().as_secs_f64();
+    let left = |t: Option<f64>| t.map(|t| (t - spent).max(0.0));
+    let mut o = opts.clone();
+    o.time_limit_s = left(opts.time_limit_s);
+    o.stall_time_s = left(opts.stall_time_s);
+    o.extend_no_incumbent_s = left(opts.extend_no_incumbent_s);
+    o
+}
+
 /// Presolve the standard-form MILP (`A x = b`, structural columns `0..n_struct`, one
 /// singleton slack per inequality row after them), solve the reduced problem, map the
 /// answer back and re-verify it on the original rows. `None` means "solve the original
@@ -3985,8 +4016,9 @@ fn solve_presolved(
     b: &[f64],
     obj_const: f64,
     opts: &MilpOptions,
+    t0: std::time::Instant,
 ) -> Option<MilpResult> {
-    use crate::bnb::milp_presolve::{presolve_opts, row_form_feasible, RowForm};
+    use crate::bnb::milp_presolve::{presolve_until, row_form_feasible, RowForm};
     assert_implied_subset(opts);
     let ns = opts.n_struct.min(n);
     let fin = |v: f64| {
@@ -4055,13 +4087,19 @@ fn solve_presolved(
         u: u[..ns].iter().map(|&v| fin(v)).collect(),
         is_int,
     };
-    let p = presolve_opts(
-        &rf,
-        1e-9,
-        20,
-        milp_implied_int_enabled(),
-        milp_sparsify_enabled(),
-    );
+    let p = {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::MilpPresolve);
+        presolve_until(
+            &rf,
+            1e-9,
+            20,
+            milp_implied_int_enabled(),
+            milp_sparsify_enabled(),
+            opts.time_limit_s
+                .filter(|t| t.is_finite() && *t >= 0.0)
+                .map(|t| t0 + std::time::Duration::from_secs_f64(t)),
+        )
+    };
     // Diagnostic: write the reduced problem as free MPS, so another solver's presolve can
     // show what is left to remove (gap plan §12.36).
     if let Ok(path) = std::env::var("DISCOPT_MILP_PRESOLVE_DUMP") {
@@ -4200,7 +4238,8 @@ fn solve_presolved(
         cp.push(ri2.len());
     }
     let csc2 = SparseCols::from_csc(cp, ri2, rv2);
-    let mut o2 = opts.clone();
+    // The reduced search gets what presolve left of the budget.
+    let mut o2 = clock_from(opts, t0);
     o2.n_struct = k;
     o2.integer_cols = (0..k).filter(|&q| f.is_int[q]).collect();
     // HiGHS's `integer_cols` / `integral_cols` split: the presolve-proved columns stay
@@ -6580,7 +6619,7 @@ fn solve_milp_node_search(
                 }
             }
         }
-        if let Some(st) = opts.stall_time_s {
+        if let Some(st) = opts.stall_time_s.filter(|_| stall_stops(opts)) {
             let has_inc = tm
                 .incumbent()
                 .is_some_and(|(_, v)| v < INFEAS_SENTINEL - 1.0);
@@ -6963,6 +7002,7 @@ fn solve_milp_node_search(
                     stall_at: opts
                         .stall_time_s
                         .map(|st| t_start + std::time::Duration::from_secs_f64(st)),
+                    stall_keeps_searching: !stall_stops(opts),
                     heur_effort: highs_env::heur_effort_enabled(),
                     max_stall_nodes: opts.max_stall_nodes,
                     max_leaves: opts.max_leaves,
@@ -13645,7 +13685,8 @@ mod tests {
                 );
                 presolve_infeasible += 1;
             }
-            let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o) else {
+            let t0 = std::time::Instant::now();
+            let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, t0) else {
                 fallbacks += 1;
                 continue;
             };
@@ -14030,6 +14071,92 @@ mod tests {
             least.nodes,
             least.lp_iters
         );
+    }
+
+    /// The caller's budgets run from the entry of `solve_milp_node_hooked`: what
+    /// presolve (or anything before the search) spent comes off each "seconds from the
+    /// start" budget. Without it a 50 s MILP presolve was followed by a full 20 s
+    /// search (neos-4971100-bodrog: 118 s on a 20 s limit).
+    #[test]
+    fn clock_from_counts_the_time_already_spent() {
+        let mut o = opts(2, vec![0]);
+        o.time_limit_s = Some(10.0);
+        o.stall_time_s = Some(1.0);
+        o.extend_no_incumbent_s = None;
+        o.root_cut_time_s = Some(5.0);
+        let t0 = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        let c = clock_from(&o, t0);
+        let tl = c.time_limit_s.unwrap();
+        assert!((7.0..=8.0).contains(&tl), "{tl}");
+        assert_eq!(c.stall_time_s, Some(0.0), "floored at zero");
+        assert_eq!(c.extend_no_incumbent_s, None);
+        assert_eq!(
+            c.root_cut_time_s,
+            Some(5.0),
+            "the root's own budget is unchanged"
+        );
+        o.time_limit_s = None;
+        o.extend_no_incumbent_s = Some(30.0);
+        let c = clock_from(&o, t0);
+        assert_eq!(c.time_limit_s, None);
+        let ext = c.extend_no_incumbent_s.unwrap();
+        assert!((27.0..=28.0).contains(&ext), "{ext}");
+    }
+
+    /// The stall guard stops a search with no incumbent at its slice only when the
+    /// caller did not offer `extend_no_incumbent_s`; with the offer (the Python engine
+    /// passes both) the search keeps going. On a problem whose only feasible points are
+    /// found by branching (heuristics off), a slice of 0 s stops the search without an
+    /// incumbent, while the same slice with the offer certifies the optimum.
+    #[test]
+    fn stall_guard_yields_to_the_no_incumbent_extension() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        // max sum (v_j) x_j  s.t.  sum w_j x_j = 20 (an equality: x = 0 is infeasible).
+        let w = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let c: Vec<f64> = w.iter().map(|v| -(v + 0.5)).collect();
+        let l = [0.0; 8];
+        let u = [1.0; 8];
+        let lp = LpView {
+            a: &w,
+            m: 1,
+            n: 8,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let run = |extend: Option<f64>| {
+            crate::profile::reset();
+            let mut o = opts(8, (0..8).collect());
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.heuristics = false;
+            o.stall_time_s = Some(0.0);
+            o.time_limit_s = Some(60.0);
+            o.extend_no_incumbent_s = extend;
+            let r = solve_milp(&lp, &[20.0], 0.0, &o);
+            (
+                r,
+                crate::profile::counter(crate::profile::Ctr::MilpStallGuardStop),
+            )
+        };
+        let (stopped, stops) = run(None);
+        let (kept, kept_stops) = run(Some(60.0));
+        crate::profile::set_enabled(false);
+        assert_eq!(
+            stops, 1,
+            "no offer: the guard must stop the search ({stopped:?})"
+        );
+        assert_ne!(stopped.status, MilpStatus::Optimal);
+        assert_eq!(kept_stops, 0, "with the offer the guard must not stop it");
+        assert_eq!(kept.status, MilpStatus::Optimal, "{kept:?}");
+        // Optimum: weights summing to 20 with the largest value: 3+7+10 / 4+6+10 /
+        // 5+7+8 / ... all give value 20 + 0.5 * count; 3+4+5+8 = 20 has four items.
+        assert!((kept.obj - (-22.0)).abs() <= 1e-9, "{}", kept.obj);
     }
 
     /// A heuristic sub-solve never inherits the parent's deadline policies: with

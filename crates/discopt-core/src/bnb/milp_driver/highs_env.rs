@@ -74,8 +74,12 @@ pub(super) struct Limits {
     /// Strong branching allowed (`MilpOptions::strong_branch`; off: `minreliable` 0).
     pub strong_branch: bool,
     /// `MilpOptions::stall_time_s` as an instant: there, a search with no incumbent
-    /// stops (uncertified), and one with an incumbent runs the stall re-solve once.
+    /// stops (uncertified) unless `stall_keeps_searching`, and one with an incumbent
+    /// runs the stall re-solve once.
     pub stall_at: Option<std::time::Instant>,
+    /// The caller offered `MilpOptions::extend_no_incumbent_s`: a search with no
+    /// incumbent at `stall_at` keeps searching to its deadline (`stall_stops` in `milp_driver.rs`).
+    pub stall_keeps_searching: bool,
     /// HiGHS's heuristic effort budget (`moreHeuristicsAllowed`,
     /// [`heur_effort_enabled`]) gates the node heuristics.
     pub heur_effort: bool,
@@ -1735,6 +1739,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             .is_some_and(|t| std::time::Instant::now() >= t)
         {
             match self.best.clone() {
+                None if self.lim.stall_keeps_searching => {}
                 None => {
                     crate::profile::incr(crate::profile::Ctr::MilpStallGuardStop);
                     self.stop = Some(Stop::Stall);

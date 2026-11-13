@@ -147,6 +147,8 @@ timed_phases!(
     SubMip,
     // D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`).
     RandRound,
+    // The MILP presolve (`milp_presolve::presolve_opts`), top level and sub-MIPs.
+    MilpPresolve,
     // W1 (D2 plan): the node-GMI step's parts.
     NodeGmiScan,
     NodeGmiAugment,

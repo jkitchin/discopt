@@ -11170,7 +11170,17 @@ class Model:
                 #
                 # The default path therefore uses the pre-#860 gate. The widening is
                 # still callable explicitly via ``_is_in_scope(..., mixed=True)``.
-                if _is_in_scope(self):
+                from discopt._relax.problem_classifier import ProblemClass, classify_problem
+
+                # A LINEAR integer model is not this fallback's class: the engine
+                # branches on integer PRODUCTS, and with none it is a plain LP-per-node
+                # integer B&B, weaker than the MILP engine the primary already is. On
+                # the 2026-11-13 MIPLIB population (`docs/dev/highs-mip-replacement-
+                # plan.md` §8.3) 22 linear in-scope solves ended with no incumbent: the
+                # fallback supplied none of them (on reblock420 it raised RecursionError
+                # on the model's 420-term rows) and its reserve cut the engine to 65 % of
+                # the budget -- solves stopping at 8.6-17.7 s of a 20 s limit.
+                if _is_in_scope(self) and classify_problem(self) != ProblemClass.MILP:
                     _fb_reserve = 0.35 * _remaining_tl
                     # NOTE: scope is checked here, but whether the engine can actually
                     # build its incremental structure is only known once it runs (see

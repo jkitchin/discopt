@@ -39400,7 +39400,14 @@ def _solve_milp_simplex(
         # input check (a NaN box) already ran on this exact data in the solve
         # above. A raise here is a defect, not "no root bound".
         _t_root = time.perf_counter()
-        if relu_cuts is None:
+        # Reporting only, so it gets what is left of the caller's budget and no more:
+        # its own 5 s cap ran past the limit (neos-1445738, 2026-11-13 population panel:
+        # the search ended on time at 20.1 s, then this LP ran to 25.2 s of a 20 s
+        # limit). With nothing left it is skipped and the root metrics stay unset.
+        _probe_tl = min(float(_milp_budget), 5.0, _effective_time_limit - (_t_root - t_start))
+        if _probe_tl <= 0.05:
+            _lp_status, _lp_obj = "skipped", None
+        elif relu_cuts is None:
             _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
                 np.ascontiguousarray(_drv.c, dtype=np.float64),
                 _A_m,
@@ -39416,7 +39423,7 @@ def _solve_milp_simplex(
                 float(lp_data.obj_const),
                 1000,  # a relaxed (integer-free) LP solves at the root; headroom to finalize
                 float(gap_tolerance),
-                time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
+                time_limit_s=float(_probe_tl),
             )
         else:
             # #2157: the integer-free LP above never reaches the fractional-node
@@ -39444,7 +39451,7 @@ def _solve_milp_simplex(
                 # its separation rounds and stops as soon as it branches.
                 2,
                 float(gap_tolerance),
-                time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
+                time_limit_s=float(_probe_tl),
                 heuristics=False,
                 **_cut_opts,
             )

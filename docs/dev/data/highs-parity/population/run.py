@@ -59,8 +59,23 @@ def run(job):
     return k, arm, r
 
 
-jobs = [(k, a) for k in range(len(pop)) for a in (("ours", "highs") if k % 2 else ("highs", "ours"))]
+# POP_ARMS=ours re-runs one arm and takes the other's rows from POP_REUSE (a previous
+# out.jsonl): a change to discopt does not re-time HiGHS.
+ARMS = tuple(os.environ.get("POP_ARMS", "ours,highs").split(","))
+reuse = {}
+if os.environ.get("POP_REUSE"):
+    for l in open(os.environ["POP_REUSE"]):
+        r = json.loads(l)
+        if r["arm"] not in ARMS:
+            reuse[(r["name"], r["arm"])] = {k: v for k, v in r.items() if k not in ("name", "arm", "opt")}
+jobs = [(k, a) for k in range(len(pop)) for a in (("ours", "highs") if k % 2 else ("highs", "ours")) if a in ARMS]
 res, viol = {}, []
+for k in range(len(pop)):
+    for a in ("ours", "highs"):
+        if a not in ARMS:
+            if (pop[k][0], a) not in reuse:
+                sys.exit(f"POP_REUSE has no {a} row for {pop[k][0]}")
+            res[(k, a)] = reuse[(pop[k][0], a)]
 with open(out_path, "w") as out, ThreadPoolExecutor(2) as ex:
     for k, arm, r in ex.map(run, jobs):
         name, opt = pop[k][0], float(pop[k][1])

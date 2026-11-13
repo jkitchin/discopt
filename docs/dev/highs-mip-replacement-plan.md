@@ -465,3 +465,63 @@ past 25 s on a 20 s limit, worst neos-4971100-bodrog 118 s, n2seq36q 68 s), and 
 4. **The time-limit defect is an API-contract bug, not parity work,** and is fixed on its own:
    a 6x overrun of `time_limit` breaks what the caller was promised.
 
+### 8.5 The time-limit defect, fixed (2026-11-13)
+
+Four causes, each measured on a population row before it was changed (after:
+`data/highs-parity/population/population_panel_timefix.jsonl`, the same 112 rows, HiGHS rows
+reused from the close-out run):
+
+1. **MILP presolve ignored the deadline, and the search's clock started after it.**
+   `solve_presolved` handed the search `opts` unchanged, so a 50 s presolve was followed by
+   a full 20 s search (neos-4971100-bodrog: 118 s). Now one clock starts at the entry of
+   `solve_milp_node_hooked` (`clock_from`): presolve stops at the caller's deadline
+   (`presolve_until`: between rows, columns and rules, so every applied reduction is
+   complete), and the reduced search -- or the original search when presolve declines --
+   gets what is left.
+2. **Presolve was slow for a reason that was not the rules' work.** 54 of 58 s on bodrog
+   was the aggregator re-testing the same columns (750k implied-free tests, 615k on columns
+   of > 50 rows, 6 accepted). The test reads only the problem's state, so a rejection holds
+   until the next change: an epoch cache answers the repeats. Exact -- byte-identical
+   reduced problems on all 88 instances tried (38 panel + 50 population, HEAD build vs this
+   one) and a unit test against the uncached rule on 300 random IPs. bodrog's presolve
+   1.5 s (was ~50 s); the row now **certifies** (it was HiGHS-only).
+   `dominated_pairs` (28 s of one pass on n2seq36q) is still slow; with the deadline it
+   no longer overruns, and its speed is presolve work, not this fix.
+3. **No-incumbent solves stopped at half the budget.** Two graduated changes conflicted:
+   `RUN1_CONTINUE` passes the #291 stall slice (`stall_time_s`), the no-stall-tree
+   retirement passes `extend_no_incumbent_s` ("keep searching without an incumbent"), and
+   the guard fired first, under a route label claiming the whole budget was searched
+   (16 rows, 8.6-17.7 s). The guard now yields when the extension is offered
+   (`stall_stops`); its with-incumbent role (the stall re-solve) is unchanged. And the
+   #844 LP-spatial reserve (35 % of the budget) no longer applies to **linear** models:
+   22 linear pure-integer solves had ended with no incumbent and the fallback supplied
+   none (on reblock420 it raised `RecursionError`).
+4. **A reporting-only root-bound LP ran after the search with its own 5 s cap**
+   (neos-1445738: search ended at 20.1 s, the LP at 25.2 s). It now gets what is left,
+   or is skipped.
+
+| ours, 112 readable rows, 20 s | before | after |
+|---|---|---|
+| certified | 9 | **11** (+bodrog, +acc-tight2; none lost) |
+| no incumbent | 53 | 50 |
+| max wall | 118.3 s | 27.1 s |
+| rows > 21 s / > 25 s | 44 / 17 | 15 / 1 |
+| stopped early (< 19 s, uncertified) | 16 | 0 |
+| total wall | 2447 s | 2180 s |
+
+62-row panel on the same build (`data/highs-parity/timelimit/panel_62_after.jsonl`): 53
+certified, the same 53 as the close-out run (none gained or lost), 0 violations, 308.6 s
+total (was 327.3), max wall 20.2 s (was 21.4). Presolve equivalence evidence and the
+probes: `data/highs-parity/timelimit/`.
+
+0 violations over 224 solves. Incumbents gained: rococoB10-011000, 10teams, neos-932721,
+neos-686190, acc-tight2. Lost: fiball (found at 39 s, past the limit, before) and
+neos-555001 (an incumbent at the deadline: 2 of 3 standalone repeats find it).
+
+**Remaining overrun, recorded not fixed:** the #1537 E incumbent repair
+(`_repair_published_incumbent` -> `repair_point`) runs dense minimum-norm least squares
+after the search with no budget: mkc1 ended at 22-33 s in 2 of 4 loaded runs, all of the
+excess in `numpy.linalg.lstsq`. It is a certificate guard (it can withdraw a certificate),
+so it is not skipped for time; the fix is a cheaper exact solve, verified against
+`test_1537_invariance`.
+

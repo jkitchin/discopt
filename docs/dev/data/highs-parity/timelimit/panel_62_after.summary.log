@@ -1,0 +1,67 @@
+neos-1425699          OPT d=  0.0 p=  0.0  1.5
+blend2                OPT d=  0.0 p=  0.0  3.1
+enlight8              OPT d=  0.0 p=  0.0  1.9
+p0201                 OPT d=  0.0 p=  0.0  4.7
+mik-250-20-75-5      feas d=  0.8 p=  0.0 20.1
+neos-911970          feas d=  1.7 p= 13.6 20.1
+mik-250-20-75-3      feas d=  1.2 p=  0.3 20.1
+fiber                 OPT d=  0.0 p=  0.0  4.4
+khb05250              OPT d=  0.0 p=  0.0  1.8
+nexp-50-20-1-1        OPT d=  0.0 p=  0.0  0.5
+mik-250-20-75-2      feas d=  0.7 p=  0.0 20.2
+22433                 OPT d=  0.0 p=  0.0  8.1
+nexp-50-20-4-2        OPT d=  0.0 p=  0.0  3.0
+gt2                   OPT d=  0.0 p=  0.0  0.2
+mik-250-20-75-1      feas d=  1.2 p=  0.0 20.1
+23588                 OPT d=  0.0 p=  0.0 15.9
+flugpl                OPT d=  0.0 p=  0.0  0.1
+dcmulti               OPT d=  0.0 p=  0.0  3.4
+enlight_hard         time d=  2.7 p=    - 20.0
+sp150x300d            OPT d=  0.0 p=  0.0  0.6
+gen                   OPT d=  0.0 p=  0.0  0.8
+neos17               feas d=  0.5 p=  1.8 20.1
+beavma                OPT d=  0.0 p=  0.0  0.8
+neos-3611447-jijia    OPT d=  0.0 p=  0.0  3.0
+neos-3610051-istra    OPT d=  0.0 p=  0.0  6.9
+neos-3611689-kaihu    OPT d=  0.0 p=  0.0  6.5
+neos-3610040-iskar    OPT d=  0.0 p=  0.0  5.3
+neos-5192052-neckar   OPT d=  0.0 p=  0.0  0.2
+neos-2624317-amur    feas d=100.0 p=609.8 20.1
+app2-2                OPT d=  0.0 p=  0.0  6.6
+b-ball                OPT d=  0.0 p=  0.0  0.3
+bppc8-02              OPT d=  0.0 p=  0.0  6.0
+supportcase16         OPT d=  0.0 p=  0.0  0.7
+supportcase14         OPT d=  0.0 p=  0.0  0.4
+f2gap40400            OPT d=  0.0 p=  0.0  0.2
+gsvm2rl3              OPT d=  0.0 p=  0.0 12.4
+neos-3118745-obra    feas d=  0.4 p=  7.5 20.1
+gr4x6                 OPT d=  0.0 p=  0.0  0.1
+1451                  OPT d=  0.0 p=  0.0  0.1
+2122                  OPT d=  0.0 p=  0.0  2.4
+2171                  OPT d=  0.0 p=  0.0  0.2
+bell5                 OPT d=  0.0 p=  0.0  7.0
+bound_implied         OPT d=  0.0 p=  0.0  0.1
+dcmulti               OPT d=  0.0 p=  0.0  3.4
+egout                 OPT d=  0.0 p=  0.0  0.3
+fixed-binary          OPT d=  0.0 p=  0.0  0.1
+flugpl                OPT d=  0.0 p=  0.0  0.1
+gesa2                 OPT d=  0.0 p=  0.0  2.2
+gt2                   OPT d=  0.0 p=  0.0  0.2
+issue-2095            OPT d=  0.0 p=  0.0  0.1
+issue-2173            OPT d=  0.0 p=  0.0  0.7
+issue-2204            OPT d=  0.0 p=  0.0  0.1
+issue-2290            OPT d=  0.0 p=  0.0  0.1
+issue-2388            OPT d=  0.0 p=  0.0  0.2
+issue-2446            OPT d=  0.0 p=  0.0  7.2
+issue-2585            OPT d=  0.0 p=  0.0  0.1
+lseu                  OPT d=  0.0 p=  0.0  0.6
+p01                   OPT d=  0.0 p=  0.0  0.2
+p0548                 OPT d=  0.0 p=  0.0  0.6
+rgn                   OPT d=  0.0 p=  0.0  0.5
+small_mip             OPT d=  0.0 p=  0.0  0.2
+sp150x300d            OPT d=  0.0 p=  0.0  1.4
+
+arm      certified  ran  total_wall
+graduated        53   62      308.6
+violations: 0
+solves: 62

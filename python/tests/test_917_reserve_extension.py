@@ -228,12 +228,15 @@ def test_extension_leaves_an_unset_global_deadline_unset():
 
 
 def _pure_integer_min() -> dm.Model:
-    """In scope for the #844 fallback: all-integer, MINIMIZE, has a constraint row."""
+    """In scope for the #844 fallback: all-integer, MINIMIZE, and NONLINEAR -- an
+    integer product, the class the fallback branches on. (A linear pure-integer model
+    takes no reserve: the MILP engine is the primary, see
+    ``test_linear_pure_integer_model_keeps_the_whole_budget``.) Optimum 6 at x=2, y=0."""
     m = dm.Model("pure_int_min")
     x = m.integer("x", lb=0, ub=5)
     y = m.integer("y", lb=0, ub=5)
     m.minimize(3 * x + 5 * y)
-    m.subject_to(x + y >= 2)
+    m.subject_to(x * y + x + y >= 2)
     return m
 
 
@@ -263,7 +266,10 @@ def captured(monkeypatch):
     real = _solver.solve_model
 
     def _spy(model, **kwargs):
-        seen.update(kwargs)
+        # The top-level call only: a nonlinear model's inner sub-solves call
+        # ``solve_model`` again with their own budgets.
+        if not seen:
+            seen.update(kwargs)
         return real(model, **kwargs)
 
     monkeypatch.setattr(_solver, "solve_model", _spy)
@@ -290,6 +296,31 @@ def test_out_of_scope_solve_never_gets_an_extension(ext, captured, flag, forward
     """No reserve was taken, so there is nothing to hand back — under either flag."""
     ext(flag)
     _pure_continuous().solve(time_limit=40)
+    assert captured["time_limit"] == forwarded_budget(40.0)
+    assert captured["incumbent_time_extension"] == 0.0
+
+
+def _linear_pure_integer_min() -> dm.Model:
+    """All-integer, MINIMIZE, linear: in ``_is_in_scope`` but a MILP."""
+    m = dm.Model("lin_int_min")
+    x = m.integer("x", lb=0, ub=5)
+    y = m.integer("y", lb=0, ub=5)
+    m.minimize(3 * x + 5 * y)
+    m.subject_to(x + y >= 2)
+    return m
+
+
+@pytest.mark.parametrize("flag", ["0", "1"])
+def test_linear_pure_integer_model_keeps_the_whole_budget(ext, captured, flag, forwarded_budget):
+    """A linear integer model is the MILP engine's, not the #844 fallback's: no 35 %
+    reserve is taken from it (the 2026-11-13 MIPLIB population: the fallback supplied
+    no incumbent on any of 22 such solves, and its reserve stopped them at 8.6-17.7 s
+    of a 20 s limit)."""
+    from discopt._relax.lp_spatial_bb import _is_in_scope
+
+    assert _is_in_scope(_linear_pure_integer_min())  # in scope by the engine's gate
+    ext(flag)
+    _linear_pure_integer_min().solve(time_limit=40)
     assert captured["time_limit"] == forwarded_budget(40.0)
     assert captured["incumbent_time_extension"] == 0.0
 

@@ -129,6 +129,13 @@ pub struct PresolveStats {
     pub sparsify_refused_roundoff: usize,
     /// Passes over the rule set.
     pub passes: usize,
+    /// Aggregator implied-free tests answered from [`Work::implied_free_rejected`]
+    /// (a column already rejected with nothing changed since).
+    pub implied_free_cached: usize,
+    /// The caller's deadline stopped presolve before its fixpoint (`presolve_until`).
+    /// Every reduction applied up to then is complete, so the result is a valid, less
+    /// reduced problem.
+    pub deadline_stopped: bool,
 }
 
 /// One postsolve step.
@@ -318,6 +325,21 @@ struct Work {
     infeasible: bool,
     feastol: f64,
     stats: PresolveStats,
+    /// Bumped by every change the row rules make (and at the start of the row loop,
+    /// after the column rules and propagation). The aggregator's implied-free test of a
+    /// column reads only the problem's state, never the row being aggregated, so a
+    /// rejection recorded at the current epoch still holds.
+    epoch: u64,
+    /// Per column: the epoch at which its implied-free test last failed (`u64::MAX`:
+    /// never). Without it a column in hundreds of equality rows was re-tested from each
+    /// of them, scanning all its rows every time: 54 of 58 s of presolve on
+    /// neos-4971100-bodrog (615k tests on columns of > 50 rows, 6 of them accepted).
+    implied_free_rejected: Vec<u64>,
+    /// Stop between rows / passes once this passes (`presolve_until`).
+    deadline: Option<std::time::Instant>,
+    /// Answer repeat implied-free tests from `implied_free_rejected` (always, outside
+    /// the test that checks the cache against the uncached rule).
+    cache_implied_free: bool,
 }
 
 impl Work {
@@ -349,7 +371,25 @@ impl Work {
             infeasible: false,
             feastol,
             stats: PresolveStats::default(),
+            epoch: 0,
+            implied_free_rejected: vec![u64::MAX; f.n],
+            deadline: None,
+            cache_implied_free: true,
         }
+    }
+
+    /// Whether the deadline has passed; records it in the stats when it has.
+    fn out_of_time(&mut self) -> bool {
+        if self.stats.deadline_stopped {
+            return true;
+        }
+        if self
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            self.stats.deadline_stopped = true;
+        }
+        self.stats.deadline_stopped
     }
 
     fn activity(&self, r: usize) -> (f64, usize, f64, usize) {
@@ -637,6 +677,11 @@ impl Work {
             if self.is_int[s] && !self.implied_integral(s) {
                 continue;
             }
+            if self.cache_implied_free && self.implied_free_rejected[s] == self.epoch {
+                // Rejected already, with nothing changed since: the same answer.
+                self.stats.implied_free_cached += 1;
+                continue;
+            }
             // Implied free (HiGHS `isImpliedFree`): the rows containing x_s, with the
             // other columns' bounds (and their implied bounds from other rows), keep x_s
             // within [l_s, u_s]. Implications can chain (as in HiGHS), so a wrong "implied"
@@ -722,6 +767,7 @@ impl Work {
             if (self.l[s].is_finite() && (il < self.l[s] - tl || il.is_nan()))
                 || (self.u[s].is_finite() && (iu > self.u[s] + tu || iu.is_nan()))
             {
+                self.implied_free_rejected[s] = self.epoch;
                 continue;
             }
             // Fill-in: new entries in the other rows of x_s.
@@ -1167,6 +1213,12 @@ impl Work {
         const INT_SLACK: f64 = 1e-6;
         let mut changed = false;
         for j in 0..self.n {
+            // Between columns every applied tightening is complete. This rule is the
+            // one measured past a deadline: 28 s of one pass on n2seq36q (each column's
+            // shortest row is long, and every column in it is tested).
+            if j % 64 == 0 && self.out_of_time() {
+                return changed;
+            }
             if !self.col_alive[j] || self.l[j] == self.u[j] {
                 continue;
             }
@@ -1549,6 +1601,10 @@ impl Work {
             e
         };
         for k in 0..self.n {
+            // Bounds derived only, nothing applied yet.
+            if k % 64 == 0 && self.out_of_time() {
+                return false;
+            }
             if !self.col_alive[k] || self.is_int[k] {
                 continue;
             }
@@ -1614,6 +1670,9 @@ impl Work {
         }
         let mut changed = false;
         for j in 0..self.n {
+            if j % 64 == 0 && self.out_of_time() {
+                return changed;
+            }
             if !self.col_alive[j] {
                 continue;
             }
@@ -1964,16 +2023,26 @@ impl Work {
                 self.fix_col(j, v);
                 self.stats.fixed_cols += 1;
                 changed = true;
+                self.epoch += 1;
             }
         }
         if self.propagate() {
             changed = true;
+            self.epoch += 1;
         }
         if self.infeasible {
             return false;
         }
         // Rows: empty, singleton, redundant, forcing.
+        // The column rules and propagation above may have changed what the
+        // aggregator's implied-free test reads.
+        self.epoch += 1;
         for r in 0..self.rows.len() {
+            // Between rows every applied reduction is complete: stopping here leaves a
+            // valid, less reduced problem.
+            if r % 256 == 0 && self.out_of_time() {
+                return changed;
+            }
             if !self.row_alive[r] || self.infeasible {
                 continue;
             }
@@ -1988,6 +2057,7 @@ impl Work {
                 self.row_alive[r] = false;
                 self.stats.empty_rows += 1;
                 changed = true;
+                self.epoch += 1;
                 continue;
             }
             if len == 1 {
@@ -2003,14 +2073,17 @@ impl Work {
                 self.row_alive[r] = false;
                 self.stats.singleton_rows += 1;
                 changed = true;
+                self.epoch += 1;
                 continue;
             }
             if len == 2 && self.lo[r] == self.up[r] && self.doubleton_eq(r) {
                 changed = true;
+                self.epoch += 1;
                 continue;
             }
             if len >= 3 && self.lo[r] == self.up[r] && self.aggregate(r) {
                 changed = true;
+                self.epoch += 1;
                 continue;
             }
             if self.infeasible {
@@ -2030,6 +2103,7 @@ impl Work {
                 self.row_alive[r] = false;
                 self.stats.redundant_rows += 1;
                 changed = true;
+                self.epoch += 1;
                 continue;
             }
             if self.redundant_by_implied(r) {
@@ -2037,6 +2111,7 @@ impl Work {
                 self.drop_sourced_by(r);
                 self.stats.redundant_rows_implied += 1;
                 changed = true;
+                self.epoch += 1;
                 continue;
             }
             // Forcing: the row can only be met at one end of its activity range.
@@ -2058,12 +2133,16 @@ impl Work {
                 self.row_alive[r] = false;
                 self.stats.forcing_rows += 1;
                 changed = true;
+                self.epoch += 1;
             }
         }
         if self.infeasible {
             return false;
         }
         // Columns: empty, dual fixing.
+        if self.out_of_time() {
+            return changed;
+        }
         for j in 0..self.n {
             if !self.col_alive[j] {
                 continue;
@@ -2122,17 +2201,29 @@ impl Work {
                 }
             }
         }
+        if self.out_of_time() {
+            return changed;
+        }
         if self.dominated_cols() {
             changed = true;
         }
+        if self.out_of_time() {
+            return changed;
+        }
         if self.dominated_pairs() {
             changed = true;
+        }
+        if self.out_of_time() {
+            return changed;
         }
         if self.parallel_cols() {
             changed = true;
         }
         if self.infeasible {
             return false;
+        }
+        if self.out_of_time() {
+            return changed;
         }
         // Parallel rows: hash the row normalized by its first coefficient.
         let mut seen: HashMap<Vec<(usize, i64)>, usize> = HashMap::new();
@@ -2244,7 +2335,44 @@ pub fn presolve_opts(
     implied_int: bool,
     sparsify: bool,
 ) -> Presolved {
+    presolve_until(f, feastol, max_passes, implied_int, sparsify, None)
+}
+
+/// `presolve_opts` that stops at `deadline`: between rows and between passes, so every
+/// reduction applied is complete and the result is a valid, less reduced problem
+/// (`stats.deadline_stopped`). Sparsify and implied-integer detection are skipped once
+/// it has passed.
+pub fn presolve_until(
+    f: &RowForm,
+    feastol: f64,
+    max_passes: usize,
+    implied_int: bool,
+    sparsify: bool,
+    deadline: Option<std::time::Instant>,
+) -> Presolved {
+    presolve_impl(
+        f,
+        feastol,
+        max_passes,
+        implied_int,
+        sparsify,
+        deadline,
+        true,
+    )
+}
+
+fn presolve_impl(
+    f: &RowForm,
+    feastol: f64,
+    max_passes: usize,
+    implied_int: bool,
+    sparsify: bool,
+    deadline: Option<std::time::Instant>,
+    cache_implied_free: bool,
+) -> Presolved {
     let mut w = Work::new(f, feastol);
+    w.deadline = deadline;
+    w.cache_implied_free = cache_implied_free;
     // Integer bounds rounded inward first.
     for j in 0..f.n {
         if w.is_int[j] {
@@ -2258,11 +2386,11 @@ pub fn presolve_opts(
         )
     };
     let mut try_sparsify = sparsify;
-    while !w.infeasible && w.stats.passes < max_passes {
+    while !w.infeasible && w.stats.passes < max_passes && !w.out_of_time() {
         w.stats.passes += 1;
         let (r0, c0) = alive(&w);
         let mut changed = w.pass();
-        if try_sparsify && !w.infeasible {
+        if try_sparsify && !w.infeasible && !w.out_of_time() {
             // HiGHS `problemSizeReduction`: the larger of the row and column reductions,
             // in percent.
             let (r1, c1) = alive(&w);
@@ -2284,7 +2412,7 @@ pub fn presolve_opts(
             break;
         }
     }
-    if implied_int && !w.infeasible {
+    if implied_int && !w.infeasible && !w.out_of_time() {
         w.detect_implied_integers();
     }
     let keep_cols: Vec<usize> = (0..f.n).filter(|&j| w.col_alive[j]).collect();
@@ -2433,6 +2561,108 @@ pub fn row_form_feasible(f: &RowForm, x: &[f64], tol: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything a presolve result carries that the driver reads, for comparisons.
+    fn fingerprint(p: &Presolved) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+            p.form,
+            p.keep_cols,
+            p.keep_rows,
+            p.row_shift,
+            p.ops,
+            p.implied_int_cols,
+            p.offset,
+            p.infeasible
+        )
+    }
+
+    /// The implied-free rejection cache answers only what the uncached rule would:
+    /// cached and uncached presolve agree exactly (form, kept rows/columns, postsolve
+    /// stack) on 300 random IPs and on a dense-column problem where the cache fires.
+    /// Counts the comparisons and the cache hits it relied on (CLAUDE.md section 6).
+    #[test]
+    fn implied_free_cache_is_exact() {
+        let mut r = Lcg(0x5eed_cafe);
+        let (mut compared, mut hits) = (0usize, 0usize);
+        // Returns (comparisons, cache hits).
+        let check = |f: &RowForm| {
+            let (mut n, mut h) = (0usize, 0usize);
+            for (ii, sp) in [(false, false), (true, false), (true, true)] {
+                let a = presolve_impl(f, 1e-9, 20, ii, sp, None, true);
+                let b = presolve_impl(f, 1e-9, 20, ii, sp, None, false);
+                assert_eq!(b.stats.implied_free_cached, 0);
+                assert_eq!(fingerprint(&a), fingerprint(&b));
+                h += a.stats.implied_free_cached;
+                n += 1;
+            }
+            (n, h)
+        };
+        for _ in 0..300 {
+            let (n, h) = check(&random_ip(&mut r));
+            compared += n;
+            hits += h;
+        }
+        // Column 0 in 40 equality rows of three columns, bounded so no row implies its
+        // bounds: rejected from every row, and the 39 repeats are the cache's.
+        let k = 40;
+        let mut rows = Vec::new();
+        for i in 0..k {
+            rows.push((vec![0, 1 + 2 * i, 2 + 2 * i], vec![1.0, 1.0, -1.0]));
+        }
+        let n = 1 + 2 * k;
+        let mut l = vec![0.0; n];
+        let mut u = vec![10.0; n];
+        l[0] = 2.0;
+        u[0] = 3.0;
+        for j in 1..n {
+            l[j] = -100.0;
+            u[j] = 100.0;
+        }
+        let dense = RowForm {
+            n,
+            rows,
+            lo: vec![0.0; k],
+            up: vec![0.0; k],
+            c: (0..n).map(|j| (j % 3) as f64 - 1.0).collect(),
+            l,
+            u,
+            is_int: vec![true; n],
+        };
+        let (n, h) = check(&dense);
+        compared += n;
+        hits += h;
+        assert!(h > 0, "the dense column never hit the cache");
+        assert_eq!(compared, 903);
+        assert!(hits > 0);
+    }
+
+    /// A deadline already past stops presolve before its first pass: no reduction, a
+    /// valid problem, `deadline_stopped` recorded. With no deadline the result is
+    /// `presolve_opts`'s.
+    #[test]
+    fn presolve_until_stops_at_the_deadline_with_a_valid_problem() {
+        let mut r = Lcg(0xdead_beef);
+        let mut checked = 0;
+        for _ in 0..50 {
+            let f = random_ip(&mut r);
+            let past = std::time::Instant::now();
+            let p = presolve_until(&f, 1e-9, 20, true, true, Some(past));
+            assert!(p.stats.deadline_stopped);
+            assert_eq!(p.stats.passes, 0);
+            assert!(p.ops.is_empty() && !p.infeasible);
+            assert_eq!(p.keep_cols.len(), f.n);
+            assert_eq!(p.form.rows.len(), f.rows.len());
+            let q = presolve_until(&f, 1e-9, 20, true, true, None);
+            assert!(!q.stats.deadline_stopped);
+            assert_eq!(
+                fingerprint(&q),
+                fingerprint(&presolve_opts(&f, 1e-9, 20, true, true))
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 50);
+    }
 
     /// A substitution whose coefficients cancel to round-off on a large column must not
     /// drop the leftover from an inequality without relaxing it (`cancel_entry`; the
