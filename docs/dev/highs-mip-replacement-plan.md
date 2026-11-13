@@ -525,3 +525,33 @@ excess in `numpy.linalg.lstsq`. It is a certificate guard (it can withdraw a cer
 so it is not skipped for time; the fix is a cheaper exact solve, verified against
 `test_1537_invariance`.
 
+### 8.6 Root-gap entry measurement (2026-11-13)
+
+The §8.4 rule-3 entry experiment, on the 22 population rows where discopt reported no
+dual bound at 20 s (after the §8.5 fixes; HiGHS: 2 such rows). Script and data:
+`data/highs-parity/rootgap/` (`measure.py`, `rootgap.jsonl`, `rootgap.summary.log`).
+Per row: the LP relaxation by HiGHS 1.15.1 (threads=1, presolve on and off) and by
+discopt's LP route (Rust simplex), each capped at 60 s; and the 20 s MILP solve split into
+the Python set-up before the first engine call and the engine's root phases.
+
+Two causes, both large; neither is the cut loop or the heuristics:
+
+1. **The simplex.** Our LP relaxation is >= 10x HiGHS's on 11 of 22 rows (12-127x) and
+   does not finish in 60 s on 9 where HiGHS takes 0.7-5 s (reblock420 5.0 s, piperout-d27
+   0.66 s, neos-827175 0.43 s, neos-738098 2.4 s ...). HiGHS's presolve is not the reason:
+   presolve off, its times are the same. In the MILP the root LP is where the engine's
+   time goes (`RootSolve` ~ `RootCutLoop` on 15 rows, one cut round, the LP stopped by the
+   deadline). Sub-MIPs and MILP presolve: 0 s on 21 of 22 rows.
+2. **Python set-up before the engine starts:** median 9.7 s of the 20 s budget, > 5 s on
+   20 of 22 rows (piperout-d27 18.4 s, leaving the engine 1.8 s). HiGHS has no such cost.
+
+Counterfactual from the same numbers: with HiGHS-speed LPs and today's set-up, the root
+LP fits in the remaining budget on 17 of 22 rows; with no set-up and today's simplex, on
+about 7. So the simplex is the larger lever and the set-up the cheaper one; both are
+needed for the rows where they compound (piperout-d27, tbfp-network).
+
+Next, per the stop rule: (a) set-up -- profile the 9.7 s on these rows and remove what is
+not needed for a linear model (kill: no certified gain on the population at 20 s);
+(b) simplex -- split our LP time into iteration count vs per-iteration cost against
+HiGHS's `simplex_iteration_count` (recorded), before choosing what to port.
+
