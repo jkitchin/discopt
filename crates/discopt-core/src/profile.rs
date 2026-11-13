@@ -289,6 +289,10 @@ counters!(
     // count, and how often that stall crossed the threshold and switched the dual
     // to Bland's smallest-index rule to break a potential cycle.
     DualDegeneratePivots,
+    // Dual simplex pivots taken (every pivot of `run_dual`), and those whose pivot
+    // row was computed row-wise over the nonzeros of rho (`DualRowwisePrice`).
+    DualPivots,
+    DualRowwisePrice,
     DualBlandActivations,
     // Primal EXPAND anti-degeneracy (discopt#364): degenerate blocking steps that
     // were bumped up to the guaranteed EXPAND minimum step (breaking the stall in

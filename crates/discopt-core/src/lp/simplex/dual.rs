@@ -107,6 +107,11 @@ const STALL_PATIENCE: usize = 2048;
 ///
 /// Read once per process: the bail changes which engine solves a stalled LP, so
 /// flipping it mid-solve would make a measurement incomparable with itself.
+/// The pivot row is computed row-wise when `ρ` has fewer than `m / this` nonzeros
+/// (density below 10 %, HiGHS's switch-over region for its row-wise PRICE). Speed
+/// only: both ways give the same pivot row.
+const ROWWISE_PRICE_DENSITY: usize = 10;
+
 pub(super) fn stall_patience_default() -> usize {
     static PATIENCE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *PATIENCE.get_or_init(|| {
@@ -1998,6 +2003,11 @@ impl<'a> PreparedDual<'a> {
         let tol = opts.tol;
         // Clone the pristine prepared state; the loop mutates these in place.
         let mut lu = self.lu.clone();
+        // Row-wise PRICE (see the pivot-row computation): needs every column's rows
+        // ascending for the result to be the column dots' exactly; the row copy is
+        // built on the first sparse pivot row and reused for this solve.
+        let rows_ok = sp.rows_ascending();
+        let mut row_copy: Option<super::sparse::SparseRows> = None;
         let mut basis = self.basis.clone();
         let mut slot_of = self.slot_of.clone();
         let mut stat = self.stat.clone();
@@ -2321,10 +2331,43 @@ impl<'a> PreparedDual<'a> {
                 crate::profile::incr(crate::profile::Ctr::DualExitRhoBtranFail);
                 return None;
             }
+            // Row-wise when `ρ` is sparse (HiGHS's PRICE): only the rows where `ρ` is
+            // nonzero are visited, and `touched` lists (ascending) the nonbasic columns
+            // the pivot row can be nonzero on, so the ratio test and the reduced-cost
+            // update skip the rest. Bit-identical to the column dots: with every
+            // column's rows ascending (`rows_ascending`, checked once), each α_rj
+            // receives the same nonzero terms in the same order from 0.0, and a skipped
+            // `ρ_i = 0` term only ever added ±0 to a sum that is never −0.
+            // Measured (2026-11-13, `highs-mip-replacement-plan.md` §8.6): the root LP
+            // of piperout-d27 ran 27 s here against HiGHS's 0.66 s.
+            let rho_nz: Vec<usize> = (0..m).filter(|&i| rho[i] != 0.0).collect();
             let mut alpha_r = vec![0.0; n];
-            for (j, arj) in alpha_r.iter_mut().enumerate() {
-                if stat[j] != BASIC {
-                    *arj = sp.dot(j, &rho);
+            let mut touched: Option<Vec<usize>> = None;
+            if rows_ok && rho_nz.len() * ROWWISE_PRICE_DENSITY < m {
+                let rows = row_copy.get_or_insert_with(|| sp.transpose_rows(m));
+                let mut mark = vec![false; n];
+                let mut t = Vec::new();
+                for &i in &rho_nz {
+                    let yi = rho[i];
+                    let (cols, vals) = rows.row(i);
+                    for (k, &j) in cols.iter().enumerate() {
+                        if stat[j] != BASIC {
+                            alpha_r[j] += yi * vals[k];
+                            if !mark[j] {
+                                mark[j] = true;
+                                t.push(j);
+                            }
+                        }
+                    }
+                }
+                t.sort_unstable();
+                touched = Some(t);
+                crate::profile::incr(crate::profile::Ctr::DualRowwisePrice);
+            } else {
+                for (j, arj) in alpha_r.iter_mut().enumerate() {
+                    if stat[j] != BASIC {
+                        *arj = sp.dot(j, &rho);
+                    }
                 }
             }
 
@@ -2335,10 +2378,11 @@ impl<'a> PreparedDual<'a> {
             // column is eligible the LP is primal-infeasible — but confirm on
             // *exact* reduced costs first, since a drifted `dvec` could spuriously
             // empty the set. Flips only change which bound a nonbasic sits at.
-            let mut cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
+            let cols = touched.as_deref();
+            let mut cand = build_candidates(n, cols, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
             if cand.is_empty() {
                 dvec = refresh_rc!();
-                cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
+                cand = build_candidates(n, cols, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
                 if cand.is_empty() {
                     xb = tagged(
                         recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
@@ -2561,9 +2605,22 @@ impl<'a> PreparedDual<'a> {
             // every nonbasic j; the entering q becomes basic (0) and the leaving
             // column takes −d_q/piv. Bound flips don't change reduced costs.
             let theta_d = dvec[q] / piv;
-            for j in 0..n {
-                if stat[j] != BASIC && j != q {
-                    dvec[j] -= theta_d * alpha_r[j];
+            crate::profile::incr(crate::profile::Ctr::DualPivots);
+            match touched.as_deref() {
+                // α_rj = 0 off `touched`: those d_j are unchanged.
+                Some(t) => {
+                    for &j in t {
+                        if stat[j] != BASIC && j != q {
+                            dvec[j] -= theta_d * alpha_r[j];
+                        }
+                    }
+                }
+                None => {
+                    for j in 0..n {
+                        if stat[j] != BASIC && j != q {
+                            dvec[j] -= theta_d * alpha_r[j];
+                        }
+                    }
                 }
             }
             dvec[leaving] = -theta_d;
@@ -3018,6 +3075,7 @@ fn select_leaving(
 #[allow(clippy::too_many_arguments)]
 fn build_candidates(
     n: usize,
+    cols: Option<&[usize]>,
     stat: &[i8],
     l: &[f64],
     u: &[f64],
@@ -3027,7 +3085,17 @@ fn build_candidates(
     tol: f64,
 ) -> Vec<(usize, f64, f64)> {
     let mut cand = Vec::new();
-    for j in 0..n {
+    // `cols`: the ascending columns the pivot row can be nonzero on (row-wise PRICE);
+    // every other column has α_rj = 0 and is not eligible. Same order, same set.
+    let all: Vec<usize>;
+    let cols = match cols {
+        Some(c) => c,
+        None => {
+            all = (0..n).collect();
+            &all
+        }
+    };
+    for &j in cols {
         if stat[j] == BASIC || u[j] - l[j] <= tol {
             continue;
         }

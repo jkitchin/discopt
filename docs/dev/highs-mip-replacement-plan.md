@@ -555,3 +555,30 @@ not needed for a linear model (kill: no certified gain on the population at 20 s
 (b) simplex -- split our LP time into iteration count vs per-iteration cost against
 HiGHS's `simplex_iteration_count` (recorded), before choosing what to port.
 
+### 8.7 Simplex: first fix and the per-pivot breakdown (2026-11-13)
+
+**Row-wise PRICE (shipped).** The dual simplex computed every pivot row as one column
+dot per nonbasic column (`O(nnz(A))` per pivot) and ran the ratio test and the
+reduced-cost update over all `n` columns. Now, when `ρ = e_rᵀB⁻¹` is under 10 % dense,
+the pivot row is accumulated row-wise over `ρ`'s nonzeros (HiGHS's PRICE) and the ratio
+test and update visit only the columns it touches. Exact by construction: with every
+column's rows ascending (checked per solve), each `α_rj` gets the same terms in the same
+order (`rowwise_pivot_row_is_bit_identical_to_column_dots`, 1,000+ bitwise comparisons).
+Bound-neutral A/B (`data/highs-parity/rootgap/price_ab_*.jsonl`, deterministic, 300
+nodes, 38 panel + 20 population instances, HEAD build vs this): status, objective, bound
+and node count identical on all 56 rows that are reproducible; the other two
+(neos17, neos-1067731) differ between two runs of the *baseline* itself -- deterministic
+mode is not deterministic on them, a separate defect. Total wall 2996 -> 2789 s.
+piperout-d27 root LP 27.3 -> 20.1 s.
+
+**What is left in a pivot** (piperout-d27, m = 17,470, 14,749 pivots vs HiGHS 9,243, so
+the iteration count is not the gap; temporary timers, reverted): LU update +
+refactorization + exact recompute **10.0 s**, ftran 3.4, Devex/flips/value updates 2.0,
+CHUZR (`select_leaving`, a full `O(m)` scan) 2.0, btran 1.9, PRICE 1.5, ratio test 0.2.
+The refactorizations are all cap-triggered (every 48 updates); each factors a basis of
+~54k nonzeros with almost no fill (factor 54.9k) in ~21 ms inside `feral`'s Markowitz
+LU -- a near-triangular basis that HiGHS's INVERT handles in about a millisecond. A longer
+interval saves little (48 -> 200: 19.7 -> 18.4 s). The next simplex lever is therefore
+`feral`'s factor time on near-triangular bases (its repository, not this one), then
+CHUZR with a maintained infeasibility list.
+

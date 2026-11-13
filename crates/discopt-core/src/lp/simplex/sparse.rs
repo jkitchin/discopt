@@ -127,6 +127,40 @@ impl SparseCols {
         s
     }
 
+    /// Whether every column's row indices are strictly ascending. Then a row-wise
+    /// pass over `y`'s nonzeros in ascending row order adds, to each `yᵀA_j`, the
+    /// same terms in the same order as [`Self::dot`] (see [`SparseRows`]).
+    pub fn rows_ascending(&self) -> bool {
+        (0..self.ncols()).all(|j| self.col(j).0.windows(2).all(|w| w[0] < w[1]))
+    }
+
+    /// The row-wise copy of this `m`-row matrix; within a row, columns ascend.
+    pub fn transpose_rows(&self, m: usize) -> SparseRows {
+        let mut row_ptr = vec![0usize; m + 1];
+        for &r in &self.row_idx {
+            row_ptr[r + 1] += 1;
+        }
+        for i in 0..m {
+            row_ptr[i + 1] += row_ptr[i];
+        }
+        let mut next = row_ptr.clone();
+        let mut col_idx = vec![0usize; self.row_idx.len()];
+        let mut vals = vec![0.0; self.row_idx.len()];
+        for j in 0..self.ncols() {
+            let (rows, v) = self.col(j);
+            for (k, &r) in rows.iter().enumerate() {
+                col_idx[next[r]] = j;
+                vals[next[r]] = v[k];
+                next[r] += 1;
+            }
+        }
+        SparseRows {
+            row_ptr,
+            col_idx,
+            vals,
+        }
+    }
+
     /// Sparse dot `yᵀ A_j` **with the magnitudes its rounding error is bounded by**:
     /// returns `(Σ y_i a_ij, Σ|y_i a_ij|, k)` where `k` is the number of terms summed.
     /// The classic bound is `|fl(x·y) − x·y| ≤ γ_k · Σ|x_i y_i|` (Higham, *Accuracy and
@@ -180,5 +214,94 @@ mod tests {
         let mut buf = vec![0.0; 3];
         sp.scatter(2, &mut buf);
         assert_eq!(buf, vec![1.0, 0.0, 5.0]);
+    }
+}
+
+/// CSR copy of a [`SparseCols`] matrix ([`SparseCols::transpose_rows`]): the dual
+/// simplex's pivot row `ρᵀA` computed over the nonzeros of `ρ` only (HiGHS's
+/// row-wise PRICE), instead of one column dot per nonbasic column.
+pub struct SparseRows {
+    row_ptr: Vec<usize>,
+    col_idx: Vec<usize>,
+    vals: Vec<f64>,
+}
+
+impl SparseRows {
+    /// Row `i`'s column indices (ascending) and values.
+    pub fn row(&self, i: usize) -> (&[usize], &[f64]) {
+        let (a, b) = (self.row_ptr[i], self.row_ptr[i + 1]);
+        (&self.col_idx[a..b], &self.vals[a..b])
+    }
+}
+
+#[cfg(test)]
+mod rowwise_tests {
+    use super::*;
+
+    /// The dual simplex's row-wise pivot row (`SparseRows`, over the nonzeros of `ρ` in
+    /// ascending row order) equals the column dots `ρᵀA_j` bit for bit when every
+    /// column's rows ascend -- the condition `run_dual` checks before using it. 200
+    /// random matrices with explicit-zero-free values of mixed magnitude, `ρ` with
+    /// zeros, negative zeros and values across 1e-12..1e8; counts its comparisons
+    /// (CLAUDE.md section 6).
+    #[test]
+    fn rowwise_pivot_row_is_bit_identical_to_column_dots() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut compared = 0usize;
+        for _ in 0..200 {
+            let m = 1 + (next() % 40) as usize;
+            let n = 1 + (next() % 40) as usize;
+            let (mut cp, mut ri, mut vv) = (vec![0usize], Vec::new(), Vec::new());
+            for _ in 0..n {
+                for i in 0..m {
+                    if next() % 4 == 0 {
+                        ri.push(i);
+                        let mag = 10f64.powi((next() % 17) as i32 - 8);
+                        let sign = if next() % 2 == 0 { 1.0 } else { -1.0 };
+                        vv.push(sign * mag * (1.0 + (next() % 1000) as f64 / 7.0));
+                    }
+                }
+                cp.push(ri.len());
+            }
+            let a = SparseCols::from_csc(cp, ri, vv);
+            assert!(a.rows_ascending());
+            let rows = a.transpose_rows(m);
+            let rho: Vec<f64> = (0..m)
+                .map(|_| match next() % 5 {
+                    0 => 0.0,
+                    1 => -0.0,
+                    _ => {
+                        let sign = if next() % 2 == 0 { 1.0 } else { -1.0 };
+                        sign * 10f64.powi((next() % 21) as i32 - 12) * (next() % 97) as f64
+                    }
+                })
+                .collect();
+            let mut alpha = vec![0.0f64; n];
+            for i in (0..m).filter(|&i| rho[i] != 0.0) {
+                let (cols, vals) = rows.row(i);
+                for (k, &j) in cols.iter().enumerate() {
+                    alpha[j] += rho[i] * vals[k];
+                }
+            }
+            for j in 0..n {
+                assert_eq!(alpha[j].to_bits(), a.dot(j, &rho).to_bits(), "column {j}");
+                compared += 1;
+            }
+        }
+        assert!(compared > 1000, "{compared}");
+    }
+
+    #[test]
+    fn rows_ascending_detects_an_unsorted_column() {
+        let a = SparseCols::from_csc(vec![0, 2], vec![1, 0], vec![1.0, 2.0]);
+        assert!(!a.rows_ascending());
+        let b = SparseCols::from_csc(vec![0, 2], vec![0, 1], vec![1.0, 2.0]);
+        assert!(b.rows_ascending());
     }
 }
