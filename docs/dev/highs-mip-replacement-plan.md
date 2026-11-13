@@ -612,3 +612,25 @@ of the basis columns for every factorization (`from_sparse_columns` + `validate`
 the samples too), the exact recompute after each, the `O(m)` CHUZR, and ftran/btran at
 ~0.2/0.13 ms each. feral is one of several fixes, not the fix.
 
+**Filed upstream:** jkitchin/feral#232 (the factor comparison above, with the basis and
+harness).
+
+**Where the root LP's time sits after row-wise PRICE** (piperout-d27, ~19 s, 14,749
+pivots; temporary timers, reverted). Inside `feral`: factorization 7.03 s (307 calls),
+ftran 3.4 s and btran 1.9 s (0.23 / 0.13 ms per call; HiGHS's whole iteration is ~0.07 ms),
+LU updates 0.70 s -- about 13 s, two thirds. discopt's own: dense `O(m)` loops (Devex
+weights, `x_B` updates) ~2 s, the CHUZR scan, PRICE 1.5 s, the per-refactor column-list
+rebuild 0.73 s, the post-refactor recomputes 0.6 s. So feral is the larger share after
+all: its sparse solves as much as its factor.
+
+**CHUZR by slot (shipped, exact).** `select_leaving` read `l[basis[i]]`, `u[basis[i]]`
+for every row; the loop now keeps those bounds by slot (updated at the pivot slot), the
+same values in the same order. Same 14,749 pivots; root LP 19.3/19.6 -> 18.8/19.3 s in
+two interleaved pairs (~2 %). The scan itself, not the gather, is what costs; removing it
+needs the sparse pipeline below.
+
+**Next on discopt's side:** a sparse pipeline -- feral's sparse-RHS entry points
+(`ftran_sparse` / `btran_sparse`) with index lists, so the Devex, `x_B` and CHUZR updates
+touch only the rows a pivot changes (HiGHS's design) -- and reusing the basis column
+buffers across refactorizations.
+

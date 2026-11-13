@@ -2065,6 +2065,10 @@ impl<'a> PreparedDual<'a> {
         // pricing. Pricing only chooses *which* primal-infeasible row leaves, never
         // affects correctness (any infeasible basic var is a valid leaving choice).
         let mut gamma = vec![1.0f64; m];
+        // The basic variables' bounds by slot (`select_leaving_slots`); `basis`
+        // changes only at the pivot slot, where these follow it.
+        let mut lb_b: Vec<f64> = basis.iter().map(|&j| l[j]).collect();
+        let mut ub_b: Vec<f64> = basis.iter().map(|&j| u[j]).collect();
         // Anti-cycling: consecutive degenerate dual pivots (entering reduced cost
         // ≈ 0 → no dual-objective progress) accumulate `stall`; once it crosses the
         // threshold the pivot rules switch to Bland's smallest-index selection
@@ -2155,11 +2159,11 @@ impl<'a> PreparedDual<'a> {
             // feasibility, confirm with an *exact* recompute before declaring
             // optimality, and verify dual feasibility on *exact* reduced costs —
             // so a drifted increment can never return a wrong optimum.
-            let (r, to_lower, delta) = match select_leaving(
+            let (r, to_lower, delta) = match select_leaving_slots(
                 m,
                 &basis,
-                l,
-                u,
+                &lb_b,
+                &ub_b,
                 &gamma,
                 &xb,
                 tol,
@@ -2173,11 +2177,11 @@ impl<'a> PreparedDual<'a> {
                         crate::profile::Ctr::DualExitXbSolveFail,
                     )?;
                     since_refresh = 0;
-                    match select_leaving(
+                    match select_leaving_slots(
                         m,
                         &basis,
-                        l,
-                        u,
+                        &lb_b,
+                        &ub_b,
                         &gamma,
                         &xb,
                         tol,
@@ -2218,11 +2222,11 @@ impl<'a> PreparedDual<'a> {
                                     );
                                     match refined_basic_values(sp, b, n, m, l, u, &basis, &stat) {
                                         Some(xb_r) => {
-                                            if select_leaving(
+                                            if select_leaving_slots(
                                                 m,
                                                 &basis,
-                                                l,
-                                                u,
+                                                &lb_b,
+                                                &ub_b,
                                                 &gamma,
                                                 &xb_r,
                                                 tol,
@@ -2660,6 +2664,8 @@ impl<'a> PreparedDual<'a> {
             stat[leaving] = if to_lower { AT_LOWER } else { AT_UPPER };
             slot_of[leaving] = -1;
             basis[r] = q;
+            lb_b[r] = l[q];
+            ub_b[r] = u[q];
             slot_of[q] = r as i64;
             stat[q] = BASIC;
             let need_refac = lu.update(r, &raw_q).is_err();
@@ -3012,11 +3018,34 @@ fn recompute_reduced_costs(
 /// `(slot, to_lower, violation)` where `to_lower` is the bound the leaving
 /// variable is pinned at. Pricing only — choosing any infeasible row is valid.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn select_leaving(
     m: usize,
     basis: &[usize],
     l: &[f64],
     u: &[f64],
+    gamma: &[f64],
+    xb: &[f64],
+    tol: f64,
+    bland: bool,
+    tolerated: Option<&[bool]>,
+) -> Option<(usize, bool, f64)> {
+    let lb: Vec<f64> = basis.iter().map(|&j| l[j]).collect();
+    let ub: Vec<f64> = basis.iter().map(|&j| u[j]).collect();
+    select_leaving_slots(m, basis, &lb, &ub, gamma, xb, tol, bland, tolerated)
+}
+
+/// [`select_leaving`] with the basic variables' bounds by slot (`lb[i] = l[basis[i]]`,
+/// `ub[i] = u[basis[i]]`): the same values read in slot order instead of through
+/// `basis`, so the scan streams instead of gathering. Same rows, same order, same
+/// choice. Measured (2026-11-13, piperout-d27 root LP, m = 17,470): the gather scan
+/// was 2.0 s of 20 s.
+#[allow(clippy::too_many_arguments)]
+fn select_leaving_slots(
+    m: usize,
+    basis: &[usize],
+    lb: &[f64],
+    ub: &[f64],
     gamma: &[f64],
     xb: &[f64],
     tol: f64,
@@ -3030,17 +3059,18 @@ fn select_leaving(
     let mut to_lower = true;
     let mut delta = 0.0f64;
     for i in 0..m {
-        let bi = basis[i];
         // A sentinel side (`±INF`, 1e20) is no bound at all. Testing it as one made
         // a basic free column that drifted past 1e20 "leave" pinned AT 1e20, so a
         // warm re-solve ended `Optimal` with columns sitting at x = 1e20.
-        let viol = if l[bi] > -INF && xb[i] < l[bi] - tol {
-            Some((l[bi] - xb[i], true))
-        } else if u[bi] < INF && xb[i] > u[bi] + tol {
-            Some((xb[i] - u[bi], false))
+        let (li, ui, xi) = (lb[i], ub[i], xb[i]);
+        let viol = if li > -INF && xi < li - tol {
+            Some((li - xi, true))
+        } else if ui < INF && xi > ui + tol {
+            Some((xi - ui, false))
         } else {
-            None
+            continue;
         };
+        let bi = basis[i];
         // A row tolerated at the noise level (`NOISE_ROW_TOL`, see the empty-ratio-test
         // arm of the loop) stays out while its violation stays that small.
         let viol = viol.filter(|&(v, _)| {
