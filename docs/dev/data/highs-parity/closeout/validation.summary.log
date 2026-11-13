@@ -1,0 +1,4 @@
+4717 passed, 15 skipped, 148 warnings in 454.18s (0:07:34)
+19 passed, 5 warnings in 66.72s (0:01:06)
+test result: ok. 1141 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 19.99s
+cargo exit 0

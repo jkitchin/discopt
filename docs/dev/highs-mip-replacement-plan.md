@@ -1,6 +1,6 @@
 # Replacing the MILP driver's search core with HiGHS's design
 
-Status: plan, 2026-11-10. Owner: highs-parity D2. Supersedes the lever-by-lever approach of
+Status: **closed 2026-11-13** (§8: final state, population result, stop rule). Opened as a plan 2026-11-10. Owner: highs-parity D2. Supersedes the lever-by-lever approach of
 `highs-parity-d2-gap-plan.md` §12.20-§12.39 for the search core.
 
 ## 1. Decision
@@ -379,4 +379,89 @@ deleted.
   - **Matched boxes (root RC fixing on, `fresh` mode):** our separation gains a median 81 vs HiGHS 155 because two per-node caps bind -- `SEARCH_CUTS_PER_NODE` (20 rows added) and `NODE_GMI_POOL_PER_NODE` (20 pool picks); every separation added exactly 20 rows (275 -> 295) where HiGHS added 59-76. Rounds (`NODE_GMI_ROUNDS` 3 -> 10) and the new-cut cap alone change nothing. Both caps lifted: gain **184** (HiGHS 155), post-separation gap -180 -> -85.
   - **In the search the lifted caps lose:** 20 s, six rows, all worse (nodes down 1.5-3.5x). At equal nodes (1,500) worse too while the total search-row cap (`search_cut_cap`, `max(100, base rows)`) stays -- later nodes find no room; with it lifted as well, better at equal nodes (mik-2 -51,066 vs -51,236) but the LP swells (mik-2: 6,188 rows added / 5,850 deleted over 19 ageing epochs, `LuNumeric` 188 of 264 s for 1,500 nodes). HiGHS keeps ~200-330 cut rows via `CutPool::separate` (~10 per round, 0.1 parallelism) and ageing per separation round.
   - **Step 2.1d (global pool) re-run in the real default** (sub-MIPs on, so root RC fixing on; patch rebased onto the current tree, `data/highs-parity/search/step21d_global_pool_retired.patch`, logs `step21d_rerun/`): the retirement reason is falsified -- the pool now selects 12.5 (mik-2) / 9.2 (mik-5) cuts per round (HiGHS 8.85; was 1.33 under `SUBMIP=0`) and the LP does not swell (`LuNumeric` flat / -23 %). But it is not net-positive: 20 s, 4 of 6 bounds better (mik-1/2/3, neos-911970), mik-5 and neos17 worse, no certificate; equal nodes (1,500) 3 better (mik-2 +115) / 3 worse (mik-5 -175, with a worse incumbent); 0 soundness failures in 28 solves. Named follow-up (global pool + total row cap lifted, since 45 % of mik-2's selections were refused by it): equal nodes mik-2 -51,099 (better), mik-5 -52,205 and neos17 0.1426 (worse), the rest within noise -- kill criterion met. **Retired again (§5 bar 2), now on real-default measurements.** What remains: separation runs at 2-4 % of nodes (HiGHS separates at every queue install, 27 %), which is the search-trajectory gap recorded above, not a separator deficit.
+
+## 8. Close-out (2026-11-13)
+
+The parity push stops here. This section is its final state; §7 is the record that led to it.
+
+### 8.1 What shipped
+
+- **One engine, HiGHS-design search core**: `DISCOPT_HIGHS_MIP_SEARCH`, `DISCOPT_MILP_PRESOLVE`
+  and `DISCOPT_MILP_ROOT_CMIR=highs` graduated 2026-11-11 (stage 1d-5 r4 panel). The ported
+  separators, cut pool, aged search-LP rows, node queue/plunge, heuristic-effort budget and
+  sub-MIP presolve/limits run on discopt's own simplex and safety layer.
+- **`DISCOPT_HIGHS_CONFIG` graduated default-ON for the MILP engine** 2026-11-12 (two panels,
+  53 and 54 vs 52 certified); every member's audit row in `flag-retirement-audit.md` now leads
+  with its final state (graduated; `DISCOPT_HIGHS_SEPA_NODE=add` kept as a documented
+  alternative). Retired with their implementations on the way: `HIGHS_SEP_FIRST`,
+  `HIGHS_TREE_RCFIX`, `HIGHS_ROOT_POOL=all`, step 2.1d's global pool (twice).
+- **Final-tree validation** (`800a3b45` + this commit's docs; `data/highs-parity/closeout/`):
+  62-row panel (20 s, 1 thread) graduated **53** vs `DISCOPT_HIGHS_CONFIG=0` **52** certified,
+  327.3 vs 369.8 s total wall, 124 solves, **0 violations**; `pytest -m smoke` 4717 passed,
+  15 skipped; adversarial suite 19 passed; `cargo test --release -p discopt-core --lib` 1141
+  passed, 0 failed.
+
+### 8.2 The 62-row panel: 53-54 vs HiGHS 59
+
+The six HiGHS-only rows (mik-250-20-75-{1,2,3,5}, neos17, neos-911970) are one class --
+bound progress per node -- driven by a path-dependent chain (degenerate LP vertex -> which cuts
+-> when the incumbent arrives -> plunge length -> separation frequency). About a dozen
+experiments after graduation (§7, 2026-11-12/13: restarts, heuristic effort, in-tree sub-MIP
+schedule, strong-branching counts, branching inputs, plunge decisions, matched-box node LPs,
+per-node separation caps, the global pool re-run) each removed a measured difference and gained
+**zero** rows. No single deviation explains the rows; they are not closable by another lever.
+
+### 8.3 Population check: the panel understates the gap
+
+To test whether 54 vs 59 is representative, a second, independent population was fixed
+**before any solve** (`data/highs-parity/population/select.py`): MIPLIB 2017 `easy-v2.test`,
+minus the 62-row panel, with an `=opt=` value in `miplib2017-v31.solu`, ordered by
+sha1(name), the first 120 whose `.mps.gz` is at most 1 MB. Ours (graduated default) vs highspy
+1.15.1 (`threads=1`, `time_limit=20`, `mip_rel_gap=1e-4`, everything else default), 20 s, two
+solves in parallel (`run.py`; `population_panel.jsonl`, `.summary.log`).
+
+| | certified (of 112 readable) | no incumbent | total wall |
+|---|---|---|---|
+| discopt | **9** | 53 | 2446.8 s |
+| HiGHS | **26** | 19 | 1880.1 s |
+
+0 violations over 224 solves (certificates and bounds against the MIPLIB optima, our
+incumbents' max row violation <= 1e-5). 8 rows were unreadable by **both** readers (SOS/indicator
+sections, coefficients >= 1e15) and are excluded. Both certify 8; HiGHS-only 18; ours-only 1
+(decomp2). On rows neither certifies HiGHS has the better incumbent on 34 vs 7 and the better
+bound on 32 vs 8.
+
+So on a population that was not used for tuning the engine certifies about a third of what
+HiGHS does. The 62-row panel has been the tuning set for months and is not representative.
+The 18 HiGHS-only rows fall into classes different from §8.2's:
+
+- **Root never finishes (6 rows: neos-827175, neos-913984, drayage-25-27, neos-932721,
+  neos-960392, nursesched-sprint-hidden09):** we report no dual bound after 20 s; HiGHS
+  certifies five of them at the root (1 node) and drayage-25-27 in 755 nodes.
+- **Bound at the optimum, no incumbent (3: 10teams, acc-tight2, neos-498623 with a 943 %
+  incumbent):** HiGHS closes each at the root -- a root primal-heuristics gap.
+- **Root closes in HiGHS, not in ours (3: drayage-25-32, neos-4971100-bodrog, neos-555001):**
+  HiGHS needs 1 node; we have an incumbent or a bound but not both closed -- presolve/root
+  strength.
+- **Small HiGHS trees (2: nu25-pr12, neos-595904, 19 nodes each).**
+- **Tree rows (4: swath1, aflow30a, rlp1, mik-250-20-75-4):** §8.2's class.
+
+Two non-certificate defects surfaced too: **the time limit is not honoured** (17 of 112 solves ran
+past 25 s on a 20 s limit, worst neos-4971100-bodrog 118 s, n2seq36q 68 s), and 16 solves stopped
+**early** (8.6-17.7 s) with status `time_limit`.
+
+### 8.4 Stop rule
+
+1. **No more per-row probing of the 62-row panel.** Its six rows reopen only inside a scoped
+   project with its own entry experiment and kill criterion (CLAUDE.md §4); "find the next
+   deviation on mik-5" does not qualify.
+2. **The 62-row panel stops being the parity measure.** Any future parity claim is scored on
+   the §8.3 population (or a larger pre-registered draw by the same rule), with the panel kept
+   only as the soundness and regression gate.
+3. **What would reopen parity work** is one of the §8.3 classes as a project of its own, entered
+   by measuring that class across the population first: root-LP throughput on the six
+   no-bound rows; root primal heuristics on the bound-at-optimum rows; root presolve/strength on
+   the 1-node rows. Its kill criterion: no gain in certified count on the population at 20 s.
+4. **The time-limit defect is an API-contract bug, not parity work,** and is fixed on its own:
+   a 6x overrun of `time_limit` breaks what the caller was promised.
 
