@@ -1595,6 +1595,44 @@ def _refuse_bound_outside_unit_box(
         )
 
 
+class VarBlock:
+    """Several variables' elements as the columns of one fast-API linear block.
+
+    ``Model.add_linear_constraints(A, [x, y, ...], ...)`` takes the columns of ``A``
+    as the elements of ``x`` (flat, in order), then of ``y``, and so on: one block
+    whose rows may mix variables of different types -- a MILP read from a file, whose
+    integer and continuous columns share rows. A single :class:`Variable` is the
+    one-variable case and stays a plain ``Variable`` in the block record.
+
+    Read the columns through :meth:`columns`; consumers of
+    ``model._builder_linear_blocks`` go through
+    :func:`discopt.export._common.block_columns`, which accepts either.
+    """
+
+    __slots__ = ("vars", "size", "name", "_cols")
+
+    def __init__(self, variables):
+        vs = tuple(variables)
+        if not vs or not all(isinstance(v, Variable) for v in vs):
+            raise TypeError("a VarBlock is a non-empty sequence of Variables")
+        if len({id(v) for v in vs}) != len(vs):
+            raise ValueError("a VarBlock lists each variable at most once")
+        self.vars = vs
+        self.size = int(builtins_sum(int(v.size) for v in vs))
+        self.name = "[" + ", ".join(v.name for v in vs) + "]"
+        pos = np.repeat(np.arange(len(vs)), [int(v.size) for v in vs])
+        local = np.concatenate([np.arange(int(v.size)) for v in vs])
+        self._cols = (pos, local)
+
+    def columns(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(position, local)`` per column: column ``k`` is element ``local[k]``
+        (flat) of ``self.vars[position[k]]``."""
+        return self._cols
+
+    def __repr__(self) -> str:
+        return f"VarBlock({self.name})"
+
+
 class Variable(Expression):
     """
     A decision variable in the optimization problem.
@@ -8534,11 +8572,46 @@ class Model:
             A = A.tocsr()
         A = A.astype(np.float64)
 
+        if isinstance(x, (list, tuple)):
+            x = x[0] if len(x) == 1 else VarBlock(x)
         m_rows, n_cols = A.shape
         if n_cols != x.size:
             raise ValueError(f"A has {n_cols} columns but variable '{x.name}' has size {x.size}.")
 
         b = np.broadcast_to(np.asarray(b, dtype=np.float64), (m_rows,)).copy()
+        # A scalar variable goes through the column-map path, which references it by
+        # its variable node. The single-variable builder call emits ``x[0]`` (an Index
+        # node), which on a scalar variable lost the row: a one-variable model read
+        # from a file solved to 0 instead of 1 (caught by the #1561 verification).
+        record = x
+        if not isinstance(x, VarBlock) and getattr(x, "shape", None) == ():
+            x = VarBlock([x])
+        if isinstance(x, VarBlock):
+            builder = self._get_builder()
+            missing = [v.name for v in x.vars if not hasattr(v, "_builder_idx")]
+            if missing:
+                raise ValueError(
+                    f"Variables {missing} are not registered in the builder. Ensure "
+                    "they were created via m.continuous/binary/integer."
+                )
+            owned = {id(v) for v in self._variables}
+            foreign = [v.name for v in x.vars if id(v) not in owned]
+            if foreign:
+                raise ValueError(f"Variables {foreign} do not belong to this model.")
+            pos, local = x.columns()
+            block_idx = np.array([v._builder_idx for v in x.vars], dtype=np.int64)
+            builder.add_linear_constraints_cols(
+                A.indptr.astype(np.int64),
+                A.indices.astype(np.int64),
+                A.data,
+                block_idx[pos],
+                local.astype(np.int64),
+                sense,
+                b,
+                name,
+            )
+            self._builder_linear_blocks.append((A, record, sense, b, name))
+            return
 
         builder = self._get_builder()
         if not hasattr(x, "_builder_idx"):
@@ -14337,7 +14410,16 @@ def model_from_repr(rep, name: str) -> Model:
         elif vt == "integer":
             m.integer(vname, shape=shape, lb=lb, ub=ub)
 
-    objective_expr, constraint_tuples = reconstruct_dag(rep, m._variables)
+    # A model whose every row is linear takes its rows as matrix blocks
+    # (``DISCOPT_NL_LINEAR_MATRIX``); only the objective is rebuilt as an expression.
+    linear_rows = _linear_rows_of_repr(rep) if _nl_linear_matrix_enabled() else None
+    if linear_rows is not None:
+        from discopt._relax.nl_reconstruction import reconstruct_objective
+
+        objective_expr = reconstruct_objective(rep, m._variables)
+        constraint_tuples = []
+    else:
+        objective_expr, constraint_tuples = reconstruct_dag(rep, m._variables)
 
     # #654: rebalance pathologically deep ``+`` chains (flat sums parsed as depth-N
     # left chains) so downstream recursive tree-walks don't overflow the stack.
@@ -14348,6 +14430,9 @@ def model_from_repr(rep, name: str) -> Model:
         m.minimize(obj_expr)
     else:
         m.maximize(obj_expr)
+
+    if linear_rows is not None:
+        _add_linear_rows_as_blocks(m, *linear_rows)
 
     for body, sense, rhs in constraint_tuples:
         body_expr: Expression = _rebalance_deep_sum(body)
@@ -14361,6 +14446,97 @@ def model_from_repr(rep, name: str) -> Model:
     _attach_repr_initial_point(m, rep)
 
     return m
+
+
+def _nl_linear_matrix_enabled() -> bool:
+    """``DISCOPT_NL_LINEAR_MATRIX`` (default ON; ``=0`` restores expression rows).
+
+    A model read from a file whose every row is linear gets its rows as fast-API
+    matrix blocks (:func:`_linear_rows_of_repr`) instead of one Python expression tree
+    per row: the same rows in the same order, a representation change, not a model
+    change. Those trees were walked by ~10 independent set-up passes: on MIPLIB's
+    reblock420 (15k rows) set-up before the MILP engine took 9.8 s of a 20 s budget
+    (2026-11-13, ``highs-mip-replacement-plan.md`` §8.9). The opt-out is for A/B
+    measurement and as an escape hatch.
+    """
+    import os as _os
+
+    raw = _os.environ.get("DISCOPT_NL_LINEAR_MATRIX", "1").strip().lower()
+    if raw in ("1", "true", "yes", "on", ""):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"DISCOPT_NL_LINEAR_MATRIX={raw!r} is not recognized (expected 1 or 0)")
+
+
+def _linear_rows_of_repr(rep):
+    """``(A, senses, rhs)`` when ``rep`` is an LP/MILP -- a linear objective and every
+    constraint linear -- else ``None``.
+
+    Each row is read off the arena's exact quadratic decomposition (as
+    ``extract_lp_data``'s repr rung reads it): linear exactly when its quadratic map
+    is empty; the row's constant moves to the right-hand side. ``A`` is CSR over the
+    model's flat columns, rows in ``rep``'s order, exact zeros dropped.
+    """
+    import scipy.sparse as sp
+
+    m = rep.n_constraints
+    # LP/MILP only: a quadratic or nonlinear objective goes down routes (QP, spatial,
+    # the arena tape) that treat builder-resident rows differently.
+    if m == 0 or not rep.is_objective_linear():
+        return None
+    indptr = [0]
+    cols: list = []
+    vals: list = []
+    senses: list[str] = []
+    rhs = np.empty(m, dtype=np.float64)
+    for i in range(m):
+        form = rep.constraint_quadratic_form(i)
+        if form is None or len(form[0]) != 0:
+            return None
+        ci, cd, const = form[3], form[4], float(form[5])
+        for j, v in zip(ci, cd):
+            if v != 0.0:
+                cols.append(int(j))
+                vals.append(float(v))
+        indptr.append(len(cols))
+        senses.append(rep.constraint_sense(i))
+        rhs[i] = float(rep.constraint_rhs(i)) - const
+    if any(s not in ("<=", ">=", "==") for s in senses):
+        return None
+    A = sp.csr_matrix(
+        (np.asarray(vals, dtype=np.float64), np.asarray(cols, dtype=np.int64), indptr),
+        shape=(m, rep.n_vars),
+    )
+    return A, senses, rhs
+
+
+def _add_linear_rows_as_blocks(m: "Model", A, senses: list, rhs: np.ndarray) -> None:
+    """Add ``A x (senses) rhs`` to ``m`` as fast-API blocks over all its variables, one
+    block per maximal run of equal senses, so the rows keep their order (the builder
+    and every consumer read blocks in order). Rows are unnamed, as ``subject_to``
+    leaves them.
+
+    A ``>=`` row is added as ``-a x <= -rhs``: ``subject_to(body >= rhs)`` stores
+    ``rhs - body <= 0``, so this is the row the expression path hands the solver, and
+    the standard form comes out identical, not merely equivalent (negation is exact).
+    """
+    import scipy.sparse as sp
+
+    ge = np.array([s == ">=" for s in senses])
+    if ge.any():
+        flip = sp.diags(np.where(ge, -1.0, 1.0))
+        A = (flip @ A).tocsr()
+        rhs = np.where(ge, -rhs, rhs)
+        senses = ["<=" if s == ">=" else s for s in senses]
+    x = VarBlock(m._variables) if len(m._variables) > 1 else m._variables[0]
+    start, n = 0, len(senses)
+    while start < n:
+        end = start + 1
+        while end < n and senses[end] == senses[start]:
+            end += 1
+        m.add_linear_constraints(A[start:end], x, senses[start], rhs[start:end])
+        start = end
 
 
 def _attach_repr_initial_point(m: Model, rep) -> None:

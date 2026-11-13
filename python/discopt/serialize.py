@@ -1556,13 +1556,19 @@ def _dec_csr(d: dict):
 
 def _enc_builder_blocks(model: Model, var_ids: dict[int, int]) -> list[dict]:
     out = []
+    from discopt.modeling.core import VarBlock
+
     for A, x, sense, b, name in getattr(model, "_builder_linear_blocks", []) or []:
-        ref = var_ids.get(id(x))
-        if ref is None:
+        # A VarBlock (several variables' columns) is encoded as the list of their refs.
+        members = list(x.vars) if isinstance(x, VarBlock) else [x]
+        refs = [var_ids.get(id(v)) for v in members]
+        if any(r is None for r in refs):
+            bad = next(v for v, r in zip(members, refs) if r is None)
             raise SerializationError(
                 f"fast-API constraint block references variable "
-                f"{getattr(x, 'name', x)!r}, which is not registered on this model."
+                f"{getattr(bad, 'name', bad)!r}, which is not registered on this model."
             )
+        ref = refs if isinstance(x, VarBlock) else refs[0]
         b_arr = np.broadcast_to(np.asarray(b, dtype=np.float64), (A.shape[0],))
         out.append(
             {
@@ -3841,7 +3847,7 @@ def _decode_document(doc: dict, minor: int) -> Model:
     for d in _seq(doc.get("builder_blocks", []), "builder_blocks"):
         model.add_linear_constraints(
             _dec_csr(d["A"]),
-            variables[d["x"]],
+            [variables[i] for i in d["x"]] if isinstance(d["x"], list) else variables[d["x"]],
             d["sense"],
             _dec_array(d["b"], (d["A"]["shape"][0],)),
             name=d["name"],

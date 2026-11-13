@@ -21,18 +21,45 @@ from discopt.modeling.core import (
 )
 
 
-def _build_cache(nl_repr, variables: list[Variable]) -> list[Optional[Expression]]:
+def _build_cache(
+    nl_repr, variables: list[Variable], roots: Optional[list[int]] = None
+) -> list[Optional[Expression]]:
     """Walk the Rust ExprArena bottom-up and materialize one Expression per node.
 
     Shared by :func:`reconstruct_dag` and :func:`reconstruct_complementarities`
     so both read from the same arena walk without duplicating the opcode
-    dispatch.
+    dispatch. With ``roots``, only the nodes reachable from them are built (the
+    others stay ``None``): :func:`reconstruct_objective` uses it when the rows are
+    taken from the arena as a matrix instead.
     """
     n = nl_repr.arena_len()
     cache: list[Optional[Expression]] = [None] * n
 
-    for i in range(n):
-        node = nl_repr.get_node(i)
+    if roots is None:
+        order = range(n)
+        fetched: dict = {}
+    else:
+        # Only the nodes reachable from ``roots``. The arena is topological (a node's
+        # children have smaller ids), so ascending id order builds children first,
+        # exactly as the full walk does; nodes nothing asked for are never built.
+        fetched = {}
+        stack = [int(r) for r in roots]
+        while stack:
+            i = stack.pop()
+            if i in fetched:
+                continue
+            node = nl_repr.get_node(i)
+            fetched[i] = node
+            for key in ("left", "right", "arg", "operand", "base"):
+                if key in node:
+                    stack.append(int(node[key]))
+            for key in ("args", "terms"):
+                if key in node:
+                    stack.extend(int(c) for c in node[key])
+        order = sorted(fetched)
+
+    for i in order:
+        node = fetched[i] if roots is not None else nl_repr.get_node(i)
         ntype = node["type"]
 
         if ntype == "constant":
@@ -146,6 +173,13 @@ def reconstruct_dag(
         constraints.append((body, sense, rhs))
 
     return objective, constraints
+
+
+def reconstruct_objective(nl_repr, variables: list[Variable]) -> Expression:
+    """The objective expression alone, building only the nodes it reaches (the
+    rows of a linear model are read off the arena as a matrix instead)."""
+    obj_id = nl_repr.objective_id()
+    return _build_cache(nl_repr, variables, roots=[obj_id])[obj_id]
 
 
 def reconstruct_complementarities(

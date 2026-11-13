@@ -96,6 +96,36 @@ def variable_flat_offsets(model: Model) -> dict[int, int]:
     return offsets
 
 
+def block_columns(x) -> tuple[list, np.ndarray, np.ndarray]:
+    """The columns of a fast-API block's variable record ``x`` (a :class:`Variable` or
+    a :class:`~discopt.modeling.core.VarBlock`): ``(variables, position, local)``,
+    column ``k`` being flat element ``local[k]`` of ``variables[position[k]]``."""
+    from discopt.modeling.core import VarBlock
+
+    if isinstance(x, VarBlock):
+        pos, local = x.columns()
+        return list(x.vars), pos, local
+    n = int(x.size) if x.shape != () else 1
+    return [x], np.zeros(n, dtype=np.int64), np.arange(n)
+
+
+def block_flat_columns(x, offsets: dict[int, int]) -> np.ndarray:
+    """Flat model index of each column of block record ``x``, from ``offsets``
+    (``id(variable)`` -> flat start, e.g. :func:`variable_flat_offsets`). Raises when a
+    variable of the block is not in ``offsets``."""
+    vs, pos, local = block_columns(x)
+    starts = []
+    for v in vs:
+        base = offsets.get(id(v))
+        if base is None:
+            raise ValueError(
+                f"Fast-API constraint block references variable '{getattr(v, 'name', v)}' "
+                "that is not registered in the model; cannot export."
+            )
+        starts.append(base)
+    return np.asarray(starts, dtype=np.int64)[pos] + local
+
+
 def iter_builder_linear_rows(model: Model) -> list[LinearRow]:
     """Decompose ``model._builder_linear_blocks`` into per-row :class:`LinearRow`.
 
@@ -109,12 +139,8 @@ def iter_builder_linear_rows(model: Model) -> list[LinearRow]:
     offsets = variable_flat_offsets(model)
     rows: list[LinearRow] = []
     for A, x, sense, b, name in blocks:
-        base = offsets.get(id(x))
-        if base is None:
-            raise ValueError(
-                f"Fast-API constraint block references variable '{getattr(x, 'name', x)}' "
-                "that is not registered in the model; cannot export."
-            )
+        flat = block_flat_columns(x, offsets)
+        col_vars, col_pos, col_local = block_columns(x)
         indptr = A.indptr
         indices = A.indices
         data = A.data
@@ -126,10 +152,10 @@ def iter_builder_linear_rows(model: Model) -> list[LinearRow]:
                 coeff = float(data[k])
                 if coeff == 0.0:
                     continue
-                local = int(indices[k])
-                gidx = base + local
+                col = int(indices[k])
+                gidx = int(flat[col])
                 coeffs[gidx] = coeffs.get(gidx, 0.0) + coeff
-                terms.append((x, local, coeff))
+                terms.append((col_vars[int(col_pos[col])], int(col_local[col]), coeff))
             row_name = f"{name}_{r}" if name else f"blk{len(rows)}"
             rows.append(
                 LinearRow(

@@ -22,7 +22,7 @@ inst_dir, out_path = sys.argv[2], sys.argv[3]
 # e.g. {"ours_flag": {"DISCOPT_SOME_FLAG": "1"}} with POP_ARMS=ours,ours_flag. Empty: the
 # one flag panelled this way so far (DISCOPT_LP_DUAL_SPARSE_SOLVES, 2026-11-13) was
 # retired (highs-mip-replacement-plan.md §8.8).
-ARM_ENV: dict = {}
+ARM_ENV: dict = {"ours_nlexpr": {"DISCOPT_NL_LINEAR_MATRIX": "0"}}
 HIGHS = r'''
 import json, sys, time, highspy
 h = highspy.Highs()

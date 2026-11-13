@@ -657,3 +657,50 @@ no row crosses the 20 s line. **Retired** (owner decision, §5): flag and wiring
 sparse pipeline is worth ~20 % of the root LP once the rest lets a root LP finish --
 feral's factor (jkitchin/feral#232) and the Python set-up are the gating items.
 
+### 8.9 Python set-up before the engine (2026-11-13)
+
+The second gating item of §8.6. Three exact changes, then the structural one.
+
+1. `_milp_aligned_lp` sliced `A[:, k]` per column and `hstack`-ed ~m pieces: now one
+   array assembly, identical output (test against the old implementation), 2.0 -> 0.04 s
+   on reblock420.
+2. `coefficient_tightened` (#1654) scanned every row in Python and recomputed a row's
+   activity terms per binary in it: now only the candidate rows, terms recomputed only
+   after a rewrite; identical outputs on 20 comparisons (n2seq36q 2.7 -> 0.28 s).
+3. **Linear files as matrices** (`DISCOPT_NL_LINEAR_MATRIX`, default ON, `=0` opts out).
+   `model_from_repr` built one Python expression tree per row, and ~10 set-up passes
+   walked them. A model whose objective and rows are all linear now takes its rows
+   straight off the arena's exact quadratic decomposition as fast-API blocks
+   (`add_linear_constraints(A, [x0, x1, ...])`, one block per run of equal senses, a
+   `>=` row stored as the `-a x <= -rhs` the expression path stores), and only the
+   objective is rebuilt as an expression. New: `VarBlock` (a block over several
+   variables; Rust `add_linear_constraints_cols`), handled by every consumer of
+   `_builder_linear_blocks` (export, the affine evaluator, serialization, recentring,
+   copy/pickle). Found and fixed on the way: a fast-API block on a *scalar* variable lost
+   its row (referenced as `x[0]`; a one-variable model solved to 0 instead of 1 --
+   the #1561 check caught it).
+
+   Bound-neutral: `extract_lp_data` gives a byte-identical standard form (A, b, c, bounds,
+   constant) on all 60 instances checked (38 panel + 22 no-bound population rows). Set-up
+   before the engine:
+
+   | instance | expression rows | matrix rows |
+   |---|---|---|
+   | reblock420 | 10.5 s | 3.1 s |
+   | piperout-d27 | 17.3 s | 10.4 s (recentring still rebuilds the model) |
+   | neos-827175 | 9.0 s | 2.7 s |
+   | opm2-z7-s8 | 8.3 s | 1.6 s |
+
+   Population (112 rows, 20 s, matrix rows vs `DISCOPT_NL_LINEAR_MATRIX=0` interleaved,
+   `data/highs-parity/population/population_panel_nl_matrix.jsonl`): certified 11 = 11,
+   0 violations over 336 solves; **dual bounds on 95 rows vs 90** (neos-1354092,
+   blp-ic98, 30n20b8, fiball, trento1 now finish their root LP; none lost); dual gap
+   better on 21 rows, worse on 1; incumbents 62 vs 61 (+rococoB10-011000). The first
+   movement on the no-bound class. What still blocks the rest: the root LP itself
+   (§8.7, feral#232) and, on the 6 rows that trigger it, recentring's model rebuild.
+
+   Tests: smoke 4724 passed; the 238 test files that read `.nl` (not slow) 3955 passed,
+   1 failure that fails identically with the flag off (`portfol_roundlot` OA at 60 s,
+   timing-dependent per its own comment). Tests that check the reader's expression
+   reconstruction row by row pin `DISCOPT_NL_LINEAR_MATRIX=0` for their reload.
+

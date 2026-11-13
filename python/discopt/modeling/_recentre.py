@@ -454,7 +454,12 @@ def _translate_rows(A, b: np.ndarray, c: np.ndarray, what: str) -> np.ndarray:
     c_flat = np.ravel(c)
     out = np.array(b, dtype=np.float64, copy=True)
     indptr, indices, data = A.indptr, A.indices, A.data
-    for i in range(A.shape[0]):
+    # Only rows with a nonzero entry on a moved column change; the others keep their
+    # rhs exactly as the loop below would leave it (``touched`` stays False).
+    moved_entry = (c_flat[indices] != 0.0) & (data != 0.0)
+    rows_touched = np.unique(np.repeat(np.arange(A.shape[0]), np.diff(indptr))[moved_entry])
+    for i in rows_touched:
+        i = int(i)
         acc = Fraction(float(b[i]))
         touched = False
         for k in range(int(indptr[i]), int(indptr[i + 1])):
@@ -631,10 +636,25 @@ def _build(model: Model, plan: dict[int, np.ndarray]) -> Recentring:
         new._constraints.append(
             Constraint(body=rw(con.body), sense=con.sense, rhs=0.0, name=con.name)
         )
+    from discopt.export._common import block_columns
+    from discopt.modeling.core import VarBlock
+
     for A, x, sense, b, name in model._builder_linear_blocks:
-        c = shifts_by_id.get(id(x))
-        b_new = b if c is None else _translate_rows(A, b, c, f"builder block {name!r}")
-        new.add_linear_constraints(A, var_map[id(x)], sense, b_new, name=name)
+        vs, pos, local = block_columns(x)
+        shifts = [shifts_by_id.get(id(v)) for v in vs]
+        if any(c is not None for c in shifts):
+            per_var = [
+                np.zeros(max(int(v.size), 1)) if c is None else np.ravel(c)
+                for v, c in zip(vs, shifts)
+            ]
+            c_cols = np.array([per_var[int(p)][int(q)] for p, q in zip(pos, local)])
+            b_new = _translate_rows(A, b, c_cols, f"builder block {name!r}")
+        else:
+            b_new = b
+        x_new = (
+            VarBlock([var_map[id(v)] for v in vs]) if isinstance(x, VarBlock) else var_map[id(x)]
+        )
+        new.add_linear_constraints(A, x_new, sense, b_new, name=name)
     if placeholder:
         _translate_builder_objective(model, var_map, shifts_by_id, new)
     else:

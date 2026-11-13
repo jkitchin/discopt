@@ -463,7 +463,7 @@ def _con_key(c: Any) -> tuple:
 def _block_key(block: tuple) -> tuple:
     A, x, sense, b, name = block
     return (
-        x.name,
+        x.name,  # a VarBlock's name lists its variables in column order
         sense,
         name,
         A.shape,
