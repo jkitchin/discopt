@@ -48,6 +48,7 @@ use crate::bnb::highs_search::search::{
 use crate::bnb::node::{BranchRecord, NodeStatus};
 use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
 
+mod nodebox;
 mod refcheck;
 
 #[cfg(test)]
@@ -1769,12 +1770,94 @@ impl SearchEnv for HighsEnv<'_, '_> {
     }
 }
 
+impl<'a, 'b> HighsEnv<'a, 'b> {
+    /// A search environment over the driver's root working LP, before any node.
+    fn new(
+        ctx: &'a NodeCtx<'b>,
+        lim: &'a Limits,
+        sub_mip: Option<SubMip<'a>>,
+        dbg: Option<Debugger<'a>>,
+        refp: Option<refcheck::RefCheck>,
+    ) -> Option<Self> {
+        let mut eval = HighsEval::new(ctx)?;
+        eval.tighten_cutoff = false;
+        Some(HighsEnv {
+            ctx,
+            lim,
+            sub_mip,
+            eval,
+            pc: Pseudocost::new(
+                ctx.ns,
+                if lim.strong_branch {
+                    DEFAULT_MIN_RELIABLE
+                } else {
+                    0
+                },
+            ),
+            q: NodeQueue::new(ctx.ns),
+            best: None,
+            nseen: 0,
+            nodes: 0,
+            commits: 0,
+            branched: 0,
+            heuristic_hits: 0,
+            stop: None,
+            gap_stop: false,
+            stall_redive_done: false,
+            open_on_stack: 0,
+            pool: Vec::new(),
+            pool_sigs: std::collections::HashSet::new(),
+            sep_calls: 0,
+            sep_lifts: 0,
+            sub_mip_hits: 0,
+            last_slot: -1,
+            dbg,
+            hook_nodes: 0,
+            hook_last: None,
+            bound_hook_calls: 0,
+            bound_hook_raised: 0,
+            cut_lp: search_cut_lp_enabled(),
+            dual_fresh: false,
+            lp: None,
+            in_lp: std::collections::HashSet::new(),
+            cut_rows_added: 0,
+            cut_rows_deleted: 0,
+            seeded_pool: 0,
+            refp,
+            queue_pruned: 0.0,
+            progress: (0.0, 0, 0),
+            stall_nodes: 0,
+        })
+    }
+
+    /// Step 2.1: HiGHS's search starts with the root's whole cut pool (every separated
+    /// cut, and the ones root cleanup dropped from the LP); with persistent cuts on,
+    /// so does this one (the pool feeds the LP when a node violates a cut).
+    fn seed_pool(&mut self, seed_pool: Vec<GomoryCut>) {
+        if self.cut_lp {
+            for cut in self.ctx.gmi_pool.iter().cloned().chain(seed_pool) {
+                if self.pool_sigs.insert(cut_signature(&cut)) {
+                    self.pool.push(cut);
+                }
+            }
+            self.seeded_pool = self.pool.len();
+        }
+    }
+
+    /// Rows of the LP the search's components see (model rows, root cuts, and the
+    /// search's own cut rows).
+    fn lp_rows(&self) -> usize {
+        self.lp.as_ref().map_or(self.ctx.m_w, |l| l.m)
+    }
+}
+
 /// Search the whole tree from the driver's root working LP. `initial` is the best
 /// verified point the driver already holds; `root_bound` a valid bound on the root box
 /// the driver already proved (its root evaluation, node-local cuts included), with
 /// `obj_const` (`-inf` for none). `None` when any LP of the search is unbounded or
 /// the rows are infeasible over the global box before any search (the driver's own
 /// handling then decides).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run<'a>(
     ctx: &'a NodeCtx<'_>,
     lim: &'a Limits,
@@ -1783,58 +1866,17 @@ pub(super) fn run<'a>(
     sub_mip: Option<SubMip<'a>>,
     dbg: Option<Debugger<'a>>,
     seed_pool: Vec<GomoryCut>,
+    top_level: bool,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
-    let mut eval = HighsEval::new(ctx)?;
-    eval.tighten_cutoff = false;
-    let mut env = HighsEnv {
-        ctx,
-        lim,
-        sub_mip,
-        eval,
-        pc: Pseudocost::new(
-            ctx.ns,
-            if lim.strong_branch {
-                DEFAULT_MIN_RELIABLE
-            } else {
-                0
-            },
-        ),
-        q: NodeQueue::new(ctx.ns),
-        best: None,
-        nseen: 0,
-        nodes: 0,
-        commits: 0,
-        branched: 0,
-        heuristic_hits: 0,
-        stop: None,
-        gap_stop: false,
-        stall_redive_done: false,
-        open_on_stack: 0,
-        pool: Vec::new(),
-        pool_sigs: std::collections::HashSet::new(),
-        sep_calls: 0,
-        sep_lifts: 0,
-        sub_mip_hits: 0,
-        last_slot: -1,
-        dbg,
-        hook_nodes: 0,
-        hook_last: None,
-        bound_hook_calls: 0,
-        bound_hook_raised: 0,
-        cut_lp: search_cut_lp_enabled(),
-        dual_fresh: false,
-        lp: None,
-        in_lp: std::collections::HashSet::new(),
-        cut_rows_added: 0,
-        cut_rows_deleted: 0,
-        seeded_pool: 0,
-        refp: refcheck::RefCheck::load(ctx),
-        queue_pruned: 0.0,
-        progress: (0.0, 0, 0),
-        stall_nodes: 0,
-    };
+    // `DISCOPT_NODEBOX_FILE` (diagnostic, top-level solve only): evaluate external node
+    // boxes on environments of their own, built exactly as this search's, before the
+    // search starts; the search below is untouched by it.
+    if top_level {
+        nodebox::harness(ctx, lim, initial.as_ref(), &seed_pool);
+    }
+    let mut env = HighsEnv::new(ctx, lim, sub_mip, dbg, refcheck::RefCheck::load(ctx))?;
     if let Some(rc) = env.refp.as_mut() {
         let xb = rc.x.clone();
         for cut in ctx.gmi_pool.iter() {
@@ -1845,17 +1887,7 @@ pub(super) fn run<'a>(
         }
         rc.bound("root", 0, root_bound, f64::INFINITY, "");
     }
-    // Step 2.1: HiGHS's search starts with the root's whole cut pool (every separated
-    // cut, and the ones root cleanup dropped from the LP); with persistent cuts on,
-    // so does this one (the pool feeds the LP when a node violates a cut).
-    if env.cut_lp {
-        for cut in ctx.gmi_pool.iter().cloned().chain(seed_pool) {
-            if env.pool_sigs.insert(cut_signature(&cut)) {
-                env.pool.push(cut);
-            }
-        }
-        env.seeded_pool = env.pool.len();
-    }
+    env.seed_pool(seed_pool);
     let root_id = env.dbg.as_ref().map_or(0, |d| d.root_id);
     if let Some(d) = env.dbg.as_mut() {
         d.bound = root_bound;

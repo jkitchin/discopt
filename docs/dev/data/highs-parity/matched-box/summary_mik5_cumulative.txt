@@ -1,0 +1,22 @@
+NODEBOX_BEGIN call=0 records=1274 ns=270 n_int=250 model_rows=195 root_lp_rows=274 node_gmi=true cut_lp=true incumbent=Some(-51532.00000000003) mode=cumulative
+NODEBOX_END records=1274 evaluated=1274 separated=37 outside_cols=20
+our evaluation results: {'NBE:BoundExceeding': 121, 'NBE:Open': 1116, 'NBS:Open': 37}
+boxes infeasible for us (propagation or LP, a=inf): 0; HiGHS boxes with columns outside our global box: 1274 of 1274
+boxes with an untrusted LP on our side: 0
+HiGHS NBE value kinds: {'exact': 1107, 'ge_limit': 130}
+NBE boxes pruned by the LP (bound >= limit): HiGHS 130, ours 121
+NBE  (a) vs HiGHS node LP: 1237 boxes; ours weaker 1044, equal 85, stronger 108
+  ours - HiGHS over 1107 exact HiGHS values: median -328.72, q1 -730.09, q3 -115.22, min -1217.96, max 373.26
+  among weaker: median shortfall -413.32
+  (ours - HiGHS) / (limit - HiGHS), i.e. ours' share of HiGHS's distance to the cutoff: median -1.151
+NBS  (a) vs HiGHS pre-separation LP: 37 boxes; ours weaker 24, equal 0, stronger 13
+  ours - HiGHS over 37 exact HiGHS values: median -119.30, q1 -247.12, q3 40.76, min -1183.63, max 369.34
+  among weaker: median shortfall -223.78
+  (ours - HiGHS) / (limit - HiGHS), i.e. ours' share of HiGHS's distance to the cutoff: median -0.256
+NBS  (b) vs HiGHS post-separation LP: 37 boxes; ours weaker 35, equal 0, stronger 2
+  ours - HiGHS over 33 exact HiGHS values: median -226.55, q1 -355.61, q3 -115.84, min -1170.99, max 33.25
+  among weaker: median shortfall -241.20
+  (ours - HiGHS) / (limit - HiGHS), i.e. ours' share of HiGHS's distance to the cutoff: median -0.862
+separation gain (post - pre): HiGHS median 154.92 over 33; ours median 82.31 over 37
+LP rows at evaluation: HiGHS median 375.0 (min 273, max 413); ours median 354.0 (min 274, max 489)
+compared 1311 box comparisons over 1274 records

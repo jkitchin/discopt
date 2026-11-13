@@ -7100,6 +7100,7 @@ fn solve_milp_node_search(
                     Some(&mut sub_mip),
                     dbg,
                     seed_pool,
+                    milp_depth == 0,
                 );
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};

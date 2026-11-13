@@ -1,0 +1,116 @@
+--- a/highs/mip/HighsSearch.cpp
++++ b/highs/mip/HighsSearch.cpp
+@@ -15,6 +15,38 @@
+   return (mipsolver.submip || inheuristic) ? nullptr : hsSearchDumpFile();
+ }
+ 
++// ---- discopt matched-box dump (HS_DUMP_NODEBOX=<path>): top level only ----
++// One record per node-LP solve ("NBE") and per node separation ("NBS"): the node's
++// full local column box (absolute bounds, %a) and the LP objective / status / row
++// count. Capped at HS_DUMP_NODEBOX_MAX (default 300) records of each kind. Writing
++// only: nothing here feeds back into the solve.
++FILE* hsNodeBoxFile(const HighsMipSolver& mipsolver, bool sep) {
++  static FILE* f = nullptr;
++  static bool init = false;
++  static long maxr = 300;
++  static long ne = 0, ns = 0;
++  if (mipsolver.submip) return nullptr;
++  if (!init) {
++    init = true;
++    if (const char* p = std::getenv("HS_DUMP_NODEBOX")) f = std::fopen(p, "w");
++    if (const char* m = std::getenv("HS_DUMP_NODEBOX_MAX")) maxr = std::atol(m);
++  }
++  if (!f) return nullptr;
++  long& c = sep ? ns : ne;
++  if (c >= maxr) { std::fflush(f); return nullptr; }
++  ++c;
++  return f;
++}
++long hsNodeBoxNextId() { static long id = 0; return id++; }
++void hsNodeBoxWriteBox(FILE* f, const std::vector<double>& lo,
++                       const std::vector<double>& hi) {
++  std::fprintf(f, "L %d", (int)lo.size());
++  for (double v : lo) std::fprintf(f, " %a", v);
++  std::fprintf(f, "\nU %d", (int)hi.size());
++  for (double v : hi) std::fprintf(f, " %a", v);
++  std::fprintf(f, "\n");
++}
++
+ #include <numeric>
+ 
+ #include "lp_data/HConst.h"
+@@ -966,9 +998,21 @@
+              mipsolver.isColContinuous(i));
+     }
+ #endif
++    FILE* nbf = inheuristic ? nullptr : hsNodeBoxFile(mipsolver, false);
++    std::vector<double> nbLo, nbHi;
++    if (nbf) { nbLo = localdom.col_lower_; nbHi = localdom.col_upper_; }
+     int64_t oldnumiters = lp->getNumLpIterations();
+     HighsLpRelaxation::Status status = lp->resolveLp(&localdom);
+     lpiterations += lp->getNumLpIterations() - oldnumiters;
++    if (nbf) {
++      // NBE id nnodes depth status modelstatus obj rows modelrows upperlimit node_lb_in
++      std::fprintf(nbf, "NBE %ld %lld %d %d %d %a %d %d %a %a\n", hsNodeBoxNextId(),
++                   (long long)mipsolver.mipdata_->num_nodes, (int)getCurrentDepth(),
++                   (int)status, (int)lp->getLpSolver().getModelStatus(),
++                   lp->getObjective(), (int)lp->numRows(), (int)lp->getNumModelRows(),
++                   getUpperLimit(), currnode.lower_bound);
++      hsNodeBoxWriteBox(nbf, nbLo, nbHi);
++    }
+ 
+     currnode.lower_bound =
+         std::max(localdom.getObjectiveLowerBound(), currnode.lower_bound);
+--- a/highs/mip/HighsMipSolver.cpp
++++ b/highs/mip/HighsMipSolver.cpp
+@@ -8,6 +8,11 @@
+ #include "mip/HighsMipSolver.h"
+ #include <cstdio>
+ FILE* hsSearchDumpFile();  // discopt dump (HighsNodeQueue.cpp)
++// discopt matched-box dump (HighsSearch.cpp, HS_DUMP_NODEBOX)
++FILE* hsNodeBoxFile(const HighsMipSolver& mipsolver, bool sep);
++long hsNodeBoxNextId();
++void hsNodeBoxWriteBox(FILE* f, const std::vector<double>& lo,
++                       const std::vector<double>& hi);
+ 
+ #include "lp_data/HighsLpUtils.h"
+ #include "lp_data/HighsModelUtils.h"
+@@ -694,7 +699,38 @@
+         profiling_->start(kMipClockNodeSearchSeparation);
+       if (!submip)
+         if (FILE* f = hsSearchDumpFile()) std::fprintf(f, "MS\n");
++      FILE* nbf = hsNodeBoxFile(*this, true);
++      std::vector<double> nbLo, nbHi;
++      int nbSt0 = 0, nbMs0 = 0, nbRows0 = 0;
++      double nbObj0 = 0, nbNodeLb = 0;
++      if (nbf) {
++        nbLo = worker.search_ptr_->getLocalDomain().col_lower_;
++        nbHi = worker.search_ptr_->getLocalDomain().col_upper_;
++        HighsLpRelaxation& nlp = worker.getLpRelaxation();
++        nbSt0 = (int)nlp.getStatus();
++        nbMs0 = (int)nlp.getLpSolver().getModelStatus();
++        nbObj0 = nlp.getObjective();
++        nbRows0 = (int)nlp.numRows();
++        nbNodeLb = worker.search_ptr_->getCurrentLowerBound();
++      }
+       worker.sepa_ptr_->separate(worker.search_ptr_->getLocalDomain());
++      if (nbf) {
++        HighsLpRelaxation& nlp = worker.getLpRelaxation();
++        // NBS id nnodes status0 modelstatus0 obj0 rows0 status1 modelstatus1 obj1 rows1
++        //     modelrows upperlimit node_lb localdom_infeasible box_cols_tightened
++        const HighsDomain& d1 = worker.search_ptr_->getLocalDomain();
++        int nbTight = 0;
++        for (size_t j = 0; j < nbLo.size(); ++j)
++          if (d1.col_lower_[j] != nbLo[j] || d1.col_upper_[j] != nbHi[j]) ++nbTight;
++        std::fprintf(nbf, "NBS %ld %lld %d %d %a %d %d %d %a %d %d %a %a %d %d\n",
++                     hsNodeBoxNextId(), (long long)mipdata_->num_nodes, nbSt0, nbMs0,
++                     nbObj0, nbRows0, (int)nlp.getStatus(),
++                     (int)nlp.getLpSolver().getModelStatus(), nlp.getObjective(),
++                     (int)nlp.numRows(), (int)nlp.getNumModelRows(),
++                     mipdata_->upper_limit, nbNodeLb,
++                     (int)d1.infeasible(), nbTight);
++        hsNodeBoxWriteBox(nbf, nbLo, nbHi);
++      }
+       if (!mipdata_->parallelLockActive())
+         profiling_->stop(kMipClockNodeSearchSeparation);
+     } else {
