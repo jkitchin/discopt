@@ -1,5 +1,5 @@
 diff --git a/crates/discopt-core/src/bnb/milp_driver.rs b/crates/discopt-core/src/bnb/milp_driver.rs
-index ea6ad414..1348a008 100644
+index da927224..5e8243bf 100644
 --- a/crates/discopt-core/src/bnb/milp_driver.rs
 +++ b/crates/discopt-core/src/bnb/milp_driver.rs
 @@ -1855,6 +1855,16 @@ struct LocalGmi {
@@ -180,7 +180,7 @@ index ea6ad414..1348a008 100644
      }
  }
  
-@@ -6170,6 +6233,24 @@ fn solve_milp_node_search(
+@@ -6232,6 +6295,24 @@ fn solve_milp_node_search(
              all_root_cuts.len() as u64,
          );
          crate::profile::incr_by(crate::profile::Ctr::RootCutsKept, n_keep as u64);
@@ -205,7 +205,7 @@ index ea6ad414..1348a008 100644
          if n_keep < all_root_cuts.len() {
              let mut newidx = vec![usize::MAX; all_root_cuts.len()];
              let mut next = 0usize;
-@@ -7028,6 +7109,11 @@ fn solve_milp_node_search(
+@@ -7092,6 +7173,11 @@ fn solve_milp_node_search(
                  } else {
                      Vec::new()
                  };
@@ -217,15 +217,15 @@ index ea6ad414..1348a008 100644
                  highs_outcome = highs_env::run(
                      &ctx,
                      &lim,
-@@ -7036,6 +7122,7 @@ fn solve_milp_node_search(
-                     Some(&mut sub_mip),
+@@ -7101,6 +7187,7 @@ fn solve_milp_node_search(
                      dbg,
                      seed_pool,
+                     milp_depth == 0,
 +                    root_pool,
                  );
                  if let Some(o) = &highs_outcome {
                      use crate::profile::{incr, incr_by, Ctr};
-@@ -8979,6 +9066,9 @@ fn solve_node(
+@@ -9052,6 +9139,9 @@ fn solve_node(
                      if gmi_slot { NODE_GMI_ROUNDS } else { 0 },
                      id.0 as i64,
                      ctx.inc_snapshot,
@@ -235,7 +235,7 @@ index ea6ad414..1348a008 100644
                  );
                  out.iters += lg.pivots;
                  if let Some(g) = lg.bound {
-@@ -12834,6 +12924,154 @@ mod tests {
+@@ -12911,6 +13001,154 @@ mod tests {
          );
      }
  
@@ -391,19 +391,19 @@ index ea6ad414..1348a008 100644
      /// domain, `highs_eval` evaluation, `highs_branch` reliability strong branching) run
      /// on the working LP the batched search has at its root reaches the batched
 diff --git a/crates/discopt-core/src/bnb/milp_driver/highs_branch.rs b/crates/discopt-core/src/bnb/milp_driver/highs_branch.rs
-index 0d76f161..8a07d3ee 100644
+index c33a0894..15bb040c 100644
 --- a/crates/discopt-core/src/bnb/milp_driver/highs_branch.rs
 +++ b/crates/discopt-core/src/bnb/milp_driver/highs_branch.rs
-@@ -1084,6 +1084,7 @@ pub(super) mod e2e {
-             None,
+@@ -1087,6 +1087,7 @@ pub(super) mod e2e {
              None,
              Vec::new(),
+             false,
 +            None,
          ) {
              Some(o) => {
                  res.best = o.best;
 diff --git a/crates/discopt-core/src/bnb/milp_driver/highs_env.rs b/crates/discopt-core/src/bnb/milp_driver/highs_env.rs
-index 696611a2..03298f49 100644
+index a432cf74..4ea0076f 100644
 --- a/crates/discopt-core/src/bnb/milp_driver/highs_env.rs
 +++ b/crates/discopt-core/src/bnb/milp_driver/highs_env.rs
 @@ -47,6 +47,7 @@ use crate::bnb::highs_search::search::{
@@ -412,9 +412,9 @@ index 696611a2..03298f49 100644
  use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
 +use crate::lp::highs_cutgen::pool::{CutPool, NoObserver};
  
+ mod nodebox;
  mod refcheck;
- 
-@@ -54,6 +55,44 @@ mod refcheck;
+@@ -55,6 +56,44 @@ mod refcheck;
  thread_local! {
      /// Searches run on this thread (tests prove the route fired).
      pub(super) static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -459,7 +459,7 @@ index 696611a2..03298f49 100644
  }
  
  /// Limits and tolerances for [`run`].
-@@ -318,6 +357,60 @@ pub(super) fn search_cut_lp_enabled() -> bool {
+@@ -327,6 +366,60 @@ pub(super) fn search_cut_lp_enabled() -> bool {
      }
  }
  
@@ -520,7 +520,7 @@ index 696611a2..03298f49 100644
  /// Cut rows the search's LP may carry at once, beyond the root's: bounds the per-LP
  /// cost (the falsified 1d-5 fold doubled it with unmanaged rows).
  fn search_cut_cap(base_rows: usize) -> usize {
-@@ -516,6 +609,15 @@ pub(super) struct HighsEnv<'a, 'b> {
+@@ -525,6 +618,15 @@ pub(super) struct HighsEnv<'a, 'b> {
      pub cut_rows_deleted: usize,
      /// Root cuts the pool started with (step 2.1).
      pub seeded_pool: usize,
@@ -536,7 +536,7 @@ index 696611a2..03298f49 100644
      /// `DISCOPT_HIGHS_SEARCH_CHECK_POINT` (debug instrument, [`refcheck`]).
      refp: Option<refcheck::RefCheck>,
      /// Tree weight the queue pruned (`emplaceNode`, `performBounding`): with the
-@@ -637,16 +739,19 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
+@@ -648,16 +750,19 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
      }
  
      /// Append `cuts` (over the current columns) to the search's LP as persistent rows.
@@ -559,7 +559,7 @@ index 696611a2..03298f49 100644
              if add.len() >= room {
                  break;
              }
-@@ -656,10 +761,11 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
+@@ -667,10 +772,11 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
              }
              if self.in_lp.insert(cut_signature(&c)) {
                  add.push(c);
@@ -572,7 +572,7 @@ index 696611a2..03298f49 100644
          }
          let (m0, n0w) = (lp.m, lp.n);
          let (csc, m, n) = augment_csc_with_cuts(
-@@ -699,6 +805,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
+@@ -710,6 +816,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
              d.resize(n, 0.0);
          }
          self.clear_lp_caches();
@@ -580,7 +580,7 @@ index 696611a2..03298f49 100644
      }
  
      fn clear_lp_caches(&mut self) {
-@@ -770,7 +877,14 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
+@@ -781,7 +888,14 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
              return;
          }
          for r in &gone {
@@ -596,7 +596,7 @@ index 696611a2..03298f49 100644
          }
          let d = delete_cut_rows(&lp.csc, lp.m, lp.n, &lp.b, &mut gone, &mut kept);
          let col_map = d.col_map.clone();
-@@ -825,6 +939,160 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
+@@ -836,6 +950,160 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
          self.clear_lp_caches();
      }
  
@@ -757,7 +757,7 @@ index 696611a2..03298f49 100644
      /// The external node bound (`MilpBoundHook`, `Model.solve(lagrangian_bound=True)`),
      /// as the batched search applies it: on a node whose LP bound is real and whose
      /// point is fractional (`Open`), every `bound_hook_every`-th node, over the node's
-@@ -1492,14 +1760,16 @@ impl SearchEnv for HighsEnv<'_, '_> {
+@@ -1503,14 +1771,16 @@ impl SearchEnv for HighsEnv<'_, '_> {
              self.eval.last_box.clone(),
          ) else {
              // HiGHS `separate`'s else branch: no optimal LP, just ageing (a no-op
@@ -775,7 +775,7 @@ index 696611a2..03298f49 100644
              return false;
          }
          if self
-@@ -1509,6 +1779,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
+@@ -1520,6 +1790,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
          {
              return false;
          }
@@ -785,7 +785,7 @@ index 696611a2..03298f49 100644
          let mut pick: Vec<(f64, usize)> = Vec::new();
          for (k, cut) in self.pool.iter().enumerate() {
              if self.cut_lp && self.in_lp.contains(&cut_signature(cut)) {
-@@ -1557,6 +1830,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
+@@ -1568,6 +1841,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
              NODE_GMI_ROUNDS,
              self.nodes,
              self.best.as_ref().map(|b| b.1),
@@ -793,44 +793,33 @@ index 696611a2..03298f49 100644
          );
          self.eval.lp_iters += lg.pivots as i64;
          if let (Some(rc), Some(xc)) = (self.refp.as_mut(), ref_cur.as_ref()) {
-@@ -1744,6 +2018,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
- /// `obj_const` (`-inf` for none). `None` when any LP of the search is unbounded or
- /// the rows are infeasible over the global box before any search (the driver's own
- /// handling then decides).
-+#[allow(clippy::too_many_arguments)]
- pub(super) fn run<'a>(
-     ctx: &'a NodeCtx<'_>,
-     lim: &'a Limits,
-@@ -1752,6 +2027,7 @@ pub(super) fn run<'a>(
-     sub_mip: Option<SubMip<'a>>,
-     dbg: Option<Debugger<'a>>,
-     seed_pool: Vec<GomoryCut>,
-+    root_pool: Option<CutPool>,
- ) -> Option<Outcome> {
-     #[cfg(test)]
-     RUNS.with(|r| r.set(r.get() + 1));
-@@ -1799,6 +2075,10 @@ pub(super) fn run<'a>(
-         cut_rows_added: 0,
-         cut_rows_deleted: 0,
-         seeded_pool: 0,
-+        gpool: None,
-+        lp_pool_id: std::collections::HashMap::new(),
-+        #[cfg(test)]
-+        gpool_origin: std::collections::HashMap::new(),
-         refp: refcheck::RefCheck::load(ctx),
-         queue_pruned: 0.0,
-         progress: (0.0, 0, 0),
-@@ -1813,10 +2093,67 @@ pub(super) fn run<'a>(
+@@ -1823,6 +2097,10 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
+             cut_rows_added: 0,
+             cut_rows_deleted: 0,
+             seeded_pool: 0,
++            gpool: None,
++            lp_pool_id: std::collections::HashMap::new(),
++            #[cfg(test)]
++            gpool_origin: std::collections::HashMap::new(),
+             refp,
+             queue_pruned: 0.0,
+             progress: (0.0, 0, 0),
+@@ -1844,6 +2122,70 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
          }
-         rc.bound("root", 0, root_bound, f64::INFINITY, "");
      }
-+    // `DISCOPT_HIGHS_SEARCH_GLOBAL_POOL`: the root's ported pool itself, as HiGHS's
-+    // search inherits `mipdata_->cutpool`; the driver's own root-pool cuts
-+    // (`gmi_pool`) join it through `addCut` when they lie over the structural columns
-+    // (the ported pool's space). Then `HighsMipSolver::run`'s five `performAging` calls
-+    // after the root (`HighsMipSolver.cpp:229-235`).
-+    let global_pool = env.cut_lp && ctx.highs_node.is_some() && search_global_pool_enabled();
-+    if global_pool {
+ 
++    /// `DISCOPT_HIGHS_SEARCH_GLOBAL_POOL`: install the root's ported pool itself, as
++    /// HiGHS's search inherits `mipdata_->cutpool`; the driver's own root-pool cuts
++    /// (`gmi_pool`) join it through `addCut` when they lie over the structural columns
++    /// (the ported pool's space). Then `HighsMipSolver::run`'s five `performAging`
++    /// calls after the root (`HighsMipSolver.cpp:229-235`). `false` (nothing
++    /// installed) when the flag is off, persistent search cuts are off, or the node
++    /// separators are not ported for this model.
++    fn install_global_pool(&mut self, root_pool: Option<CutPool>) -> bool {
++        let ctx = self.ctx;
++        if !(self.cut_lp && ctx.highs_node.is_some() && search_global_pool_enabled()) {
++            return false;
++        }
 +        let mut cp = root_pool.unwrap_or_else(|| {
 +            let h = ctx.highs_node.as_ref().expect("checked above");
 +            CutPool::new(
@@ -861,7 +850,7 @@ index 696611a2..03298f49 100644
 +        for _ in 0..5 {
 +            cp.perform_aging(&mut NoObserver);
 +        }
-+        if let Some(rc) = env.refp.as_mut() {
++        if let Some(rc) = self.refp.as_mut() {
 +            let xb = rc.x.clone();
 +            for r in 0..cp.num_slots() as i32 {
 +                if cp.is_live(r) {
@@ -870,26 +859,44 @@ index 696611a2..03298f49 100644
 +                }
 +            }
 +        }
-+        env.seeded_pool = cp.num_cuts().max(0) as usize;
++        self.seeded_pool = cp.num_cuts().max(0) as usize;
 +        #[cfg(test)]
 +        if GPOOL_LOG.with(|g| g.borrow().is_some()) {
 +            for r in 0..cp.num_slots() as i32 {
 +                if cp.is_live(r) {
-+                    env.gpool_origin.insert(gpool_key(&cp, r), 0);
++                    self.gpool_origin.insert(gpool_key(&cp, r), 0);
 +                }
 +            }
 +        }
-+        env.gpool = Some(cp);
++        self.gpool = Some(cp);
++        true
 +    }
-     // Step 2.1: HiGHS's search starts with the root's whole cut pool (every separated
-     // cut, and the ones root cleanup dropped from the LP); with persistent cuts on,
-     // so does this one (the pool feeds the LP when a node violates a cut).
--    if env.cut_lp {
-+    if env.cut_lp && !global_pool {
-         for cut in ctx.gmi_pool.iter().cloned().chain(seed_pool) {
-             if env.pool_sigs.insert(cut_signature(&cut)) {
-                 env.pool.push(cut);
-@@ -1922,6 +2259,19 @@ mod ageing_tests {
++
+     /// Rows of the LP the search's components see (model rows, root cuts, and the
+     /// search's own cut rows).
+     fn lp_rows(&self) -> usize {
+@@ -1867,6 +2209,7 @@ pub(super) fn run<'a>(
+     dbg: Option<Debugger<'a>>,
+     seed_pool: Vec<GomoryCut>,
+     top_level: bool,
++    root_pool: Option<CutPool>,
+ ) -> Option<Outcome> {
+     #[cfg(test)]
+     RUNS.with(|r| r.set(r.get() + 1));
+@@ -1887,7 +2230,11 @@ pub(super) fn run<'a>(
+         }
+         rc.bound("root", 0, root_bound, f64::INFINITY, "");
+     }
+-    env.seed_pool(seed_pool);
++    // `DISCOPT_HIGHS_SEARCH_GLOBAL_POOL`: the root's ported pool itself; otherwise
++    // the step 2.1 `Vec` pool seeded with the root's cuts.
++    if !env.install_global_pool(root_pool) {
++        env.seed_pool(seed_pool);
++    }
+     let root_id = env.dbg.as_ref().map_or(0, |d| d.root_id);
+     if let Some(d) = env.dbg.as_mut() {
+         d.bound = root_bound;
+@@ -1986,6 +2333,19 @@ mod ageing_tests {
      /// slack is basic; a nonbasic row with a nonzero dual is reset, one with a zero
      /// dual keeps its age; separation epochs age every basic row and make deletion
      /// due every 5th epoch at `min(epochs, 10)`.
@@ -1066,10 +1073,10 @@ index 27330207..a25c3fb7 100644
      matrix: DynamicRowMatrix,
      rhs: Vec<f64>,
 diff --git a/crates/discopt-core/src/profile.rs b/crates/discopt-core/src/profile.rs
-index 0b032589..57881ea0 100644
+index edc34b9b..3a268241 100644
 --- a/crates/discopt-core/src/profile.rs
 +++ b/crates/discopt-core/src/profile.rs
-@@ -757,6 +757,21 @@ counters!(
+@@ -759,6 +759,21 @@ counters!(
      // view (`MilpOptions::implied_int_cols`) at work.
      PresolveImpliedFracResult,
      HighsSearchPoolSeeded,
