@@ -3830,9 +3830,14 @@ pub fn solve_milp_node_hooked(
     // The caller's `presolve: false` covers MILP presolve; a seeded incumbent is in
     // the original columns and is not carried into the reduced problem, so a seeded
     // solve skips presolve rather than drop the seed.
+    // A seed file (`DISCOPT_MILP_SEED_POINT`, read by the depth-0 search) is a seed too:
+    // with presolve on, the search runs one level down and would silently ignore it.
+    let seed_file_set =
+        MILP_DEPTH.with(|d| d.get()) == 0 && std::env::var_os("DISCOPT_MILP_SEED_POINT").is_some();
     if milp_presolve_enabled()
         && opts.presolve
         && opts.initial_incumbent.is_none()
+        && !seed_file_set
         && hook.is_none()
         && lazy.is_none()
         && node.is_none()
