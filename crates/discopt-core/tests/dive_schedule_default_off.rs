@@ -36,6 +36,8 @@ fn stride_unset_never_dives_away_from_the_root() {
         n_struct: N,
         integer_cols: (0..N).collect(),
         implied_int_cols: Vec::new(),
+        max_stall_nodes: 0,
+        max_leaves: 0,
         max_nodes: 4_000,
         max_open_nodes: None,
         time_limit_s: Some(60.0),

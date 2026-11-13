@@ -144,6 +144,8 @@ fn opts(n_struct: usize, integer_cols: Vec<usize>, tl: f64) -> MilpOptions {
         n_struct,
         integer_cols,
         implied_int_cols: Vec::new(),
+        max_stall_nodes: 0,
+        max_leaves: 0,
         max_nodes: 5_000_000,
         max_open_nodes: None,
         time_limit_s: Some(tl),

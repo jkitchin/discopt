@@ -287,6 +287,11 @@ pub trait SearchEnv {
     /// it has closed, its leaves, and the nodes processed (`moreHeuristicsAllowed`
     /// reads `pruned_treeweight`, `num_leaves`, `num_nodes`).
     fn note_search_progress(&mut self, _treeweight: f64, _nleaves: i64, _nnodes: i64) {}
+    /// The estimate of the node just installed from the queue (`numStallNodes`); `true`
+    /// when this install reaches `mip_max_stall_nodes` and the search stops.
+    fn note_installed_estimate(&mut self, _estimate: f64) -> bool {
+        false
+    }
     /// `runHeuristics` after its node evaluation: randomized rounding, RENS/RINS.
     fn run_heuristics(&mut self);
 
@@ -1037,6 +1042,13 @@ impl MainLoop {
         node_lim: i64,
     ) -> bool {
         self.install(env, search, root);
+        let est = search.nodestack.last().map(|top| top.estimate);
+        if est.is_some_and(|e| env.note_installed_estimate(e)) {
+            // `HighsMipSolver.cpp:645-648`: the limit is reached at install, before
+            // the node is processed; it goes back to the queue (the bound keeps it).
+            search.open_nodes_to_queue(env);
+            return true;
+        }
         self.process_node(env, search, root, node_lim, 100);
         search.open_nodes_to_queue(env);
         self.num_nodes += search.nnodes;

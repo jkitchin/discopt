@@ -82,6 +82,10 @@ pub(super) struct Limits {
     pub submip: bool,
     /// LP iterations the driver spent before the search (root LP and cut loop).
     pub iters_before: i64,
+    /// `MilpOptions::max_stall_nodes` (0 = none).
+    pub max_stall_nodes: usize,
+    /// `MilpOptions::max_leaves` (0 = none).
+    pub max_leaves: usize,
 }
 
 /// `DISCOPT_HIGHS_HEUR_EFFORT`: gate the search's node heuristics (rounding, RENS,
@@ -115,6 +119,10 @@ pub(super) enum Stop {
     Stall,
     /// The attached debugger asked the search to stop.
     Debugger,
+    /// `mip_max_stall_nodes` consecutive installs at or above the cutoff.
+    StallNodes,
+    /// `mip_max_leaves` leaves.
+    Leaves,
 }
 
 /// The outcome of [`run`].
@@ -523,6 +531,8 @@ pub(super) struct HighsEnv<'a, 'b> {
     queue_pruned: f64,
     /// The search's `(treeweight, nleaves, nodes)` at the last node processed.
     progress: (f64, i64, i64),
+    /// Consecutive stall installs (`numStallNodes`).
+    stall_nodes: usize,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -1652,6 +1662,27 @@ impl SearchEnv for HighsEnv<'_, '_> {
     }
     fn note_search_progress(&mut self, treeweight: f64, nleaves: i64, nnodes: i64) {
         self.progress = (treeweight, nleaves, nnodes);
+        if self.lim.max_leaves > 0 && nleaves >= self.lim.max_leaves as i64 && self.stop.is_none() {
+            self.stop = Some(Stop::Leaves);
+        }
+    }
+    fn note_installed_estimate(&mut self, estimate: f64) -> bool {
+        if self.lim.max_stall_nodes == 0 {
+            return false;
+        }
+        // `HighsMipSolver.cpp:641-650`: an installed node whose estimate cannot beat the
+        // incumbent is a stall node; the counter resets on any other.
+        if estimate >= self.eval.cutoff {
+            self.stall_nodes += 1;
+            if self.stall_nodes >= self.lim.max_stall_nodes && self.stop.is_none() {
+                crate::profile::incr(crate::profile::Ctr::SearchStallNodeStops);
+                self.stop = Some(Stop::StallNodes);
+                return true;
+            }
+        } else {
+            self.stall_nodes = 0;
+        }
+        false
     }
     fn run_heuristics(&mut self) {
         // discopt's rounding of the node LP point (HiGHS: randomized rounding, RENS,
@@ -1802,6 +1833,7 @@ pub(super) fn run<'a>(
         refp: refcheck::RefCheck::load(ctx),
         queue_pruned: 0.0,
         progress: (0.0, 0, 0),
+        stall_nodes: 0,
     };
     if let Some(rc) = env.refp.as_mut() {
         let xb = rc.x.clone();

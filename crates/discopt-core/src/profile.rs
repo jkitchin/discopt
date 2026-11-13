@@ -507,6 +507,8 @@ counters!(
     DualPrepRepriced,
     // Node-heuristic slots the HiGHS effort budget (DISCOPT_HIGHS_HEUR_EFFORT) allowed / refused.
     HeurEffortAllowed,
+    // HiGHS searches stopped by `mip_max_stall_nodes` (DISCOPT_HIGHS_SUBMIP_LIMITS).
+    SearchStallNodeStops,
     HeurEffortRefused,
     // Leaving rows tolerated at the noise level (DISCOPT_LP_DUAL_NOISE_ROWS).
     DualNoiseRowTolerated,

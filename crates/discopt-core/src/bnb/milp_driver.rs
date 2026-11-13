@@ -2222,6 +2222,13 @@ pub struct MilpOptions {
     /// (every integer column is a true integer) at every entry point but the presolved
     /// solve.
     pub implied_int_cols: Vec<usize>,
+    /// Stop after this many consecutive queue installs whose estimate is at or above
+    /// the cutoff (HiGHS `mip_max_stall_nodes`; 0 = no limit). Honoured by the HiGHS
+    /// search; set for heuristic sub-MIPs ([`sub_solve_options`]).
+    pub max_stall_nodes: usize,
+    /// Stop after this many leaves (HiGHS `mip_max_leaves`; 0 = no limit). Honoured by
+    /// the HiGHS search; set for heuristic sub-MIPs.
+    pub max_leaves: usize,
     /// Node-creation cap.
     pub max_nodes: usize,
     /// Open-frontier cap (#1874). `Some(k)`: the search stops, uncertified, once
@@ -2518,7 +2525,30 @@ fn sub_solve_options(opts: &MilpOptions, max_nodes: usize, seed: Option<Vec<f64>
     sub.initial_incumbent = seed;
     sub.extend_no_incumbent_s = None;
     sub.stall_time_s = None;
+    if submip_limits_enabled() {
+        // `HighsPrimalHeuristics::RENS/RINS` -> `solveSubMip(.., 500, 200 + nodes/20, 12)`.
+        sub.max_leaves = 500;
+        sub.max_stall_nodes = 12;
+    }
     sub
+}
+
+/// `DISCOPT_HIGHS_SUBMIP_LIMITS`: heuristic sub-MIPs stop on HiGHS's work limits --
+/// 500 leaves and 12 stall nodes (consecutive queue installs whose estimate is at or
+/// above the cutoff), `HighsPrimalHeuristics.cpp:627-632` / `HighsMipSolver.cpp:641-650`
+/// -- in addition to the node budget and the wall-clock share. Member of
+/// `DISCOPT_HIGHS_CONFIG`; garbage refused.
+fn submip_limits_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SUBMIP_LIMITS") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SUBMIP_LIMITS={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
 }
 
 /// Build a neighbourhood sub-box (a contraction of `base.l`/`base.u`), propagate it,
@@ -6925,6 +6955,8 @@ fn solve_milp_node_search(
                         .stall_time_s
                         .map(|st| t_start + std::time::Duration::from_secs_f64(st)),
                     heur_effort: highs_env::heur_effort_enabled(),
+                    max_stall_nodes: opts.max_stall_nodes,
+                    max_leaves: opts.max_leaves,
                     submip: in_sub_mip(),
                     iters_before: lp_iters as i64,
                 };
@@ -8160,7 +8192,15 @@ fn highs_search_result(
         o.unresolved,
         gap_ok,
         gap_certified && o.complete,
-        o.stop == Some(highs_env::Stop::Nodes) || o.stop == Some(highs_env::Stop::OpenNodes),
+        matches!(
+            o.stop,
+            Some(
+                highs_env::Stop::Nodes
+                    | highs_env::Stop::OpenNodes
+                    | highs_env::Stop::StallNodes
+                    | highs_env::Stop::Leaves
+            )
+        ),
     );
     let mut res = MilpResult {
         status,
@@ -11658,6 +11698,8 @@ mod tests {
             n_struct: ns,
             integer_cols: (0..ns).collect(),
             implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -12666,6 +12708,8 @@ mod tests {
             n_struct: ns,
             integer_cols: int_cols,
             implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -13281,6 +13325,74 @@ mod tests {
     /// certified optimum as the unpresolved search on random mixed-integer problems, with a
     /// postsolved point feasible on the original rows. Covers the continuous columns the
     /// enumeration test in `milp_presolve` cannot (aggregator, doubleton substitutions).
+    /// `MilpOptions::max_stall_nodes` (HiGHS `mip_max_stall_nodes`, set for heuristic
+    /// sub-MIPs by `DISCOPT_HIGHS_SUBMIP_LIMITS`): a search stopped by the stall rule is
+    /// a limit stop, never a certificate -- its bound stays at or below the optimum and
+    /// an `Optimal` it reports is the true optimum. Random knapsack-like integer
+    /// programs; the rule must actually fire (CLAUDE.md §6).
+    #[test]
+    fn stall_node_limit_stops_without_a_false_certificate() {
+        let _guard = crate::profile::test_guard();
+        let mut seed = 0x51a1_u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut compared, mut stopped) = (0usize, 0u64);
+        for _ in 0..30 {
+            let ns = rnd(10, 16) as usize;
+            let m = 3usize;
+            let n = ns + m;
+            let mut a = vec![0.0; m * n];
+            for i in 0..m {
+                for j in 0..ns {
+                    a[i * n + j] = rnd(1, 9) as f64;
+                }
+                a[i * n + ns + i] = 1.0;
+            }
+            let b: Vec<f64> = (0..m).map(|_| rnd(15, 30) as f64).collect();
+            let mut c: Vec<f64> = (0..ns).map(|_| -(rnd(3, 11) as f64)).collect();
+            c.extend(std::iter::repeat_n(0.0, m));
+            let l = vec![0.0; n];
+            let mut u = vec![1.0; ns];
+            u.extend(std::iter::repeat_n(INF, m));
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let o = opts(ns, (0..ns).collect());
+            let plain = solve_milp(&lp, &b, 0.0, &o);
+            if plain.status != MilpStatus::Optimal {
+                continue;
+            }
+            let mut os = o.clone();
+            os.max_stall_nodes = 1;
+            crate::profile::set_enabled(true);
+            crate::profile::reset();
+            let r = solve_milp(&lp, &b, 0.0, &os);
+            stopped += crate::profile::counter(crate::profile::Ctr::SearchStallNodeStops);
+            crate::profile::set_enabled(false);
+            assert!(
+                r.bound <= plain.obj + 1e-6 * (1.0 + plain.obj.abs()),
+                "stall-stopped bound {} above the optimum {}",
+                r.bound,
+                plain.obj
+            );
+            if r.status == MilpStatus::Optimal {
+                assert!((r.obj - plain.obj).abs() <= 1e-6 * (1.0 + plain.obj.abs()));
+            }
+            compared += 1;
+        }
+        assert!(compared >= 20, "only {compared} compared");
+        assert!(stopped >= 1, "the stall rule never fired");
+    }
+
     /// `DISCOPT_HIGHS_SUBMIP_PRESOLVE` (HiGHS `solveSubMip` presolves every sub-MIP): a
     /// solve inside a heuristic sub-MIP (`SubMipNest`) runs the MILP presolve, a merely
     /// nested solve does not, and the optimum is the plain solve's. Random integer
@@ -14823,6 +14935,8 @@ mod tests {
             n_struct: 3,
             integer_cols: vec![0, 1, 2],
             implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
             max_nodes: 5_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -14966,6 +15080,8 @@ pub(crate) mod sparse_milp_diff {
                 n_struct: self.ns,
                 integer_cols: self.int_cols.clone(),
                 implied_int_cols: Vec::new(),
+                max_stall_nodes: 0,
+                max_leaves: 0,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -15282,6 +15398,8 @@ pub(crate) mod sparse_milp_diff {
             n_struct: 6,
             integer_cols: vec![0, 1, 2, 3, 4, 5],
             implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -15598,6 +15716,8 @@ mod lazy_separation {
                 n_struct: 4,
                 integer_cols: vec![0, 1, 2, 3],
                 implied_int_cols: Vec::new(),
+                max_stall_nodes: 0,
+                max_leaves: 0,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -15904,6 +16024,8 @@ mod node_separation {
                 n_struct: 3,
                 integer_cols: vec![0, 1, 2],
                 implied_int_cols: Vec::new(),
+                max_stall_nodes: 0,
+                max_leaves: 0,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -16193,6 +16315,8 @@ mod lazy_infeasible_node {
             n_struct: 2,
             integer_cols: vec![0, 1],
             implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -16338,6 +16462,8 @@ mod root_cut_budget_tests {
             n_struct: ns,
             integer_cols: (0..ns).collect(),
             implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
             max_nodes: 200_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -17127,6 +17253,8 @@ mod tiny_entry_tests {
             n_struct: ns,
             integer_cols: int_cols,
             implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
             max_nodes: 10_000,
             max_open_nodes: None,
             time_limit_s: None,

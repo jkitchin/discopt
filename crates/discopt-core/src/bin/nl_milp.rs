@@ -327,6 +327,8 @@ fn run() -> Result<(), String> {
         n_struct,
         integer_cols: integer_cols.clone(),
         implied_int_cols: Vec::new(),
+        max_stall_nodes: 0,
+        max_leaves: 0,
         max_nodes: args.max_nodes,
         max_open_nodes: None,
         time_limit_s: Some(args.time_limit),
