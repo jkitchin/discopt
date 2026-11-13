@@ -38527,47 +38527,65 @@ def _milp_aligned_slacks_enabled() -> bool:
 
 
 def _milp_aligned_lp(lp_data, n_orig: int):
-    """The aligned standard form described in :func:`_milp_aligned_slacks_enabled`."""
+    """The aligned standard form described in :func:`_milp_aligned_slacks_enabled`.
+
+    Assembled directly from the CSC arrays: the structural columns, then per row its
+    singleton slack (or a new unit column), then the remaining columns -- the same
+    matrix, entry for entry and in the same within-column order, as stacking the
+    column slices. It used to slice ``A[:, k]`` once per column and ``hstack`` ~m
+    pieces: 5.2 s of a 20 s budget on reblock420 (15k rows, 2026-11-13), before the
+    engine started (``test_milp_aligned_lp_matches_the_column_stack``).
+    """
     import scipy.sparse as _sp
 
     A = _sp.csc_matrix(lp_data.A_eq)
     m, n = A.shape
-    slack_of_row = [-1] * m
+    indptr, indices, data = A.indptr, A.indices, A.data
+    lens = np.diff(indptr)
+    slack_of_row = np.full(m, -1, dtype=np.int64)
     for k in range(n_orig, n):
-        lo, hi = A.indptr[k], A.indptr[k + 1]
-        if hi - lo == 1:
-            r = int(A.indices[lo])
+        if lens[k] == 1:
+            r = int(indices[indptr[k]])
             if slack_of_row[r] < 0:
                 slack_of_row[r] = k
-    used = {k for k in slack_of_row if k >= 0}
-    rest = [k for k in range(n_orig, n) if k not in used]
+    used = np.zeros(n, dtype=bool)
+    used[slack_of_row[slack_of_row >= 0]] = True
+    rest = np.array([k for k in range(n_orig, n) if not used[k]], dtype=np.int64)
+    # Output column order: -1 marks a new unit column for that row.
+    order = np.concatenate([np.arange(n_orig, dtype=np.int64), slack_of_row, rest])
+    new_row = np.flatnonzero(slack_of_row < 0)  # rows that get a unit column
+    is_new = order < 0
+    out_len = np.where(is_new, 1, lens[np.where(is_new, 0, order)])
+    out_ptr = np.zeros(order.size + 1, dtype=np.int64)
+    np.cumsum(out_len, out=out_ptr[1:])
+    nnz = int(out_ptr[-1])
+    out_idx = np.empty(nnz, dtype=indices.dtype)
+    out_val = np.empty(nnz, dtype=np.float64)
+    # Gather existing columns in one vectorized pass.
+    src_cols = order[~is_new]
+    src_start = indptr[src_cols]
+    dst_start = out_ptr[:-1][~is_new]
+    seg = lens[src_cols]
+    if seg.sum():
+        offs = np.repeat(dst_start - np.cumsum(np.concatenate([[0], seg[:-1]])), seg)
+        src = np.repeat(src_start - np.cumsum(np.concatenate([[0], seg[:-1]])), seg)
+        pos = np.arange(int(seg.sum()))
+        out_idx[pos + offs] = indices[pos + src]
+        out_val[pos + offs] = data[pos + src]
+    # Unit columns for rows without a slack: positions n_orig + r in `order`.
+    new_pos = out_ptr[:-1][is_new]
+    out_idx[new_pos] = new_row
+    out_val[new_pos] = 1.0
     c = np.asarray(lp_data.c, dtype=np.float64)
     xl = np.asarray(lp_data.x_l, dtype=np.float64)
     xu = np.asarray(lp_data.x_u, dtype=np.float64)
-    cols = [A[:, :n_orig]]
-    cc, ll, uu = [c[:n_orig]], [xl[:n_orig]], [xu[:n_orig]]
-    for r in range(m):
-        k = slack_of_row[r]
-        if k >= 0:
-            cols.append(A[:, k])
-            cc.append(c[k : k + 1])
-            ll.append(xl[k : k + 1])
-            uu.append(xu[k : k + 1])
-        else:
-            cols.append(_sp.csc_matrix(([1.0], ([r], [0])), shape=(m, 1)))
-            cc.append(np.zeros(1))
-            ll.append(np.zeros(1))
-            uu.append(np.zeros(1))
-    for k in rest:
-        cols.append(A[:, k])
-        cc.append(c[k : k + 1])
-        ll.append(xl[k : k + 1])
-        uu.append(xu[k : k + 1])
+    take = np.where(is_new, 0, order)
+    zero = np.zeros(order.size)
     return lp_data._replace(
-        A_eq=_sp.hstack(cols, format="csc"),
-        c=np.concatenate(cc),
-        x_l=np.concatenate(ll),
-        x_u=np.concatenate(uu),
+        A_eq=_sp.csc_matrix((out_val, out_idx, out_ptr), shape=(m, order.size)),
+        c=np.where(is_new, zero, c[take]),
+        x_l=np.where(is_new, zero, xl[take]),
+        x_u=np.where(is_new, zero, xu[take]),
     )
 
 

@@ -61,3 +61,85 @@ def test_aligned_slacks_solve_to_the_same_certified_optimum(monkeypatch):
         assert str(r.status).endswith("optimal"), (arm, r.status)
         out[arm] = r.objective
     assert out["0"] == pytest.approx(out["1"], abs=1e-9)
+
+
+def _aligned_by_column_stack(lp_data, n_orig):
+    """The pre-2026-11-13 ``_milp_aligned_lp`` (one ``A[:, k]`` slice per column,
+    then ``hstack``): the reference the array assembly must reproduce exactly."""
+    A = sp.csc_matrix(lp_data.A_eq)
+    m, n = A.shape
+    slack_of_row = [-1] * m
+    for k in range(n_orig, n):
+        lo, hi = A.indptr[k], A.indptr[k + 1]
+        if hi - lo == 1:
+            r = int(A.indices[lo])
+            if slack_of_row[r] < 0:
+                slack_of_row[r] = k
+    used = {k for k in slack_of_row if k >= 0}
+    rest = [k for k in range(n_orig, n) if k not in used]
+    c, xl, xu = (np.asarray(v, dtype=np.float64) for v in (lp_data.c, lp_data.x_l, lp_data.x_u))
+    cols = [A[:, :n_orig]]
+    cc, ll, uu = [c[:n_orig]], [xl[:n_orig]], [xu[:n_orig]]
+    for r in range(m):
+        k = slack_of_row[r]
+        if k >= 0:
+            cols.append(A[:, k])
+            cc.append(c[k : k + 1])
+            ll.append(xl[k : k + 1])
+            uu.append(xu[k : k + 1])
+        else:
+            cols.append(sp.csc_matrix(([1.0], ([r], [0])), shape=(m, 1)))
+            cc.append(np.zeros(1))
+            ll.append(np.zeros(1))
+            uu.append(np.zeros(1))
+    for k in rest:
+        cols.append(A[:, k])
+        cc.append(c[k : k + 1])
+        ll.append(xl[k : k + 1])
+        uu.append(xu[k : k + 1])
+    return sp.hstack(cols, format="csc"), np.concatenate(cc), np.concatenate(ll), np.concatenate(uu)
+
+
+def _assert_same(lp, n_orig):
+    want_a, want_c, want_l, want_u = _aligned_by_column_stack(lp, n_orig)
+    got = _milp_aligned_lp(lp, n_orig)
+    ga = sp.csc_matrix(got.A_eq)
+    assert ga.shape == want_a.shape
+    assert np.array_equal(ga.indptr, want_a.indptr)
+    assert np.array_equal(ga.indices, want_a.indices)
+    assert np.array_equal(ga.data, want_a.data)
+    for g, w in ((got.c, want_c), (got.x_l, want_l), (got.x_u, want_u)):
+        assert np.array_equal(np.asarray(g), w)
+    return ga.nnz
+
+
+@pytest.mark.smoke
+def test_milp_aligned_lp_matches_the_column_stack():
+    """The array assembly is the column stack exactly (indptr, indices, values, costs,
+    bounds): on the model above, and on 200 random standard forms with singleton slacks
+    in random order, rows without a slack, two slacks on one row, and non-slack columns
+    after the structural block. Counts what it compared (CLAUDE.md section 6)."""
+    from collections import namedtuple
+
+    compared = _assert_same(extract_lp_data(_model()), 4)
+    Lp = namedtuple("Lp", "A_eq c x_l x_u")
+    rng = np.random.default_rng(7)
+    for _ in range(200):
+        m_rows = int(rng.integers(1, 12))
+        n_orig = int(rng.integers(1, 10))
+        struct = sp.random(m_rows, n_orig, density=0.4, random_state=rng, format="csc")
+        extra = []
+        for r in rng.permutation(m_rows):
+            if rng.random() < 0.7:  # a singleton slack
+                extra.append(
+                    sp.csc_matrix(([rng.choice([1.0, -1.0])], ([r], [0])), shape=(m_rows, 1))
+                )
+            if rng.random() < 0.15:  # a second singleton on the same row
+                extra.append(sp.csc_matrix(([2.0], ([r], [0])), shape=(m_rows, 1)))
+        if rng.random() < 0.5:  # a non-singleton extra column
+            extra.append(sp.random(m_rows, 1, density=0.6, random_state=rng, format="csc"))
+        A = sp.hstack([struct] + extra, format="csc")
+        n = A.shape[1]
+        lp = Lp(A, rng.normal(size=n), -rng.random(n), rng.random(n) + 1.0)
+        compared += _assert_same(lp, n_orig)
+    assert compared > 1000, compared

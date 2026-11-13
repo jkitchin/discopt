@@ -2535,14 +2535,18 @@ def coefficient_tightened(
     A.sort_indices()
     b = sf.b.copy()
     n_rewritten = 0
-    for i in range(sf.m):
-        if n_log[i] != 1:
-            continue
+    # The rows the loop can act on -- one logical column and a binary entry -- found in
+    # one pass; the loop visits them in the same ascending order the full scan did and
+    # skips exactly the rows it skipped. (The full scan cost ~2 s of Python on a 15k-row
+    # model, 2026-11-13, before the engine started.)
+    has_bin = np.zeros(sf.m, dtype=bool)
+    entry_row = np.repeat(np.arange(sf.m), np.diff(A.indptr))
+    has_bin[entry_row[is_bin[A.indices]]] = True
+    for i in np.flatnonzero((n_log == 1) & has_bin):
+        i = int(i)
         j_s = int(row_logical[i])
         lo, hi = A.indptr[i], A.indptr[i + 1]
         cols = A.indices[lo:hi]
-        if not np.any(is_bin[cols]):
-            continue
         k_s = lo + int(np.flatnonzero(cols == j_s)[0])
         sig = float(A.data[k_s])
         ends = sorted((sig * sf.xl[j_s], sig * sf.xu[j_s]))
@@ -2557,16 +2561,25 @@ def coefficient_tightened(
         others = np.flatnonzero(cols != j_s) + lo
         if not np.all(finite_box[A.indices[others]]):
             continue
+        # The row's activity terms change only when one of its entries is rewritten:
+        # computed once, and again after each rewrite -- the same arrays, hence the same
+        # sums, the per-binary recompute produced (that recompute made the row
+        # quadratic in its length: ~2 s on reblock420's 15k rows with no rewrite).
+        stale = True
         for k_ent in others:
             kq = int(k_ent)
             if not is_bin[int(A.indices[kq])]:
                 continue
-            g = sgn * A.data[others]
-            cj = A.indices[others]
-            terms = np.maximum(g * xl[cj], g * xu[cj])
+            if stale:
+                g = sgn * A.data[others]
+                cj = A.indices[others]
+                terms = np.maximum(g * xl[cj], g * xu[cj])
+                terms_sum = float(terms.sum())
+                terms_abs = float(np.abs(terms).sum())
+                stale = False
             gk = sgn * float(A.data[kq])
-            maxact_rest = float(terms.sum()) - max(gk, 0.0)
-            scale = float(np.abs(terms).sum()) + abs(U) + abs(gk)
+            maxact_rest = terms_sum - max(gk, 0.0)
+            scale = terms_abs + abs(U) + abs(gk)
             margin = _COEF_TIGHTEN_SAFETY * (terms.size + 2) * np.finfo(float).eps * scale
             if gk > 0.0:
                 d = U - maxact_rest - margin
@@ -2580,6 +2593,7 @@ def coefficient_tightened(
                     continue
                 gk_new = gk + d
             A.data[kq] = sgn * gk_new
+            stale = True
             n_rewritten += 1
     if not n_rewritten:
         return None, 0
