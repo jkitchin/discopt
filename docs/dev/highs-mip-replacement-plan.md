@@ -582,3 +582,33 @@ interval saves little (48 -> 200: 19.7 -> 18.4 s). The next simplex lever is the
 `feral`'s factor time on near-triangular bases (its repository, not this one), then
 CHUZR with a maintained infeasibility list.
 
+**Checked: feral vs HiGHS on the identical basis** (`data/highs-parity/rootgap/
+factor_bench/`: the 100th refactorization's basis of piperout-d27's root dual simplex,
+the C++ harness, and the 307 in-solve timings). The basis: m = 17,470, 50,762 nonzeros,
+13,217 one-entry columns; singleton peeling removes 91.6 %, leaving a 1,459 x 1,459 kernel
+with 5,201 nonzeros.
+
+| factor of this basis | median | min |
+|---|---|---|
+| HiGHS 1.15.1 `HFactor::build` (Release, -O3), 50 reps | 2.7-2.9 ms | 2.2 ms |
+| feral 0.18 via discopt's `FeralLU::new().factorize_sparse`, 600-800 reps | 17.1-18.3 ms | 14.3 ms |
+| feral inside the solve, 307 factorizations | 24.5 ms | 6.8 ms |
+
+So feral is ~6.5x HiGHS here. Stack samples of the standalone factor (45): 29 in
+`markowitz_factor` (11 of them `BinaryHeap::pop`), ~9 in malloc/free, the rest
+`from_sparse_columns`/`validate`, `assemble`, `remap_and_sort_l`. With a kernel this small
+the time is bookkeeping, not arithmetic: the count heaps are built over all m columns and
+rows and receive a push on every count change, so the singleton phase leaves ~17k+ stale
+entries to pop; and the matrix is held as one `Vec` per column and per row (and the
+factor's `U` as one per row), ~50k small allocations per factorization. HiGHS peels the
+triangular part in a separate pass with flat count arrays and runs Markowitz on the kernel
+only, with count-bucket lists. Fix in feral: build the heaps (or buckets) over the kernel
+after the singleton pass; flat storage for the active submatrix.
+
+**What it is worth here**, honestly: feral's factor is ~7.5 s of the ~20 s root LP. At
+HiGHS's speed that becomes ~1.2 s, a root LP of ~14 s -- still 20x HiGHS's 0.66 s. The
+rest is discopt's: refactorizing every 48 updates, rebuilding a `Vec<Vec<(usize, f64)>>`
+of the basis columns for every factorization (`from_sparse_columns` + `validate` show in
+the samples too), the exact recompute after each, the `O(m)` CHUZR, and ftran/btran at
+~0.2/0.13 ms each. feral is one of several fixes, not the fix.
+
