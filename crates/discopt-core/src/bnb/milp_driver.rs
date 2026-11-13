@@ -3332,7 +3332,11 @@ fn try_rens_highs(
         d.saturating_duration_since(std::time::Instant::now())
             .as_secs_f64()
     });
-    let nested = MILP_DEPTH.with(|c| c.get()) > 1; // the top-level driver reads 1
+    // A sub-MIP launched from inside a heuristic sub-MIP (this call's own nest is
+    // entered later). Not `MILP_DEPTH > 1`: since the MILP presolve the top-level
+    // search itself runs one level down (`solve_presolved`), so that test budgeted
+    // every root sub-MIP of a presolved solve as nested.
+    let nested = in_sub_mip();
     let share = if nested {
         // A nested sub-MIP gets half the time left, not a quarter: at a quarter the
         // depth-2 solve of nexp-50-20-4-2's neighbourhood ran out before its root LP.
