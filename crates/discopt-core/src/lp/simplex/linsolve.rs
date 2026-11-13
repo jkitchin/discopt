@@ -15,6 +15,7 @@
 //!   cross-checking `FeralLU` in tests — not performance.
 
 use super::refine::residual_matvec_dd_sparse;
+use super::sparse::SparseCols;
 use feral::{
     should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuPivoting, LuSingularAction,
     RefactorCause, SparseColMatrix, SparseLu, SparseLuSymbolic,
@@ -775,6 +776,82 @@ fn feral_err(e: feral::FeralError) -> LinError {
     LinError::Backend(format!("{e:?}"))
 }
 
+impl FeralLU {
+    /// Factorize the basis `B = A[:, basis]` straight from the CSC view `sp`.
+    ///
+    /// Same factor as [`LinearSolver::factorize_sparse`] on the per-slot
+    /// `(row, value)` lists the simplex used to build from `sp.col(basis[slot])`,
+    /// without building them: on piperout-d27 (m = 17 470, ~300 refactors in
+    /// the root LP) those `m` small vectors, which `from_sparse_columns` then
+    /// scattered, sorted and copied again, cost 0.73 s of the root LP. When every
+    /// basis column has strictly ascending rows, the canonical form
+    /// `from_sparse_columns` produces (rows sorted, no duplicates, exact zeros
+    /// dropped) is the slice itself with its exact zeros removed, so the matrix
+    /// is assembled in one copy. Anything else (an unsorted or repeated row, a
+    /// non-finite or out-of-range entry, numeric-focus retention) takes the
+    /// list path, which keeps that path's canonicalization and its error.
+    pub fn factorize_basis(
+        &mut self,
+        m: usize,
+        sp: &SparseCols,
+        basis: &[usize],
+    ) -> Result<(), LinError> {
+        let fallback = |lu: &mut Self| {
+            let cols: Vec<Vec<(usize, f64)>> = basis
+                .iter()
+                .map(|&j| {
+                    let (rows, vals) = sp.col(j);
+                    rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+                })
+                .collect();
+            lu.factorize_sparse(m, &cols)
+        };
+        if self.refine_enabled() || basis.len() != m {
+            return fallback(self);
+        }
+        let params = self.params();
+        // Raw entry count, explicit zeros included: what `factorize_sparse`
+        // routes on (the sum of its list lengths).
+        let nnz: usize = basis.iter().map(|&j| sp.col(j).0.len()).sum();
+        if want_dense_route(m, nnz, &params) {
+            return fallback(self);
+        }
+        let mut col_ptr = Vec::with_capacity(m + 1);
+        let mut row_idx = Vec::with_capacity(nnz);
+        let mut values = Vec::with_capacity(nnz);
+        col_ptr.push(0);
+        for &j in basis {
+            let (rows, vals) = sp.col(j);
+            let mut prev: Option<usize> = None;
+            for (&r, &v) in rows.iter().zip(vals) {
+                if r >= m || prev.is_some_and(|p| p >= r) || !v.is_finite() {
+                    return fallback(self);
+                }
+                prev = Some(r);
+                if v != 0.0 {
+                    row_idx.push(r);
+                    values.push(v);
+                }
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let a = SparseColMatrix {
+            m,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        a.validate().map_err(feral_err)?;
+        let lu = self.factor_sparse_ordered(&a, params)?;
+        crate::profile::incr(crate::profile::Ctr::LuSparseFactorizations);
+        crate::profile::incr_by(crate::profile::Ctr::LuBasisNnz, nnz as u64);
+        crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
+        self.lu = Some(Factored::Sparse(Box::new(lu)));
+        self.retained = None;
+        Ok(())
+    }
+}
+
 impl LinearSolver for FeralLU {
     fn factorize(&mut self, m: usize, cols: &[Vec<f64>]) -> Result<(), LinError> {
         debug_assert_eq!(cols.len(), m);
@@ -991,6 +1068,92 @@ mod tests {
     /// on the sparse route feral sums in another order) on both factor routes, emit
     /// sorted, zero-free supports, and keep agreeing after a Forrest-Tomlin update.
     /// Counts its comparisons (CLAUDE.md section 6).
+    /// `factorize_basis` (direct CSC assembly) must give the factor the list
+    /// path gives: identical solves bit for bit, on a basis that is a permuted
+    /// subset of the columns and carries explicit zeros, and on an unsorted
+    /// column, which must take the list path.
+    #[test]
+    fn factorize_basis_is_bit_identical_to_the_list_path() {
+        let m = 400usize;
+        let tri = tridiagonal_basis(m, 0.25);
+        // n = m + 50 columns: the tridiagonal columns with an explicit zero
+        // appended where the row is free, plus 50 decoy unit columns.
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut vals = Vec::new();
+        for (k, col) in tri.iter().enumerate() {
+            let mut c = col.clone();
+            let z = (k + 3) % m;
+            if !c.iter().any(|&(r, _)| r == z) {
+                c.push((z, 0.0));
+            }
+            c.sort_by_key(|&(r, _)| r);
+            for (r, v) in c {
+                row_idx.push(r);
+                vals.push(v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        for k in 0..50 {
+            row_idx.push((7 * k) % m);
+            vals.push(1.0);
+            col_ptr.push(row_idx.len());
+        }
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        // Basis slots in reversed order.
+        let basis: Vec<usize> = (0..m).rev().collect();
+        let lists: Vec<Vec<(usize, f64)>> = basis
+            .iter()
+            .map(|&j| {
+                let (r, v) = sp.col(j);
+                r.iter().zip(v).map(|(&r, &v)| (r, v)).collect()
+            })
+            .collect();
+        let mut checked = 0usize;
+        let mut compare = |sp: &SparseCols, lists: &[Vec<(usize, f64)>]| {
+            let mut a = FeralLU::new();
+            let mut b = FeralLU::new();
+            a.factorize_basis(m, sp, &basis).unwrap();
+            b.factorize_sparse(m, lists).unwrap();
+            assert!(matches!(a.lu, Some(Factored::Sparse(_))));
+            for seed in 0..4usize {
+                let rhs: Vec<f64> = (0..m)
+                    .map(|i| ((i * 31 + seed * 17) % 13) as f64 - 6.0)
+                    .collect();
+                let (mut x1, mut x2) = (rhs.clone(), rhs.clone());
+                a.ftran(&mut x1).unwrap();
+                b.ftran(&mut x2).unwrap();
+                let (mut y1, mut y2) = (rhs.clone(), rhs);
+                a.btran(&mut y1).unwrap();
+                b.btran(&mut y2).unwrap();
+                for i in 0..m {
+                    assert_eq!(x1[i].to_bits(), x2[i].to_bits(), "ftran row {i}");
+                    assert_eq!(y1[i].to_bits(), y2[i].to_bits(), "btran row {i}");
+                    checked += 2;
+                }
+            }
+        };
+        compare(&sp, &lists);
+        // An unsorted column: swap the first two entries of column 5.
+        let (cp, ri, vv) = sp.raw();
+        let (cp, mut ri, mut vv) = (cp.to_vec(), ri.to_vec(), vv.to_vec());
+        let s5 = cp[5];
+        assert!(cp[6] - s5 >= 2);
+        ri.swap(s5, s5 + 1);
+        vv.swap(s5, s5 + 1);
+        let sp2 = SparseCols::from_csc(cp, ri, vv);
+        assert!(!sp2.rows_ascending());
+        let lists2: Vec<Vec<(usize, f64)>> = basis
+            .iter()
+            .map(|&j| {
+                let (r, v) = sp2.col(j);
+                r.iter().zip(v).map(|(&r, &v)| (r, v)).collect()
+            })
+            .collect();
+        compare(&sp2, &lists2);
+        assert_eq!(checked, 2 * 2 * 4 * m);
+    }
+
     #[test]
     fn sparse_solves_match_the_dense_solves_on_both_routes() {
         let mut checked = 0usize;

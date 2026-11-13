@@ -1865,14 +1865,7 @@ impl<'a> PreparedDual<'a> {
         let mut lu = node_feral_lu();
         // Sparse basis columns straight from the CSC view — O(nnz) factorize, no
         // dense m×m basis (discopt#268 / feral#87). Bit-identical to `col()`.
-        let cols: Vec<Vec<(usize, f64)>> = basis
-            .iter()
-            .map(|&j| {
-                let (rows, vals) = sp.col(j);
-                rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
-            })
-            .collect();
-        if lu.factorize_sparse(m, &cols).is_err() {
+        if lu.factorize_basis(m, sp, &basis).is_err() {
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectSingular);
             return None; // singular warm basis → fall back to cold
         }
@@ -2109,6 +2102,26 @@ impl<'a> PreparedDual<'a> {
         // iteration's pivot), so `pivots` is exactly the number performed so far.
         // THRU-5: time the whole pivot loop (RAII, records on any return path).
         let _t_loop = crate::profile::Timer::new(crate::profile::Phase::DualPivotLoop);
+        // Per-pivot work vectors, allocated once per solve and cleaned between
+        // pivots by the entries the last pivot wrote. Allocating them per pivot
+        // (six `m`- or `n`-vectors, zero-filled) was ~1.8 s of malloc/memset in the
+        // 17.5 s root LP of piperout-d27 (m = 17 470, 14 749 pivots; py-spy).
+        // Every vector is all `+0.0` (or `false`) when it is next written, which is
+        // what the fresh allocation gave, so the arithmetic is unchanged.
+        let mut rho = vec![0.0f64; m];
+        let mut rho_nz: Vec<usize> = Vec::new();
+        // Rows of `rho` whose bits are not `+0.0` (its nonzeros and any `-0.0`).
+        let mut rho_dirty: Vec<usize> = Vec::new();
+        let mut alpha_r = vec![0.0f64; n];
+        let mut mark = vec![false; n];
+        let mut touched: Option<Vec<usize>> = None;
+        let mut touched_buf: Vec<usize> = Vec::new();
+        // The last PRICE was the dense one: `alpha_r` may be nonzero anywhere.
+        let mut alpha_r_dense = false;
+        let mut raw_q = vec![0.0f64; m];
+        let mut raw_q_col: Option<usize> = None;
+        let mut alpha = vec![0.0f64; m];
+        let mut rd = vec![0.0f64; m];
         for pivots in 0..stall_cap {
             let bland = stall > bland_threshold;
             // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
@@ -2329,7 +2342,11 @@ impl<'a> PreparedDual<'a> {
             // Pivot row ρ = e_rᵀ B⁻¹, then α_rj = ρ·A_j for every nonbasic j (kept
             // for both the ratio test and the incremental reduced-cost update). No
             // per-iteration `y = B⁻ᵀc_B` btran: the reduced costs are maintained.
-            let mut rho = vec![0.0; m];
+            for &i in &rho_dirty {
+                rho[i] = 0.0;
+            }
+            rho_dirty.clear();
+            rho_nz.clear();
             rho[r] = 1.0;
             if lu.btran(&mut rho).is_err() {
                 crate::profile::incr(crate::profile::Ctr::DualExitRhoBtranFail);
@@ -2344,13 +2361,30 @@ impl<'a> PreparedDual<'a> {
             // `ρ_i = 0` term only ever added ±0 to a sum that is never −0.
             // Measured (2026-11-13, `highs-mip-replacement-plan.md` §8.6): the root LP
             // of piperout-d27 ran 27 s here against HiGHS's 0.66 s.
-            let rho_nz: Vec<usize> = (0..m).filter(|&i| rho[i] != 0.0).collect();
-            let mut alpha_r = vec![0.0; n];
-            let mut touched: Option<Vec<usize>> = None;
+            for (i, &v) in rho.iter().enumerate() {
+                if v.to_bits() != 0 {
+                    rho_dirty.push(i);
+                    if v != 0.0 {
+                        rho_nz.push(i);
+                    }
+                }
+            }
+            match touched.take() {
+                Some(mut t) => {
+                    for &j in &t {
+                        alpha_r[j] = 0.0;
+                        mark[j] = false;
+                    }
+                    t.clear();
+                    touched_buf = t;
+                }
+                None if alpha_r_dense => alpha_r.fill(0.0),
+                None => {}
+            }
+            alpha_r_dense = false;
             if rows_ok && rho_nz.len() * ROWWISE_PRICE_DENSITY < m {
                 let rows = row_copy.get_or_insert_with(|| sp.transpose_rows(m));
-                let mut mark = vec![false; n];
-                let mut t = Vec::new();
+                let mut t = std::mem::take(&mut touched_buf);
                 for &i in &rho_nz {
                     let yi = rho[i];
                     let (cols, vals) = rows.row(i);
@@ -2368,6 +2402,7 @@ impl<'a> PreparedDual<'a> {
                 touched = Some(t);
                 crate::profile::incr(crate::profile::Ctr::DualRowwisePrice);
             } else {
+                alpha_r_dense = true;
                 for (j, arj) in alpha_r.iter_mut().enumerate() {
                     if stat[j] != BASIC {
                         *arj = sp.dot(j, &rho);
@@ -2515,9 +2550,14 @@ impl<'a> PreparedDual<'a> {
             // Entering column α = B⁻¹A_q for the Devex weight update (and reused as
             // the raw column for the product-form basis update). Scattered from the
             // CSC view into a dense buffer (O(nnz_q)), not read from a dense matrix.
-            let mut raw_q = vec![0.0; m];
+            if let Some(qp) = raw_q_col.take() {
+                for &i in sp.col(qp).0 {
+                    raw_q[i] = 0.0;
+                }
+            }
             sp.scatter(q, &mut raw_q);
-            let mut alpha = raw_q.clone();
+            raw_q_col = Some(q);
+            alpha.copy_from_slice(&raw_q);
             if lu.ftran(&mut alpha).is_err() {
                 crate::profile::incr(crate::profile::Ctr::DualExitAlphaFtranFail);
                 return None;
@@ -2554,14 +2594,7 @@ impl<'a> PreparedDual<'a> {
                 // the near-zero element.
                 if opts.recover_unstable_pivot && unstable_recoveries < UNSTABLE_RECOVERY_MAX {
                     unstable_recoveries += 1;
-                    let cols: Vec<Vec<(usize, f64)>> = basis
-                        .iter()
-                        .map(|&j| {
-                            let (rows, vals) = sp.col(j);
-                            rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
-                        })
-                        .collect();
-                    if lu.factorize_sparse(m, &cols).is_ok() {
+                    if lu.factorize_basis(m, sp, &basis).is_ok() {
                         xb = tagged(
                             recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
                             crate::profile::Ctr::DualExitXbSolveFail,
@@ -2636,7 +2669,7 @@ impl<'a> PreparedDual<'a> {
             // taking value v_q + t at slot r. (`stat` already reflects the flips;
             // q/leaving statuses are set just below, so `nb_value(q)` is its bound.)
             if !flips.is_empty() {
-                let mut rd = vec![0.0; m];
+                rd.fill(0.0);
                 for &j in &flips {
                     let gap = u[j] - l[j];
                     let dxj = if stat[j] == AT_UPPER { gap } else { -gap };
@@ -2679,14 +2712,7 @@ impl<'a> PreparedDual<'a> {
                     crate::profile::Ctr::DualRefacCap
                 });
                 crate::profile::incr(crate::profile::Ctr::DualRefactorizations);
-                let cols: Vec<Vec<(usize, f64)>> = basis
-                    .iter()
-                    .map(|&j| {
-                        let (rows, vals) = sp.col(j);
-                        rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
-                    })
-                    .collect();
-                if lu.factorize_sparse(m, &cols).is_err() {
+                if lu.factorize_basis(m, sp, &basis).is_err() {
                     crate::profile::incr(crate::profile::Ctr::DualExitRefacFail);
                     return None;
                 }
