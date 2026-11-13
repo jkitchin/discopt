@@ -3803,7 +3803,7 @@ pub fn solve_milp_node_hooked(
         && lazy.is_none()
         && node.is_none()
         && opts.bound_hook.is_none()
-        && MILP_DEPTH.with(|d| d.get()) == 0
+        && (MILP_DEPTH.with(|d| d.get()) == 0 || (in_sub_mip() && submip_presolve_enabled()))
     {
         if let Some(mut res) = solve_presolved(&prep.csc, m, n, c, l, u, b, obj_const, opts) {
             crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
@@ -3867,6 +3867,29 @@ fn milp_implied_int_enabled() -> bool {
             other => {
                 panic!("DISCOPT_MILP_IMPLIED_INT={other:?} is not recognized (expected 1 or 0)")
             }
+        },
+    }
+}
+
+/// `DISCOPT_HIGHS_SUBMIP_PRESOLVE`: run the MILP presolve on heuristic sub-MIPs (RENS,
+/// and any other unseeded sub-solve), as HiGHS's `solveSubMip` does
+/// (`submipoptions.presolve = kHighsOnString`, `HighsPrimalHeuristics.cpp:125-128`).
+/// A seeded sub-solve (RINS, stall re-dive) still skips it, as every seeded solve
+/// does, since the seed lives in the original columns. Sound by the same checks as
+/// the top-level presolve: `solve_presolved` re-verifies the postsolved point and its
+/// objective, and the sub-MIP's result is validated again before injection. Member
+/// of `DISCOPT_HIGHS_CONFIG`; garbage refused. Entry (20 s, graduated configuration):
+/// mik-250-20-75-5's root finds the optimum -51,532 (was -39,884) with root sub-MIP
+/// time 3.0 -> 1.7 s, and its 20 s bound -52,146 -> -51,961.
+fn submip_presolve_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SUBMIP_PRESOLVE") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!(
+                "DISCOPT_HIGHS_SUBMIP_PRESOLVE={other:?} is not recognized (expected 1 or 0)"
+            ),
         },
     }
 }
@@ -13258,6 +13281,112 @@ mod tests {
     /// certified optimum as the unpresolved search on random mixed-integer problems, with a
     /// postsolved point feasible on the original rows. Covers the continuous columns the
     /// enumeration test in `milp_presolve` cannot (aggregator, doubleton substitutions).
+    /// `DISCOPT_HIGHS_SUBMIP_PRESOLVE` (HiGHS `solveSubMip` presolves every sub-MIP): a
+    /// solve inside a heuristic sub-MIP (`SubMipNest`) runs the MILP presolve, a merely
+    /// nested solve does not, and the optimum is the plain solve's. Random integer
+    /// programs `A x + s = b` with a fixed column and a singleton row each, so presolve
+    /// always has something to remove. Counts what it checked (CLAUDE.md §6).
+    #[test]
+    fn heuristic_sub_mips_are_presolved_and_keep_the_optimum() {
+        let _guard = crate::profile::test_guard();
+        let mut seed = 0x5ab_u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut compared, mut presolved_in_sub, mut presolved_nested) = (0usize, 0usize, 0usize);
+        for _ in 0..40 {
+            let ns = rnd(4, 7) as usize;
+            let m = rnd(2, 4) as usize + 1;
+            let n = ns + m;
+            let mut a = vec![0.0; m * n];
+            for i in 0..m - 1 {
+                for j in 0..ns {
+                    a[i * n + j] = rnd(-2, 4) as f64;
+                }
+            }
+            // A singleton row x_0 <= 2.
+            a[(m - 1) * n] = 1.0;
+            for i in 0..m {
+                a[i * n + ns + i] = 1.0;
+            }
+            let mut b: Vec<f64> = (0..m - 1).map(|_| rnd(3, 12) as f64).collect();
+            b.push(2.0);
+            let c: Vec<f64> = (0..ns)
+                .map(|_| -(rnd(1, 5) as f64))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .chain(std::iter::repeat_n(0.0, m))
+                .collect();
+            let mut l = vec![0.0; n];
+            let mut u: Vec<f64> = (0..ns).map(|_| rnd(1, 4) as f64).collect();
+            u.extend(std::iter::repeat_n(INF, m));
+            // A fixed column.
+            l[ns - 1] = 1.0;
+            u[ns - 1] = 1.0;
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            // Heuristics off: no sub-MIPs of its own, so the counter sees this solve's
+            // presolve only.
+            let mut o = opts(ns, (0..ns).collect());
+            o.heuristics = false;
+            let plain = solve_milp(&lp, &b, 0.0, &o);
+            let runs = |f: &dyn Fn() -> MilpResult| {
+                crate::profile::set_enabled(true);
+                crate::profile::reset();
+                let r = f();
+                let k = crate::profile::counter(crate::profile::Ctr::MilpPresolveRuns);
+                crate::profile::set_enabled(false);
+                (r, k)
+            };
+            let (sub, k_sub) = runs(&|| {
+                let (_d, _) = MilpDepthGuard::enter();
+                let _n = SubMipNest::enter();
+                solve_milp(&lp, &b, 0.0, &o)
+            });
+            let (nested, k_nested) = runs(&|| {
+                let (_d, _) = MilpDepthGuard::enter();
+                solve_milp(&lp, &b, 0.0, &o)
+            });
+            if plain.status != MilpStatus::Optimal {
+                continue;
+            }
+            for (r, name) in [(&sub, "sub-MIP"), (&nested, "nested")] {
+                assert_eq!(r.status, MilpStatus::Optimal, "{name}: {r:?}");
+                assert!(
+                    (r.obj - plain.obj).abs() <= 1e-6 * (1.0 + plain.obj.abs()),
+                    "{name}: obj {} vs plain {}",
+                    r.obj,
+                    plain.obj
+                );
+            }
+            if submip_presolve_enabled() {
+                assert!(k_sub >= 1, "the sub-MIP solve was not presolved");
+            }
+            presolved_in_sub += (k_sub >= 1) as usize;
+            presolved_nested += (k_nested >= 1) as usize;
+            compared += 1;
+        }
+        assert!(compared >= 20, "only {compared} problems compared");
+        assert_eq!(
+            presolved_nested, 0,
+            "a nested non-heuristic solve was presolved"
+        );
+        if submip_presolve_enabled() {
+            assert_eq!(presolved_in_sub, compared);
+        } else {
+            assert_eq!(presolved_in_sub, 0);
+        }
+    }
+
     #[test]
     fn milp_presolve_keeps_the_certified_optimum_on_mixed_problems() {
         use crate::bnb::milp_presolve::{presolve, RowForm};

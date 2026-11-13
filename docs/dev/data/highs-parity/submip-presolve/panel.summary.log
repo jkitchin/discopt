@@ -1,0 +1,6 @@
+
+arm      certified  ran  total_wall
+graduated        53   62      348.7
+no_subpre        53   62      356.9
+violations: 0
+solves: 124
