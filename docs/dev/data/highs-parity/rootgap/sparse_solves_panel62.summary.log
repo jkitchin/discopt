@@ -1,0 +1,68 @@
+neos-1425699          OPT d=  0.0 p=  0.0  1.4  OPT d=  0.0 p=  0.0  1.4
+blend2                OPT d=  0.0 p=  0.0  3.0  OPT d=  0.0 p=  0.0  2.9
+enlight8              OPT d=  0.0 p=  0.0  1.9  OPT d=  0.0 p=  0.0  1.9
+p0201                 OPT d=  0.0 p=  0.0  5.1  OPT d=  0.0 p=  0.0  5.5
+mik-250-20-75-5      feas d=  0.9 p=  0.0 20.2 feas d=  0.9 p=  0.0 20.1
+neos-911970          feas d=  1.9 p= 13.6 20.1 feas d=  1.9 p= 13.6 20.1
+mik-250-20-75-3      feas d=  1.2 p=  0.0 20.1 feas d=  1.2 p=  0.0 20.2
+fiber                 OPT d=  0.0 p=  0.0  4.6  OPT d=  0.0 p=  0.0  4.5
+khb05250              OPT d=  0.0 p=  0.0  1.7  OPT d=  0.0 p=  0.0  2.2
+nexp-50-20-1-1        OPT d=  0.0 p=  0.0  0.6  OPT d=  0.0 p=  0.0  0.6
+mik-250-20-75-2      feas d=  0.7 p=  0.0 20.1 feas d=  0.7 p=  0.0 20.1
+22433                 OPT d=  0.0 p=  0.0  7.9  OPT d=  0.0 p=  0.0  8.1
+nexp-50-20-4-2        OPT d=  0.0 p=  0.0  3.0  OPT d=  0.0 p=  0.0  3.3
+gt2                   OPT d=  0.0 p=  0.0  0.2  OPT d=  0.0 p=  0.0  0.2
+mik-250-20-75-1      feas d=  1.2 p=  0.0 20.1 feas d=  1.2 p=  0.0 20.2
+23588                 OPT d=  0.0 p=  0.0 17.5  OPT d=  0.0 p=  0.0 17.6
+flugpl                OPT d=  0.0 p=  0.0  0.2  OPT d=  0.0 p=  0.0  0.2
+dcmulti               OPT d=  0.0 p=  0.0  3.8  OPT d=  0.0 p=  0.0  4.3
+enlight_hard         time d=  2.7 p=    - 20.0 time d=  2.7 p=    - 20.0
+sp150x300d            OPT d=  0.0 p=  0.0  0.8  OPT d=  0.0 p=  0.0  0.7
+gen                   OPT d=  0.0 p=  0.0  0.9  OPT d=  0.0 p=  0.0  0.7
+neos17               feas d=  0.5 p=  1.8 20.2 feas d=  0.5 p=  0.3 20.2
+beavma                OPT d=  0.0 p=  0.0  0.8  OPT d=  0.0 p=  0.0  0.9
+neos-3611447-jijia    OPT d=  0.0 p=  0.0  3.1  OPT d=  0.0 p=  0.0  3.2
+neos-3610051-istra    OPT d=  0.0 p=  0.0  7.4  OPT d=  0.0 p=  0.0  7.5
+neos-3611689-kaihu    OPT d=  0.0 p=  0.0  6.7  OPT d=  0.0 p=  0.0  7.3
+neos-3610040-iskar    OPT d=  0.0 p=  0.0  5.6  OPT d=  0.0 p=  0.0  5.9
+neos-5192052-neckar   OPT d=  0.0 p=  0.0  0.3  OPT d=  0.0 p=  0.0  0.3
+neos-2624317-amur    feas d=100.0 p=609.8 20.2 feas d=100.0 p=609.8 20.1
+app2-2                OPT d=  0.0 p=  0.0  7.7  OPT d=  0.0 p=  0.0  8.3
+b-ball                OPT d=  0.0 p=  0.0  0.3  OPT d=  0.0 p=  0.0  0.4
+bppc8-02              OPT d=  0.0 p=  0.0  7.2  OPT d=  0.0 p=  0.0  7.9
+supportcase16         OPT d=  0.0 p=  0.0  0.8  OPT d=  0.0 p=  0.0  0.8
+supportcase14         OPT d=  0.0 p=  0.0  0.6  OPT d=  0.0 p=  0.0  0.6
+f2gap40400            OPT d=  0.0 p=  0.0  0.4  OPT d=  0.0 p=  0.0  0.4
+gsvm2rl3              OPT d=  0.0 p=  0.0 14.2  OPT d=  0.0 p=  0.0 14.7
+neos-3118745-obra    feas d=  0.4 p=  7.5 20.2 feas d=  0.4 p=  7.5 20.2
+gr4x6                 OPT d=  0.0 p=  0.0  0.2  OPT d=  0.0 p=  0.0  0.2
+1451                  OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1
+2122                  OPT d=  0.0 p=  0.0  2.3  OPT d=  0.0 p=  0.0  3.2
+2171                  OPT d=  0.0 p=  0.0  0.3  OPT d=  0.0 p=  0.0  0.3
+bell5                 OPT d=  0.0 p=  0.0  8.4  OPT d=  0.0 p=  0.0  8.9
+bound_implied         OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.2
+dcmulti               OPT d=  0.0 p=  0.0  3.8  OPT d=  0.0 p=  0.0  4.0
+egout                 OPT d=  0.0 p=  0.0  0.2  OPT d=  0.0 p=  0.0  0.3
+fixed-binary          OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1
+flugpl                OPT d=  0.0 p=  0.0  0.2  OPT d=  0.0 p=  0.0  0.2
+gesa2                 OPT d=  0.0 p=  0.0  2.5  OPT d=  0.0 p=  0.0  2.3
+gt2                   OPT d=  0.0 p=  0.0  0.3  OPT d=  0.0 p=  0.0  0.3
+issue-2095            OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.2
+issue-2173            OPT d=  0.0 p=  0.0  0.8  OPT d=  0.0 p=  0.0  0.8
+issue-2204            OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1
+issue-2290            OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1
+issue-2388            OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1
+issue-2446            OPT d=  0.0 p=  0.0  7.5  OPT d=  0.0 p=  0.0 11.8
+issue-2585            OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1
+lseu                  OPT d=  0.0 p=  0.0  0.8  OPT d=  0.0 p=  0.0  0.7
+p01                   OPT d=  0.0 p=  0.0  0.2  OPT d=  0.0 p=  0.0  0.3
+p0548                 OPT d=  0.0 p=  0.0  0.6  OPT d=  0.0 p=  0.0  0.7
+rgn                   OPT d=  0.0 p=  0.0  0.4  OPT d=  0.0 p=  0.0  0.4
+small_mip             OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1
+sp150x300d            OPT d=  0.0 p=  0.0  0.8  OPT d=  0.0 p=  0.0  0.8
+
+arm      certified  ran  total_wall
+graduated        53   62      319.2
+sparse_solves        53   62      329.5
+violations: 0
+solves: 124

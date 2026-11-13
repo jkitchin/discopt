@@ -634,3 +634,26 @@ needs the sparse pipeline below.
 touch only the rows a pivot changes (HiGHS's design) -- and reusing the basis column
 buffers across refactorizations.
 
+### 8.8 Sparse solves in the dual loop: built, panelled, retired (2026-11-13)
+
+Entry experiment (`data/highs-parity/rootgap/factor_bench/sparse_solve_bench.rs.txt`, the
+dumped piperout-d27 basis): feral's sparse-in/sparse-out solves against its dense entry
+points -- btran of a unit vector 0.197 -> 0.0079 ms (25x, 65 nonzeros out of 17,470),
+ftran of an `A` column 0.082 -> 0.024 ms (3.4x); 194,800 entries compared, identical here
+(feral does not promise it in general). Wired into `run_dual` behind
+`DISCOPT_LP_DUAL_SPARSE_SOLVES` (the three per-pivot solves sparse; Devex and `x_B`
+updates over the touched rows): piperout-d27's root LP 20.5 -> 16.1 s, same 14,749
+pivots. Per-step after (s, over 14,000 pivots): btran 1.86 -> 0.70, PRICE 1.45 -> 0.76,
+ftran block 3.42 -> 2.36, Devex/`x_B` 2.04 -> 1.19; update + refactorization 9.1, now over
+half.
+
+Panels: 62-row 53 = 53 certified (same set), 0 violations, 319 vs 330 s total;
+112-row population 11 = 11 certified, dual bounds on 90 = 90 rows, dual gap better/worse
+8/8, primal 5/10 (noise at 20 s), 0 violations over 336 solves. Cert-clean, not
+net-positive: the no-bound rows still pay ~10 s of Python set-up and ~16 s of root LP, so
+no row crosses the 20 s line. **Retired** (owner decision, §5): flag and wiring deleted,
+`FeralLU::ftran_sparse`/`btran_sparse` kept with their test
+(`sparse_solves_match_the_dense_solves_on_both_routes`). The finding stands for later: the
+sparse pipeline is worth ~20 % of the root LP once the rest lets a root LP finish --
+feral's factor (jkitchin/feral#232) and the Python set-up are the gating items.
+

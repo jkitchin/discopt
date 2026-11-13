@@ -18,6 +18,11 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../..")
 TL = 20.0
 pop = [l.rstrip("\n").split("\t") for l in open(sys.argv[1]) if l.strip()]
 inst_dir, out_path = sys.argv[2], sys.argv[3]
+# Extra discopt arms: ours with these variables set (a flag's panel against "ours"),
+# e.g. {"ours_flag": {"DISCOPT_SOME_FLAG": "1"}} with POP_ARMS=ours,ours_flag. Empty: the
+# one flag panelled this way so far (DISCOPT_LP_DUAL_SPARSE_SOLVES, 2026-11-13) was
+# retired (highs-mip-replacement-plan.md §8.8).
+ARM_ENV: dict = {}
 HIGHS = r'''
 import json, sys, time, highspy
 h = highspy.Highs()
@@ -43,7 +48,9 @@ def run(job):
     path = os.path.join(inst_dir, f"{name}.mps.gz")
     env = {a: b for a, b in os.environ.items() if not a.startswith("DISCOPT_")}
     env.update(PYTHONUNBUFFERED="1", RAYON_NUM_THREADS="1", DISCOPT_LP_MILP_BACKEND="rust")
-    if arm == "ours":
+    if arm in ARM_ENV:
+        env.update(ARM_ENV[arm])
+    if arm == "ours" or arm in ARM_ENV:
         cmd = [sys.executable, f"{REPO}/discopt_benchmarks/scripts/lp_milp_panel.py", "worker",
                path, "R", str(TL), "1e-4", "100000000"]
     else:
@@ -68,7 +75,9 @@ if os.environ.get("POP_REUSE"):
         r = json.loads(l)
         if r["arm"] not in ARMS:
             reuse[(r["name"], r["arm"])] = {k: v for k, v in r.items() if k not in ("name", "arm", "opt")}
-jobs = [(k, a) for k in range(len(pop)) for a in (("ours", "highs") if k % 2 else ("highs", "ours")) if a in ARMS]
+ALL = ("ours", "highs") + tuple(ARM_ENV)
+jobs = [(k, a) for k in range(len(pop))
+        for a in (ALL[k % len(ALL):] + ALL[:k % len(ALL)]) if a in ARMS]
 res, viol = {}, []
 for k in range(len(pop)):
     for a in ("ours", "highs"):
@@ -82,11 +91,11 @@ with open(out_path, "w") as out, ThreadPoolExecutor(2) as ex:
         res[(k, arm)] = r
         out.write(json.dumps({"name": name, "arm": arm, "opt": opt, **r}) + "\n")
         out.flush()
-        if (k, "ours") in res and (k, "highs") in res:
+        if all((k, a) in res for a in ARMS) and (k, "ours") in res and (k, "highs") in res:
             # MIPLIB optima are in the file's own sense; the HiGHS worker reports the sense.
             sg = -1 if res[(k, "highs")].get("maximize") else 1
             tol = 1e-6 + 1e-4 * abs(opt)
-            for a in ("ours", "highs"):
+            for a in [a for a in ALL if (k, a) in res]:
                 x = res[(k, a)]
                 if x.get("status") == "ERR":
                     continue
@@ -97,14 +106,14 @@ with open(out_path, "w") as out, ThreadPoolExecutor(2) as ex:
                     viol.append((name, a, "bound past optimum", b, opt))
                 if x.get("status") == "infeasible":
                     viol.append((name, a, "infeasible verdict", None, opt))
-                if a == "ours" and x.get("objective") is not None and (x.get("max_viol") or 0) > 1e-5:
+                if a != "highs" and x.get("objective") is not None and (x.get("max_viol") or 0) > 1e-5:
                     viol.append((name, a, "incumbent violation", x.get("max_viol"), opt))
             c = ["OPT " if res[(k, a)].get("gap_certified") else f"{res[(k, a)].get('status', '?')[:4]:4}"
                  for a in ("ours", "highs")]
             print(f"{k:3d} {name[:28]:28} ours {c[0]} {res[(k,'ours')].get('wall') or 0:5.1f}  "
                   f"highs {c[1]} {res[(k,'highs')].get('wall') or 0:5.1f}", flush=True)
 n = sum(1 for r in res.values() if r.get("status") != "ERR")
-for a in ("ours", "highs"):
+for a in [a for a in ALL if any((k, a) in res for k in range(len(pop)))]:
     rs = [res[(k, a)] for k in range(len(pop)) if (k, a) in res]
     print(f"{a:6} certified {sum(bool(r.get('gap_certified')) for r in rs):4d} of {len(rs)}"
           f"  ERR {sum(r.get('status') == 'ERR' for r in rs)}"

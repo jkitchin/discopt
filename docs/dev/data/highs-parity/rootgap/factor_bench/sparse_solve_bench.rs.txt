@@ -1,0 +1,85 @@
+// TEMPORARY entry experiment: feral dense vs sparse-RHS solves on a dumped dual-simplex basis.
+use feral::lu::{LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+fn read(path: &str) -> (usize, Vec<Vec<(usize, f64)>>) {
+    let txt = std::fs::read_to_string(path).unwrap();
+    let mut lines = txt.lines();
+    let m: usize = lines.next().unwrap().trim().parse().unwrap();
+    let cols = (0..m)
+        .map(|_| {
+            let t: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
+            let k: usize = t[0].parse().unwrap();
+            (0..k)
+                .map(|i| (t[1 + 2 * i].parse().unwrap(), t[2 + 2 * i].parse().unwrap()))
+                .collect()
+        })
+        .collect();
+    (m, cols)
+}
+#[test]
+#[ignore]
+fn dense_vs_sparse_rhs() {
+    let (m, cols) = read(&std::env::var("BASIS").unwrap());
+    let (_, rhs_cols) = read(&std::env::var("RHS").unwrap());
+    let a = SparseColMatrix::from_sparse_columns(m, &cols).unwrap();
+    let sym = SparseLuSymbolic::natural(m);
+    let mut lu = SparseLu::factor(&a, &sym, LuParams::default()).unwrap();
+    let mut st = 0x1234_5678u64;
+    let mut rnd = || {
+        st ^= st << 13;
+        st ^= st >> 7;
+        st ^= st << 17;
+        st
+    };
+    let rows: Vec<usize> = (0..3000).map(|_| (rnd() % m as u64) as usize).collect();
+    // RHS columns that are not unit vectors (structural columns of a later basis).
+    let fcols: Vec<&Vec<(usize, f64)>> =
+        rhs_cols.iter().filter(|c| c.len() > 1).take(3000).collect();
+    let (mut checked, mut maxdiff) = (0usize, 0.0f64);
+    // btran e_r
+    let t = std::time::Instant::now();
+    let mut dense_out = Vec::new();
+    for &r in &rows {
+        let mut v = vec![0.0; m];
+        v[r] = 1.0;
+        lu.btran(&mut v).unwrap();
+        dense_out.push(v);
+    }
+    let tb_dense = t.elapsed().as_secs_f64() / rows.len() as f64 * 1e3;
+    let t = std::time::Instant::now();
+    let mut out = Vec::new();
+    let mut nnz = 0usize;
+    let mut sparse_out = Vec::new();
+    for &r in &rows {
+        lu.btran_sparse(&[(r, 1.0)], &mut out).unwrap();
+        nnz += out.len();
+        sparse_out.push(out.clone());
+    }
+    let tb_sparse = t.elapsed().as_secs_f64() / rows.len() as f64 * 1e3;
+    for (d, s) in dense_out.iter().zip(&sparse_out) {
+        for &(i, v) in s {
+            maxdiff = maxdiff.max((d[i] - v).abs());
+            checked += 1;
+        }
+    }
+    println!("BTRAN e_r  m={m} dense {tb_dense:.4} ms  sparse {tb_sparse:.4} ms  speedup {:.2}x  mean nnz(out) {:.0} ({:.2}% of m)", tb_dense / tb_sparse, nnz as f64 / rows.len() as f64, 100.0 * nnz as f64 / rows.len() as f64 / m as f64);
+    // ftran A_q
+    let t = std::time::Instant::now();
+    for c in &fcols {
+        let mut v = vec![0.0; m];
+        for &(i, x) in c.iter() {
+            v[i] += x;
+        }
+        lu.ftran(&mut v).unwrap();
+    }
+    let tf_dense = t.elapsed().as_secs_f64() / fcols.len() as f64 * 1e3;
+    let t = std::time::Instant::now();
+    let mut nnz = 0usize;
+    for c in &fcols {
+        lu.ftran_sparse(c, &mut out).unwrap();
+        nnz += out.len();
+    }
+    let tf_sparse = t.elapsed().as_secs_f64() / fcols.len() as f64 * 1e3;
+    println!("FTRAN A_q  n={} dense {tf_dense:.4} ms  sparse {tf_sparse:.4} ms  speedup {:.2}x  mean nnz(out) {:.0} ({:.2}% of m)", fcols.len(), tf_dense / tf_sparse, nnz as f64 / fcols.len() as f64, 100.0 * nnz as f64 / fcols.len() as f64 / m as f64);
+    println!("checked {checked} entries, max |dense - sparse| = {maxdiff:e}");
+    assert!(checked > 0);
+}
