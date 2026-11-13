@@ -416,6 +416,21 @@ pub(super) fn noise_rows_default() -> bool {
     member_env("DISCOPT_LP_DUAL_NOISE_ROWS").unwrap_or_else(crate::highs_config::lp_default)
 }
 
+/// Sparse-in/sparse-out basis solves in the dual pivot loop (default on;
+/// `DISCOPT_LP_DUAL_SPARSE_SOLVES=0` restores the dense solves). The pivot row
+/// `ρ = eᵣᵀB⁻¹`, the entering column `B⁻¹A_q` and the bound-flip correction go
+/// through feral's hypersparse solves (`FeralLU::{btran,ftran}_sparse`), which
+/// read only the right-hand side's nonzeros and visit only the rows the answer
+/// can reach, and the Devex and `x_B` updates walk the solve's support instead
+/// of all `m` rows. Measured on piperout-d27 (m = 17 470): btran of a unit
+/// vector 0.197 -> 0.0079 ms, ftran of a column 0.082 -> 0.024 ms
+/// (`highs-mip-replacement-plan.md` §8.8). Kept as an opt-out so the two
+/// routes can be A/B'd: feral does not promise the sparse solves are
+/// bit-identical to the dense ones (they were on every entry compared).
+pub(super) fn sparse_solves_enabled() -> bool {
+    member_env("DISCOPT_LP_DUAL_SPARSE_SOLVES").unwrap_or(true)
+}
+
 fn dual_trace_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("DISCOPT_LP_DUAL_TRACE").is_some())
@@ -2122,6 +2137,13 @@ impl<'a> PreparedDual<'a> {
         let mut raw_q_col: Option<usize> = None;
         let mut alpha = vec![0.0f64; m];
         let mut rd = vec![0.0f64; m];
+        // Sparse-solve state (`sparse_solves_enabled`): the solve outputs, and the
+        // rows of `alpha` the last entering-column solve wrote.
+        let sparse_solves = opts.dual_sparse_solves;
+        let mut sp_rhs: Vec<(usize, f64)> = Vec::new();
+        let mut sp_out: Vec<(usize, f64)> = Vec::new();
+        let mut alpha_nz: Vec<usize> = Vec::new();
+        let mut rd_rows: Vec<usize> = Vec::new();
         for pivots in 0..stall_cap {
             let bland = stall > bland_threshold;
             // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
@@ -2347,10 +2369,29 @@ impl<'a> PreparedDual<'a> {
             }
             rho_dirty.clear();
             rho_nz.clear();
-            rho[r] = 1.0;
-            if lu.btran(&mut rho).is_err() {
-                crate::profile::incr(crate::profile::Ctr::DualExitRhoBtranFail);
-                return None;
+            if sparse_solves {
+                if lu.btran_sparse(m, &[(r, 1.0)], &mut sp_out).is_err() {
+                    crate::profile::incr(crate::profile::Ctr::DualExitRhoBtranFail);
+                    return None;
+                }
+                // `rho` is all `+0.0` here; the output lists the solution's
+                // nonzeros (sorted), so `rho_dirty`/`rho_nz` come out as the dense
+                // scan below would build them, without the O(m) scan.
+                for &(i, v) in &sp_out {
+                    rho[i] = v;
+                    if v.to_bits() != 0 {
+                        rho_dirty.push(i);
+                        if v != 0.0 {
+                            rho_nz.push(i);
+                        }
+                    }
+                }
+            } else {
+                rho[r] = 1.0;
+                if lu.btran(&mut rho).is_err() {
+                    crate::profile::incr(crate::profile::Ctr::DualExitRhoBtranFail);
+                    return None;
+                }
             }
             // Row-wise when `ρ` is sparse (HiGHS's PRICE): only the rows where `ρ` is
             // nonzero are visited, and `touched` lists (ascending) the nonbasic columns
@@ -2361,11 +2402,13 @@ impl<'a> PreparedDual<'a> {
             // `ρ_i = 0` term only ever added ±0 to a sum that is never −0.
             // Measured (2026-11-13, `highs-mip-replacement-plan.md` §8.6): the root LP
             // of piperout-d27 ran 27 s here against HiGHS's 0.66 s.
-            for (i, &v) in rho.iter().enumerate() {
-                if v.to_bits() != 0 {
-                    rho_dirty.push(i);
-                    if v != 0.0 {
-                        rho_nz.push(i);
+            if !sparse_solves {
+                for (i, &v) in rho.iter().enumerate() {
+                    if v.to_bits() != 0 {
+                        rho_dirty.push(i);
+                        if v != 0.0 {
+                            rho_nz.push(i);
+                        }
                     }
                 }
             }
@@ -2557,10 +2600,29 @@ impl<'a> PreparedDual<'a> {
             }
             sp.scatter(q, &mut raw_q);
             raw_q_col = Some(q);
-            alpha.copy_from_slice(&raw_q);
-            if lu.ftran(&mut alpha).is_err() {
-                crate::profile::incr(crate::profile::Ctr::DualExitAlphaFtranFail);
-                return None;
+            if sparse_solves {
+                for &i in &alpha_nz {
+                    alpha[i] = 0.0;
+                }
+                alpha_nz.clear();
+                let (rows, vals) = sp.col(q);
+                sp_rhs.clear();
+                sp_rhs.extend(rows.iter().copied().zip(vals.iter().copied()));
+                if lu.ftran_sparse(m, &sp_rhs, &mut sp_out).is_err() {
+                    crate::profile::incr(crate::profile::Ctr::DualExitAlphaFtranFail);
+                    return None;
+                }
+                for &(i, v) in &sp_out {
+                    alpha[i] = v;
+                    alpha_nz.push(i);
+                }
+                crate::profile::incr(crate::profile::Ctr::DualSparseSolvePivots);
+            } else {
+                alpha.copy_from_slice(&raw_q);
+                if lu.ftran(&mut alpha).is_err() {
+                    crate::profile::incr(crate::profile::Ctr::DualExitAlphaFtranFail);
+                    return None;
+                }
             }
             let piv = alpha[r];
             if piv.abs() <= tol {
@@ -2612,13 +2674,20 @@ impl<'a> PreparedDual<'a> {
             {
                 // Goldfarb–Reid dual Devex update (uses the still-current basis).
                 let gamma_r = gamma[r];
-                for i in 0..m {
+                // Off the solve's support `alpha[i] = 0`, so `cand = 0` never beats
+                // a weight (all are ≥ 1): walking the support is the same update.
+                let mut devex = |i: usize| {
                     if i != r {
                         let cand = (alpha[i] / piv).powi(2) * gamma_r;
                         if cand > gamma[i] {
                             gamma[i] = cand;
                         }
                     }
+                };
+                if sparse_solves {
+                    alpha_nz.iter().for_each(|&i| devex(i));
+                } else {
+                    (0..m).for_each(devex);
                 }
                 // Slot r now holds the entering variable; give it a fresh weight.
                 gamma[r] = (gamma_r / (piv * piv)).max(1.0);
@@ -2669,28 +2738,68 @@ impl<'a> PreparedDual<'a> {
             // taking value v_q + t at slot r. (`stat` already reflects the flips;
             // q/leaving statuses are set just below, so `nb_value(q)` is its bound.)
             if !flips.is_empty() {
-                rd.fill(0.0);
-                for &j in &flips {
-                    let gap = u[j] - l[j];
-                    let dxj = if stat[j] == AT_UPPER { gap } else { -gap };
-                    let (rows, vals) = sp.col(j);
-                    for (k, &rr) in rows.iter().enumerate() {
-                        rd[rr] += vals[k] * dxj;
+                if sparse_solves {
+                    // The flipped columns' sum, accumulated in `rd` in the dense
+                    // route's order, then handed over by its touched rows (sorted)
+                    // and `rd` cleaned by them.
+                    for &j in &flips {
+                        let gap = u[j] - l[j];
+                        let dxj = if stat[j] == AT_UPPER { gap } else { -gap };
+                        let (rows, vals) = sp.col(j);
+                        for (k, &rr) in rows.iter().enumerate() {
+                            if rd[rr].to_bits() == 0 {
+                                rd_rows.push(rr);
+                            }
+                            rd[rr] += vals[k] * dxj;
+                        }
                     }
-                }
-                if lu.ftran(&mut rd).is_err() {
-                    crate::profile::incr(crate::profile::Ctr::DualExitFlipFtranFail);
-                    return None;
-                }
-                for (xi, ri) in xb.iter_mut().zip(rd.iter()) {
-                    *xi -= *ri;
+                    rd_rows.sort_unstable();
+                    rd_rows.dedup();
+                    sp_rhs.clear();
+                    for &rr in &rd_rows {
+                        if rd[rr] != 0.0 {
+                            sp_rhs.push((rr, rd[rr]));
+                        }
+                        rd[rr] = 0.0;
+                    }
+                    rd_rows.clear();
+                    if lu.ftran_sparse(m, &sp_rhs, &mut sp_out).is_err() {
+                        crate::profile::incr(crate::profile::Ctr::DualExitFlipFtranFail);
+                        return None;
+                    }
+                    for &(i, v) in &sp_out {
+                        xb[i] -= v;
+                    }
+                } else {
+                    rd.fill(0.0);
+                    for &j in &flips {
+                        let gap = u[j] - l[j];
+                        let dxj = if stat[j] == AT_UPPER { gap } else { -gap };
+                        let (rows, vals) = sp.col(j);
+                        for (k, &rr) in rows.iter().enumerate() {
+                            rd[rr] += vals[k] * dxj;
+                        }
+                    }
+                    if lu.ftran(&mut rd).is_err() {
+                        crate::profile::incr(crate::profile::Ctr::DualExitFlipFtranFail);
+                        return None;
+                    }
+                    for (xi, ri) in xb.iter_mut().zip(rd.iter()) {
+                        *xi -= *ri;
+                    }
                 }
             }
             let bound_p = if to_lower { l[leaving] } else { u[leaving] };
             let t = (xb[r] - bound_p) / piv;
             let v_q = nb_value(&stat, q);
-            for (xi, ai) in xb.iter_mut().zip(alpha.iter()) {
-                *xi -= t * *ai;
+            if sparse_solves {
+                for &i in &alpha_nz {
+                    xb[i] -= t * alpha[i];
+                }
+            } else {
+                for (xi, ai) in xb.iter_mut().zip(alpha.iter()) {
+                    *xi -= t * *ai;
+                }
             }
             xb[r] = v_q + t;
 
@@ -5735,6 +5844,78 @@ mod tests {
         }
         assert_eq!(compared, 4, "every captured LP must have been compared");
     }
+    /// The sparse-solve route (`dual_sparse_solves`) against the dense one on
+    /// every captured warm LP: same verdict, same optimum to 1e-9 relative. feral
+    /// does not promise the sparse solves are bit-identical to the dense ones
+    /// (same terms, other order), so this pins the verdict, not the bits; the
+    /// counter proves the sparse route ran (CLAUDE.md §6).
+    #[test]
+    fn sparse_dual_solves_agree_with_the_dense_solves_on_every_captured_lp() {
+        let _guard = crate::profile::test_guard();
+        use crate::profile::{counter, reset, set_enabled, Ctr};
+        let mut compared = 0usize;
+        let mut sparse_pivots = 0u64;
+        for (name, json) in [
+            (
+                "qplib2170",
+                include_str!("testdata/qplib2170_cold_fail_lp.json") as &str,
+            ),
+            (
+                "tspn12",
+                include_str!("testdata/tspn12_dual_stall_lp.json") as &str,
+            ),
+            (
+                "st_testgr3",
+                include_str!("testdata/st_testgr3_degenerate_stall_lp.json") as &str,
+            ),
+            (
+                "nvs01",
+                include_str!("testdata/nvs01_warm_stall_lp.json") as &str,
+            ),
+            (
+                "bchoco06",
+                include_str!("testdata/bchoco06_unstable_pivot_lp.json") as &str,
+            ),
+        ] {
+            let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+                parse_stall_fixture(json);
+            let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+            let start = Basis {
+                col_status,
+                basic_vars,
+            };
+            for base in [opts(), legacy_warm_opts()] {
+                let mut dense = base.clone();
+                dense.dual_sparse_solves = false;
+                let mut sparse = base;
+                sparse.dual_sparse_solves = true;
+                reset();
+                set_enabled(true);
+                let d = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &dense);
+                assert_eq!(counter(Ctr::DualSparseSolvePivots), 0, "{name}: dense arm");
+                reset();
+                let s = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &sparse);
+                sparse_pivots += counter(Ctr::DualSparseSolvePivots);
+                set_enabled(false);
+                assert_eq!(
+                    d.status, s.status,
+                    "{name}: the solve route changed the verdict"
+                );
+                if d.status == LpStatus::Optimal {
+                    assert!(
+                        (d.obj - s.obj).abs() <= 1e-9 * (1.0 + d.obj.abs()),
+                        "{name}: obj {} (dense) vs {} (sparse)",
+                        d.obj,
+                        s.obj
+                    );
+                }
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 10, "every captured LP must have been compared");
+        assert!(sparse_pivots > 0, "the sparse route never ran");
+    }
+
     /// #1013: the perturbation must be reachable from the entry the B&B driver
     /// actually uses for a node LP.
     ///

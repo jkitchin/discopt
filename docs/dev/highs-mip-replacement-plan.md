@@ -730,3 +730,44 @@ five 1.0-2.5 s.
 still have no bound at 20 s -- their set-up is now 1-3 s, so what is left is the root LP
 itself (§8.7, jkitchin/feral#232).
 
+
+### 8.10 Root-LP loop: buffers, direct basis assembly, sparse solves back (2026-11-13)
+
+Three changes to the dual pivot loop, measured on piperout-d27's root LP (m = 17,470,
+14,749 pivots, 307 refactors; `DISCOPT_ROOT_CUT_ROUNDS=0 DISCOPT_MILP_SUBMIP=0
+DISCOPT_MILP_PRESOLVE=0`, node cap 1).
+
+- **Pivot buffers reused** (`896c43fd`). The six per-pivot `m`/`n` work vectors were
+  allocated and zero-filled every pivot (py-spy: ~1.8 s of malloc/memset in a 17.5 s root
+  LP); they are now allocated once and cleaned by the entries the last pivot wrote.
+- **Basis factored straight from CSC** (`896c43fd`). `FeralLU::factorize_basis` builds
+  feral's `SparseColMatrix` from the basis columns' CSC slices instead of `m` small
+  `(row, value)` vectors that `from_sparse_columns` re-scatters and sorts: 17.06 -> 15.61 ms
+  per factor on the real basis (60 alternated reps). Unsorted rows, non-finite entries,
+  the dense route and numeric-focus retention keep the list path.
+  Both are bit-identical: `DISCOPT_LP_DUAL_TRACE` per-pivot traces equal the parent's on
+  piperout-d27, air04 and neos-3024952-loue, and on dano3_5/mzzv11 up to the wall-clock
+  deadline stop. Root LP, interleaved, 3 rounds: 17.23/17.36/17.06 -> 17.29/15.29/16.29 s.
+- **Sparse solves re-wired, default on** (`DISCOPT_LP_DUAL_SPARSE_SOLVES=0` restores the
+  dense solves). §8.8 retired them because the rows they sped up still missed 20 s on
+  set-up; §8.9 removed that. Same design: `ρ`, `α` and the bound-flip correction through
+  `FeralLU::{btran,ftran}_sparse`, Devex and `x_B` over the solve's support. Root LP
+  17.2 -> 13.3 s, still 14,749 pivots and 307 refactors. feral documents these solves as
+  agreeing with the dense ones to rounding, not bitwise
+  (`sparse_hyper.rs`, "This is not bit-identical"); the test
+  `sparse_dual_solves_agree_with_the_dense_solves_on_every_captured_lp` pins verdict and
+  optimum on the five captured warm LPs, both option sets, with a counter proving the
+  sparse route ran.
+
+**Population with all three** (`data/highs-parity/population/population_panel_sparse_solves.jsonl`,
+120 rows, 20 s, HiGHS rows reused from the close-out), against `2e00e2ae`: certified
+11 = 11, dual bound 95 = 95, incumbent 63 = 63, > 25 s 0 = 0, total wall 2180 -> 2167 s,
+**0 violations over 224 solves**. Per row: dual bound closer to the optimum on 10, further
+on 5; incumbent closer on 10, further on 6; > 10% more nodes in the budget on 16 rows,
+fewer on 4; certified rows' walls mostly lower (neos-3048764-nadi 7.8 -> 5.7 s). Not an
+interleaved A/B: the baseline is the earlier run on `2e00e2ae` (§9 caveat). The §8.8
+population had dual gap better/worse 8/8 with no node gain; this one is net-positive on
+bound, primal and node throughput, so the route ships default-on with the opt-out kept.
+No row crosses a status line: piperout-d27 and dano3_5 still have no bound at 20 s, and
+of piperout-d27's 13.3 s root LP, 5.9 s is now the feral factor (`LuNumeric`), which
+jkitchin/feral#234 roughly halves.

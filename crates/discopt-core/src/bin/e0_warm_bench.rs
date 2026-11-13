@@ -162,6 +162,7 @@ fn main() -> ExitCode {
         subtol_repair: true,
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
+        dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         dual_noise_rows: SimplexOptions::default().dual_noise_rows,

@@ -170,6 +170,11 @@ pub struct SimplexOptions {
     /// cert-clean, 0 bounds recovered, retention 72/82 in both arms). Tests and
     /// callers still set the field directly.
     pub recover_unstable_pivot: bool,
+    /// Sparse-in/sparse-out basis solves in the dual pivot loop (pivot row,
+    /// entering column, bound-flip correction), with the Devex and `x_B` updates
+    /// over the solves' support. Default from `DISCOPT_LP_DUAL_SPARSE_SOLVES`
+    /// (on unless `=0`); see `dual::sparse_solves_enabled` for the measurement.
+    pub dual_sparse_solves: bool,
     /// Consecutive degenerate dual pivots after which a **stalled** warm re-solve
     /// is abandoned for the cold solve; `0` disables the bail (#1013).
     ///
@@ -338,6 +343,7 @@ impl Default for SimplexOptions {
             subtol_repair: true,
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
+            dual_sparse_solves: dual::sparse_solves_enabled(),
             dual_stall_patience: dual::stall_patience_default(),
             dual_cost_perturb: dual::cost_perturb_default(),
             dual_noise_rows: dual::noise_rows_default(),

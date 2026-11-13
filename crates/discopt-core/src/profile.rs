@@ -293,6 +293,9 @@ counters!(
     // row was computed row-wise over the nonzeros of rho (`DualRowwisePrice`).
     DualPivots,
     DualRowwisePrice,
+    // Dual pivots whose pivot-row and entering-column solves went through the
+    // sparse-in/sparse-out route (`SimplexOptions::dual_sparse_solves`).
+    DualSparseSolvePivots,
     DualBlandActivations,
     // Primal EXPAND anti-degeneracy (discopt#364): degenerate blocking steps that
     // were bumped up to the guaranteed EXPAND minimum step (breaking the stall in
