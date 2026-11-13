@@ -1609,7 +1609,7 @@ class VarBlock:
     :func:`discopt.export._common.block_columns`, which accepts either.
     """
 
-    __slots__ = ("vars", "size", "name", "_cols")
+    __slots__ = ("vars", "size", "name", "_cols", "_checked")
 
     def __init__(self, variables):
         vs = tuple(variables)
@@ -1618,11 +1618,18 @@ class VarBlock:
         if len({id(v) for v in vs}) != len(vs):
             raise ValueError("a VarBlock lists each variable at most once")
         self.vars = vs
-        self.size = int(builtins_sum(int(v.size) for v in vs))
+        sizes = np.fromiter((int(v.size) for v in vs), dtype=np.int64, count=len(vs))
+        self.size = int(sizes.sum())
         self.name = "[" + ", ".join(v.name for v in vs) + "]"
-        pos = np.repeat(np.arange(len(vs)), [int(v.size) for v in vs])
-        local = np.concatenate([np.arange(int(v.size)) for v in vs])
+        # Vectorized: a file's model has one block over thousands of scalar variables,
+        # and a Python loop per variable here cost O(n) per block (304 blocks on
+        # piperout-d27).
+        pos = np.repeat(np.arange(len(vs), dtype=np.int64), sizes)
+        starts = np.concatenate([[0], np.cumsum(sizes)[:-1]])
+        local = np.arange(self.size, dtype=np.int64) - np.repeat(starts, sizes)
         self._cols = (pos, local)
+        # (id(model), its variable count, builder indices) once checked for a model.
+        self._checked = None
 
     def columns(self) -> tuple[np.ndarray, np.ndarray]:
         """``(position, local)`` per column: column ``k`` is element ``local[k]``
@@ -8588,18 +8595,25 @@ class Model:
             x = VarBlock([x])
         if isinstance(x, VarBlock):
             builder = self._get_builder()
-            missing = [v.name for v in x.vars if not hasattr(v, "_builder_idx")]
-            if missing:
-                raise ValueError(
-                    f"Variables {missing} are not registered in the builder. Ensure "
-                    "they were created via m.continuous/binary/integer."
-                )
-            owned = {id(v) for v in self._variables}
-            foreign = [v.name for v in x.vars if id(v) not in owned]
-            if foreign:
-                raise ValueError(f"Variables {foreign} do not belong to this model.")
+            chk = x._checked
+            if chk is not None and chk[0] == id(self) and chk[1] == len(self._variables):
+                block_idx = chk[2]
+            else:
+                missing = [v.name for v in x.vars if not hasattr(v, "_builder_idx")]
+                if missing:
+                    raise ValueError(
+                        f"Variables {missing} are not registered in the builder. Ensure "
+                        "they were created via m.continuous/binary/integer."
+                    )
+                owned = {id(v) for v in self._variables}
+                foreign = [v.name for v in x.vars if id(v) not in owned]
+                if foreign:
+                    raise ValueError(f"Variables {foreign} do not belong to this model.")
+                block_idx = np.array([v._builder_idx for v in x.vars], dtype=np.int64)
+                # Same model, same variables (append-only list): the checks hold. A
+                # builder reset re-registers variables with the same indices.
+                x._checked = (id(self), len(self._variables), block_idx)
             pos, local = x.columns()
-            block_idx = np.array([v._builder_idx for v in x.vars], dtype=np.int64)
             builder.add_linear_constraints_cols(
                 A.indptr.astype(np.int64),
                 A.indices.astype(np.int64),

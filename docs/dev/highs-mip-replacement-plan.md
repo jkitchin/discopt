@@ -704,3 +704,14 @@ The second gating item of §8.6. Three exact changes, then the structural one.
    timing-dependent per its own comment). Tests that check the reader's expression
    reconstruction row by row pin `DISCOPT_NL_LINEAR_MATRIX=0` for their reload.
 
+**Recentring on matrix models (2026-11-13).** After the reader change, the 6 population
+rows that trigger recentring (piperout-d27, piperout-03, neos-1354092, dano3_5,
+30n20b8, neos-1456979) spent their set-up in bookkeeping, not arithmetic: a file's rows
+are one block per run of equal senses (304 on piperout-d27), and each block rebuilt an
+O(n) `VarBlock`, ownership set, builder-index list and per-column shift list. Now
+`VarBlock` is vectorized and caches its per-model checks, and recentring maps each
+distinct block record (and its shift vector) once. The recentred model is byte-identical
+to before (its standard form and shifts, 9 arrays, on piperout-d27 and dano3_5); the 317
+recentring tests pass. Set-up before the engine: piperout-d27 10.4 -> 3.4 s; the other
+five 1.0-2.5 s.
+
