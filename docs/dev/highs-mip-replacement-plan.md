@@ -715,3 +715,18 @@ to before (its standard form and shifts, 9 arrays, on piperout-d27 and dano3_5);
 recentring tests pass. Set-up before the engine: piperout-d27 10.4 -> 3.4 s; the other
 five 1.0-2.5 s.
 
+**Population on `2e00e2ae`** (`data/highs-parity/population/population_panel_2e00e2ae.jsonl`,
+112 readable rows, 20 s, HiGHS rows reused), against the week's earlier runs:
+
+| run | certified | dual bound | incumbent | > 25 s | early stop | max wall | total |
+|---|---|---|---|---|---|---|---|
+| close-out (§8.3) | 9 | 80 | 59 | 17 | 16 | 118.3 s | 2447 s |
+| expression rows (§8.9 A/B) | 11 | 90 | 61 | 3 | 0 | 35.0 s | 2214 s |
+| matrix rows (§8.9 A/B) | 11 | 95 | 62 | 3 | 0 | 35.3 s | 2207 s |
+| `2e00e2ae` (+ recentring) | 11 | 95 | 63 | 0 | 0 | 24.3 s | 2180 s |
+| HiGHS 1.15.1 | 26 | 110 | 93 | | | | 1880 s |
+
+0 violations. The recentring speed-up changed no row's outcome: piperout-d27 and dano3_5
+still have no bound at 20 s -- their set-up is now 1-3 s, so what is left is the root LP
+itself (§8.7, jkitchin/feral#232).
+
