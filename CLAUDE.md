@@ -45,16 +45,28 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
      `gap_certified=True` instance regresses to uncertified), objective drift
      within tolerance, and incumbents independently feasibility-verified
      (soundness is non-negotiable; never flip a flag whose run shows any false
-     or looser bound), AND (2) *net-positive*: measurably helpful broadly (node
-     count / wall / bound), not merely sound — the `DISCOPT_CUT_INHERIT` lesson
-     (sound ≠ helpful; a cert-clean but neutral-or-harmful flag stays OFF, with
-     the measurement recorded). A passing panel graduates the flag default-ON
+     or looser bound), AND (2) *not harmful*: no broad regression in node
+     count / wall / bound beyond the run-to-run spread. A cert-clean flag that is
+     measurably helpful graduates. A cert-clean flag that is **neutral** also
+     graduates when it is (a) a faithful port of a component the reference solver
+     we are tracking (HiGHS, for the MILP engine) runs by default, or (b) a stated
+     prerequisite of planned work; record the measurement and which reason applies.
+     Only a measurably harmful flag stays OFF (the `DISCOPT_CUT_INHERIT` lesson
+     still holds for that case: sound ≠ helpful). A passing panel graduates the flag default-ON
      (keep the `=0` opt-out and the legacy path intact); the nightly panel
      remains the ongoing regression watch, not a graduation gate.
      (Policy updated 2026-07-17 by the owner — consecutive-nightly graduation
      was dropped in favor of the panel gate; first applied to the #309 flags.
      One passing graduation-gate run meeting both bars suffices — consecutive
      nightly runs are no longer required.)
+     (Bar 2 relaxed 2026-11-14 by the owner, from "net-positive" to "not
+     harmful, and neutral is enough for a faithful reference-solver component or
+     a prerequisite": a solver's components assume each other, so one measured
+     against a partly ported stack often reads as neutral until the piece it
+     depends on lands. Measured: `DISCOPT_LP_DUAL_SPARSE_SOLVES` was retired as
+     neutral (dual gap 8/8 on the population) and was worth 20% of the root LP
+     and 10/5 on dual gap once the Python set-up stopped hiding it. Retiring on
+     "neutral" stifled progress; soundness (bar 1) is unchanged.)
 
    **A graduation attempt has three outcomes, not two (added 2026-09-19, #1345).**
    "A cert-clean but neutral-or-harmful flag stays OFF, with the measurement
@@ -73,7 +85,9 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
    and a gate in none of them is a defect:
    - **Graduated** — the panel passed both bars. Flip the default, keep the `=0`
      opt-out and the legacy path intact.
-   - **Retired** — the panel ran and did not pass, or nobody is willing to run it.
+   - **Retired** — the panel ran and showed it unsound or harmful, or nobody is
+     willing to run it. (Neutral is not a reason to retire a faithful
+     reference-solver component or a prerequisite; see bar 2.)
      Delete the flag **and the implementation behind it**, in one PR, recording the
      measurement that killed it (or that none was ever taken). Keep reusable
      pieces, regression fixtures and benchmark cases; the entry point goes.
