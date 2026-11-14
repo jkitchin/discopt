@@ -4637,6 +4637,7 @@ mod tests {
             ..legacy_lp_opts()
         };
         let mut checked = 0usize;
+        let mut rescues = 0u64;
         let mut graduated_checked = 0usize;
         let fixtures = [
             (
@@ -4668,8 +4669,24 @@ mod tests {
             };
             let before =
                 solve_lp_warm_csc_counted(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &o);
-            assert_eq!(before.status, LpStatus::Numerical, "the captured defect");
-            let after = logical_dual_rescue(before, &sp, m, n, &c, &l, &u, &b, &o);
+            // Under `DISCOPT_LP_PRIMAL_INCR_PRICING=1` the legacy warm path can decide
+            // a fixture by itself; then the premise is that it decided it CORRECTLY
+            // (checked below on that solve) and the rescue has nothing to do. The
+            // default arm must still reproduce the captured defect.
+            let rescued = before.status == LpStatus::Numerical;
+            if !rescued {
+                assert!(
+                    crate::lp::simplex::primal::incr_pricing_enabled(),
+                    "the captured defect: the default arm must end Numerical, got {:?}",
+                    before.status
+                );
+            }
+            let after = if rescued {
+                logical_dual_rescue(before, &sp, m, n, &c, &l, &u, &b, &o)
+            } else {
+                before
+            };
+            rescues += rescued as u64;
             match want {
                 Some(h) => {
                     assert_eq!(after.status, LpStatus::Optimal);
@@ -4684,13 +4701,16 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 4);
+        if !crate::lp::simplex::primal::incr_pricing_enabled() {
+            assert_eq!(rescues, 4, "the default arm rescues every fixture");
+        }
         assert_eq!(
             crate::profile::counter(crate::profile::Ctr::LpLogicalRescueAttempts),
-            4
+            rescues
         );
         assert_eq!(
             crate::profile::counter(crate::profile::Ctr::LpLogicalRescueDecided),
-            4,
+            rescues,
             "the stage decided them"
         );
         crate::profile::set_enabled(false);
