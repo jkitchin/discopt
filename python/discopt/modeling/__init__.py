@@ -18,6 +18,7 @@ Examples
 """
 
 from discopt.batch import solve_batch
+from discopt.modeling._linear_files import FileColumns, from_lp, from_mps
 from discopt.modeling._piecewise import PiecewiseDomainError, PiecewiseLinear
 from discopt.modeling._pwl_transform import (
     PWLSkippedTerm,
@@ -214,6 +215,9 @@ __all__ = [
     "from_pyomo",
     "from_nl",
     "from_gams",
+    "from_mps",
+    "from_lp",
+    "FileColumns",
     "load",
     "loads",
     "dumps",

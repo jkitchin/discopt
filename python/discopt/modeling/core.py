@@ -6807,6 +6807,10 @@ class Model:
         # entry is ``(A_csr, x, sense, b, name)``. Kept so .nl export and
         # introspection can recover constraints that bypass ``_constraints``.
         self._builder_linear_blocks: list = []
+        # Set by ``from_mps`` / ``from_lp``: the file's column names in file order
+        # and where each column lives in the model's variables
+        # (``discopt.modeling._linear_files.FileColumns``). ``None`` otherwise.
+        self.file_columns: Optional[Any] = None
         # Linear objective emitted directly into the Rust builder via
         # ``add_linear_objective``: ``(c, x, constant, sense)`` or ``None``. Kept
         # so .nl export can recover an objective that bypasses ``_objective``
@@ -8531,7 +8535,7 @@ class Model:
     def add_linear_constraints(
         self,
         A,
-        x: Variable,
+        x: "Variable | VarBlock | list[Variable] | tuple[Variable, ...]",
         sense: str,
         b,
         name: Optional[str] = None,
@@ -8550,8 +8554,9 @@ class Model:
             Constraint coefficient matrix, shape ``(m, n)`` where
             ``n == x.size``. Any scipy sparse format (CSR, CSC, COO) or
             dense array. Automatically converted to CSR internally.
-        x : Variable
-            Array variable whose size matches ``A.shape[1]``.
+        x : Variable, VarBlock, or list/tuple of Variable
+            Array variable whose size matches ``A.shape[1]``, or several variables
+            whose flattened entries, in order, are the columns of ``A``.
         sense : str
             ``"<="``, ``"=="``, or ``">="``. Applied to all rows.
         b : numpy.ndarray or float

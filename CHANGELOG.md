@@ -12,6 +12,18 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`discopt.modeling.from_mps` / `from_lp`: read MPS and CPLEX-LP files.** Both
+  use the in-house HiGHS-compatible parsers. The model is built in vector form: one
+  integer and one continuous variable (`x_int`, `x_cont`), the rows as matrix blocks
+  (`eq`, `le`, `ge`), and the objective as array sums. A quadratic LP-file objective
+  is included. `model.file_columns` keeps the file's column names and maps a result
+  back to file order (`values(result)`, `as_dict(result)`). Semi-continuous columns
+  and an MPS quadratic section are refused, not dropped. Compared with converting to
+  `.nl` and using `from_nl` (one scalar variable per column), large files skip
+  per-column Python passes. On MIPLIB `tbfp-network` (72,747 columns, 20 s budget),
+  the Rust engine got 20.9 s instead of 19.8 s, and the wall was 21.8 s instead of
+  26.3 s.
+
 - **`discopt mcp`: a Model Context Protocol server.** Install with
   `pip install 'discopt[mcp]'`, then register it with Claude Desktop (or any MCP
   client) using the entry `discopt mcp --print-config` prints. Tools:

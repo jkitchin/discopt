@@ -859,3 +859,48 @@ The check has a budget of 2,000 nodes, because branching alone cannot empty
 `Unbounded` without the check. Counters: `MilpUnboundedSettle`, `MilpUnboundedDemoted`.
 The case that is unbounded with integer points (`= 2`) stays `Unbounded`, seeded or not.
 The cost is one bounded extra solve, paid only by models whose relaxation is unbounded.
+
+### 8.13 Python outside the engine on file-loaded MILPs (S2, 2026-11-14)
+
+**Measurement.** `tbfp-network` (72,747 columns) at a 20 s budget was read as
+MPS → `.nl` → `from_nl`: one scalar `Variable` per column, a 72k-term objective
+tree, and the rows as one matrix block. The Rust engine got 11–15 s, and the wall
+was 27 s. With a 5 s budget the engine never ran at all.
+
+Plain timers, with no profiler, attribute the rest to Python passes that each walk
+all the variables or the objective tree:
+
+| pass | time | note |
+|---|---|---|
+| `_milp_is_exactly_linear` | 2.6 s | run 2× outside the engine, 3× in all |
+| `classify_problem` | 1.6 s | run 4× |
+| `extract_lp_data` | 1.3–1.8 s | |
+| `post_solve_evaluator` | 1.5 s | the affine evaluator build |
+| dual recovery | 1.5 s | mostly unpacking per variable |
+| `recentre` | 0.8–1.5 s | |
+| box tightening | 0.7–1.0 s | |
+| the two convex-route attempts | 1.1–1.3 s | |
+| scaling check | 0.5–0.8 s | |
+| `validate` | 0.5 s | |
+
+**Entry experiment.** The same model built with one integer vector variable,
+`add_linear_constraints` and `dm.sum(c * x)` spent about 1.5 s in Python. The
+engine got 20.5 s of the 20 s budget. So the representation is the cause, not any
+single pass: about 25 walkers cost 0.1–1.2 s each, and each scales with the column
+count.
+
+**Changes.**
+
+1. `discopt._structure_memo` memoizes `_milp_is_exactly_linear` and
+   `classify_problem` on the model's structure (see the module for the key). Each
+   is now computed once per solve.
+2. `recentre`'s planning is vectorized: 0.76 s → 0.06 s. It is checked against the
+   per-variable reference on 20 random models.
+3. **`discopt.modeling.from_mps` / `from_lp`** (owner decision 2026-11-14, over
+   vectorizing `from_nl`, which would have changed result keys, and over patching
+   the passes one at a time). They read with the in-house parsers and build one
+   vector variable per column type, matrix rows and array-sum objectives;
+   `model.file_columns` maps back to file order. The population worker now loads
+   instances this way (`DISCOPT_PANEL_LOADER=nl` restores the old route), as HiGHS
+   reads MPS natively. `tbfp-network` at 20 s: engine 20.9 s against 19.8 s, wall
+   21.8 s against 26.3 s, the same incumbent, `max_viol` 0.

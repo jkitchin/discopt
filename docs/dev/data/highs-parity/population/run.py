@@ -24,7 +24,10 @@ inst_dir, out_path = sys.argv[2], sys.argv[3]
 # retired (highs-mip-replacement-plan.md §8.8).
 ARM_ENV: dict = {"ours_nlexpr": {"DISCOPT_NL_LINEAR_MATRIX": "0"},
                  "ours_fj": {"DISCOPT_MILP_FEAS_JUMP": "1", "DISCOPT_MILP_TRIVIAL_HEUR": "1"},
-                 "ours_incr": {"DISCOPT_LP_PRIMAL_INCR_PRICING": "1"}}
+                 "ours_incr": {"DISCOPT_LP_PRIMAL_INCR_PRICING": "1"},
+                 # The worker reads instances with from_mps since 2026-11-14; this arm
+                 # is the earlier MPS -> .nl -> from_nl route (one scalar per column).
+                 "ours_nl": {"DISCOPT_PANEL_LOADER": "nl"}}
 HIGHS = r'''
 import json, sys, time, highspy
 h = highspy.Highs()
