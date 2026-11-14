@@ -1,0 +1,125 @@
+  0 newdano                      ours feas  20.2  highs kTim  20.0
+  1 swath1                       ours feas  21.1  highs OPT   19.3
+  2 h80x6320                     ours OPT    4.4  highs OPT    0.0
+  3 neos-3421095-cinca           ours ERR    0.0  highs ERR    0.0
+  4 neos-3046615-murg            ours feas  20.2  highs kTim  20.0
+  5 reblock420                   ours time  20.7  highs kTim  20.6
+  6 neos-1067731                 ours feas  21.2  highs kTim  20.2
+  7 disctom                      ours time  20.1  highs kTim  20.0
+  8 supportcase28i               ours ERR    0.0  highs ERR    0.0
+  9 drayage-25-32                ours time  20.1  highs OPT    1.4
+ 10 neos18                       ours feas  22.5  highs kTim  20.0
+ 11 nsrand-ipx                   ours time  20.2  highs kTim  20.0
+ 12 fastxgemm-n2r6s0t2           ours feas  20.9  highs kTim  20.0
+ 13 gen-ip054                    ours feas  20.0  highs kTim  20.0
+ 14 rmatr100-p5                  ours feas  20.6  highs kTim  20.0
+ 15 danoint                      ours feas  20.2  highs kTim  20.0
+ 16 neos-4971100-bodrog          ours OPT   21.2  highs OPT    0.4
+ 17 ran13x13                     ours feas  20.2  highs kTim  20.0
+ 18 piperout-d27                 ours time  20.6  highs kTim  20.0
+ 19 nu25-pr12                    ours feas  21.4  highs OPT    7.1
+ 20 piperout-03                  ours time  20.2  highs kTim  20.3
+ 21 mc7                          ours feas  21.2  highs kTim  20.0
+ 22 ns2071214                    ours time  20.1  highs kTim  20.0
+ 23 opm2-z7-s8                   ours time  20.4  highs kTim  20.1
+ 24 neos-820879                  ours feas  21.1  highs kTim  20.0
+ 25 neos-498623                  ours feas  21.3  highs OPT    3.6
+ 26 k16x240b                     ours feas  20.2  highs kTim  20.0
+ 27 mappingmesh3x3mpeg2i         ours ERR    0.0  highs ERR    0.0
+ 28 prod2                        ours feas  20.1  highs kTim  20.0
+ 29 mc11                         ours feas  21.2  highs kTim  20.0
+ 30 pigeon-20                    ours time  20.1  highs kTim  20.0
+ 31 neos-555001                  ours time  20.2  highs OPT    0.7
+ 32 rococoB10-011000             ours feas  21.0  highs kTim  20.0
+ 33 neos-831188                  ours time  20.2  highs kTim  20.0
+ 34 supportcase25                ours feas  20.5  highs kTim  20.0
+ 35 neos-1330346                 ours feas  21.0  highs kTim  20.0
+ 36 pk1                          ours feas  20.0  highs kTim  20.0
+ 37 supportcase17                ours feas  20.5  highs kTim  20.0
+ 38 neos-827175                  ours time  20.5  highs OPT    5.2
+ 39 neos-3048764-nadi            ours OPT    7.2  highs OPT    0.1
+ 40 neos-5140963-mincio          ours feas  20.1  highs kTim  20.0
+ 41 aflow30a                     ours feas  20.2  highs OPT   15.3
+ 42 tr12-30                      ours feas  20.5  highs kTim  20.0
+ 43 neos-1354092                 ours time  20.2  highs kTim  20.0
+ 44 mad                          ours feas  20.1  highs kTim  20.0
+ 45 swath2                       ours feas  20.9  highs kTim  20.0
+ 46 ran12x21                     ours feas  20.2  highs kTim  20.0
+ 47 10teams                      ours feas  20.2  highs OPT    2.0
+ 48 neos-913984                  ours time  20.4  highs OPT    6.2
+ 49 neos-3761878-oglio           ours time  20.1  highs kTim  20.0
+ 50 mzzv11                       ours time  20.5  highs kTim  20.9
+ 51 dano3_5                      ours time  20.2  highs kTim  20.0
+ 52 pg5_34                       ours feas  20.4  highs kTim  20.0
+ 53 rococoC11-011100             ours feas  21.9  highs kTim  20.0
+ 54 blp-ic98                     ours time  20.8  highs kTim  20.9
+ 55 tbfp-network                 ours time  20.8  highs kTim  20.1
+ 56 p200x1188c                   ours OPT    8.6  highs OPT    0.8
+ 57 decomp2                      ours OPT   24.3  highs kTim  20.0
+ 58 neos-1171737                 ours feas  21.0  highs kTim  20.0
+ 59 neos-1112782                 ours feas  20.7  highs kTim  20.0
+ 60 30n20b8                      ours time  20.3  highs kTim  20.5
+ 61 neos-738098                  ours time  20.4  highs kTim  20.0
+ 62 app1-1                       ours time  20.1  highs kTim  20.0
+ 63 prod1                        ours feas  20.1  highs kTim  20.0
+ 64 n2seq36q                     ours time  20.3  highs kTim  20.0
+ 65 ns1208400                    ours time  20.1  highs kTim  20.0
+ 66 neos-799711                  ours time  20.5  highs kTim  20.1
+ 67 drayage-25-27                ours time  20.2  highs OPT   12.0
+ 68 neos-1445738                 ours feas  21.3  highs kTim  20.0
+ 69 30_70_45_095_98              ours time  20.2  highs kTim  20.0
+ 70 reblock115                   ours time  20.1  highs kTim  25.0
+ 71 diameterc-mstc-v20a190d5i    ours ERR    0.0  highs ERR    0.0
+ 72 gmu-35-40                    ours feas  20.3  highs kTim  20.0
+ 73 neos-932721                  ours feas  21.5  highs OPT    9.5
+ 74 fillomino7x7-0i              ours ERR    0.0  highs ERR    0.0
+ 75 shipschedule8shipsmixuci     ours ERR    0.0  highs ERR    0.0
+ 76 CMS750_4                     ours time  20.2  highs kTim  20.2
+ 77 mzzv42z                      ours time  20.2  highs kTim  20.1
+ 78 neos-1171448                 ours feas  20.8  highs kTim  20.0
+ 79 csched008                    ours time  20.0  highs kTim  20.0
+ 80 neos-3216931-puriri          ours time  20.2  highs kTim  20.0
+ 81 neos-3024952-loue            ours time  20.2  highs kTim  20.0
+ 82 rlp1                         ours feas  20.1  highs OPT    0.4
+ 83 bppc8-09                     ours feas  20.2  highs kTim  20.0
+ 84 csched010                    ours time  20.1  highs kTim  20.0
+ 85 mkc1                         ours feas  20.7  highs kTim  20.0
+ 86 neos-691058                  ours time  20.1  highs kTim  20.0
+ 87 diameterc-msts-v40a100d5i    ours ERR    0.0  highs ERR    0.0
+ 88 markshare_5_0                ours feas  20.1  highs kTim  20.0
+ 89 neos-686190                  ours time  20.3  highs kTim  20.0
+ 90 markshare_4_0                ours feas  20.1  highs kTim  20.0
+ 91 neos6                        ours time  20.2  highs kTim  20.0
+ 92 nexp-150-20-1-5              ours OPT    8.5  highs OPT    1.6
+ 93 neos-480878                  ours feas  20.3  highs kTim  20.0
+ 94 neos5                        ours feas  20.1  highs kTim  20.0
+ 95 neos-3703351-marne           ours time  20.1  highs kTim  20.0
+ 96 air04                        ours time  20.1  highs kTim  20.1
+ 97 neos-595904                  ours time  20.2  highs OPT    4.0
+ 98 exp-1-500-5-5                ours OPT    4.9  highs OPT    4.2
+ 99 neos-3116779-oban            ours OPT    1.5  highs OPT    0.0
+100 control30-3-2-3              ours feas  20.3  highs kTim  20.0
+101 aflow40b                     ours feas  20.6  highs kTim  20.0
+102 neos-960392                  ours time  20.3  highs OPT   18.2
+103 nursesched-sprint-hidden09   ours time  20.2  highs OPT   20.0
+104 acc-tight2                   ours OPT   20.5  highs OPT    0.1
+105 neos-4333596-skien           ours time  20.0  highs kTim  20.0
+106 neos-1516309                 ours OPT    3.9  highs OPT    0.3
+107 fiball                       ours feas  23.2  highs kTim  20.2
+108 trento1                      ours time  20.3  highs kTim  20.0
+109 neos-3004026-krka            ours time  20.1  highs kTim  20.0
+110 control20-5-10-5             ours ERR    0.0  highs ERR    0.0
+111 mik-250-20-75-4              ours feas  20.1  highs OPT   15.8
+112 reblock166                   ours time  20.3  highs kTim  21.6
+113 neos-1456979                 ours time  20.1  highs kTim  20.1
+114 nursesched-sprint02          ours time  20.2  highs kTim  20.1
+115 ns1830653                    ours time  20.1  highs kTim  20.0
+116 pigeon-08                    ours feas  20.2  highs kTim  20.0
+117 neos-1112787                 ours feas  20.5  highs kTim  20.0
+118 f2gap401600                  ours OPT    0.8  highs OPT    0.2
+119 neos-4393408-tinui           ours feas  22.1  highs kTim  20.0
+ours   certified   11 of 120  ERR 8  total_wall   2173.1
+highs  certified   26 of 120  ERR 8  total_wall   1880.1
+ours_fj certified   12 of 120  ERR 8  total_wall   2185.0
+violations: 0
+solves: 336

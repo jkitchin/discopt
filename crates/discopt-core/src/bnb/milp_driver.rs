@@ -2834,8 +2834,10 @@ fn try_stall_redive(
 
 /// `DISCOPT_MILP_FEAS_JUMP` / `DISCOPT_MILP_TRIVIAL_HEUR`: HiGHS's pre-root
 /// heuristics (`bnb::feas_jump`), run once before the root LP of a top-level solve
-/// with no seed. Default OFF until the population panel (CLAUDE.md §5); `1` opts in;
-/// garbage is refused.
+/// with no seed. **Default ON** since the 2026-11-14 population panel (120 rows, 20 s,
+/// interleaved, BLAS pinned; `highs-mip-replacement-plan.md` §9): 0 violations over
+/// 336 solves, certified 11 -> 12, incumbents 63 -> 83, dual gap better/worse 11/5,
+/// primal 7/9 at a median +0.2%. `=0` opts out; garbage is refused.
 fn pre_root_flag(var: &'static str) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -2843,7 +2845,7 @@ fn pre_root_flag(var: &'static str) -> bool {
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut c = cache.lock().expect("pre_root_flag cache");
     *c.entry(var).or_insert_with(|| match std::env::var(var) {
-        Err(_) => false,
+        Err(_) => true,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
@@ -7186,6 +7188,15 @@ fn solve_milp_node_search(
             highs_eval::diff::batch(&ctx, &batch.node_ids, &batch.lb, &batch.ub, &outs);
             #[cfg(test)]
             highs_branch::e2e::maybe_run(&ctx);
+            // An unbounded relaxation is decided by the batched reduce below
+            // (`hit_unbounded` -> `Unbounded`), never handed to the HiGHS search: with
+            // an incumbent in hand, that search could close the gap against the
+            // bound carried from this unbounded evaluation and report `Optimal`
+            // (measured: `min -x0, x0 >= 0` integer, seeded by the pre-root
+            // heuristics with x0 = 0, came back Optimal 0 instead of Unbounded).
+            if highs_route && outs.iter().any(|o| o.unbounded) {
+                highs_route = false;
+            }
             if highs_route && batch.node_ids.len() == 1 {
                 highs_route = false;
                 let lim = highs_env::Limits {
@@ -8312,8 +8323,11 @@ fn solve_milp_node_search(
     // An all-integer placeholder at an infeasible node can be fathomed by the
     // tree as a sentinel-valued "incumbent"; it never blocks a real (finite)
     // incumbent, so treat obj ≥ the sentinel threshold as "no real solution".
+    // An unbounded relaxation reports no point and `obj = INFINITY` whether or not
+    // a heuristic found a feasible one first (the pre-root heuristics can seed one
+    // on an unbounded MILP): the contract an `Unbounded` result always had.
     let (x, obj, has_inc) = match tm.incumbent() {
-        Some((xi, oi)) if oi < INFEAS_SENTINEL - 1.0 => (xi.to_vec(), oi, true),
+        Some((xi, oi)) if oi < INFEAS_SENTINEL - 1.0 && !unbounded => (xi.to_vec(), oi, true),
         _ => (vec![0.0; ns], f64::INFINITY, false),
     };
     // #1296: report the value of the point returned, recomputed. The tree's
@@ -15597,6 +15611,31 @@ pub(crate) mod sparse_milp_diff {
                 b.bound
             );
         }
+    }
+
+    /// An unbounded MILP holding a feasible point must still be `Unbounded`, with
+    /// no point and `obj = inf`: seeded through the caller's `initial_incumbent`
+    /// (independent of the pre-root heuristics) and through the heuristics. Before
+    /// the fix the HiGHS search took over the root's unbounded evaluation, closed
+    /// the gap against the seed and returned `Optimal 0`.
+    #[test]
+    fn unbounded_milp_with_a_feasible_seed_is_still_unbounded() {
+        let mut checked = 0;
+        for case in panel() {
+            if case.name != "unbounded" {
+                continue;
+            }
+            let mut o = case.opts();
+            o.initial_incumbent = Some(vec![0.0]);
+            let seeded = solve_milp(&case.dense_view(), &case.b, 0.0, &o);
+            let plain = case.solve_dense();
+            for (label, r) in [("seeded", &seeded), ("heuristics", &plain)] {
+                assert_eq!(r.status, MilpStatus::Unbounded, "{label}");
+                assert_eq!(r.obj, f64::INFINITY, "{label}: obj");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 2);
     }
 
     #[test]

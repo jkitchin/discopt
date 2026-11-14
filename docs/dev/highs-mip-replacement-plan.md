@@ -771,3 +771,57 @@ bound, primal and node throughput, so the route ships default-on with the opt-ou
 No row crosses a status line: piperout-d27 and dano3_5 still have no bound at 20 s, and
 of piperout-d27's 13.3 s root LP, 5.9 s is now the feral factor (`LuNumeric`), which
 jkitchin/feral#234 roughly halves.
+
+### 8.11 Gap 1, incumbents: HiGHS's pre-root heuristics (2026-11-14)
+
+**Entry.** On the 31 population rows where HiGHS 1.15.1 ends with an incumbent and
+discopt with none, HiGHS's log gives the source of its first incumbent on 29: feasibility
+jump 12, a trivial point 6, sub-MIP 5, randomized rounding 4, central rounding / LP 2
+(`data/highs-parity/heuristics/`). discopt had neither of the first two.
+
+**Built.** `bnb/feas_jump.rs`: HiGHS's trivial heuristics and Feasibility Jump, run once
+before the root LP; candidates enter through `validate_seed_incumbent`. Two things around
+it were needed before the panel could judge it fairly:
+
+- *Randomized rounding on the first root LP point whatever the incumbent* (HiGHS
+  `HighsMipSolverData.cpp:2112`, `a92cc388`). discopt only ran it while there was no
+  incumbent, so a weak feasibility-jump point switched it off: the first A/B had primal
+  better/worse 8/14, median +24.5% (two OFF runs: +0.1%), pg5_34 5.1e-2 -> 1.0.
+- *The mod-k separator honours the deadline* (`1888ee38`): one root round on reblock166
+  took 22 s once an incumbent's cutoff box changed its GF(k) system.
+
+**Panel** (120 rows, 20 s, OFF and ON interleaved on one build, OpenBLAS pinned to one
+thread; `data/highs-parity/population/population_panel_preroot_heur.*`):
+
+| | OFF | ON |
+|---|---|---|
+| certified | 11 | 12 (disctom 20.1 -> 10.2 s) |
+| dual bound | 93 | 94 |
+| incumbent | 63 | 83 (21 gained, 1 lost: neos-1112782) |
+| dual gap better / worse | | 11 / 5 |
+| primal gap better / worse | | 7 / 9, median +0.2% |
+| > 25 s | 0 | 1 (tbfp-network 27.0 s) |
+
+0 violations over 336 solves. Graduated default-ON (`DISCOPT_MILP_FEAS_JUMP`,
+`DISCOPT_MILP_TRIVIAL_HEUR`, `=0` opts out).
+
+**Soundness defect found on graduation.** With the heuristics on by default, the golden
+`unbounded` case (`min -x0`, `x0 >= 0` integer) came back `Optimal 0`: the HiGHS search took
+over the root's unbounded evaluation, closed the gap against the seed and pruned. The same
+happens with a caller's `initial_incumbent` and the heuristics off (regression test
+`unbounded_milp_with_a_feasible_seed_is_still_unbounded` fails on the parent), so it was
+latent in the seed path. Fixed: an unbounded batch evaluation never goes to the HiGHS route,
+and an `Unbounded` result carries no point and `obj = inf`. No population row is unbounded,
+so no panel could have caught it.
+
+**Measurement defect found on the way.** Two concurrent solves with numpy's 4-thread
+OpenBLAS on 4 cores turned the incumbent repair's dense `lstsq`
+(`validation/feasibility.py` `_min_norm_lstsq`) from ~1 s into ~19 s (neos-4393408-tinui,
+mc7: 21 -> 39 s on both builds). The runner now pins BLAS threads; earlier population runs
+of this week ran unpinned, so their wall columns carry that contention. The product cost
+(a dense least-squares over every equality row of a MILP the engine already verified)
+remains: tbfp-network's 27.0 s above is the same repair, ~3.5 s after the engine.
+
+Open on this front: neos-498623's primal (45.6 OFF vs 160.8 ON), ns1830653 (HiGHS's
+feasibility jump finds a point at 0.3 s, ours none), central rounding (8 of the 31 rows used
+it), then the rest of HiGHS's heuristic set.
