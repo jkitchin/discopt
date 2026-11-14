@@ -399,11 +399,41 @@ impl FeralLU {
     /// and they have completely different fixes. The split measured numeric
     /// ≈50% of total LP wall and symbolic ≈11% (2.7%–25.5% across 18 captured
     /// QPLIB relaxation LPs) — see the #1008 record.
+    ///
+    /// **In place when it can be** (feral 0.23, jkitchin/feral#232). Under the
+    /// default Markowitz pivoting, `SparseLu::factor` is `factor_markowitz`, and
+    /// `refactor_markowitz` on the factor this solver already holds returns
+    /// exactly what it would (same pivots, same `L`/`U` bits, pending updates
+    /// discarded) while reusing that factor's memory: 7.3 -> 5.65 ms per factor
+    /// on piperout-d27's basis (feral#234). On `Err` feral leaves the old factor
+    /// intact and it is put back, so a failed factorization leaves `self.lu` as
+    /// the fresh path does.
     fn factor_sparse_ordered(
         &mut self,
         a: &SparseColMatrix,
         params: LuParams,
-    ) -> Result<SparseLu, LinError> {
+    ) -> Result<Box<SparseLu>, LinError> {
+        if params.pivoting == LuPivoting::Markowitz && matches!(self.lu, Some(Factored::Sparse(_)))
+        {
+            if let Some(Factored::Sparse(mut prev)) = self.lu.take() {
+                // `refactor_markowitz` validates `params` first, as `factor`
+                // does before its Markowitz dispatch.
+                let res = {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
+                    prev.refactor_markowitz(a, params)
+                };
+                return match res {
+                    Ok(()) => {
+                        crate::profile::incr(crate::profile::Ctr::LuInPlaceRefactors);
+                        Ok(prev)
+                    }
+                    Err(e) => {
+                        self.lu = Some(Factored::Sparse(prev));
+                        Err(feral_err(e))
+                    }
+                };
+            }
+        }
         let sym = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::LuSymbolic);
             symbolic_for(a, &params)?
@@ -412,7 +442,7 @@ impl FeralLU {
             let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
             SparseLu::factor(a, &sym, params).map_err(feral_err)?
         };
-        Ok(lu)
+        Ok(Box::new(lu))
     }
 
     /// Enable numeric-focus mode with the default refinement depth: refined
@@ -846,7 +876,7 @@ impl FeralLU {
         crate::profile::incr(crate::profile::Ctr::LuSparseFactorizations);
         crate::profile::incr_by(crate::profile::Ctr::LuBasisNnz, nnz as u64);
         crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
-        self.lu = Some(Factored::Sparse(Box::new(lu)));
+        self.lu = Some(Factored::Sparse(lu));
         self.retained = None;
         Ok(())
     }
@@ -915,7 +945,7 @@ impl LinearSolver for FeralLU {
             crate::profile::incr(crate::profile::Ctr::LuSparseFactorizations);
             crate::profile::incr_by(crate::profile::Ctr::LuBasisNnz, nnz as u64);
             crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
-            Factored::Sparse(Box::new(lu))
+            Factored::Sparse(lu)
         });
         self.retained = self.refine_enabled().then(|| RetainedBasis {
             m,
@@ -1072,6 +1102,51 @@ mod tests {
     /// path gives: identical solves bit for bit, on a basis that is a permuted
     /// subset of the columns and carries explicit zeros, and on an unsorted
     /// column, which must take the list path.
+    /// A refactor through the held factor (feral 0.23 `refactor_markowitz`)
+    /// must be the factor a fresh solver builds: identical ftran/btran bits on a
+    /// second basis after a first, across a dimension change, with the
+    /// in-place counter proving the path ran (CLAUDE.md §6).
+    #[test]
+    fn in_place_refactor_is_bit_identical_to_a_fresh_factor() {
+        let _guard = crate::profile::test_guard();
+        use crate::profile::{counter, reset, set_enabled, Ctr};
+        let mut checked = 0usize;
+        reset();
+        set_enabled(true);
+        let mut held = FeralLU::new();
+        for (m, bump) in [(512usize, 0.25), (512, 0.4), (300, 0.3), (700, 0.2)] {
+            let cols = tridiagonal_basis(m, bump);
+            held.factorize_sparse(m, &cols).unwrap();
+            let mut fresh = FeralLU::new();
+            fresh.factorize_sparse(m, &cols).unwrap();
+            assert!(matches!(held.lu, Some(Factored::Sparse(_))), "m = {m}");
+            for seed in 0..3usize {
+                let rhs: Vec<f64> = (0..m)
+                    .map(|i| ((i * 29 + seed * 11) % 17) as f64 - 8.0)
+                    .collect();
+                let (mut x1, mut x2) = (rhs.clone(), rhs.clone());
+                held.ftran(&mut x1).unwrap();
+                fresh.ftran(&mut x2).unwrap();
+                let (mut y1, mut y2) = (rhs.clone(), rhs);
+                held.btran(&mut y1).unwrap();
+                fresh.btran(&mut y2).unwrap();
+                for i in 0..m {
+                    assert_eq!(x1[i].to_bits(), x2[i].to_bits(), "m {m} ftran row {i}");
+                    assert_eq!(y1[i].to_bits(), y2[i].to_bits(), "m {m} btran row {i}");
+                    checked += 2;
+                }
+            }
+        }
+        let in_place = counter(Ctr::LuInPlaceRefactors);
+        set_enabled(false);
+        // The first factorization of `held` and every `fresh` one are fresh.
+        assert_eq!(
+            in_place, 3,
+            "the held factor must refactor in place 3 times"
+        );
+        assert_eq!(checked, 2 * 3 * (512 + 512 + 300 + 700));
+    }
+
     #[test]
     fn factorize_basis_is_bit_identical_to_the_list_path() {
         let m = 400usize;

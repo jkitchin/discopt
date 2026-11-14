@@ -896,6 +896,9 @@ counters!(
     // the quantity that sets the cost of ALL THREE of the LU hot spots at once
     // (refactorize, each FT update, and every ftran/btran), so it separates "we
     // refactorize too often" from "each factor is far denser than it should be".
+    // Sparse factorizations done in place on the held factor (feral 0.23
+    // `refactor_markowitz`); a subset of `LuSparseFactorizations`.
+    LuInPlaceRefactors,
     LuSparseFactorizations,
     LuBasisNnz,
     LuFactorNnz,
