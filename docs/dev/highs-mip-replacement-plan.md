@@ -825,3 +825,37 @@ remains: tbfp-network's 27.0 s above is the same repair, ~3.5 s after the engine
 Open on this front: neos-498623's primal (45.6 OFF vs 160.8 ON), ns1830653 (HiGHS's
 feasibility jump finds a point at 0.3 s, ours none), central rounding (8 of the 31 rows used
 it), then the rest of HiGHS's heuristic set.
+
+### 8.12 Status matrix and the unbounded-relaxation verdict (2026-11-14)
+
+S1 of the 2026-11-14 review: `bnb::milp_driver::status_matrix`. It covers 250 random
+pure-integer MILPs (2-4 integers in small boxes, 1-3 rows of mixed sense, some
+infeasible by construction, some with a zero objective). Each is solved through
+`solve_milp`, presolve included, in five ways: plain, without heuristics, seeded with
+the enumerated optimum, seeded with the worst feasible point, and seeded with an
+infeasible point. Each run is checked against brute-force enumeration for status,
+objective, bound and feasibility of the point: 1,000 or more executed solves, asserted.
+Hand-built cases sit alongside: all columns fixed, zero objective, an integer-infeasible
+row with a bounded relaxation, and a row that presolve empties. Every case agreed with
+enumeration.
+
+One case did not. `2 x0 - 2 x1 = 1` over free integers, `min x0`: the LP relaxation is
+unbounded and there is no integer point. The engine returned `Unbounded`, which
+`discopt.status` documents as *certified* unboundedness, so the certificate was false.
+In HiGHS the same state is `kUnboundedOrInfeasible` when no solution is held
+(`HighsMipSolverData.cpp:1904`).
+
+The fix goes past naming the case: `settle_unbounded`. For rational data (and every
+`f64` is rational), an unbounded relaxation plus one integer point proves the MILP
+unbounded (Meyer 1974). So a top-level `Unbounded` is re-decided by a zero-objective
+solve of the same problem:
+
+- a point found keeps `Unbounded`;
+- a proof that no point exists gives `Infeasible`;
+- anything else gives `NodeLimit`, with no claim.
+
+The check has a budget of 2,000 nodes, because branching alone cannot empty
+`2 x0 - 2 x1 = 1` (that takes a gcd argument). A nested sub-MIP never claims
+`Unbounded` without the check. Counters: `MilpUnboundedSettle`, `MilpUnboundedDemoted`.
+The case that is unbounded with integer points (`= 2`) stays `Unbounded`, seeded or not.
+The cost is one bounded extra solve, paid only by models whose relaxation is unbounded.

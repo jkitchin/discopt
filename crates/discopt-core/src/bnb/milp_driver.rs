@@ -4171,9 +4171,15 @@ pub fn solve_milp_node_hooked(
     // Presolve may have run and declined (no reduction, a refused or unverified
     // reduced solve): the original search gets what is left of the budget, not all of it.
     let opts = &clock_from(opts, t0);
+    // Kept for the unbounded check below (the search consumes and extends the matrix).
+    let top_level = MILP_DEPTH.with(|d| d.get()) == 0;
+    let csc_orig = (top_level && !opts.integer_cols.is_empty()).then(|| prep.csc.clone());
     let mut res = solve_milp_node_search(
         prep.csc, m, n, c, l, u, b, obj_const, opts, hook, lazy, node,
     );
+    if res.status == MilpStatus::Unbounded && !opts.integer_cols.is_empty() {
+        settle_unbounded(&mut res, csc_orig, m, n, l, u, b, opts, lazy, node, t0);
+    }
     // After the search: its `begin_solve` resets the counters.
     crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
     if unscalable {
@@ -4187,6 +4193,66 @@ pub fn solve_milp_node_hooked(
         withdraw_certificate(&mut res);
     }
     res
+}
+
+/// An unbounded LP relaxation is not an unbounded MILP: `2 x0 - 2 x1 = 1` over free
+/// integers has an unbounded relaxation for `min x0` and no integer point at all. For
+/// rational data (every `f64` is rational) an unbounded relaxation together with one
+/// feasible integer point does prove the MILP unbounded (Meyer 1974, "On the existence
+/// of optimal solutions to integer and mixed-integer programming problems"), so the
+/// verdict is settled by a zero-objective solve of the same problem: a point keeps
+/// `Unbounded`, a proof of no point gives `Infeasible`, and anything else is a
+/// `NodeLimit` with no claim. HiGHS stops at `kUnboundedOrInfeasible` when it holds no
+/// point; this resolves the case instead of naming it. A nested solve (`csc` `None`)
+/// is not re-solved and never claims `Unbounded` without that check.
+/// Node budget of the feasibility solve in [`settle_unbounded`]. Branching cannot
+/// prove some unbounded integer sets empty at all (`2 x0 - 2 x1 = 1` needs a gcd
+/// argument), and those exhaust any budget; past it the verdict is an unclaimed
+/// `NodeLimit`, where HiGHS returns `kUnboundedOrInfeasible` at once.
+const UNBOUNDED_SETTLE_MAX_NODES: usize = 2_000;
+
+#[allow(clippy::too_many_arguments)]
+fn settle_unbounded(
+    res: &mut MilpResult,
+    csc: Option<SparseCols>,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &MilpOptions,
+    lazy: Option<&dyn MilpLazyHook>,
+    node: Option<&dyn MilpNodeHook>,
+    t0: std::time::Instant,
+) {
+    crate::profile::incr(crate::profile::Ctr::MilpUnboundedSettle);
+    let verdict = match csc {
+        None => MilpStatus::NodeLimit,
+        Some(csc) => {
+            let zero = vec![0.0; n];
+            let mut o = clock_from(opts, t0);
+            o.initial_incumbent = None;
+            o.max_nodes = o.max_nodes.min(UNBOUNDED_SETTLE_MAX_NODES);
+            let feas = solve_milp_node_search(csc, m, n, &zero, l, u, b, 0.0, &o, None, lazy, node);
+            match feas.status {
+                MilpStatus::Optimal | MilpStatus::Feasible => MilpStatus::Unbounded,
+                MilpStatus::Infeasible => MilpStatus::Infeasible,
+                // A zero objective cannot be unbounded; a limit decides nothing.
+                _ => MilpStatus::NodeLimit,
+            }
+        }
+    };
+    if verdict != MilpStatus::Unbounded {
+        crate::profile::incr(crate::profile::Ctr::MilpUnboundedDemoted);
+        res.status = verdict;
+        res.obj = f64::INFINITY;
+        res.bound = if verdict == MilpStatus::Infeasible {
+            f64::INFINITY
+        } else {
+            // No incumbent and no proof: the relaxation is unbounded below.
+            f64::NEG_INFINITY
+        };
+    }
 }
 
 /// `DISCOPT_MILP_PRESOLVE` (gap plan §12.34): run [`crate::bnb::milp_presolve`] on the
@@ -15662,7 +15728,7 @@ pub(crate) mod sparse_milp_diff {
             }
         }
 
-        fn dense_view(&self) -> LpView<'_> {
+        pub(crate) fn dense_view(&self) -> LpView<'_> {
             LpView {
                 a: &self.a,
                 m: self.m,
@@ -18341,5 +18407,375 @@ mod sepa_cutoff_box_tests {
             assert_cuts(&cuts, &t.sol.x) > 0,
             "no node cut over the cutoff box"
         );
+    }
+}
+
+/// Status edge-case matrix (S1 of the 2026-11-14 review): small MILPs with answers
+/// known by enumeration, each solved plain, without heuristics, and seeded with the
+/// optimum, a worse feasible point and an infeasible point, through the production
+/// entry (`solve_milp`, presolve included). Every new heuristic or incumbent path
+/// must keep these green; the `Optimal 0` on a seeded unbounded MILP (`7207bbb6`) is
+/// the class this guards.
+#[cfg(test)]
+mod status_matrix {
+    use super::sparse_milp_diff::Case;
+    use super::*;
+
+    const BIG: f64 = 1e20;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % ((hi - lo + 1) as u64)) as i64
+        }
+    }
+
+    /// A random pure-integer instance: `k` integers in small boxes, `rows` rows of
+    /// sense `<=`, `>=` or `=`, slacks after the structurals.
+    struct Inst {
+        case: Case,
+        rows: Vec<(Vec<f64>, char, f64)>,
+        lo: Vec<i64>,
+        hi: Vec<i64>,
+        c: Vec<f64>,
+    }
+
+    fn gen(rng: &mut Lcg) -> Inst {
+        let k = rng.int(2, 4) as usize;
+        let m = rng.int(1, 3) as usize;
+        let lo: Vec<i64> = (0..k).map(|_| rng.int(-2, 0)).collect();
+        let hi: Vec<i64> = lo.iter().map(|&l| l + rng.int(1, 4)).collect();
+        let target: Vec<i64> = (0..k).map(|j| rng.int(lo[j], hi[j])).collect();
+        let zero_obj = rng.int(0, 9) == 0;
+        let c: Vec<f64> = (0..k)
+            .map(|_| if zero_obj { 0.0 } else { rng.int(-3, 3) as f64 })
+            .collect();
+        let mut rows = Vec::new();
+        for _ in 0..m {
+            let a: Vec<f64> = (0..k).map(|_| rng.int(-3, 3) as f64).collect();
+            let act: f64 = a.iter().zip(&target).map(|(x, &t)| x * t as f64).sum();
+            let sense = ['<', '>', '='][rng.int(0, 2) as usize];
+            // Sometimes push the right-hand side past the box: an infeasible row.
+            let shift = if rng.int(0, 7) == 0 { 40.0 } else { 0.0 };
+            let rhs = match sense {
+                '<' => act + rng.int(0, 2) as f64 - shift,
+                '>' => act - rng.int(0, 2) as f64 + shift,
+                _ => act + if shift > 0.0 { 0.5 } else { 0.0 },
+            };
+            rows.push((a, sense, rhs));
+        }
+        let ns = k;
+        let slacks: Vec<usize> = (0..m).filter(|&i| rows[i].1 != '=').collect();
+        let n = ns + slacks.len();
+        let mut a = vec![0.0; m * n];
+        let (mut l, mut u) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for j in 0..k {
+            l.push(lo[j] as f64);
+            u.push(hi[j] as f64);
+        }
+        for (i, (row, sense, _)) in rows.iter().enumerate() {
+            for j in 0..k {
+                a[i * n + j] = row[j];
+            }
+            if let Some(p) = slacks.iter().position(|&s| s == i) {
+                a[i * n + ns + p] = 1.0;
+                // a x + s = rhs: `<=` means s >= 0, `>=` means s <= 0.
+                if *sense == '<' {
+                    l.push(0.0);
+                    u.push(BIG);
+                } else {
+                    l.push(-BIG);
+                    u.push(0.0);
+                }
+            }
+        }
+        let mut cfull = c.clone();
+        cfull.resize(n, 0.0);
+        let case = Case {
+            name: "random",
+            a,
+            m,
+            n,
+            c: cfull,
+            l,
+            u,
+            b: rows.iter().map(|r| r.2).collect(),
+            ns,
+            int_cols: (0..k).collect(),
+        };
+        Inst {
+            case,
+            rows,
+            lo,
+            hi,
+            c,
+        }
+    }
+
+    fn feasible(inst: &Inst, x: &[f64]) -> bool {
+        inst.rows.iter().all(|(a, sense, rhs)| {
+            let act: f64 = a.iter().zip(x).map(|(p, q)| p * q).sum();
+            match sense {
+                '<' => act <= rhs + 1e-9,
+                '>' => act >= rhs - 1e-9,
+                _ => (act - rhs).abs() <= 1e-9,
+            }
+        })
+    }
+
+    /// Every integer point of the box, feasible ones with their objective.
+    fn enumerate(inst: &Inst) -> (Vec<(Vec<f64>, f64)>, Vec<Vec<f64>>) {
+        let k = inst.lo.len();
+        let (mut feas, mut infeas) = (Vec::new(), Vec::new());
+        let mut x: Vec<i64> = inst.lo.clone();
+        loop {
+            let xf: Vec<f64> = x.iter().map(|&v| v as f64).collect();
+            if feasible(inst, &xf) {
+                let obj = xf.iter().zip(&inst.c).map(|(p, q)| p * q).sum();
+                feas.push((xf, obj));
+            } else {
+                infeas.push(xf);
+            }
+            let mut j = 0;
+            loop {
+                if j == k {
+                    return (feas, infeas);
+                }
+                if x[j] < inst.hi[j] {
+                    x[j] += 1;
+                    break;
+                }
+                x[j] = inst.lo[j];
+                j += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn random_milps_match_enumeration_seeded_and_unseeded() {
+        let mut rng = Lcg(2026_11_14);
+        let (mut checked, mut infeasible_seen, mut seeded_bad) = (0usize, 0usize, 0usize);
+        for t in 0..250 {
+            let inst = gen(&mut rng);
+            let (feas, infeas) = enumerate(&inst);
+            let best = feas.iter().min_by(|p, q| p.1.total_cmp(&q.1)).cloned();
+            let worst = feas.iter().max_by(|p, q| p.1.total_cmp(&q.1)).cloned();
+            let mut variants: Vec<(&str, MilpOptions)> = Vec::new();
+            variants.push(("plain", inst.case.opts()));
+            let mut o = inst.case.opts();
+            o.heuristics = false;
+            variants.push(("no-heuristics", o));
+            if let Some((x, _)) = &best {
+                let mut o = inst.case.opts();
+                o.initial_incumbent = Some(x.clone());
+                variants.push(("seed-optimum", o));
+            }
+            if let Some((x, _)) = &worst {
+                let mut o = inst.case.opts();
+                o.initial_incumbent = Some(x.clone());
+                variants.push(("seed-worse", o));
+            }
+            if let Some(x) = infeas.first() {
+                let mut o = inst.case.opts();
+                o.initial_incumbent = Some(x.clone());
+                variants.push(("seed-infeasible", o));
+                seeded_bad += 1;
+            }
+            for (label, opts) in variants {
+                let r = solve_milp(&inst.case.dense_view(), &inst.case.b, 0.0, &opts);
+                match &best {
+                    None => {
+                        assert_eq!(r.status, MilpStatus::Infeasible, "#{t} {label}");
+                        infeasible_seen += 1;
+                    }
+                    Some((_, opt)) => {
+                        assert_eq!(r.status, MilpStatus::Optimal, "#{t} {label}");
+                        let tol = 1e-6 * (1.0 + opt.abs());
+                        assert!(
+                            (r.obj - opt).abs() <= tol,
+                            "#{t} {label}: obj {} vs {opt}",
+                            r.obj
+                        );
+                        assert!(
+                            r.bound <= opt + tol,
+                            "#{t} {label}: bound {} past {opt}",
+                            r.bound
+                        );
+                        let x = &r.x[..inst.lo.len()];
+                        assert!(
+                            x.iter().all(|v| (v - v.round()).abs() <= 1e-6),
+                            "#{t} {label}"
+                        );
+                        let xr: Vec<f64> = x.iter().map(|v| v.round()).collect();
+                        assert!(feasible(&inst, &xr), "#{t} {label}: point infeasible");
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 1000, "only {checked} solves checked");
+        assert!(
+            infeasible_seen > 0 && seeded_bad > 0,
+            "{infeasible_seen} / {seeded_bad}"
+        );
+    }
+
+    fn case(
+        a: Vec<f64>,
+        m: usize,
+        n: usize,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        b: Vec<f64>,
+        ns: usize,
+        ints: Vec<usize>,
+    ) -> Case {
+        Case {
+            name: "hand",
+            a,
+            m,
+            n,
+            c,
+            l,
+            u,
+            b,
+            ns,
+            int_cols: ints,
+        }
+    }
+
+    /// Hand-built statuses, plain and seeded.
+    #[test]
+    fn hand_built_statuses_hold_with_and_without_a_seed() {
+        let mut checked = 0;
+        // All columns fixed by their bounds: x0 = 2, x1 = -1; min x0 + x1 = 1.
+        let fixed = case(
+            vec![1.0, 1.0, 1.0],
+            1,
+            3,
+            vec![1.0, 1.0, 0.0],
+            vec![2.0, -1.0, 0.0],
+            vec![2.0, -1.0, BIG],
+            vec![5.0],
+            2,
+            vec![0, 1],
+        );
+        // Zero objective on a feasible box: any feasible point, value 0.
+        let zero = case(
+            vec![1.0, 1.0, 1.0],
+            1,
+            3,
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+            vec![3.0, 3.0, BIG],
+            vec![4.0],
+            2,
+            vec![0, 1],
+        );
+        // Integer-infeasible with an LP-feasible bounded relaxation: 2 x0 = 1.
+        let parity = case(
+            vec![2.0],
+            1,
+            1,
+            vec![1.0],
+            vec![-5.0],
+            vec![5.0],
+            vec![1.0],
+            1,
+            vec![0],
+        );
+        // A row presolve removes entirely (0 x0 + s = 1, s >= 0) and min x0 on [1, 4].
+        let empty_row = case(
+            vec![0.0, 1.0],
+            1,
+            2,
+            vec![1.0, 0.0],
+            vec![1.0, 0.0],
+            vec![4.0, BIG],
+            vec![1.0],
+            1,
+            vec![0],
+        );
+        let cases: [(&Case, Option<f64>, Vec<Vec<f64>>); 4] = [
+            (&fixed, Some(1.0), vec![vec![2.0, -1.0]]),
+            (&zero, Some(0.0), vec![vec![1.0, 1.0], vec![9.0, 9.0]]),
+            (&parity, None, vec![vec![0.0], vec![1.0]]),
+            (&empty_row, Some(1.0), vec![vec![3.0], vec![0.0]]),
+        ];
+        for (cs, want, seeds) in cases.iter() {
+            let mut variants = vec![cs.opts()];
+            for sd in seeds {
+                let mut o = cs.opts();
+                o.initial_incumbent = Some(sd.clone());
+                variants.push(o);
+            }
+            for o in variants {
+                let r = solve_milp(&cs.dense_view(), &cs.b, 0.0, &o);
+                match want {
+                    Some(v) => {
+                        assert_eq!(r.status, MilpStatus::Optimal);
+                        assert!((r.obj - v).abs() <= 1e-9, "obj {} vs {v}", r.obj);
+                    }
+                    None => assert_eq!(r.status, MilpStatus::Infeasible),
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 4 + 1 + 2 + 2 + 2);
+    }
+
+    /// LP relaxation unbounded but no integer point at all: `2 x0 - 2 x1 = 1`, both
+    /// integer and free, `min x0`. `Unbounded` claims a feasible point exists; before
+    /// `settle_unbounded` the engine returned it here.
+    #[test]
+    fn lp_unbounded_integer_infeasible_is_not_reported_as_unbounded() {
+        let cs = case(
+            vec![2.0, -2.0],
+            1,
+            2,
+            vec![1.0, 0.0],
+            vec![-BIG, -BIG],
+            vec![BIG, BIG],
+            vec![1.0],
+            2,
+            vec![0, 1],
+        );
+        let r = solve_milp(&cs.dense_view(), &cs.b, 0.0, &cs.opts());
+        // Branching alone cannot prove `2 x0 - 2 x1 = 1` empty over free integers
+        // (that takes a gcd argument), so either verdict short of a claim is right.
+        assert!(
+            matches!(r.status, MilpStatus::Infeasible | MilpStatus::NodeLimit),
+            "{:?}",
+            r.status
+        );
+        assert_eq!(r.obj, f64::INFINITY);
+        // An even right-hand side: `2 x0 - 2 x1 = 2` has integer points, so the
+        // unbounded relaxation does make the MILP unbounded, seeded or not.
+        let ok = case(
+            vec![2.0, -2.0],
+            1,
+            2,
+            vec![1.0, 0.0],
+            vec![-BIG, -BIG],
+            vec![BIG, BIG],
+            vec![2.0],
+            2,
+            vec![0, 1],
+        );
+        let mut seeded = ok.opts();
+        seeded.initial_incumbent = Some(vec![1.0, 0.0]);
+        for o in [ok.opts(), seeded] {
+            let r = solve_milp(&ok.dense_view(), &ok.b, 0.0, &o);
+            assert_eq!(r.status, MilpStatus::Unbounded);
+            assert_eq!(r.obj, f64::INFINITY);
+        }
     }
 }

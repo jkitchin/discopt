@@ -482,6 +482,10 @@ counters!(
     MilpPresolveRowsRemoved,
     MilpPresolveInfeasibleFallback,
     MilpPresolveVerifyFallback,
+    // Unbounded relaxations re-checked by a zero-objective feasibility solve, and the
+    // verdicts that check overturned (`settle_unbounded`).
+    MilpUnboundedSettle,
+    MilpUnboundedDemoted,
     PlungeContinued,
     PlungeStarts,
     RootRensRuns,
