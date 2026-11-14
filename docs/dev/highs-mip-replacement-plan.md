@@ -904,3 +904,21 @@ count.
    instances this way (`DISCOPT_PANEL_LOADER=nl` restores the old route), as HiGHS
    reads MPS natively. `tbfp-network` at 20 s: engine 20.9 s against 19.8 s, wall
    21.8 s against 26.3 s, the same incumbent, `max_viol` 0.
+
+**Population A/B** (`data/highs-parity/population/population_panel_loader.*`):
+
+- **Setup.** 120 rows at 20 s, one thread and BLAS pinned. `ours` (with
+  `from_mps`) and `ours_nl` (the `.nl` route) are interleaved per instance; the
+  HiGHS rows are reused.
+- **Soundness.** 0 violations over 336 checked solves.
+- **Headline counts.** Certified 12 = 12; incumbents 86 vs 85; rows with a bound
+  94 vs 95.
+- **Primal / dual.** Primal better/worse 20/24 (median +0.14%) and dual 20/22,
+  which is run-to-run spread on unfinished searches.
+- **Wall.** Total wall 2,121 vs 2,179 s. Runs past 25 s on a 20 s budget: 0 vs 2.
+- **Certified rows.** On the 5 rows both arms certify, the wall geometric mean is
+  0.47× (e.g. `h80x6320` 0.4 vs 4.7 s).
+
+The loader removes the Python overrun and halves time-to-certificate where the
+engine finishes. It moves no certificate: on the rows that time out, the engine,
+not Python, is the bottleneck. The remaining gap to HiGHS (26 certified) is S3–S5.
