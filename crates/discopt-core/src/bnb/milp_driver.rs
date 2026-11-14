@@ -2051,6 +2051,7 @@ fn node_local_gmi_bound(
                     x: &lp.x,
                     y: &lp.y,
                     basic_vars: &lp.basis.basic_vars,
+                    deadline: ctx.deadline,
                 },
                 &crate::lp::highs_cutgen::bridge::NodeSepa {
                     node_l: &lp.l[..ctx.ns],
@@ -2830,6 +2831,163 @@ fn try_stall_redive(
 // batch's best-bound fractional node at each batch boundary while there is none.
 // Soundness is the sub-MIP argument: a point is injected only after
 // `validate_seed_incumbent` re-verifies every original row, bound and integrality.
+
+/// `DISCOPT_MILP_FEAS_JUMP` / `DISCOPT_MILP_TRIVIAL_HEUR`: HiGHS's pre-root
+/// heuristics (`bnb::feas_jump`), run once before the root LP of a top-level solve
+/// with no seed. Default OFF until the population panel (CLAUDE.md §5); `1` opts in;
+/// garbage is refused.
+fn pre_root_flag(var: &'static str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut c = cache.lock().expect("pre_root_flag cache");
+    *c.entry(var).or_insert_with(|| match std::env::var(var) {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("{var}={other:?} is not recognized (expected 1 or 0)"),
+        },
+    })
+}
+
+/// HiGHS's pre-root heuristics on the working standard form: the trivial points
+/// (pure-integer models) and then feasibility jump, started from the best trivial
+/// point when there is one, as HiGHS starts it from its incumbent
+/// (`HighsMipSolver.cpp:187-210`). Every candidate is re-verified by
+/// [`validate_seed_incumbent`]; the best verified one is returned as a seed in
+/// structural space. `None` when neither flag is on, the rows cannot be put in
+/// row form (a slack that is not a zero-cost singleton), or nothing verified.
+#[allow(clippy::too_many_arguments)]
+fn pre_root_heuristic_seed(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    ns: usize,
+    b: &[f64],
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    is_int_full: &[bool],
+    heur_is_int: &[bool],
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<f64>> {
+    let (trivial_on, fj_on) = (
+        pre_root_flag("DISCOPT_MILP_TRIVIAL_HEUR"),
+        pre_root_flag("DISCOPT_MILP_FEAS_JUMP"),
+    );
+    if !(trivial_on || fj_on) || ns == 0 {
+        return None;
+    }
+    let _t = crate::profile::Timer::new(crate::profile::Phase::PreRootHeur);
+    crate::profile::incr(crate::profile::Ctr::PreRootHeurRuns);
+    let fin = |v: f64| {
+        if v <= -INF {
+            f64::NEG_INFINITY
+        } else if v >= INF {
+            f64::INFINITY
+        } else {
+            v
+        }
+    };
+    // Row form `lo <= A_s x <= up` (structural columns), each inequality's range
+    // from its singleton slack, as `solve_presolved` builds it.
+    let mut slack: Vec<Option<(usize, f64)>> = vec![None; m];
+    for (j, &cj) in c.iter().enumerate().take(n).skip(ns) {
+        let (ri, rv) = csc.col(j);
+        let nz: Vec<(usize, f64)> = ri
+            .iter()
+            .zip(rv)
+            .filter(|(_, &v)| v != 0.0)
+            .map(|(&i, &v)| (i, v))
+            .collect();
+        if nz.len() != 1 || cj != 0.0 || slack[nz[0].0].is_some() {
+            crate::profile::incr(crate::profile::Ctr::PreRootSkipNoRowForm);
+            return None;
+        }
+        slack[nz[0].0] = Some((j, nz[0].1));
+    }
+    let (mut lo, mut up) = (vec![0.0; m], vec![0.0; m]);
+    for i in 0..m {
+        match slack[i] {
+            None => {
+                lo[i] = b[i];
+                up[i] = b[i];
+            }
+            Some((j, sigma)) => {
+                let (e1, e2) = (b[i] - sigma * fin(l[j]), b[i] - sigma * fin(u[j]));
+                let (a, z) = if sigma > 0.0 { (e2, e1) } else { (e1, e2) };
+                lo[i] = if a.is_nan() { f64::NEG_INFINITY } else { a };
+                up[i] = if z.is_nan() { f64::INFINITY } else { z };
+            }
+        }
+    }
+    let mut row_ptr = vec![0usize; m + 1];
+    for j in 0..ns {
+        for &i in csc.col(j).0 {
+            row_ptr[i + 1] += 1;
+        }
+    }
+    for i in 0..m {
+        row_ptr[i + 1] += row_ptr[i];
+    }
+    let mut next = row_ptr.clone();
+    let nnz = row_ptr[m];
+    let (mut row_idx, mut row_val) = (vec![0usize; nnz], vec![0.0; nnz]);
+    for j in 0..ns {
+        let (ri, rv) = csc.col(j);
+        for (&i, &v) in ri.iter().zip(rv) {
+            row_idx[next[i]] = j;
+            row_val[next[i]] = v;
+            next[i] += 1;
+        }
+    }
+    let ls: Vec<f64> = l[..ns].iter().map(|&v| fin(v)).collect();
+    let us: Vec<f64> = u[..ns].iter().map(|&v| fin(v)).collect();
+    let model = crate::bnb::feas_jump::RowModel {
+        row_ptr: &row_ptr,
+        row_idx: &row_idx,
+        row_val: &row_val,
+        lo: &lo,
+        up: &up,
+        l: &ls,
+        u: &us,
+        c: &c[..ns],
+        is_int: &is_int_full[..ns],
+    };
+    let validate = |x: &[f64]| validate_seed_incumbent(x, ns, heur_is_int, csc, b, c, l, u, m, n);
+    let mut best: Option<(Vec<f64>, f64)> = None;
+    let keep = |cand: (Vec<f64>, f64), best: &mut Option<(Vec<f64>, f64)>| {
+        if best.as_ref().is_none_or(|(_, v)| cand.1 < *v) {
+            *best = Some(cand);
+        }
+    };
+    if trivial_on {
+        for p in crate::bnb::feas_jump::trivial_points(&model) {
+            crate::profile::incr(crate::profile::Ctr::TrivialFound);
+            if let Some(v) = validate(&p) {
+                crate::profile::incr(crate::profile::Ctr::TrivialAccepted);
+                keep(v, &mut best);
+            }
+        }
+    }
+    if fj_on {
+        crate::profile::incr(crate::profile::Ctr::FeasJumpRuns);
+        let start = best.as_ref().map(|(x, _)| x.clone());
+        let stop = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        if let Some((x, _effort)) =
+            crate::bnb::feas_jump::feasibility_jump(&model, start.as_deref(), stop)
+        {
+            crate::profile::incr(crate::profile::Ctr::FeasJumpFound);
+            if let Some(v) = validate(&x) {
+                crate::profile::incr(crate::profile::Ctr::FeasJumpAccepted);
+                keep(v, &mut best);
+            }
+        }
+    }
+    best.map(|(x, _)| x)
+}
 
 /// `DISCOPT_MILP_RAND_ROUND`, read once. Default ON since the stage 1d-5 graduation panel (`docs/dev/flag-retirement-audit.md`); `0` opts out.
 /// Garbage is refused.
@@ -5074,7 +5232,40 @@ fn solve_milp_node_search(
     } else {
         None
     };
-    if let Some(seed) = opts.initial_incumbent.as_ref().or(seed_file.as_ref()) {
+    // HiGHS's pre-root heuristics (`DISCOPT_MILP_TRIVIAL_HEUR`,
+    // `DISCOPT_MILP_FEAS_JUMP`): a top-level solve with no seed and no lazy
+    // separator; the point goes through the same validation and separator as any
+    // seed below.
+    let pre_root_seed: Option<Vec<f64>> = (milp_depth == 0
+        && opts.heuristics
+        && lazy.is_none()
+        && opts.initial_incumbent.is_none()
+        && seed_file.is_none())
+    .then(|| {
+        let deadline = opts
+            .time_limit_s
+            .map(|tl| std::time::Instant::now() + std::time::Duration::from_secs_f64(tl));
+        pre_root_heuristic_seed(
+            &csc_w,
+            m_w,
+            n_w,
+            ns,
+            &b_w,
+            &c_w,
+            &l_w,
+            &u_w,
+            &is_int_full,
+            &heur_is_int,
+            deadline,
+        )
+    })
+    .flatten();
+    if let Some(seed) = opts
+        .initial_incumbent
+        .as_ref()
+        .or(seed_file.as_ref())
+        .or(pre_root_seed.as_ref())
+    {
         if let Some((sx, sobj)) = validate_seed_incumbent(
             seed,
             ns,
@@ -5791,6 +5982,7 @@ fn solve_milp_node_search(
                         x: &root.x,
                         y: &root.dual,
                         basic_vars: &root.basis.basic_vars,
+                        deadline,
                     });
                     crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, rc.generated as u64);
                     let remaining = opts.root_cuts - total_cuts;
@@ -17794,6 +17986,7 @@ mod sepa_cutoff_box_tests {
             x: &t.sol.x,
             y: &t.sol.dual,
             basic_vars: &t.sol.basis.basic_vars,
+            deadline: None,
         }
     }
 

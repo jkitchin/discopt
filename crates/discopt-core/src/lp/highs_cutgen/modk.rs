@@ -362,7 +362,15 @@ impl GfkSolve {
     }
 
     /// `solve<k>(reportSolution)`.
-    pub fn solve<F: FnMut(&mut Vec<SolutionEntry>)>(&mut self, k: u32, mut report: F) {
+    /// `deadline` (discopt's addition; HiGHS has no time check here): checked at
+    /// every pivot and before every basis-swap re-solve; once passed, the system
+    /// is abandoned and no further solution is reported.
+    pub fn solve<F: FnMut(&mut Vec<SolutionEntry>)>(
+        &mut self,
+        k: u32,
+        deadline: Option<std::time::Instant>,
+        mut report: F,
+    ) {
         // std::priority_queue with `a.first > b.first`.
         // Min-heap on (column size, column): smallest column first, ties by index.
         let mut pq: BinaryHeap<Reverse<(i32, i32)>> = BinaryHeap::new();
@@ -377,6 +385,9 @@ impl GfkSolve {
         let mut num_pivot = 0usize;
 
         while let Some(Reverse((old_col_size, pivot_col))) = pq.pop() {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return;
+            }
             let pc = pivot_col as usize;
             if self.colsize[pc] == 0 {
                 continue;
@@ -489,6 +500,10 @@ impl GfkSolve {
 
         let mut swap_pos = 0usize;
         loop {
+            // One re-solve per basis swap: the long mode on reblock166.
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return;
+            }
             solution.clear();
             for i in (0..num_factor_rows).rev() {
                 let row = self.factor_row_perm[i] as usize;
@@ -538,6 +553,7 @@ pub fn separate_modk(
     tl: &mut TransformedLp,
     pool: &mut dyn CutSink,
     cg_seed: i64,
+    deadline: Option<std::time::Instant>,
 ) {
     let num_row = ctx.num_rows();
     let num_col = ctx.num_cols();
@@ -654,12 +670,15 @@ pub fn separate_modk(
     }
 
     for k in [2u32, 3, 5, 7] {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return;
+        }
         let num_cuts = pool.num_cuts();
         let mut used: HashSet<Vec<SolutionEntry>> = HashSet::new();
         let mut gfk = GfkSolve::default();
         gfk.from_csc(k, &int_value, &int_index, &int_start, num_col + 1);
         gfk.set_rhs(k, num_col, 1);
-        gfk.solve(k, |weights: &mut Vec<SolutionEntry>| {
+        gfk.solve(k, deadline, |weights: &mut Vec<SolutionEntry>| {
             if weights.is_empty() {
                 return;
             }
@@ -732,7 +751,7 @@ mod tests {
                 let mut g = GfkSolve::default();
                 g.from_csc(k, &aval, &aidx, &astart, nrows + 1);
                 g.set_rhs(k, nrows, 1);
-                g.solve(k, |w: &mut Vec<SolutionEntry>| {
+                g.solve(k, None, |w: &mut Vec<SolutionEntry>| {
                     for r in 0..=nrows {
                         let mut s: i64 = 0;
                         for e in w.iter() {

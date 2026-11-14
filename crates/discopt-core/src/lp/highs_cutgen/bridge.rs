@@ -88,6 +88,11 @@ pub struct StdFormRound<'a> {
     pub y: &'a [f64],
     /// Basic column per basis position.
     pub basic_vars: &'a [usize],
+    /// The solve's wall-clock deadline. Separators with no work limit of their
+    /// own stop at it (mod-k's GF(k) elimination: 22 s of one root round on
+    /// reblock166 once an incumbent's cutoff box changed the system). Stopping
+    /// early only generates fewer cuts.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// HiGHS's view of the round's LP.
@@ -775,7 +780,7 @@ impl RootSeparation {
                 violated: 0,
                 vb: vstore.as_mut().map(|v| (v, &cl[..], &cu[..], &vint[..])),
             };
-            super::modk::separate_modk(&view, &mut agg, &mut tl, &mut sink, seed);
+            super::modk::separate_modk(&view, &mut agg, &mut tl, &mut sink, seed, r.deadline);
             if probe.is_some() {
                 eprintln!(
                     "HIGHS_SEPA_CHECK modk checked={} violated={}",
@@ -966,7 +971,7 @@ pub fn separate_node(r: &StdFormRound<'_>, p: &NodeSepa<'_>) -> Vec<GomoryCut> {
             violated: 0,
             vb: None,
         };
-        super::modk::separate_modk(&view, &mut agg, &mut tl, &mut sink, seed);
+        super::modk::separate_modk(&view, &mut agg, &mut tl, &mut sink, seed, r.deadline);
         checked += sink.checked;
         violated += sink.violated;
     }

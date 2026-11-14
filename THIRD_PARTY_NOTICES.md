@@ -18,7 +18,10 @@ simple. Every translated or derived file says where it comes from and under whic
 `crates/discopt-core/src/lp/highs_cutgen/` (`cdouble`, `random`, `integers`, `core`,
 `sparse_vec`, `transformed_lp`, `separators`, `pool`, `vbound`, `domain`, `modk`, and the
 pdqsort part of `stdalgo`), and the HiGHS-derived primal heuristics, child selection and
-strong-branching budget in `crates/discopt-core/src/bnb/milp_driver.rs`, are Rust translations
+strong-branching budget in `crates/discopt-core/src/bnb/milp_driver.rs`, and the trivial
+heuristics and Feasibility Jump solver in `crates/discopt-core/src/bnb/feas_jump.rs`
+(from `highs/mip/HighsMipSolverData.cpp`, `HighsFeasibilityJump.cpp` and
+`feasibilityjump.hh`), are Rust translations
 of, or are derived from, HiGHS (https://github.com/ERGO-Code/HiGHS), modified for discopt. The
 HiGHS patches under `docs/dev/data/highs-parity/gap-plan-p3/` are diffs of HiGHS source.
 

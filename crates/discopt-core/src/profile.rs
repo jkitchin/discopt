@@ -147,6 +147,8 @@ timed_phases!(
     SubMip,
     // D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`).
     RandRound,
+    // Pre-root trivial points + feasibility jump (`bnb::feas_jump`).
+    PreRootHeur,
     // The MILP presolve (`milp_presolve::presolve_opts`), top level and sub-MIPs.
     MilpPresolve,
     // W1 (D2 plan): the node-GMI step's parts.
@@ -430,6 +432,15 @@ counters!(
     RandRoundLpFail,
     RandRoundFound,
     RandRoundRejected,
+    // Pre-root heuristics (`bnb::feas_jump`): runs; trivial candidates found /
+    // accepted after validation; feasibility-jump runs, points found, accepted.
+    PreRootHeurRuns,
+    PreRootSkipNoRowForm,
+    TrivialFound,
+    TrivialAccepted,
+    FeasJumpRuns,
+    FeasJumpFound,
+    FeasJumpAccepted,
     RcFixRefactor,
     // Node reduced-cost fixing (gap plan §12.25): calls, nodes where it tightened
     // at least one integer column, and integer bounds tightened.

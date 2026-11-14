@@ -1,0 +1,33 @@
+drayage-25-27                first=('J', 0.1)  all=JLTTT
+neos-1112782                 first=('S', 0.1)  all=SCLLLSSSLSSS
+neos-4333596-skien           first=('C', 0.1)  all=CLTTT
+pigeon-20                    first=('J', 0.1)  all=JCL
+CMS750_4                     first=('J', 0.2)  all=JCLL
+app1-1                       first=('J', 0.2)  all=J
+disctom                      first=('J', 0.2)  all=J
+drayage-25-32                first=('J', 0.2)  all=JL
+ns1830653                    first=('J', 0.3)  all=JL
+reblock115                   first=('z', 0.3)  all=zJL
+neos-595904                  first=('R', 0.5)  all=RLLL
+neos-820879                  first=('J', 0.6)  all=JL
+neos-555001                  first=('R', 0.7)  all=R
+neos-827175                  first=('J', 0.7)  all=JRCSH
+opm2-z7-s8                   first=('z', 0.7)  all=zRCLL
+neos-913984                  first=('J', 0.9)  all=J
+reblock166                   first=('z', 1.2)  all=z
+30_70_45_095_98              first=('u', 1.5)  all=uJR
+n2seq36q                     first=('J', 1.7)  all=JCL
+neos-960392                  first=('z', 2.3)  all=zL
+ns2071214                    first=('L', 2.5)  all=LL
+tbfp-network                 first=('J', 3.4)  all=J
+trento1                      first=('R', 4.3)  all=RCL
+neos-799711                  first=('R', 5.4)  all=R
+reblock420                   first=('z', 8.7)  all=z
+neos-691058                  first=('L', 10.5)  all=L
+neos-1456979                 first=('L', 13.7)  all=L
+neos-3761878-oglio           first=('L', 14.1)  all=L
+air04                        first=('L', 20.0)  all=L
+mzzv42z                      first=None  all=
+nursesched-sprint-hidden09   first=None  all=
+first-solution source: {'u': 1, 'J': 12, 'L': 5, 'S': 1, 'C': 1, 'R': 4, 'z': 5}
+rows using source: {'R': 7, 'J': 14, 'u': 1, 'L': 19, 'C': 8, 'T': 2, 'S': 2, 'H': 1, 'z': 5}
