@@ -2838,25 +2838,30 @@ fn try_stall_redive(
 /// interleaved, BLAS pinned; `highs-mip-replacement-plan.md` §9): 0 violations over
 /// 336 solves, certified 11 -> 12, incumbents 63 -> 83, dual gap better/worse 11/5,
 /// primal 7/9 at a median +0.2%. `=0` opts out; garbage is refused.
-fn pre_root_flag(var: &'static str) -> bool {
-    pre_root_flag_default(var, true)
+fn trivial_heur_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_TRIVIAL_HEUR") {
+        Err(_) => true,
+        Ok(v) => parse_switch("DISCOPT_MILP_TRIVIAL_HEUR", &v),
+    })
 }
 
-/// A cached `0`/`1` heuristic switch with the given default; garbage is refused.
-fn pre_root_flag_default(var: &'static str, default: bool) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<&'static str, bool>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut c = cache.lock().expect("pre_root_flag cache");
-    *c.entry(var).or_insert_with(|| match std::env::var(var) {
-        Err(_) => default,
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" | "" => false,
-            other => panic!("{var}={other:?} is not recognized (expected 1 or 0)"),
-        },
+/// `DISCOPT_MILP_FEAS_JUMP`: see [`trivial_heur_enabled`] (same panel, same default).
+fn feas_jump_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_FEAS_JUMP") {
+        Err(_) => true,
+        Ok(v) => parse_switch("DISCOPT_MILP_FEAS_JUMP", &v),
     })
+}
+
+/// A set `0`/`1` heuristic switch; garbage is refused.
+fn parse_switch(var: &str, v: &str) -> bool {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" | "" => false,
+        other => panic!("{var}={other:?} is not recognized (expected 1 or 0)"),
+    }
 }
 
 /// HiGHS's pre-root heuristics on the working standard form: the trivial points
@@ -2880,10 +2885,7 @@ fn pre_root_heuristic_seed(
     heur_is_int: &[bool],
     deadline: Option<std::time::Instant>,
 ) -> Option<Vec<f64>> {
-    let (trivial_on, fj_on) = (
-        pre_root_flag("DISCOPT_MILP_TRIVIAL_HEUR"),
-        pre_root_flag("DISCOPT_MILP_FEAS_JUMP"),
-    );
+    let (trivial_on, fj_on) = (trivial_heur_enabled(), feas_jump_enabled());
     if !(trivial_on || fj_on) || ns == 0 {
         return None;
     }
@@ -3140,7 +3142,11 @@ fn try_randomized_rounding(
 /// `DISCOPT_MILP_CENTRAL_ROUNDING`: HiGHS's central rounding at the root (default
 /// OFF until its population panel). Garbage is refused.
 fn central_rounding_enabled() -> bool {
-    pre_root_flag_default("DISCOPT_MILP_CENTRAL_ROUNDING", false)
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_CENTRAL_ROUNDING") {
+        Err(_) => false,
+        Ok(v) => parse_switch("DISCOPT_MILP_CENTRAL_ROUNDING", &v),
+    })
 }
 
 /// HiGHS uses the analytic centre after this many root separation rounds

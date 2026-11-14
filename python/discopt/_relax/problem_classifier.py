@@ -68,6 +68,14 @@ class ProblemClass(Enum):
 
 
 def classify_problem(model: Model) -> ProblemClass:
+    """:func:`_classify_problem_uncached`, memoised on the model's structure
+    (``discopt._structure_memo``): a solve classifies the same model several times."""
+    from discopt._structure_memo import structure_memo
+
+    return structure_memo(model, "classify_problem", _classify_problem_uncached)
+
+
+def _classify_problem_uncached(model: Model) -> ProblemClass:
     """Classify a model into LP, QP, QCP, MILP, MIQP, MIQCP, NLP, or MINLP.
 
     Uses Rust structure detection for degree analysis of the objective

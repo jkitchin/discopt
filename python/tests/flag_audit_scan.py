@@ -550,6 +550,14 @@ def _rust_polarity(text: str, start: int, end: int, os_form: bool) -> tuple[str,
         if m:
             return "rust_match", "on" if m.group(1) == "true" else "off"
         return "rust_match", "unknown:match-err-arm-not-literal"
+    # A helper's `Option<bool>` falling back to another switch's value: `.unwrap_or(on)`
+    # with `on` a binding, or `.unwrap_or_else(path::to::default)`. The flag has no
+    # default of its own; it takes its umbrella's (a configuration member).
+    m = re.match(r"\.unwrap_or\(([a-z_][a-z0-9_]*)\)", flat) or re.match(
+        r"\.unwrap_or_else\(((?:[a-z_][a-z0-9_]*::)*[a-z_][a-z0-9_]*)\)", flat
+    )
+    if m and m.group(1) not in ("true", "false"):
+        return "rust_delegated", f"delegated:{m.group(1)}"
     # `.map(..).unwrap_or(<lit>)` chains.
     m = re.search(r"\.unwrap_or\(([^()]*)\)$", flat) or re.search(r"\.unwrap_or\(([^()]*)\)", flat)
     if m and not flat.startswith(".unwrap_or_default()"):
@@ -558,6 +566,8 @@ def _rust_polarity(text: str, start: int, end: int, os_form: bool) -> tuple[str,
             return "rust_unwrap_or", flip("on" if arg == "true" else "off")
         if re.fullmatch(r"-?[0-9][0-9_]*(\.[0-9_]*)?([eE][-+]?[0-9]+)?(usize|f64|u\d+|i\d+)?", arg):
             return "rust_unwrap_or", "selector"
+        if re.fullmatch(r"[a-z_][a-z0-9_]*", arg):
+            return "rust_delegated", f"delegated:{arg}"
         return "rust_unwrap_or", f"unknown:unwrap_or-arg:{arg}"
     # `let raw = env::var(F).unwrap_or_default(); parse_x(&raw)` (maybe `.unwrap_or_else(panic)`).
     if flat.startswith(".unwrap_or_default()"):
@@ -570,6 +580,18 @@ def _rust_polarity(text: str, start: int, end: int, os_form: bool) -> tuple[str,
             return "rust_parse_table", "unknown:binding-not-parsed"
         return "rust_parse_table", _rust_parse_table(text, call.group(1))
     return "rust_unrecognised", "unknown:rust-consumer-shape"
+
+
+def _rust_name_param_helper(text: str, read_at: int, param: str) -> str | None:
+    """The name of the function enclosing the read at ``read_at`` when ``param`` is
+    one of its ``&str`` parameters (a helper taking the flag name), else ``None``."""
+    fns = list(re.finditer(r"\bfn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)", text[:read_at]))
+    if not fns:
+        return None
+    last = fns[-1]
+    if re.search(rf"\b{param}\s*:\s*&(?:'static\s+)?str\b", last.group(2)):
+        return last.group(1)
+    return None
 
 
 def scan_rust() -> dict[str, list[Site]]:
@@ -589,6 +611,21 @@ def scan_rust() -> dict[str, list[Site]]:
                 end = lit.end()
             else:
                 ident = re.match(r"\s*([A-Z0-9_]+)\s*\)", text[m.end() :])
+                param = re.match(r"\s*([a-z_][a-z0-9_]*)\s*\)", text[m.end() :])
+                helper = _rust_name_param_helper(text, m.start(), param.group(1)) if param else None
+                if helper is not None:
+                    # `fn helper(var: &'static str) { … env::var(var) … }`: every literal
+                    # call `helper("DISCOPT_…")` in the file is a read, classified by
+                    # what the call site does with the helper's value.
+                    for call in re.finditer(
+                        rf'\b{helper}\s*\(\s*"(DISCOPT_[A-Z0-9_]+)"\s*\)', text
+                    ):
+                        n_reads += 1
+                        form, pol = _rust_polarity(text, call.start(), call.end(), False)
+                        line = text.count("\n", 0, call.start()) + 1
+                        flag = call.group(1)
+                        by_flag[flag].append(Site(flag, form, pol, rel, line, "-"))
+                    continue
                 if not ident or ident.group(1) not in consts:
                     # A non-literal, non-constant argument could name any flag.
                     # Crash rather than skip: a skipped read is the #1421 blind spot.
@@ -615,7 +652,10 @@ def polarity_of(sites: list[Site]) -> str:
     kinds = {s.polarity.split(":")[0] for s in sites}
     if kinds == {"selector"}:
         return "selector"
-    kinds -= {"selector"}
+    if kinds <= {"selector", "delegated"}:
+        # A configuration member: no default of its own, its umbrella's applies.
+        return "delegated"
+    kinds -= {"selector", "delegated"}
     if kinds == {"off"}:
         return "off"
     if kinds == {"on"}:
@@ -636,7 +676,7 @@ def main() -> int:
     print(f"distinct DISCOPT_* flags : {len(by_flag)}")
     print(f"read sites classified    : {n_sites}")
     print(f"  of which Rust (crates/): {n_rust}")
-    for kind in ("off", "on", "selector", "mixed", "unknown"):
+    for kind in ("off", "on", "selector", "delegated", "mixed", "unknown"):
         print(f"  {kind:10s} {len(buckets[kind]):4d}")
     for kind in ("off", "unknown", "mixed"):
         print(f"\n-- {kind} --")

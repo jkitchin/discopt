@@ -330,6 +330,11 @@ def test_the_scan_reads_the_rust_core(all_sites):
 #: literal `"0"` appears in all three, and all three are default ON.
 RUST_EXPECTED = {
     "DISCOPT_SIMPLEX_NO_EXPAND": ("rust_unwrap_or", "off"),  # .map(..).unwrap_or(false)
+    # Read through a helper taking the flag name (`member_env("…").unwrap_or(true)`).
+    "DISCOPT_LP_DUAL_SPARSE_SOLVES": ("rust_unwrap_or", "on"),
+    # Literal-match spelling of the pre-root heuristic switches.
+    "DISCOPT_MILP_FEAS_JUMP": ("rust_match", "on"),
+    "DISCOPT_MILP_CENTRAL_ROUNDING": ("rust_match", "off"),
     "DISCOPT_NS_MARGIN": ("rust_unwrap_or", "on"),  # .map(..).unwrap_or(true)
     "DISCOPT_PRIMAL_XB_REFRESH": ("rust_unwrap_or", "selector"),  # .parse::<usize>().unwrap_or(0)
     "DISCOPT_TREE_SENTINEL_PRUNE_GUARD": ("rust_presence", "on"),  # !var(F).is_ok_and(=="0")
@@ -374,6 +379,13 @@ RUST_SNIPPETS = [
         "on",
     ),
     ('fn f() -> bool { std::env::var_os("DISCOPT_X").is_some() }', "rust_presence", "off"),
+    # A configuration member: no default of its own, the umbrella's value applies.
+    (
+        'fn f(on: bool) -> bool { std::env::var("DISCOPT_X").ok().map(|v| v == "1")'
+        ".unwrap_or(on) }",
+        "rust_delegated",
+        "delegated:on",
+    ),
     ('fn f() -> bool { !std::env::var_os("DISCOPT_X").is_some() }', "rust_presence", "on"),
     ('fn f() -> bool { env::var("DISCOPT_X").is_err() }', "rust_presence", "on"),
     (

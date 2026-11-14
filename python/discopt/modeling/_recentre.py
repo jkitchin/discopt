@@ -149,34 +149,45 @@ def plan_shifts(model: Model, ratio: float) -> dict[int, np.ndarray]:
     model with only moderately offset one-sided bounds. Bounds at or beyond
     :data:`_OPEN` count as open; see there for the large-magnitude limit.
     """
+    # One vectorised pass over the flat bounds, then a walk of the variables only
+    # when some component moves. The per-variable form cost ~15 us a variable: 1.1 s
+    # on a 72,747-scalar model read from a file, which moved nothing (2026-11-14).
+    from discopt._relax.model_utils import flat_variable_bounds
+
+    lb, ub = flat_variable_bounds(model)
+    lb_fin = np.isfinite(lb) & (np.abs(lb) < _OPEN)
+    ub_fin = np.isfinite(ub) & (np.abs(ub) < _OPEN)
+    width = np.where(lb_fin & ub_fin, ub - lb, np.inf)
+    narrow = lb_fin & ub_fin & (np.abs(lb) >= ratio * np.maximum(1.0, width))
+    # One-sided: the box is at least as wide as its offset (an open bound gives
+    # width = inf). A fixed "open" cutoff alone missed x in [-1.3e6, 9.9987e9]
+    # (a 1e10 bound after a shift) and left its (y - c)**2 unfolded -- the #1543
+    # trigger, certified 262 vs the true 2 on shifted st_miqp2.
+    #
+    # A box that already contains 0 is never moved (#1609). Its user origin is
+    # a point of the box, so there is no offset to remove -- only one to add:
+    # j in [-1e3, 1e3] anchored at -1e3 put the optimum j* = 2.5e-4 at
+    # z* = 1000.00025, where the QP route's relative tolerance reported j off
+    # by 19 % as `optimal`. ``narrow`` already excludes 0 (|lb| >= width), so
+    # this bites only the one-sided rules: a finite lb anchors only when
+    # lb > 0, an open lb anchors at ub only when ub < 0. The #1543 trigger
+    # (shifted st_miqp2, x1 in [-1.3e6, 9.9987e9]) is such a box; it is left
+    # alone now and certifies the base optimum 2 unmoved (measured).
+    from_lb = lb_fin & ~narrow & (lb >= ratio) & (width >= lb)
+    from_ub = ub_fin & ~lb_fin & (ub <= -ratio)
+    moves = narrow | from_lb | from_ub
     plan: dict[int, np.ndarray] = {}
+    if not moves.any():
+        return plan
+    shift = np.where(narrow | from_lb, np.round(lb), np.where(from_ub, np.round(ub), 0.0))
+    offset = 0
     for v in model._variables:
-        lb = np.asarray(v.lb, dtype=np.float64)
-        ub = np.asarray(v.ub, dtype=np.float64)
-        lb_fin = np.isfinite(lb) & (np.abs(lb) < _OPEN)
-        ub_fin = np.isfinite(ub) & (np.abs(ub) < _OPEN)
-        width = np.where(lb_fin & ub_fin, ub - lb, np.inf)
-        narrow = lb_fin & ub_fin & (np.abs(lb) >= ratio * np.maximum(1.0, width))
-        # One-sided: the box is at least as wide as its offset (an open bound gives
-        # width = inf). A fixed "open" cutoff alone missed x in [-1.3e6, 9.9987e9]
-        # (a 1e10 bound after a shift) and left its (y - c)**2 unfolded -- the #1543
-        # trigger, certified 262 vs the true 2 on shifted st_miqp2.
-        #
-        # A box that already contains 0 is never moved (#1609). Its user origin is
-        # a point of the box, so there is no offset to remove -- only one to add:
-        # j in [-1e3, 1e3] anchored at -1e3 put the optimum j* = 2.5e-4 at
-        # z* = 1000.00025, where the QP route's relative tolerance reported j off
-        # by 19 % as `optimal`. ``narrow`` already excludes 0 (|lb| >= width), so
-        # this bites only the one-sided rules: a finite lb anchors only when
-        # lb > 0, an open lb anchors at ub only when ub < 0. The #1543 trigger
-        # (shifted st_miqp2, x1 in [-1.3e6, 9.9987e9]) is such a box; it is left
-        # alone now and certifies the base optimum 2 unmoved (measured).
-        from_lb = lb_fin & ~narrow & (lb >= ratio) & (width >= lb)
-        from_ub = ub_fin & ~lb_fin & (ub <= -ratio)
-        if np.any(narrow | from_lb | from_ub):
-            plan[id(v)] = np.where(
-                narrow | from_lb, np.round(lb), np.where(from_ub, np.round(ub), 0.0)
-            )
+        size = int(v.size)
+        if moves[offset : offset + size].any():
+            plan[id(v)] = shift[offset : offset + size].reshape(np.shape(v.lb))
+        offset += size
+    if offset != lb.size:
+        raise AssertionError(f"recentre: variable sizes sum to {offset}, bounds to {lb.size}")
     return plan
 
 

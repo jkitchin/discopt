@@ -37451,6 +37451,14 @@ def _pure_route_presolve_skip_backends() -> tuple[str, ...]:
 
 
 def _milp_is_exactly_linear(model: Model) -> bool:
+    """:func:`_milp_is_exactly_linear_uncached`, memoised on the model's structure
+    (``discopt._structure_memo``): a solve asks it up to three times."""
+    from discopt._structure_memo import structure_memo
+
+    return structure_memo(model, "milp_is_exactly_linear", _milp_is_exactly_linear_uncached)
+
+
+def _milp_is_exactly_linear_uncached(model: Model) -> bool:
     """Whether ``extract_lp_data``'s linear projection of *model* is the model.
 
     ``extract_lp_data`` captures only the LINEAR part of the model; any nonlinear
