@@ -48,7 +48,11 @@ def run(job):
     name = pop[k][0]
     path = os.path.join(inst_dir, f"{name}.mps.gz")
     env = {a: b for a, b in os.environ.items() if not a.startswith("DISCOPT_")}
-    env.update(PYTHONUNBUFFERED="1", RAYON_NUM_THREADS="1", DISCOPT_LP_MILP_BACKEND="rust")
+    # One thread means BLAS too: two concurrent solves with numpy's 4-thread OpenBLAS
+    # on 4 cores took the incumbent repair's dense lstsq from ~1 s to ~19 s
+    # (neos-4393408-tinui 21 -> 39 s, mc7 21 -> 39 s; 2026-11-14).
+    env.update(PYTHONUNBUFFERED="1", RAYON_NUM_THREADS="1", DISCOPT_LP_MILP_BACKEND="rust",
+               OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
     if arm in ARM_ENV:
         env.update(ARM_ENV[arm])
     if arm == "ours" or arm in ARM_ENV:

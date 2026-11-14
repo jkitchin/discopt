@@ -5625,7 +5625,7 @@ fn solve_milp_node_search(
                 root_stalled = 0;
                 hs_stall = 0;
             }
-            for _round in 0..opts.cut_rounds {
+            for round in 0..opts.cut_rounds {
                 if total_cuts >= opts.root_cuts {
                     break;
                 }
@@ -5849,13 +5849,19 @@ fn solve_milp_node_search(
                     root_stalled = 0;
                 }
                 prev_obj = prev_obj.max(root.obj);
-                // HiGHS runs randomized rounding on every root round's LP point while
-                // there is no incumbent (`HighsMipSolverData.cpp:1858-1865`); the
-                // completion LP is over the uncut base rows, as in HiGHS.
+                // HiGHS runs randomized rounding on the FIRST root LP point whatever
+                // the incumbent (`HighsMipSolverData.cpp:2112`, after the pre-root
+                // trivial / feasibility-jump heuristics may already have found one),
+                // and on every later root round's point while there is no incumbent
+                // (`:1858-1865`). The first-point call is what keeps a weak pre-root
+                // incumbent from switching rounding off (measured: pg5_34's primal gap
+                // 5.1e-2 -> 1.0 with feasibility jump on and only the second rule).
+                // The completion LP is over the uncut base rows, as in HiGHS.
                 if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
-                    if tm
-                        .incumbent()
-                        .is_none_or(|(_, v)| v >= INFEAS_SENTINEL - 1.0)
+                    if (root_pass == 0 && round == 0)
+                        || tm
+                            .incumbent()
+                            .is_none_or(|(_, v)| v >= INFEAS_SENTINEL - 1.0)
                     {
                         if let Some((x, v)) = try_randomized_rounding(
                             base,
@@ -5864,7 +5870,7 @@ fn solve_milp_node_search(
                             ns,
                             &heur_is_int,
                             &root.x,
-                            0x5EED_0000 + _round as u64,
+                            0x5EED_0000 + round as u64,
                             opts,
                             deadline,
                         ) {
