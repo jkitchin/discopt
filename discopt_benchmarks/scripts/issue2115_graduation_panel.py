@@ -80,6 +80,15 @@ _TOL_ABS = 1e-6
 #: on an instance where it did not is time-limit noise), ``leak(off)`` must be 0
 #: (the OFF arm honoured the flag).
 _FLAGS = {
+    # HiGHS's incremental / row-wise PRICE in the primal simplex (restored 2026-11-14
+    # for a re-panel under the revised bar 2). It runs on every primal pivot whose
+    # reduced costs are updated from the pivot row, counted by the row-price arm used.
+    "DISCOPT_LP_PRIMAL_INCR_PRICING": {
+        "fired": lambda off, on: on["PrimalRowPriceSparse"] + on["PrimalRowPriceDense"],
+        "ran": lambda off, on: on["PrimalRowPriceSparse"] + on["PrimalRowPriceDense"] > 0,
+        "leak": lambda off: off["PrimalRowPriceSparse"] + off["PrimalRowPriceDense"],
+        "show": ("PrimalRowPriceSparse", "PrimalIncrDriftReprice"),
+    },
     # #2212: the engine's last-resort logical-basis dual. It runs only on an engine
     # entry's `Numerical` verdict, so `LpLogicalRescueAttempts` ON is where it ran and
     # any attempt OFF is a leak; `LpLogicalRescueDecided` counts the LPs it decided.
@@ -236,6 +245,11 @@ _FLAGS = {
     },
 }
 _CTRS = (
+    # DISCOPT_LP_PRIMAL_INCR_PRICING.
+    "PrimalRowPriceSparse",
+    "PrimalRowPriceDense",
+    "PrimalIncrDriftReprice",
+    "PrimalIncrExactRecheck",
     # #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE (and the spatial kernel's own retry).
     "LpLogicalRescueAttempts",
     "LpLogicalRescueDecided",
