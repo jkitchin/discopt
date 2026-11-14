@@ -1593,12 +1593,16 @@ fn p1_expel_forced_for_test() -> bool {
 /// simplex's reduced costs incrementally from the pivot row instead of re-pricing
 /// every column every pivot. Read once.
 ///
-/// **Default OFF, restored 2026-11-14 for a re-panel** under CLAUDE.md §5's revised
-/// bar 2 (HiGHS's incremental / row-wise PRICE is a reference-solver default). It was
-/// retired 2026-11-08 (`e5eac131`) on two panels that were cert-clean with nodes
-/// -16 %, certified 125 -> 124 and 125 -> 123, every loss on `p0548` (a cross-panel
-/// coin flip: with it set aside, certified 123 = 123, primal gap unchanged;
-/// `flag-retirement-audit.md`). Restored from `deb1b1f1` onto today's simplex.
+/// **Default ON since 2026-11-14** (`=0` opts out). Retired 2026-11-08 (`e5eac131`)
+/// on MILP panels whose only certificate losses were the coin-flip row `p0548`;
+/// restored from `deb1b1f1` and re-panelled under CLAUDE.md §5's revised bar 2 (a
+/// HiGHS default component graduates when cert-clean and not harmful). The panel had
+/// to be the MINLP corpus: on the current MILP engine its LPs all take the dual
+/// simplex and the mechanism never fires (every counter 0 on the 120-row MIPLIB
+/// population). `issue2115_graduation_panel.py`, 74 in-repo instances, 30 s, arms
+/// interleaved: 744 checks, 0 violations; fired on 61 instances (3.03 M row-price
+/// updates); certified 54 = 54; bounds 3 tighter, 1 looser; nodes 4977 -> 5119,
+/// wall 805.2 -> 795.5 s.
 pub(crate) fn incr_pricing_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -1610,8 +1614,8 @@ pub(crate) fn incr_pricing_enabled() -> bool {
 /// The parse table behind [`incr_pricing_enabled`]; garbage is refused.
 fn parse_incr_pricing(raw: &str) -> bool {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => false,
-        "1" | "true" | "yes" => true,
+        "0" | "false" | "no" => false,
+        "" | "1" | "true" | "yes" => true,
         other => panic!(
             "DISCOPT_LP_PRIMAL_INCR_PRICING={other:?} is not recognized (expected 1/true/yes \
                  or 0/false/no). Refusing rather than silently picking an arm."

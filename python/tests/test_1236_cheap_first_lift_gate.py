@@ -46,7 +46,10 @@ CORPORA = (
 #: at the root (1 node, against 5 un-lifted), so the gate no longer wins there. It was
 #: out once before for the same reason, while `DISCOPT_MILP_ROOT_GMI_REPAIR` was briefly
 #: default ON (2026-11-06).
-LIFT_DECLINED = {"nvs02": 3, "nvs14": 3}
+#: `nvs02` left it on 2026-11-14, when `DISCOPT_LP_PRIMAL_INCR_PRICING` graduated: the
+#: lifted model now certifies in 2 nodes, against 3 un-lifted, same optimum
+#: 5.96418452307 in both arms, so the gate no longer wins there either.
+LIFT_DECLINED = {"nvs14": 3}
 
 #: Instances that certify ONLY with the lift. The gate must keep it, and the
 #: probe it spends first must not cost them their certificate.
