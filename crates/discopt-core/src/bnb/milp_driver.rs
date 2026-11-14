@@ -2839,13 +2839,18 @@ fn try_stall_redive(
 /// 336 solves, certified 11 -> 12, incumbents 63 -> 83, dual gap better/worse 11/5,
 /// primal 7/9 at a median +0.2%. `=0` opts out; garbage is refused.
 fn pre_root_flag(var: &'static str) -> bool {
+    pre_root_flag_default(var, true)
+}
+
+/// A cached `0`/`1` heuristic switch with the given default; garbage is refused.
+fn pre_root_flag_default(var: &'static str, default: bool) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<&'static str, bool>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut c = cache.lock().expect("pre_root_flag cache");
     *c.entry(var).or_insert_with(|| match std::env::var(var) {
-        Err(_) => true,
+        Err(_) => default,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
@@ -3099,6 +3104,175 @@ fn try_randomized_rounding(
     let feastol = opts.simplex.tol.max(1e-6);
     let mut rng = seed ^ 0xD1B5_4A32_D192_ED03;
     let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+    let mut value = |j: usize| {
+        let x = node_x[j];
+        if locks.0[j] == 0 {
+            (x - feastol).ceil()
+        } else if locks.1[j] == 0 {
+            (x + feastol).floor()
+        } else {
+            (x + 0.1 + 0.8 * rr_uniform(&mut rng)).floor()
+        }
+    };
+    match fix_and_complete(
+        base, obj_const, ns, is_int, &ints, &mut value, opts, deadline,
+    ) {
+        Ok(found) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundFound);
+            Some(found)
+        }
+        Err(FixFail::PropInfeasible) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundPropInfeas);
+            None
+        }
+        Err(FixFail::LpFailed) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundLpFail);
+            None
+        }
+        Err(FixFail::Rejected) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundRejected);
+            None
+        }
+        Err(FixFail::NoTime) => None,
+    }
+}
+
+/// `DISCOPT_MILP_CENTRAL_ROUNDING`: HiGHS's central rounding at the root (default
+/// OFF until its population panel). Garbage is refused.
+fn central_rounding_enabled() -> bool {
+    pre_root_flag_default("DISCOPT_MILP_CENTRAL_ROUNDING", false)
+}
+
+/// HiGHS uses the analytic centre after this many root separation rounds
+/// (`HighsMipSolverData.cpp:2202`, `nseparounds >= 5`), or at the end of the root
+/// when the loop stops sooner (`:2312`).
+const CENTRAL_ROUNDING_AFTER_ROUNDS: usize = 5;
+
+/// Share of the remaining wall budget the analytic centre and the rounding may use
+/// (discopt's addition: HiGHS computes the centre in a parallel task with only an
+/// iteration limit).
+const CENTRAL_ROUNDING_TIME_SHARE: f64 = 0.1;
+
+/// HiGHS's central rounding (`HighsPrimalHeuristics::centralRounding` /
+/// `linesearchRounding`, `HighsPrimalHeuristics.cpp:1061-1115, 1697-1714`): the analytic
+/// centre of the base relaxation (`lp::analytic_center`), then rounding along the
+/// segment from the first root LP point to it. At each step every integer column is
+/// rounded up when nothing locks it up, down when nothing locks it down, and to the
+/// nearest integer of the convex combination otherwise; the step advances to the next
+/// alpha at which some column's rounding changes. Each rounded point goes through
+/// [`fix_and_complete`] and the first that completes and verifies is returned.
+#[allow(clippy::too_many_arguments)]
+fn try_central_rounding(
+    base: &SubMipBase,
+    locks: &(Vec<u32>, Vec<u32>),
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    first_lp_x: &[f64],
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+) -> Option<(Vec<f64>, f64)> {
+    if first_lp_x.len() < ns {
+        return None;
+    }
+    let _t = crate::profile::Timer::new(crate::profile::Phase::CentralRounding);
+    crate::profile::incr(crate::profile::Ctr::CentralRoundingRuns);
+    let local = deadline.map(|d| {
+        let left = d.saturating_duration_since(std::time::Instant::now());
+        std::time::Instant::now() + left.mul_f64(CENTRAL_ROUNDING_TIME_SHARE)
+    });
+    let center = crate::lp::analytic_center::analytic_center(
+        &base.csc,
+        base.m,
+        base.n,
+        &base.b,
+        &base.l,
+        &base.u,
+        crate::lp::analytic_center::MAX_ITER,
+        local,
+    );
+    let Some(center) = center else {
+        crate::profile::incr(crate::profile::Ctr::CentralRoundingNoCenter);
+        return None;
+    };
+    crate::profile::incr(crate::profile::Ctr::CentralRoundingCenters);
+    let p2 = &center.x[..ns];
+    let p1 = &first_lp_x[..ns];
+    let feastol = opts.simplex.tol.max(1e-6);
+    let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+    let mut rounded = vec![0.0; ns];
+    let mut alpha = 0.0f64;
+    while alpha < 1.0 {
+        if local.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
+        let mut next_alpha = 1.0f64;
+        let mut reached_p2 = true;
+        for &j in &ints {
+            if locks.0[j] == 0 {
+                rounded[j] = (p1[j].max(p2[j]) - feastol).ceil();
+                continue;
+            }
+            if locks.1[j] == 0 {
+                rounded[j] = (p1[j].min(p2[j]) + feastol).floor();
+                continue;
+            }
+            let comb = (1.0 - alpha) * p1[j] + alpha * p2[j];
+            let int_p2 = (p2[j] + 0.5).floor();
+            rounded[j] = (comb + 0.5).floor();
+            if rounded[j] == int_p2 {
+                continue;
+            }
+            reached_p2 = false;
+            let t = (rounded[j] + 0.5 + feastol - p1[j]) / (p2[j] - p1[j]).abs();
+            if t < next_alpha && t > alpha + 1e-2 {
+                next_alpha = t;
+            }
+        }
+        crate::profile::incr(crate::profile::Ctr::CentralRoundingTries);
+        let mut value = |j: usize| rounded[j];
+        if let Ok(found) =
+            fix_and_complete(base, obj_const, ns, is_int, &ints, &mut value, opts, local)
+        {
+            crate::profile::incr(crate::profile::Ctr::CentralRoundingFound);
+            return Some(found);
+        }
+        if reached_p2 {
+            return None;
+        }
+        alpha = next_alpha;
+    }
+    None
+}
+
+/// Why [`fix_and_complete`] produced no point.
+enum FixFail {
+    /// Propagating the fixings proved the box empty.
+    PropInfeasible,
+    /// The completion LP over the remaining columns was not `Optimal`.
+    LpFailed,
+    /// The completed point failed re-verification on the original rows.
+    Rejected,
+    /// The deadline had passed before the completion LP.
+    NoTime,
+}
+
+/// HiGHS's `tryRoundedPoint` step shared by randomized and central rounding: fix
+/// each integer column in `ints` (in order) at `value(j)`, clamped into its current
+/// (propagated) bounds, propagate, solve the LP over the remaining columns on the
+/// BASE problem and re-verify the point on the original rows. `value` is called
+/// once per column, in `ints` order, so a randomized caller's draws are unchanged.
+#[allow(clippy::too_many_arguments)]
+fn fix_and_complete(
+    base: &SubMipBase,
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    ints: &[usize],
+    value: &mut dyn FnMut(usize) -> f64,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+) -> Result<(Vec<f64>, f64), FixFail> {
     let nnz = base.csc.raw().2.len().max(1);
     let stride = (ints.len() * nnz).div_ceil(RAND_ROUND_WORK).max(1);
     let (mut sl, mut su) = (base.l.clone(), base.u.clone());
@@ -3112,34 +3286,17 @@ fn try_randomized_rounding(
             &sl,
             &su,
         );
-        for &j in &ints {
-            let x = node_x[j];
-            let v = if locks.0[j] == 0 {
-                (x - feastol).ceil()
-            } else if locks.1[j] == 0 {
-                (x + feastol).floor()
-            } else {
-                (x + 0.1 + 0.8 * rr_uniform(&mut rng)).floor()
-            };
-            let v = v.min(prop.u[j]).max(prop.l[j]);
+        for &j in ints {
+            let v = value(j).min(prop.u[j]).max(prop.l[j]);
             if !prop.set(j, v, v) {
-                crate::profile::incr(crate::profile::Ctr::RandRoundPropInfeas);
-                return None;
+                return Err(FixFail::PropInfeasible);
             }
         }
         sl = prop.l;
         su = prop.u;
     } else {
         for (k, &j) in ints.iter().enumerate() {
-            let x = node_x[j];
-            let v = if locks.0[j] == 0 {
-                (x - feastol).ceil()
-            } else if locks.1[j] == 0 {
-                (x + feastol).floor()
-            } else {
-                (x + 0.1 + 0.8 * rr_uniform(&mut rng)).floor()
-            };
-            let v = v.min(su[j]).max(sl[j]);
+            let v = value(j).min(su[j]).max(sl[j]);
             sl[j] = v;
             su[j] = v;
             if (k + 1) % stride == 0 || k + 1 == ints.len() {
@@ -3154,8 +3311,7 @@ fn try_randomized_rounding(
                     opts.simplex.tol,
                 );
                 if pr.infeasible {
-                    crate::profile::incr(crate::profile::Ctr::RandRoundPropInfeas);
-                    return None;
+                    return Err(FixFail::PropInfeasible);
                 }
                 sl = pr.l;
                 su = pr.u;
@@ -3166,7 +3322,7 @@ fn try_randomized_rounding(
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            return None;
+            return Err(FixFail::NoTime);
         }
         simplex.deadline = Some(std::time::Instant::now() + left.mul_f64(0.25));
     }
@@ -3174,8 +3330,7 @@ fn try_randomized_rounding(
         &base.csc, base.m, base.n, &base.c, &sl, &su, &base.b, &simplex,
     );
     if sol.status != LpStatus::Optimal || sol.x.len() < ns {
-        crate::profile::incr(crate::profile::Ctr::RandRoundLpFail);
-        return None;
+        return Err(FixFail::LpFailed);
     }
     match validate_seed_incumbent(
         &sol.x[..ns],
@@ -3189,14 +3344,8 @@ fn try_randomized_rounding(
         base.m,
         base.n,
     ) {
-        Some((x, obj)) => {
-            crate::profile::incr(crate::profile::Ctr::RandRoundFound);
-            Some((x, obj + obj_const))
-        }
-        None => {
-            crate::profile::incr(crate::profile::Ctr::RandRoundRejected);
-            None
-        }
+        Some((x, obj)) => Ok((x, obj + obj_const)),
+        None => Err(FixFail::Rejected),
     }
 }
 
@@ -5523,6 +5672,9 @@ fn solve_milp_node_search(
     let mut round_pool_ids: Vec<i32> = Vec::new();
     // Gap plan §12.27: root RENS between root passes (`highs_root_rens`).
     let root_rens_on = highs_sep.is_some() && sub_mip_base.is_some() && highs_root_rens();
+    // Central rounding's inputs: the first root LP point, and whether it is still owed.
+    let mut first_root_x: Option<Vec<f64>> = None;
+    let mut central_pending = central_rounding_enabled() && milp_depth == 0 && opts.heuristics;
     let mut root_rens_ran = false;
     if opts.root_cuts > 0 {
         let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
@@ -5873,6 +6025,33 @@ fn solve_milp_node_search(
                             &heur_is_int,
                             &root.x,
                             0x5EED_0000 + round as u64,
+                            opts,
+                            deadline,
+                        ) {
+                            tm.inject_incumbent(x, v);
+                        }
+                    }
+                }
+                // HiGHS's central rounding (`DISCOPT_MILP_CENTRAL_ROUNDING`): from the
+                // first root LP point towards the analytic centre, once, after
+                // `CENTRAL_ROUNDING_AFTER_ROUNDS` rounds (or at the end of the root).
+                if root_pass == 0 && round == 0 {
+                    first_root_x = Some(root.x.clone());
+                }
+                if central_pending && round + 1 >= CENTRAL_ROUNDING_AFTER_ROUNDS {
+                    central_pending = false;
+                    if let (Some(base), Some(locks), Some(x0)) = (
+                        sub_mip_base.as_ref(),
+                        rr_locks.as_ref(),
+                        first_root_x.as_ref(),
+                    ) {
+                        if let Some((x, v)) = try_central_rounding(
+                            base,
+                            locks,
+                            obj_const,
+                            ns,
+                            &heur_is_int,
+                            x0,
                             opts,
                             deadline,
                         ) {
@@ -6402,6 +6581,23 @@ fn solve_milp_node_search(
                         );
                     }
                 }
+            }
+        }
+    }
+
+    // Central rounding not yet run (the root loop stopped before
+    // `CENTRAL_ROUNDING_AFTER_ROUNDS` rounds): at the end of the root, as HiGHS
+    // (`HighsMipSolverData.cpp:2312-2323`).
+    if central_pending {
+        if let (Some(base), Some(locks), Some(x0)) = (
+            sub_mip_base.as_ref(),
+            rr_locks.as_ref(),
+            first_root_x.as_ref(),
+        ) {
+            if let Some((x, v)) =
+                try_central_rounding(base, locks, obj_const, ns, &heur_is_int, x0, opts, deadline)
+            {
+                tm.inject_incumbent(x, v);
             }
         }
     }

@@ -149,6 +149,8 @@ timed_phases!(
     RandRound,
     // Pre-root trivial points + feasibility jump (`bnb::feas_jump`).
     PreRootHeur,
+    // HiGHS central rounding at the root (`bnb::milp_driver::try_central_rounding`).
+    CentralRounding,
     // The MILP presolve (`milp_presolve::presolve_opts`), top level and sub-MIPs.
     MilpPresolve,
     // W1 (D2 plan): the node-GMI step's parts.
@@ -451,6 +453,13 @@ counters!(
     FeasJumpRuns,
     FeasJumpFound,
     FeasJumpAccepted,
+    // Central rounding: runs; analytic centres found / not found; rounded points
+    // tried; incumbents found.
+    CentralRoundingRuns,
+    CentralRoundingCenters,
+    CentralRoundingNoCenter,
+    CentralRoundingTries,
+    CentralRoundingFound,
     RcFixRefactor,
     // Node reduced-cost fixing (gap plan §12.25): calls, nodes where it tightened
     // at least one integer column, and integer bounds tightened.
