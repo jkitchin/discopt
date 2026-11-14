@@ -534,6 +534,13 @@ in this repo, so treat that README's framing of them as unverified here.
   (e.g. libstdc++) -- write an independent implementation and check it against the original's
   *outputs* instead. Example: the libstdc++ `partition`/`partial_sort`/heap/
   `upper_bound` translations were replaced by Rust std versions in this way.
+- **Port the idea, not just the code** (owner, 2026-11-14). The goal is eventually to have
+  every reference-solver component (all of HiGHS's heuristics, separators, presolve rules)
+  available in discopt, reimplemented in Rust and improved where we can: better data
+  structures, work limits and deadlines the original lacks, sharper bounds, fewer
+  allocations. A faithful first version is a *verification baseline* (bit-exact replay
+  against the original, where feasible, proves the port before it is changed), not the
+  end state. Improvements over the original ship as measured changes on top of it, per §5.
 
 - **Correctness is non-negotiable**: Every phase gate enforces `incorrect_count ≤ 0`. Never weaken this check.
 - **Numerical tolerances**: abs=1e-6, rel=1e-4, integrality=1e-5, factorization=1e-12
