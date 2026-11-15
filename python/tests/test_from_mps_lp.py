@@ -192,5 +192,6 @@ def test_the_differential_compares_optima():
     for seed in range(12):
         optimal += _solve(_random_model(np.random.default_rng(seed), False)).status == "optimal"
     for seed in range(8):
-        optimal += _solve(_random_model(np.random.default_rng(100 + seed), True)).status == "optimal"
+        model = _random_model(np.random.default_rng(100 + seed), True)
+        optimal += _solve(model).status == "optimal"
     assert optimal >= 17, optimal

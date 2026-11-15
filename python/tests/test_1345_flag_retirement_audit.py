@@ -71,6 +71,12 @@ OUT_OF_SCOPE = {
     "DISCOPT_PROFILE": "arms the Rust profile counters (`profile.rs`); observation only",
     "DISCOPT_LP_DUAL_TRACE": "one stderr trace line per dual pivot; observation only",
     "DISCOPT_T14_DBG": "stderr accept/reject lines in the warm primal; observation only",
+    # Boolean diagnostics of the HiGHS port and MILP driver: replay modes and logs.
+    "DISCOPT_HIGHS_SEARCH_REPLAY_VERBOSE": "prints the search replay's steps; observation only",
+    "DISCOPT_HIGHS_SEP_REPLAY": "transformed-LP replay in separator mode; observation only",
+    "DISCOPT_HIGHS_SEP_REPLAY_RESYNC": "resyncs the separator replay; observation only",
+    "DISCOPT_MILP_PRESOLVE_LOG": "prints MILP presolve's statistics; observation only",
+    "DISCOPT_RENS_TRACE": "stderr trace of each RENS sub-MIP's box and outcome; observation only",
 }
 
 #: Reads the scan cannot classify as a boolean gate, each with the reason it is not
@@ -91,6 +97,26 @@ NOT_A_GATE = {
     "DISCOPT_LLM_MODEL": "a litellm model identifier",
     "DISCOPT_LLM_TIMEOUT": "a request timeout in seconds; 0 would be a duration, not an off-switch",
     "DISCOPT_PROVENANCE_AUTHOR": "an author name stamped into a provenance block",
+    # Diagnostics of the HiGHS port: file paths, replays, dumps and logs (2026-11-15).
+    "DISCOPT_HIGHS_DIVE_BATCH": "a batch-size count for the dive-batching experiment, not a switch",
+    "DISCOPT_HIGHS_QUEUE_REPLAY": "a path to a HiGHS node-queue dump to replay (test harness)",
+    "DISCOPT_HIGHS_SEARCH_REPLAY": "a path to HiGHS search dumps to replay (test harness)",
+    "DISCOPT_HIGHS_CUTGEN_REPLAY": "a path to HiGHS generateCut dumps to replay",
+    "DISCOPT_HIGHS_CUTGEN_FIXTURE_OUT": "writes the cutgen replay as a test fixture",
+    "DISCOPT_HIGHS_POOL_REPLAY": "a path to HiGHS cut-pool dumps to replay",
+    "DISCOPT_HIGHS_TL_REPLAY": "a path to HiGHS transformed-LP dumps to replay",
+    "DISCOPT_NODEBOX_FILE": "a path the per-node boxes are written to",
+    "DISCOPT_NODEBOX_MODE": "the node-box dump's format (fresh / cumulative)",
+    "DISCOPT_HIGHS_SEARCH_CHECK_POINT": "a path to a reference point checked against node boxes",
+    "DISCOPT_HIGHS_SEPA_CHECK_POINT": "a path to a reference point checked against cuts",
+    "DISCOPT_LP_DUMP_UNCERTIFIED": "a path uncertified LPs are dumped to",
+    "DISCOPT_MILP_SEED_POINT": "a path to a seed incumbent (entry experiments; validated)",
+    "DISCOPT_MILP_PRESOLVE_DUMP": "a path the reduced MILP is written to",
+    "DISCOPT_MILP_DUMP_INCUMBENT": "a path the final incumbent is written to",
+    "DISCOPT_MILP_ROOT_CMIR": (
+        "a mode selector for the root separators (off / on / highs); its modes are "
+        "judged through DISCOPT_HIGHS_CONFIG, which sets them"
+    ),
     "DISCOPT_LP_SPATIAL_PLUNGE": (
         "a three-state override: unset defers to the caller's `require_incremental`, "
         "so it has no single default polarity. Tracked as a solver-math gate below."
@@ -466,7 +492,9 @@ def test_no_rust_read_is_left_unclassified(rust_sites):
     unknown = {
         f: [s.where for s in v if s.polarity.startswith("unknown")] for f, v in rust_sites.items()
     }
-    unknown = {f: w for f, w in unknown.items() if w}
+    # A value read (a path, a count, a mode) is `unknown` by construction; NOT_A_GATE
+    # names each one with its reason, exactly as for the Python half.
+    unknown = {f: w for f, w in unknown.items() if w and f not in NOT_A_GATE}
     assert not unknown, (
         f"the Rust scan cannot classify {unknown}. Teach flag_audit_scan._rust_polarity "
         "the consumer shape (and add a snippet to RUST_SNIPPETS), or spell the read in "

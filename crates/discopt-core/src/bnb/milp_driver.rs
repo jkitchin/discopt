@@ -2461,8 +2461,10 @@ const NESTED_SUB_MIP_SHARE: f64 = 0.5;
 ///   sub-MIP found its incumbent at 17.8 s);
 /// - lifting the cap to min(50 %, 10 s) took neos-498623's incumbent 37.6 -> 22.7.
 ///
-/// Nested sub-MIPs keep the capped budget. Default OFF until its panel; garbage is
-/// refused.
+/// Nested sub-MIPs keep the capped budget. Default OFF: the root-only scope was
+/// also harmful (`population_panel_rb.*`: incumbents 89 -> 87, dual better/worse
+/// 10/15, certified-row wall 1.13x). Re-judge once root RENS is effort-gated as
+/// HiGHS's is (`moreHeuristicsAllowed`). Garbage is refused.
 fn submip_budget_highs_enabled() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| match std::env::var("DISCOPT_MILP_SUBMIP_BUDGET_HIGHS") {

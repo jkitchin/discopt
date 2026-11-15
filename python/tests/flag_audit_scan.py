@@ -549,6 +549,15 @@ def _rust_polarity(text: str, start: int, end: int, os_form: bool) -> tuple[str,
         m = re.search(r"Err\(_\)=>(true|false)\b", flat)
         if m:
             return "rust_match", "on" if m.group(1) == "true" else "off"
+        # `Err(_) => crate::highs_config::enabled()` / `=> None` / a guarded arm: the
+        # unset value comes from another switch (a configuration member, or the
+        # umbrella's own `Option`): delegated, like `.unwrap_or(on)`.
+        # A bare constant (`Err(_) => DEF`) names no switch and stays unknown.
+        m = re.search(r"Err\(_\)if[^=]*=>([A-Za-z_][A-Za-z0-9_:]*(?:\(\))?)", flat) or re.search(
+            r"Err\(_\)=>(None\b|[A-Za-z_][A-Za-z0-9_:]*\(\))", flat
+        )
+        if m:
+            return "rust_match", f"delegated:{m.group(1)}"
         return "rust_match", "unknown:match-err-arm-not-literal"
     # A helper's `Option<bool>` falling back to another switch's value: `.unwrap_or(on)`
     # with `on` a binding, or `.unwrap_or_else(path::to::default)`. The flag has no

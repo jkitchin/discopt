@@ -1058,6 +1058,10 @@ work-bounded sub-MIP budget).
   wall 1.17x: harmful. Both flags stay OFF.
 - The budget is the likely cause: longer sub-MIPs take the tree's time. HiGHS
   bounds them by its 5 % heuristic-effort share, which our root RENS ignores.
+- Re-scoped to root RENS only (in-tree RENS/RINS keep the 2 s cap;
+  `population_panel_rb.*`): 0 violations, certified 15 = 15, incumbents 89 -> 87,
+  primal 9/9, dual 10/15, certified-row wall 1.13x. Still harmful, so the flag
+  stays OFF. The next step is the effort gate itself, not a larger budget.
 
 **DSE weight check** (HiGHS `acceptDualSteepestEdgeWeight`): re-choose a row whose
 updated weight is under a quarter of the exact one.

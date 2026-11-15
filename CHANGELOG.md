@@ -35,11 +35,16 @@ The release procedure that produces these entries is documented in
 ### Changed
 
 - **HiGHS is an optional extra (`pip install 'discopt[highs]'`).** Without `highspy`
-  every default path runs on discopt's in-house Rust engine: pure LPs (Rust simplex by
-  default whether or not HiGHS is installed), pure MILPs (Rust MILP engine; with
-  `highspy` installed a pure MILP still defaults to HiGHS), IIS (`iis_engine="rust"`),
-  root cuts, the decomposition and OA masters. Explicit HiGHS opt-ins raise
-  `MissingHighsError` naming the extra.
+  every default path runs on discopt's in-house Rust engine: pure LPs and pure MILPs
+  (the Rust simplex and MILP engine, whether or not HiGHS is installed), IIS
+  (`iis_engine="rust"`), root cuts, the decomposition and OA masters. Explicit HiGHS
+  opt-ins raise `MissingHighsError` naming the extra.
+- **HiGHS for pure LP/MILP performance.** With `discopt[highs]` installed,
+  `Model.solve(milp_backend="highs")` (or `DISCOPT_LP_MILP_BACKEND=highs`) solves a
+  pure LP or MILP with HiGHS, its certificate still verified by discopt. On the
+  120-instance MIPLIB benchmark at 20 s, HiGHS certifies 26 instances to the Rust
+  engine's 15, so MILP-heavy users who want speed should opt in. MINLPs are unaffected:
+  their node LPs always use the in-house simplex.
 - **`highs_options=` on a pure LP is dropped with a `UserWarning`**, because pure LPs
   now solve on the Rust simplex by default. Set `DISCOPT_LP_BACKEND=highs` to keep the
   HiGHS route for LPs.
