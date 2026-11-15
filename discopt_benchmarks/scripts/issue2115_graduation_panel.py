@@ -80,6 +80,16 @@ _TOL_ABS = 1e-6
 #: on an instance where it did not is time-limit noise), ``leak(off)`` must be 0
 #: (the OFF arm honoured the flag).
 _FLAGS = {
+    # highs-parity S3 (2026-11-15, graduated default-ON on the MILP population): after
+    # a cost-perturbed dual, clean up on the true costs with the primal phase 2 first,
+    # as HiGHS does. `DualCostPerturbPrimalCleanup` counts the clean-ups it decided;
+    # any OFF is a leak. `DualCostPerturbAttempts` shows how often the perturbed route ran.
+    "DISCOPT_LP_PERTURB_PRIMAL_CLEANUP": {
+        "fired": lambda off, on: on["DualCostPerturbPrimalCleanup"],
+        "ran": lambda off, on: on["DualCostPerturbAttempts"] > 0,
+        "leak": lambda off: off["DualCostPerturbPrimalCleanup"],
+        "show": ("DualCostPerturbAttempts", "DualCostPerturbPrimalCleanup"),
+    },
     # HiGHS's incremental / row-wise PRICE in the primal simplex (restored 2026-11-14
     # for a re-panel under the revised bar 2). It runs on every primal pivot whose
     # reduced costs are updated from the pivot row, counted by the row-price arm used.
@@ -245,6 +255,9 @@ _FLAGS = {
     },
 }
 _CTRS = (
+    # DISCOPT_LP_PERTURB_PRIMAL_CLEANUP.
+    "DualCostPerturbAttempts",
+    "DualCostPerturbPrimalCleanup",
     # DISCOPT_LP_PRIMAL_INCR_PRICING.
     "PrimalRowPriceSparse",
     "PrimalRowPriceDense",
