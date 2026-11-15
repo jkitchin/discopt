@@ -993,3 +993,27 @@ Population now (defaults): **14 certified, 103 with a bound** (HiGHS 26 / 110).
   the clean-up. Degeneracy and pricing, so dual steepest edge reopens under §79a's
   condition.
 - piperout-d27's per-pivot cost.
+
+**S4 primal, first look (2026-11-15).**
+
+The three primal-bound rows and where HiGHS gets its incumbents:
+
+| row | discopt incumbent | optimum | HiGHS log |
+|---|---|---|---|
+| 10teams | 976 | 924 | root sub-MIP (`L`) at 2.1 s |
+| neos-498623 | 37.6 | 16.6 | `J` `R` `C`, then `L` at 4.0 s |
+| neos-960392 | 0 | -238 | `z`, then `L` at 17.8 s |
+
+Every row's final incumbent comes from HiGHS's root RENS sub-MIP: 500 leaves,
+200 + nodes/20 nodes, 12-node stall, presolve on, and no time share. Ours caps it
+at min(25 % of the remaining time, 2 s).
+
+Entry check, temporary build: lifting the cap to min(50 %, 10 s) moved only
+neos-498623 (37.6 -> 22.7, sub-nodes 6 -> 117). Each of the other two fails
+somewhere else:
+- 10teams: 26 sub-nodes and no point either way;
+- neos-960392: the sub-MIP is never reached (0 sub-nodes; the dive or the 10 %
+  fixing rate declines).
+
+The time share is one factor, not the cause. Next: trace each row's RENS (fixing
+rate, dive outcome, sub-MIP status) against HiGHS's `RENS` on the same root point.
