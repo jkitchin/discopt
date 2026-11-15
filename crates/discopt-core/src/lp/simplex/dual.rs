@@ -2182,6 +2182,7 @@ impl<'a> PreparedDual<'a> {
             }
             // Periodic exact refresh to bound increment roundoff.
             if since_refresh >= REFRESH {
+                let _t_refresh = crate::profile::Timer::new(crate::profile::Phase::DualRefresh);
                 xb = tagged(
                     recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
                     crate::profile::Ctr::DualExitXbSolveFail,
@@ -2194,7 +2195,8 @@ impl<'a> PreparedDual<'a> {
             // feasibility, confirm with an *exact* recompute before declaring
             // optimality, and verify dual feasibility on *exact* reduced costs —
             // so a drifted increment can never return a wrong optimum.
-            let (r, to_lower, delta) = match select_leaving_slots(
+            let t_chuzr = crate::profile::Timer::new(crate::profile::Phase::DualChuzr);
+            let chosen = select_leaving_slots(
                 m,
                 &basis,
                 &lb_b,
@@ -2204,7 +2206,9 @@ impl<'a> PreparedDual<'a> {
                 tol,
                 bland,
                 tolerated.as_deref(),
-            ) {
+            );
+            drop(t_chuzr);
+            let (r, to_lower, delta) = match chosen {
                 Some(sel) => sel,
                 None => {
                     xb = tagged(
@@ -2369,6 +2373,7 @@ impl<'a> PreparedDual<'a> {
             }
             rho_dirty.clear();
             rho_nz.clear();
+            let t_btran = crate::profile::Timer::new(crate::profile::Phase::DualBtran);
             if sparse_solves {
                 if lu.btran_sparse(m, &[(r, 1.0)], &mut sp_out).is_err() {
                     crate::profile::incr(crate::profile::Ctr::DualExitRhoBtranFail);
@@ -2393,6 +2398,8 @@ impl<'a> PreparedDual<'a> {
                     return None;
                 }
             }
+            drop(t_btran);
+            let t_price = crate::profile::Timer::new(crate::profile::Phase::DualPrice);
             // Row-wise when `ρ` is sparse (HiGHS's PRICE): only the rows where `ρ` is
             // nonzero are visited, and `touched` lists (ascending) the nonbasic columns
             // the pivot row can be nonzero on, so the ratio test and the reduced-cost
@@ -2453,6 +2460,8 @@ impl<'a> PreparedDual<'a> {
                 }
             }
 
+            drop(t_price);
+            let t_ratio = crate::profile::Timer::new(crate::profile::Phase::DualRatio);
             // Bound-flipping (long-step) dual ratio test on the *maintained*
             // reduced costs: walk eligible breakpoints in increasing |d_j/α_rj|,
             // flipping each finite-bounded one to its opposite bound until the
@@ -2590,6 +2599,8 @@ impl<'a> PreparedDual<'a> {
                 };
             }
 
+            drop(t_ratio);
+            let t_ftran = crate::profile::Timer::new(crate::profile::Phase::DualFtran);
             // Entering column α = B⁻¹A_q for the Devex weight update (and reused as
             // the raw column for the product-form basis update). Scattered from the
             // CSC view into a dense buffer (O(nnz_q)), not read from a dense matrix.
@@ -2624,6 +2635,7 @@ impl<'a> PreparedDual<'a> {
                     return None;
                 }
             }
+            drop(t_ftran);
             let piv = alpha[r];
             if piv.abs() <= tol {
                 // Unstable (near-zero) pivot. Without the recovery this hands off
@@ -2699,6 +2711,7 @@ impl<'a> PreparedDual<'a> {
             }
 
             // Pivot: q enters at slot r; leaving var pinned at the violated bound.
+            let t_update = crate::profile::Timer::new(crate::profile::Phase::DualUpdate);
             let leaving = basis[r];
 
             // Degeneracy for anti-cycling: a dual pivot makes no dual-objective
@@ -2810,7 +2823,10 @@ impl<'a> PreparedDual<'a> {
             ub_b[r] = u[q];
             slot_of[q] = r as i64;
             stat[q] = BASIC;
+            drop(t_update);
+            let t_luup = crate::profile::Timer::new(crate::profile::Phase::DualLuUpdate);
             let need_refac = lu.update(r, &raw_q).is_err();
+            drop(t_luup);
             updates += 1;
             if need_refac || updates >= refac_interval {
                 // #1008 D3: attribute the trigger. Priority FT-fail > cap, matching
@@ -2821,12 +2837,15 @@ impl<'a> PreparedDual<'a> {
                     crate::profile::Ctr::DualRefacCap
                 });
                 crate::profile::incr(crate::profile::Ctr::DualRefactorizations);
+                let t_refac = crate::profile::Timer::new(crate::profile::Phase::DualRefactor);
                 if lu.factorize_basis(m, sp, &basis).is_err() {
                     crate::profile::incr(crate::profile::Ctr::DualExitRefacFail);
                     return None;
                 }
+                drop(t_refac);
                 updates = 0;
                 // Fresh factorization → reseed exact values, reset the drift clock.
+                let _t_refresh = crate::profile::Timer::new(crate::profile::Phase::DualRefresh);
                 xb = tagged(
                     recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
                     crate::profile::Ctr::DualExitXbSolveFail,

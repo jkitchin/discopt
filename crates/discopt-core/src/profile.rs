@@ -183,6 +183,19 @@ timed_phases!(
     DualPrepare,
     DualRecompute,
     DualPivotLoop,
+    // Sections of one dual pivot (`run_dual`), for the S3 root-LP breakdown: leaving
+    // row choice, the row btran, PRICE, the bound-flipping ratio test, the column
+    // ftran, the reduced-cost / x_B / Devex updates, the LU update, refactorizations,
+    // and the exact x_B / d refreshes (periodic and after each refactor).
+    DualChuzr,
+    DualBtran,
+    DualPrice,
+    DualRatio,
+    DualFtran,
+    DualUpdate,
+    DualLuUpdate,
+    DualRefactor,
+    DualRefresh,
     // #1008: the two halves of a SPARSE basis refactorization. `LuSymbolic` is
     // `SparseLuSymbolic::analyze` (AMD on the AᵀA pattern — a fill-reducing
     // ordering recomputed from scratch on every refactorization even though an
