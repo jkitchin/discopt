@@ -100,18 +100,45 @@ def test_driver_does_not_prove_a_tolerance_feasible_box_empty(lazy):
 
 
 def test_tol_robust_opt_out_reproduces_the_defect():
-    """``DISCOPT_MILP_TOL_ROBUST=0`` (read once per process, so a subprocess) restores
-    the exact-only proofs, and the lazy master again proves the box empty: the
-    fixture still exercises the defect the default fixes."""
+    """The fixture still exercises the defect class, and ``=0`` really turns the fix off.
+
+    ``DISCOPT_MILP_TOL_ROBUST=0`` (read once per process, so subprocesses) restores the
+    exact-only proofs. On main that made the lazy master prove this box empty
+    (``INFEASIBLE``). On the highs-parity search the unfixed trajectory reaches the
+    optimum before such a proof is acted on (measured 2026-11-15: ``OPTIMAL`` with every
+    MILP switch tried), so the end-to-end symptom is no longer the probe. What is: on
+    the default the driver still meets emptiness verdicts and infeasible node LPs that
+    do not survive the acceptance tolerance -- exactly the proofs the pre-fix driver
+    acted on -- and refuses or relaxes them (measured: 13 FBBT verdicts refused, 11
+    relaxed re-solves), while ``=0`` leaves every such counter at zero. The mechanisms
+    themselves are unit-tested in ``milp_driver.rs``
+    (``robust_farkas_refuses_a_ray_inside_the_tolerance`` and the #2107 tests)."""
     code = (
         "import sys; sys.path.insert(0, %r)\n"
         "import test_milp_tolerance_feasible_box as T\n"
         "from discopt.solvers import milp_simplex as MS\n"
+        "from discopt._rust import profile_counters_py, profile_reset_py\n"
+        "profile_reset_py()\n"
         "r = MS.solve_milp_with_lazy_cuts(**T._load(), time_limit=60.0, gap_tolerance=1e-4,"
         " lazy_callback=lambda x: [])\n"
+        "c = dict(profile_counters_py())\n"
         "print('STATUS', r.status.name)\n"
+        "print('ROBUST', c['TolRobustFbbtRefused'], c['TolRobustRelaxedSolves'])\n"
     ) % os.path.dirname(__file__)
-    env = {**os.environ, "DISCOPT_MILP_TOL_ROBUST": "0"}
-    p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
-    assert p.returncode == 0, p.stderr[-3000:]
-    assert "STATUS INFEASIBLE" in p.stdout, p.stdout
+
+    def run(value: str) -> tuple[str, int, int]:
+        env = {**os.environ, "DISCOPT_PROFILE": "1", "DISCOPT_MILP_TOL_ROBUST": value}
+        p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+        assert p.returncode == 0, p.stderr[-3000:]
+        lines = dict(ln.split(" ", 1) for ln in p.stdout.splitlines() if " " in ln)
+        refused, relaxed = (int(v) for v in lines["ROBUST"].split())
+        return lines["STATUS"], refused, relaxed
+
+    status_on, refused_on, relaxed_on = run("1")
+    assert status_on == "OPTIMAL"
+    # The fixture still produces the non-robust proofs the fix exists for.
+    assert refused_on + relaxed_on > 0, (refused_on, relaxed_on)
+    status_off, refused_off, relaxed_off = run("0")
+    # ...and the opt-out is consumed: none of them is refused or relaxed.
+    assert (refused_off, relaxed_off) == (0, 0)
+    print(f"opt-out status on this trajectory: {status_off}")

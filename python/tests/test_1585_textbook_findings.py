@@ -97,8 +97,11 @@ def test_a_report_without_iterations_reads_back_with_an_empty_list(tmp_path):
 
 
 def _knap():
+    # n=50 (was 30): the 30-item knapsack closes in 2 nodes on the native no-cuts route
+    # since the root rounds' NS bounds floor the root (DISCOPT_MILP_ROOT_ROUND_BOUND),
+    # so max_nodes=5 never bound. 50 items, same seed: 29 nodes (measured 2026-11-15).
     rng = np.random.default_rng(3)
-    n = 30
+    n = 50
     v = rng.integers(10, 60, n)
     w = rng.integers(5, 40, n)
     k = dm.Model("knap")

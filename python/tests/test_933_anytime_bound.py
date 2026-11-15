@@ -256,16 +256,19 @@ def test_seed_root_bound_floor_survives_a_failed_root_relaxation():
 # ---------------------------------------------------------------------------
 
 
-def _knapsack(n: int = 14) -> dm.Model:
+def _knapsack() -> dm.Model:
+    """A strongly correlated 2-row knapsack with fractional data (n=20, seed 2): 447
+    nodes to optimal on the defaults, so max_nodes=3/9 exit budget-limited (measured
+    2026-11-15). The 14-item knapsack this test used closes at the root since the
+    root rounds' NS bounds floor the root node (``DISCOPT_MILP_ROOT_ROUND_BOUND``)."""
+    rng = np.random.default_rng(2)
+    n = 20
     m = dm.Model("kp933")
-    rng = np.random.default_rng(0)
-    c = rng.uniform(1, 10, n)
-    w = rng.uniform(1, 10, n)
     xs = [m.binary(f"x{i}") for i in range(n)]
-    m.subject_to(sum(float(w[i]) * xs[i] for i in range(n)) <= float(w.sum()) * 0.35)
-    for i in range(0, n - 1, 2):
-        m.subject_to(xs[i] + xs[i + 1] <= 1)
-    m.maximize(sum(float(c[i]) * xs[i] for i in range(n)))
+    W = rng.uniform(20, 100, (2, n))  # noqa: N806
+    m.maximize(sum(float(W[0, i] + 10) * xs[i] for i in range(n)))
+    for r in range(2):
+        m.subject_to(sum(float(W[r, i]) * xs[i] for i in range(n)) <= float(W[r].sum()) * 0.5)
     return m
 
 
@@ -295,10 +298,16 @@ def test_milp_budget_limited_exit_reports_live_tree_bound(monkeypatch):
             abs(r.objective - r.bound) / max(abs(r.objective), abs(r.bound), 1e-10), abs=1e-12
         )
 
-    # The deeper search's reported bound must reflect its lifted frontier, not
-    # the shallow run's root-level value (pre-#933 both reported the identical
-    # root LP bound: 42.4745...).
-    assert deep.bound < shallow.bound - 1e-9, (
-        f"reported bound pinned at the root value: shallow={shallow.bound} "
-        f"deep={deep.bound} — the live tree bound is being discarded again"
-    )
+    # The reported bound must be the tree's live frontier bound, not the stale root
+    # LP value (pre-#933 every budgeted exit re-reported the root LP bound). This
+    # used to compare a 3-node against a 9-node exit; since the root rounds' NS
+    # bounds floor the root node the frontier is already lifted at node 2 and does not
+    # move again before ~9 nodes here (672.798 at 2..199 nodes, root LP 682.24,
+    # optimum 672.747), so it is compared with the root LP bound directly.
+    for r in (shallow, deep):
+        assert r.root_bound is not None
+        assert r.bound < r.root_bound - 1e-6, (
+            f"reported bound pinned at the root LP value: bound={r.bound} "
+            f"root_bound={r.root_bound} — the live tree bound is being discarded again"
+        )
+    assert deep.bound <= shallow.bound + 1e-9  # a deeper search never loosens it
