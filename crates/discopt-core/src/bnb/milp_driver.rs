@@ -4468,6 +4468,7 @@ fn solve_presolved(
         u: u[..ns].iter().map(|&v| fin(v)).collect(),
         is_int,
     };
+    let presolve_t0 = std::time::Instant::now();
     let p = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::MilpPresolve);
         presolve_until(
@@ -4490,13 +4491,14 @@ fn solve_presolved(
     }
     if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
         eprintln!(
-            "MILP presolve: {}x{} -> {}x{} (offset {:e}, infeasible {}) {:?}",
+            "MILP presolve: {}x{} -> {}x{} (offset {:e}, infeasible {}, {:.3} s) {:?}",
             m,
             ns,
             p.form.rows.len(),
             p.keep_cols.len(),
             p.offset,
             p.infeasible,
+            presolve_t0.elapsed().as_secs_f64(),
             p.stats
         );
     }

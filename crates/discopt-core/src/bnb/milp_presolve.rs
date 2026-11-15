@@ -132,6 +132,11 @@ pub struct PresolveStats {
     /// Aggregator implied-free tests answered from [`Work::implied_free_rejected`]
     /// (a column already rejected with nothing changed since).
     pub implied_free_cached: usize,
+    /// Aggregator implied-integral tests answered from `Work::implied_integral_seen`.
+    pub implied_integral_cached: usize,
+    /// Aggregator implied-free tests decided by `Work::implied_free_screen` without
+    /// the exact recomputation.
+    pub implied_free_screened: usize,
     /// The caller's deadline stopped presolve before its fixpoint (`presolve_until`).
     /// Every reduction applied up to then is complete, so the result is a valid, less
     /// reduced problem.
@@ -394,6 +399,25 @@ impl DomIndex {
     }
 }
 
+/// One row's activity aggregates for the aggregator's implied-free test, with the
+/// effective bounds that test uses (a column's implied bound unless this row is its
+/// source). See [`Work::implied_free_screen`].
+#[derive(Clone)]
+struct RowAgg {
+    epoch: u64,
+    /// Largest |coefficient| (`is_noise`).
+    maxabs: f64,
+    /// Sum of the finite lower / upper contributions, the number of infinite ones, and
+    /// the sum of |finite contributions| (for the rounding-error bound).
+    smin: f64,
+    nmin: usize,
+    smax: f64,
+    nmax: usize,
+    abs: f64,
+    /// Column -> position in the row (first occurrence).
+    pos: std::collections::HashMap<usize, usize>,
+}
+
 struct Work {
     n: usize,
     rows: Vec<(Vec<usize>, Vec<f64>)>,
@@ -436,6 +460,16 @@ struct Work {
     /// Answer repeat implied-free tests from `implied_free_rejected` (always, outside
     /// the test that checks the cache against the uncached rule).
     cache_implied_free: bool,
+    /// Per column: `(epoch, answer)` of the aggregator's last [`Work::implied_integral`]
+    /// call. Valid while `epoch` is unchanged, by the same argument as
+    /// `implied_free_rejected`: no row, row side or integrality changes between two
+    /// aggregator calls at the same epoch. Measured 2026-11-15 on blp-ic98: the
+    /// uncached test was 12.2 s of a 17.8 s presolve (each call rescans every
+    /// equality row of the column), inside a 20 s budget.
+    implied_integral_seen: Vec<(u64, bool)>,
+    /// Per row: aggregates for the implied-free screen ([`Work::implied_free_screen`]),
+    /// valid at the epoch they were built (`None` before first use).
+    row_agg: Vec<Option<RowAgg>>,
 }
 
 impl Work {
@@ -471,6 +505,8 @@ impl Work {
             implied_free_rejected: vec![u64::MAX; f.n],
             deadline: None,
             cache_implied_free: true,
+            implied_integral_seen: vec![(u64::MAX, false); f.n],
+            row_agg: vec![None; f.rows.len()],
         }
     }
 
@@ -753,7 +789,9 @@ impl Work {
         cand.sort_by_key(|&p| (self.is_int[ri[p]], self.col_rows[ri[p]].len()));
         for p in cand {
             let (s, a) = (ri[p], rv[p]);
-            if self.is_noise(r, a) {
+            // `is_noise(r, a)`, with the row maximum it would recompute (same values,
+            // same order) taken from `row_max`.
+            if a.abs() <= NOISE_REL * row_max {
                 continue;
             }
             // Pivot: large enough against the row's or the column's largest entry.
@@ -770,7 +808,7 @@ impl Work {
                     continue;
                 }
             }
-            if self.is_int[s] && !self.implied_integral(s) {
+            if self.is_int[s] && !self.implied_integral_at_epoch(s) {
                 continue;
             }
             if self.cache_implied_free && self.implied_free_rejected[s] == self.epoch {
@@ -786,85 +824,25 @@ impl Work {
             // `solve_presolved` re-checks the postsolved point on the original rows and
             // bounds and falls back to the original problem when it fails or when the
             // reduced problem is unbounded.
-            let (mut il, mut iu) = (f64::NEG_INFINITY, f64::INFINITY);
-            for &q in &self.col_rows[s] {
-                if !self.row_alive[q] {
+            match self
+                .cache_implied_free
+                .then(|| self.implied_free_screen(s))
+                .flatten()
+            {
+                Some(true) => {
+                    self.stats.implied_free_screened += 1;
+                    self.implied_free_rejected[s] = self.epoch;
                     continue;
                 }
-                let Some(pq) = self.rows[q].0.iter().position(|&k| k == s) else {
-                    continue;
-                };
-                let aq = self.rows[q].1[pq];
-                if self.is_noise(q, aq) {
-                    // Row q cannot bound x_s through a noise coefficient: it implies
-                    // nothing here, so x_s is not shown implied free by it.
-                    continue;
+                Some(false) => {
+                    self.stats.implied_free_screened += 1;
                 }
-                let (mut rmin, mut rmax) = (0.0f64, 0.0f64);
-                let (mut nmin, mut nmax) = (0usize, 0usize);
-                for (&k, &v) in self.rows[q].0.iter().zip(&self.rows[q].1) {
-                    if k == s {
+                None => {
+                    if self.implied_free_rejects_exact(s) {
+                        self.implied_free_rejected[s] = self.epoch;
                         continue;
                     }
-                    // Other columns' implied bounds, except those this row implies.
-                    let lk = if self.impl_l[k].1 != q {
-                        self.l[k].max(self.impl_l[k].0)
-                    } else {
-                        self.l[k]
-                    };
-                    let uk = if self.impl_u[k].1 != q {
-                        self.u[k].min(self.impl_u[k].0)
-                    } else {
-                        self.u[k]
-                    };
-                    let (lo_c, hi_c) = if v > 0.0 {
-                        (v * lk, v * uk)
-                    } else {
-                        (v * uk, v * lk)
-                    };
-                    if lo_c.is_finite() {
-                        rmin += lo_c
-                    } else {
-                        nmin += 1
-                    }
-                    if hi_c.is_finite() {
-                        rmax += hi_c
-                    } else {
-                        nmax += 1
-                    }
                 }
-                // aq x_s in [lo_q - rest_max, up_q - rest_min].
-                let low = if self.lo[q].is_finite() && nmax == 0 {
-                    self.lo[q] - rmax
-                } else {
-                    f64::NEG_INFINITY
-                };
-                let high = if self.up[q].is_finite() && nmin == 0 {
-                    self.up[q] - rmin
-                } else {
-                    f64::INFINITY
-                };
-                let (b1, b2) = if aq > 0.0 {
-                    (low / aq, high / aq)
-                } else {
-                    (high / aq, low / aq)
-                };
-                if b1.is_finite() || b1 == f64::INFINITY {
-                    il = il.max(b1);
-                }
-                if b2.is_finite() || b2 == f64::NEG_INFINITY {
-                    iu = iu.min(b2);
-                }
-            }
-            // Tolerances at the column's own bounds, never at the implied ones (which may
-            // be infinite).
-            let tl = self.tol(self.l[s]);
-            let tu = self.tol(self.u[s]);
-            if (self.l[s].is_finite() && (il < self.l[s] - tl || il.is_nan()))
-                || (self.u[s].is_finite() && (iu > self.u[s] + tu || iu.is_nan()))
-            {
-                self.implied_free_rejected[s] = self.epoch;
-                continue;
             }
             // Fill-in: new entries in the other rows of x_s.
             let mut fill: i64 = -((ri.len() + self.col_rows[s].len()) as i64 - 1);
@@ -1032,6 +1010,289 @@ impl Work {
     /// whenever that row holds. Substituting `x_s` out through any row then drops a
     /// constraint the kept row still enforces (and the postsolve check re-verifies
     /// integrality on the original problem).
+    /// The aggregator's implied-free test of `x_s`, computed from the rows: `true` when
+    /// the rows do NOT keep `x_s` within `[l_s, u_s]` (the column is rejected).
+    fn implied_free_rejects_exact(&self, s: usize) -> bool {
+        let (mut il, mut iu) = (f64::NEG_INFINITY, f64::INFINITY);
+        for &q in &self.col_rows[s] {
+            if !self.row_alive[q] {
+                continue;
+            }
+            let Some(pq) = self.rows[q].0.iter().position(|&k| k == s) else {
+                continue;
+            };
+            let aq = self.rows[q].1[pq];
+            if self.is_noise(q, aq) {
+                // Row q cannot bound x_s through a noise coefficient: it implies
+                // nothing here, so x_s is not shown implied free by it.
+                continue;
+            }
+            let (mut rmin, mut rmax) = (0.0f64, 0.0f64);
+            let (mut nmin, mut nmax) = (0usize, 0usize);
+            for (&k, &v) in self.rows[q].0.iter().zip(&self.rows[q].1) {
+                if k == s {
+                    continue;
+                }
+                // Other columns' implied bounds, except those this row implies.
+                let lk = if self.impl_l[k].1 != q {
+                    self.l[k].max(self.impl_l[k].0)
+                } else {
+                    self.l[k]
+                };
+                let uk = if self.impl_u[k].1 != q {
+                    self.u[k].min(self.impl_u[k].0)
+                } else {
+                    self.u[k]
+                };
+                let (lo_c, hi_c) = if v > 0.0 {
+                    (v * lk, v * uk)
+                } else {
+                    (v * uk, v * lk)
+                };
+                if lo_c.is_finite() {
+                    rmin += lo_c
+                } else {
+                    nmin += 1
+                }
+                if hi_c.is_finite() {
+                    rmax += hi_c
+                } else {
+                    nmax += 1
+                }
+            }
+            // aq x_s in [lo_q - rest_max, up_q - rest_min].
+            let low = if self.lo[q].is_finite() && nmax == 0 {
+                self.lo[q] - rmax
+            } else {
+                f64::NEG_INFINITY
+            };
+            let high = if self.up[q].is_finite() && nmin == 0 {
+                self.up[q] - rmin
+            } else {
+                f64::INFINITY
+            };
+            let (b1, b2) = if aq > 0.0 {
+                (low / aq, high / aq)
+            } else {
+                (high / aq, low / aq)
+            };
+            if b1.is_finite() || b1 == f64::INFINITY {
+                il = il.max(b1);
+            }
+            if b2.is_finite() || b2 == f64::NEG_INFINITY {
+                iu = iu.min(b2);
+            }
+        }
+        // Tolerances at the column's own bounds, never at the implied ones (which may
+        // be infinite).
+        let tl = self.tol(self.l[s]);
+        let tu = self.tol(self.u[s]);
+        (self.l[s].is_finite() && (il < self.l[s] - tl || il.is_nan()))
+            || (self.u[s].is_finite() && (iu > self.u[s] + tu || iu.is_nan()))
+    }
+
+    /// The effective bounds the implied-free test uses for column `k` in row `q`.
+    fn eff_bounds(&self, q: usize, k: usize) -> (f64, f64) {
+        let lk = if self.impl_l[k].1 != q {
+            self.l[k].max(self.impl_l[k].0)
+        } else {
+            self.l[k]
+        };
+        let uk = if self.impl_u[k].1 != q {
+            self.u[k].min(self.impl_u[k].0)
+        } else {
+            self.u[k]
+        };
+        (lk, uk)
+    }
+
+    /// Makes row `q`'s [`RowAgg`] current (built at this epoch).
+    fn row_agg_at_epoch(&mut self, q: usize) {
+        let fresh = self.row_agg[q]
+            .as_ref()
+            .is_some_and(|a| a.epoch == self.epoch);
+        if !fresh {
+            let mut agg = RowAgg {
+                epoch: self.epoch,
+                maxabs: 0.0,
+                smin: 0.0,
+                nmin: 0,
+                smax: 0.0,
+                nmax: 0,
+                abs: 0.0,
+                pos: std::collections::HashMap::with_capacity(self.rows[q].0.len()),
+            };
+            for (p, (&k, &v)) in self.rows[q].0.iter().zip(&self.rows[q].1).enumerate() {
+                agg.maxabs = agg.maxabs.max(v.abs());
+                agg.pos.entry(k).or_insert(p);
+                let (lk, uk) = self.eff_bounds(q, k);
+                let (lo_c, hi_c) = if v > 0.0 {
+                    (v * lk, v * uk)
+                } else {
+                    (v * uk, v * lk)
+                };
+                if lo_c.is_finite() {
+                    agg.smin += lo_c;
+                    agg.abs += lo_c.abs();
+                } else {
+                    agg.nmin += 1;
+                }
+                if hi_c.is_finite() {
+                    agg.smax += hi_c;
+                    agg.abs += hi_c.abs();
+                } else {
+                    agg.nmax += 1;
+                }
+            }
+            self.row_agg[q] = Some(agg);
+        }
+    }
+
+    /// A screen for [`Self::implied_free_rejects_exact`]: `Some(answer)` when that
+    /// answer is certain, `None` when the exact test must decide.
+    ///
+    /// Each row's residual activity (without `x_s`) is the row's aggregate minus `x_s`'s
+    /// own contribution, instead of a fresh sum over the row. The two differ by
+    /// rounding only. With `n` terms and `S` the sum of their magnitudes, each differs
+    /// from the exact sum by at most `(n + 2) eps S`. The implied bound then carries
+    /// that error over `|a_qs|`, plus the division's. Every implied bound is kept as
+    /// an interval. The screen answers only when the decision holds at both ends of
+    /// every interval, so the exact test, had it run, would have given the same
+    /// answer. Any NaN, a duplicate column in a row, or a row where `x_s`'s entry is
+    /// missing defers to the exact test.
+    fn implied_free_screen(&mut self, s: usize) -> Option<bool> {
+        let eps = f64::EPSILON;
+        let (mut il_lo, mut il_hi) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let (mut iu_lo, mut iu_hi) = (f64::INFINITY, f64::INFINITY);
+        let rows: Vec<usize> = self.col_rows[s].clone();
+        for q in rows {
+            if !self.row_alive[q] {
+                continue;
+            }
+            let (lo_q, up_q) = (self.lo[q], self.up[q]);
+            let (lks, uks) = self.eff_bounds(q, s);
+            self.row_agg_at_epoch(q);
+            let agg = self.row_agg[q].as_ref().expect("built above");
+            let len = self.rows[q].0.len();
+            if agg.pos.len() != len {
+                return None; // a duplicate column: the exact test reads first entries
+            }
+            let Some(&pq) = agg.pos.get(&s) else {
+                continue;
+            };
+            let aq = self.rows[q].1[pq];
+            if aq.abs() <= NOISE_REL * agg.maxabs {
+                continue;
+            }
+            let (lo_s, hi_s) = if aq > 0.0 {
+                (aq * lks, aq * uks)
+            } else {
+                (aq * uks, aq * lks)
+            };
+            let (mut rmin, mut nmin) = (agg.smin, agg.nmin);
+            if lo_s.is_finite() {
+                rmin -= lo_s;
+            } else {
+                nmin -= 1;
+            }
+            let (mut rmax, mut nmax) = (agg.smax, agg.nmax);
+            if hi_s.is_finite() {
+                rmax -= hi_s;
+            } else {
+                nmax -= 1;
+            }
+            let err = (len as f64 + 2.0) * eps * (agg.abs + rmin.abs() + rmax.abs());
+            if !(rmin.is_finite() && rmax.is_finite() && err.is_finite()) {
+                return None;
+            }
+            // Implied interval of aq x_s: [lo_q - rmax, up_q - rmin], each end +- err
+            // (plus its own subtraction's rounding).
+            let low = (lo_q.is_finite() && nmax == 0).then_some(lo_q - rmax);
+            let high = (up_q.is_finite() && nmin == 0).then_some(up_q - rmin);
+            let widen = |v: f64| err + 2.0 * eps * v.abs();
+            let div = |v: f64, e: f64| -> (f64, f64) {
+                let (a, b) = ((v - e) / aq, (v + e) / aq);
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                let slack = 2.0 * eps * a.abs().max(b.abs());
+                (a - slack, b + slack)
+            };
+            // b1 (lower bound of x_s) and b2 (upper), as intervals; None = infinite.
+            let (b1, b2) = if aq > 0.0 {
+                (
+                    low.map(|v| div(v, widen(v))),
+                    high.map(|v| div(v, widen(v))),
+                )
+            } else {
+                (
+                    high.map(|v| div(v, widen(v))),
+                    low.map(|v| div(v, widen(v))),
+                )
+            };
+            if let Some((a, b)) = b1 {
+                if a.is_nan() || b.is_nan() {
+                    return None;
+                }
+                il_lo = il_lo.max(a);
+                il_hi = il_hi.max(b);
+            }
+            if let Some((a, b)) = b2 {
+                if a.is_nan() || b.is_nan() {
+                    return None;
+                }
+                iu_lo = iu_lo.min(a);
+                iu_hi = iu_hi.min(b);
+            }
+        }
+        let tl = self.tol(self.l[s]);
+        let tu = self.tol(self.u[s]);
+        // Rejected: il < l - tl (lower side) or iu > u + tu (upper side).
+        let low_side = if self.l[s].is_finite() {
+            let t = self.l[s] - tl;
+            if il_hi < t {
+                Some(true)
+            } else if il_lo >= t {
+                Some(false)
+            } else {
+                None
+            }
+        } else {
+            Some(false)
+        };
+        let up_side = if self.u[s].is_finite() {
+            let t = self.u[s] + tu;
+            if iu_lo > t {
+                Some(true)
+            } else if iu_hi <= t {
+                Some(false)
+            } else {
+                None
+            }
+        } else {
+            Some(false)
+        };
+        match (low_side, up_side) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        }
+    }
+
+    /// [`Self::implied_integral`] for the aggregator, answered from
+    /// `implied_integral_seen` when nothing changed since it was computed (and
+    /// `cache_implied_free` is on; the cache test runs presolve with it off).
+    fn implied_integral_at_epoch(&mut self, s: usize) -> bool {
+        if self.cache_implied_free {
+            let (e, v) = self.implied_integral_seen[s];
+            if e == self.epoch {
+                self.stats.implied_integral_cached += 1;
+                return v;
+            }
+        }
+        let v = self.implied_integral(s);
+        self.implied_integral_seen[s] = (self.epoch, v);
+        v
+    }
+
     fn implied_integral(&self, s: usize) -> bool {
         let integral = |v: f64| (v - v.round()).abs() <= 1e-12 * v.abs().max(1.0);
         self.col_rows[s].iter().any(|&q| {
@@ -2751,23 +3012,33 @@ mod tests {
     fn implied_free_cache_is_exact() {
         let mut r = Lcg(0x5eed_cafe);
         let (mut compared, mut hits) = (0usize, 0usize);
-        // Returns (comparisons, cache hits).
+        let mut int_hits = 0usize;
+        static SCREENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        // Returns (comparisons, cache hits, implied-integral cache hits).
         let check = |f: &RowForm| {
-            let (mut n, mut h) = (0usize, 0usize);
+            let (mut n, mut h, mut hi) = (0usize, 0usize, 0usize);
             for (ii, sp) in [(false, false), (true, false), (true, true)] {
                 let a = presolve_impl(f, 1e-9, 20, ii, sp, None, true);
                 let b = presolve_impl(f, 1e-9, 20, ii, sp, None, false);
                 assert_eq!(b.stats.implied_free_cached, 0);
+                assert_eq!(b.stats.implied_integral_cached, 0);
+                assert_eq!(b.stats.implied_free_screened, 0);
                 assert_eq!(fingerprint(&a), fingerprint(&b));
                 h += a.stats.implied_free_cached;
+                hi += a.stats.implied_integral_cached;
+                SCREENED.fetch_add(
+                    a.stats.implied_free_screened,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 n += 1;
             }
-            (n, h)
+            (n, h, hi)
         };
         for _ in 0..300 {
-            let (n, h) = check(&random_ip(&mut r));
+            let (n, h, hi) = check(&random_ip(&mut r));
             compared += n;
             hits += h;
+            int_hits += hi;
         }
         // Column 0 in 40 equality rows of three columns, bounded so no row implies its
         // bounds: rejected from every row, and the 39 repeats are the cache's.
@@ -2795,12 +3066,16 @@ mod tests {
             u,
             is_int: vec![true; n],
         };
-        let (n, h) = check(&dense);
+        let (n, h, hi) = check(&dense);
         compared += n;
         hits += h;
+        int_hits += hi;
         assert!(h > 0, "the dense column never hit the cache");
         assert_eq!(compared, 903);
         assert!(hits > 0);
+        assert!(int_hits > 0, "the implied-integral cache never answered");
+        let screened = SCREENED.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(screened > 0, "the implied-free screen never decided a test");
     }
 
     /// A deadline already past stops presolve before its first pass: no reduction, a
