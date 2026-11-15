@@ -1508,6 +1508,49 @@ impl Work {
         (lo, hi)
     }
 
+    /// The range a domination between `j` and `k` can move weight over: the larger
+    /// span of the two, each read from its declared bounds tightened by its row-implied
+    /// bounds (valid for every feasible point; later reductions only shrink the set).
+    /// Infinite when either column can move without bound.
+    fn dom_range(&self, j: usize, k: usize) -> f64 {
+        let span = |c: usize| self.u[c].min(self.impl_u[c].0) - self.l[c].max(self.impl_l[c].0);
+        span(j).max(span(k))
+    }
+
+    /// The cost tolerance of a domination between `j` and `k`. Moving `delta` from `k`
+    /// to `j` on a wrongly accepted domination costs up to the tolerance times `delta`,
+    /// which [`Self::dom_range`] bounds, so the absolute `DomIndex::EPS` is divided by
+    /// it: the loss stays within `EPS`, and an unbounded column gets an exact test.
+    /// Unscaled, `min 1e-9 x_j` over `x_j + x_k >= 1e9` (both in `[0, inf)`) read
+    /// `1e-9 <= 0 + 1e-9` as a domination, fixed `x_k` at 0 and lost 1 of objective
+    /// (review of #2220; `a_tiny_cost_difference_on_wide_columns_is_not_a_domination`).
+    fn dom_cost_tol(range: f64) -> f64 {
+        if range.is_finite() {
+            DomIndex::EPS / range.max(1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// The coefficient tolerance of a domination on a row whose finite side is `side`.
+    /// A coefficient wrongly accepted by `d` moves the row by `d * delta`; bounding that
+    /// by the driver's row acceptance tolerance `ROW_ACCEPT_TOL * (1 + |side|)` keeps the
+    /// exchanged point inside the set every incumbent is accepted from, so the reduction
+    /// is exact with respect to what the solve certifies. Capped at `DomIndex::EPS` (never
+    /// looser than the unscaled test) and exact for an unbounded range. Measured
+    /// 2026-11-15: `EPS / range` alone refused OA-cut noise (coefficients ~4e-12
+    /// differing by <= 5e-13, one by a single ulp) on portfol_roundlot's masters, and the
+    /// solve lost its certificate (optimal in 27-29 s -> feasible at 120 s).
+    fn dom_row_tol(range: f64, side: f64) -> f64 {
+        /// The driver's row acceptance tolerance (`milp_driver::ROW_VERIFY_TOL`).
+        const ROW_ACCEPT_TOL: f64 = 1e-6;
+        if range.is_finite() {
+            (ROW_ACCEPT_TOL * (1.0 + side.abs()) / range.max(1.0)).min(DomIndex::EPS)
+        } else {
+            0.0
+        }
+    }
+
     /// Whether `sj x_j` dominates `sk x_k` (`sj, sk` in `{1, -1}`): no larger cost, and
     /// in every row a coefficient that moves each finite side no worse (equal on rows
     /// with both sides finite). Then some optimal solution has `x_j` at its `sj`-upper
@@ -1518,26 +1561,9 @@ impl Work {
     /// [`Self::dominates`] on the [`DomIndex`] snapshot: the signature screen, then
     /// the same test over the alive rows holding `j` or `k`, with each coefficient
     /// read in O(1). Same answer for every pair (`dominates_index_matches_reference`).
-    /// The tolerance of a domination test between columns `j` and `k`. Moving weight
-    /// from `k` to `j` on a wrongly accepted domination costs up to the tolerance times
-    /// the amount moved, which the columns' ranges bound, so the absolute `DomIndex::EPS`
-    /// is divided by the larger range: the loss stays within `EPS`, and an unbounded
-    /// column gets an exact test. Unscaled, `min 1e-9 x_j` over `x_j + x_k >= 1e9`
-    /// (both in `[0, inf)`) read `1e-9 <= 0 + 1e-9` as a domination, fixed `x_k` at 0 and
-    /// lost 1 of objective (review of #2220;
-    /// `a_tiny_cost_difference_on_wide_columns_is_not_a_domination`).
-    fn dom_tol(&self, j: usize, k: usize) -> f64 {
-        let range = (self.u[j] - self.l[j]).max(self.u[k] - self.l[k]);
-        if range.is_finite() {
-            DomIndex::EPS / range.max(1.0)
-        } else {
-            0.0
-        }
-    }
-
     fn dominates_indexed(&self, idx: &mut DomIndex, j: usize, sj: f64, k: usize, sk: f64) -> bool {
-        let eps = self.dom_tol(j, k);
-        if sj * self.c[j] > sk * self.c[k] + eps {
+        let range = self.dom_range(j, k);
+        if sj * self.c[j] > sk * self.c[k] + Self::dom_cost_tol(range) {
             return false;
         }
         if !idx.may_dominate(j, sj, k, sk) {
@@ -1552,8 +1578,8 @@ impl Work {
         for &(r, aj) in &idx.colvals[j] {
             let alpha = sj * aj;
             let beta = sk * idx.scratch[r];
-            if (self.up[r].is_finite() && alpha > beta + eps)
-                || (self.lo[r].is_finite() && alpha < beta - eps)
+            if (self.up[r].is_finite() && alpha > beta + Self::dom_row_tol(range, self.up[r]))
+                || (self.lo[r].is_finite() && alpha < beta - Self::dom_row_tol(range, self.lo[r]))
             {
                 ok = false;
                 break;
@@ -1574,8 +1600,8 @@ impl Work {
                 continue;
             }
             let beta = sk * ak;
-            if (self.up[r].is_finite() && 0.0 > beta + eps)
-                || (self.lo[r].is_finite() && 0.0 < beta - eps)
+            if (self.up[r].is_finite() && 0.0 > beta + Self::dom_row_tol(range, self.up[r]))
+                || (self.lo[r].is_finite() && 0.0 < beta - Self::dom_row_tol(range, self.lo[r]))
             {
                 ok = false;
                 break;
@@ -1590,8 +1616,8 @@ impl Work {
     /// The row-scanning test [`Self::dominates_indexed`] replaced, kept as its oracle.
     #[cfg(test)]
     fn dominates(&self, j: usize, sj: f64, k: usize, sk: f64) -> bool {
-        let eps = self.dom_tol(j, k);
-        if sj * self.c[j] > sk * self.c[k] + eps {
+        let range = self.dom_range(j, k);
+        if sj * self.c[j] > sk * self.c[k] + Self::dom_cost_tol(range) {
             return false;
         }
         let entry = |c: usize, r: usize| -> f64 {
@@ -1612,10 +1638,10 @@ impl Work {
                 }
                 let alpha = sj * entry(j, r);
                 let beta = sk * entry(k, r);
-                if self.up[r].is_finite() && alpha > beta + eps {
+                if self.up[r].is_finite() && alpha > beta + Self::dom_row_tol(range, self.up[r]) {
                     return false;
                 }
-                if self.lo[r].is_finite() && alpha < beta - eps {
+                if self.lo[r].is_finite() && alpha < beta - Self::dom_row_tol(range, self.lo[r]) {
                     return false;
                 }
             }
