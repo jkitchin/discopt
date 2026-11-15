@@ -36,7 +36,9 @@ ARM_ENV: dict = {"ours_nlexpr": {"DISCOPT_NL_LINEAR_MATRIX": "0"},
                  "ours_afr": {"DISCOPT_MILP_ADAPTIVE_FIXING_RATE": "1"},
                  # S4 bundle: HiGHS's backtracking dive + sub-MIP budget by work only.
                  "ours_s4": {"DISCOPT_MILP_DIVE_BACKTRACK": "1",
-                             "DISCOPT_MILP_SUBMIP_BUDGET_HIGHS": "1"}}
+                             "DISCOPT_MILP_SUBMIP_BUDGET_HIGHS": "1"},
+                 # Root RENS budget alone (in-tree sub-MIPs capped as before).
+                 "ours_rb": {"DISCOPT_MILP_SUBMIP_BUDGET_HIGHS": "1"}}
 HIGHS = r'''
 import json, sys, time, highspy
 h = highspy.Highs()

@@ -2450,8 +2450,10 @@ const SUB_MIP_MIN_FIXING_RATE: f64 = 0.30;
 /// Gap plan P3: time share of a NESTED sub-MIP (`try_rens_highs` inside a sub-solve).
 const NESTED_SUB_MIP_SHARE: f64 = 0.5;
 
-/// `DISCOPT_MILP_SUBMIP_BUDGET_HIGHS`: a top-level heuristic sub-MIP (RENS, RINS) gets
-/// half the remaining time with no fixed cap. HiGHS bounds its sub-MIPs by nodes,
+/// `DISCOPT_MILP_SUBMIP_BUDGET_HIGHS`: the top-level ROOT RENS sub-MIP gets half the
+/// remaining time with no fixed cap (in-tree RENS/RINS keep the cap: applying it to
+/// them too was harmful on the dual side, `population_panel_s4.*`, dual better/worse
+/// 5/19). HiGHS bounds its sub-MIPs by nodes,
 /// leaves and stall nodes only (`HighsPrimalHeuristics.cpp:627-632`), which this
 /// keeps via the node budget and `DISCOPT_HIGHS_SUBMIP_LIMITS`. Without it the
 /// budget is `min(share x remaining, 2 s)`. Measured 2026-11-15:
@@ -2471,8 +2473,8 @@ fn submip_budget_highs_enabled() -> bool {
 
 /// A heuristic sub-MIP's wall budget from the time `left` (s); see
 /// [`submip_budget_highs_enabled`].
-fn sub_mip_budget(left: f64, share: f64, nested: bool) -> f64 {
-    if submip_budget_highs_enabled() && !nested {
+fn sub_mip_budget(left: f64, share: f64, capped: bool) -> f64 {
+    if submip_budget_highs_enabled() && !capped {
         left * 0.5
     } else {
         (left * share).min(2.0)
@@ -2682,7 +2684,7 @@ fn try_sub_mip(
         if left.is_zero() {
             return None;
         }
-        let budget = sub_mip_budget(left.as_secs_f64(), 0.25, in_sub_mip());
+        let budget = sub_mip_budget(left.as_secs_f64(), 0.25, true);
         sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
     }
     crate::profile::incr(match kind {
@@ -4084,7 +4086,9 @@ fn try_rens_highs(
     } else {
         0.25
     };
-    let budget = sub_mip_budget(left, share, nested);
+    // The work-bounded budget is for the root RENS only (`parent_nodes == 0`): HiGHS
+    // runs that one unconditionally and gates in-tree heuristics by effort.
+    let budget = sub_mip_budget(left, share, nested || parent_nodes > 0);
     if budget <= 0.05 {
         return None;
     }
