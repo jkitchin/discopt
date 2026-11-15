@@ -111,6 +111,8 @@ pub struct PresolveStats {
     pub dominated_by_derived: usize,
     /// Dominated column pairs that fixed or tightened a column.
     pub dominated_pairs: usize,
+    /// Of those, dominations admitted by relaxing a row (`Work::dom_row_ok`).
+    pub dominated_pairs_relaxed: usize,
     /// Parallel columns merged.
     pub parallel_cols: usize,
     /// Continuous columns marked integral because an equality row implies it
@@ -438,6 +440,9 @@ struct Work {
     /// relaxation the postsolve check guards.
     impl_l: Vec<(f64, usize)>,
     impl_u: Vec<(f64, usize)>,
+    /// How far `dominated_pairs` has relaxed each row's finite sides in total (see
+    /// [`Self::dom_row_ok`]); bounded by `DOM_RELAX_BUDGET * (1 + |side|)`.
+    row_relax: Vec<f64>,
     /// Rows each column appears in (may include dead rows).
     col_rows: Vec<Vec<usize>>,
     ops: Vec<PostOp>,
@@ -495,6 +500,7 @@ impl Work {
             col_alive: vec![true; f.n],
             impl_l: vec![(-INF, usize::MAX); f.n],
             impl_u: vec![(INF, usize::MAX); f.n],
+            row_relax: vec![0.0; f.rows.len()],
             col_rows,
             ops: Vec::new(),
             offset: 0.0,
@@ -1532,23 +1538,131 @@ impl Work {
         }
     }
 
-    /// The coefficient tolerance of a domination on a row whose finite side is `side`.
-    /// A coefficient wrongly accepted by `d` moves the row by `d * delta`; bounding that
-    /// by the driver's row acceptance tolerance `ROW_ACCEPT_TOL * (1 + |side|)` keeps the
-    /// exchanged point inside the set every incumbent is accepted from, so the reduction
-    /// is exact with respect to what the solve certifies. Capped at `DomIndex::EPS` (never
-    /// looser than the unscaled test) and exact for an unbounded range. Measured
-    /// 2026-11-15: `EPS / range` alone refused OA-cut noise (coefficients ~4e-12
-    /// differing by <= 5e-13, one by a single ulp) on portfol_roundlot's masters, and the
-    /// solve lost its certificate (optimal in 27-29 s -> feasible at 120 s).
-    fn dom_row_tol(range: f64, side: f64) -> f64 {
-        /// The driver's row acceptance tolerance (`milp_driver::ROW_VERIFY_TOL`).
-        const ROW_ACCEPT_TOL: f64 = 1e-6;
-        if range.is_finite() {
-            (ROW_ACCEPT_TOL * (1.0 + side.abs()) / range.max(1.0)).min(DomIndex::EPS)
+    /// A bound on the `delta` a domination's exchange moves: `delta` takes `x_j` to its
+    /// `sj`-upper bound `J` or `x_k` to its `sk`-lower bound `K`, so it is at most
+    /// `J` minus the least `sj x_j` and at most the largest `sk x_k` minus `K`. "Least"
+    /// and "largest" read the declared bounds tightened by the bounds the *current* rows
+    /// imply (`col_range`), never the cached `impl_l/impl_u`: a relaxation applied by an
+    /// earlier domination can move a point outside a cached implied bound by
+    /// `relax / |a|`, which is unbounded for a noise coefficient `a`. Widened by a
+    /// relative 1e-9 for the round-off of `col_range`. Infinite when unbounded.
+    fn dom_exchange_span(&self, j: usize, sj: f64, k: usize, sk: f64) -> f64 {
+        let (jl, ju) = self.col_range(j, None, false);
+        let (kl, ku) = self.col_range(k, None, false);
+        let span_j = if sj > 0.0 {
+            self.u[j] - self.l[j].max(jl)
+        } else {
+            self.u[j].min(ju) - self.l[j]
+        };
+        let span_k = if sk > 0.0 {
+            self.u[k].min(ku) - self.l[k]
+        } else {
+            self.u[k] - self.l[k].max(kl)
+        };
+        let span = span_j.min(span_k).max(0.0);
+        if span.is_nan() || span >= INF {
+            return INF;
+        }
+        span * (1.0 + 1e-9) + 1e-12
+    }
+
+    /// Whether row `r` admits a domination with coefficients `alpha` (of `sj x_j`) and
+    /// `beta` (of `sk x_k`); a near-miss is admitted by
+    /// relaxing the row, which is pushed onto `relax` as `(r, up_add, lo_sub)`.
+    ///
+    /// Exact (`alpha <= beta` on a finite upper side, `alpha >= beta` on a finite lower
+    /// one) needs no relaxation. A miss by `d` is the case that cannot be accepted as
+    /// is: the exchange moves the row by up to `d * span`, which keeps the moved point
+    /// within the driver's row acceptance tolerance but costs the objective the row's
+    /// dual times `d * span`, and nothing bounds that dual. 60dfaccbd accepted such a
+    /// miss outright and `min 1e-11 x_k - 2e6 z - b - w` over `x_j + x_k >= 1000`,
+    /// `(1 + 5e-10) x_j + x_k + z <= 1000 + 5e-7`, `b + w <= 1.5` fixed `x_k = 0` and
+    /// certified -1.5 against a true optimum of -2.49999999 (re-review of #2220;
+    /// `a_near_miss_domination_relaxes_the_row_instead_of_cutting_the_optimum`).
+    ///
+    /// Here the side is moved out by `d * span` instead: every point of the problem
+    /// before the step exchanges into a point of the relaxed problem with `x_j = J` or
+    /// `x_k = K` and no larger objective, so the reduced problem is a relaxation of the
+    /// one before and its bound stays valid. Admitted only when `d <= DomIndex::EPS`
+    /// (the signature screen's tolerance), the span is finite, the row is not an
+    /// equality (the rebuild keeps equalities exact), and the row's total relaxation
+    /// stays within `DOM_RELAX_BUDGET * (1 + |side|)`, a tenth of the driver's
+    /// `ROW_VERIFY_TOL`, so an incumbent of the reduced problem is still accepted on the
+    /// original rows. Measured 2026-11-15: the exact test alone cost portfol_roundlot's
+    /// OA masters their certificate (an equality row whose candidate pairs miss by one
+    /// ulp; test_1263 optimal -> feasible at its limit), hence the round-off exemption
+    /// and the relaxation below.
+    #[allow(clippy::too_many_arguments)]
+    fn dom_row_ok(
+        &self,
+        r: usize,
+        alpha: f64,
+        beta: f64,
+        (j, sj, k, sk): (usize, f64, usize, f64),
+        span: &mut Option<f64>,
+        relax: &mut Vec<(usize, f64, f64)>,
+    ) -> bool {
+        /// A tenth of the driver's row acceptance tolerance (`ROW_VERIFY_TOL`).
+        const DOM_RELAX_BUDGET: f64 = 5e-7;
+        /// Coefficient differences up to this many ulps are round-off (see below).
+        const DOM_ROUNDOFF_ULPS: f64 = 4.0;
+        let d_up = if self.up[r].is_finite() {
+            alpha - beta
         } else {
             0.0
+        };
+        let d_lo = if self.lo[r].is_finite() {
+            beta - alpha
+        } else {
+            0.0
+        };
+        if d_up > DomIndex::EPS || d_lo > DomIndex::EPS {
+            return false;
         }
+        // Computed once per pair, and only on a near miss. Charged at the larger of the
+        // directional exchange span (the sound bound) and the symmetric `dom_range`: only
+        // more conservative, and it keeps the scale at which 60dfaccbd accepted pairs.
+        // Measured 2026-11-15 on test_1263's portfol_roundlot OA solve: charged at the
+        // directional span alone, a near-duplicate pair (columns 9/14 of the n=17 master)
+        // was admitted in the opposite direction via a relaxation, and the OA run lost its
+        // certificate under 4 of 5 flag configurations (feasible at 60 s). Charged this
+        // way, all 5 certify in 10.4-33.8 s, as at 60dfaccbd.
+        let span = *span.get_or_insert_with(|| {
+            self.dom_exchange_span(j, sj, k, sk)
+                .max(self.dom_range(j, k))
+        });
+        if span >= INF {
+            return false;
+        }
+        // A miss of a few ulps over a finite exchange is the coefficients' own round-off:
+        // the row moves by at most a few ulps of the exchanged activity `|alpha| * span`,
+        // the error its floating-point evaluation already makes. Taken as exact on every
+        // row, equalities included (they cannot be relaxed). Measured 2026-11-15:
+        // portfol_roundlot's OA masters carry an equality row (side 7.8e4) whose
+        // candidate pairs miss by 2.2e-16 (1 ulp); refusing them left test_1263's OA
+        // solve uncertified at 60 s (12 s before the re-review fix). The re-review
+        // repro misses by 5e-10, relative, and is not round-off.
+        let ulps = DOM_ROUNDOFF_ULPS * f64::EPSILON * alpha.abs().max(beta.abs());
+        if d_up <= ulps && d_lo <= ulps {
+            return true;
+        }
+        if self.lo[r] == self.up[r] {
+            return false;
+        }
+        let need = |d: f64| {
+            if d > 0.0 {
+                d * span * (1.0 + 1e-12) + f64::MIN_POSITIVE
+            } else {
+                0.0
+            }
+        };
+        let (add_up, sub_lo) = (need(d_up), need(d_lo));
+        let side = if add_up > 0.0 { self.up[r] } else { self.lo[r] };
+        if self.row_relax[r] + add_up.max(sub_lo) > DOM_RELAX_BUDGET * (1.0 + side.abs()) {
+            return false;
+        }
+        relax.push((r, add_up, sub_lo));
+        true
     }
 
     /// Whether `sj x_j` dominates `sk x_k` (`sj, sk` in `{1, -1}`): no larger cost, and
@@ -1561,8 +1675,20 @@ impl Work {
     /// [`Self::dominates`] on the [`DomIndex`] snapshot: the signature screen, then
     /// the same test over the alive rows holding `j` or `k`, with each coefficient
     /// read in O(1). Same answer for every pair (`dominates_index_matches_reference`).
-    fn dominates_indexed(&self, idx: &mut DomIndex, j: usize, sj: f64, k: usize, sk: f64) -> bool {
+    /// On `true`, `relax` holds the row relaxations the domination needs (see
+    /// [`Self::dom_row_ok`]); the caller applies them before acting on it.
+    fn dominates_indexed(
+        &self,
+        idx: &mut DomIndex,
+        j: usize,
+        sj: f64,
+        k: usize,
+        sk: f64,
+        relax: &mut Vec<(usize, f64, f64)>,
+    ) -> bool {
+        relax.clear();
         let range = self.dom_range(j, k);
+        let mut span: Option<f64> = None;
         if sj * self.c[j] > sk * self.c[k] + Self::dom_cost_tol(range) {
             return false;
         }
@@ -1578,9 +1704,7 @@ impl Work {
         for &(r, aj) in &idx.colvals[j] {
             let alpha = sj * aj;
             let beta = sk * idx.scratch[r];
-            if (self.up[r].is_finite() && alpha > beta + Self::dom_row_tol(range, self.up[r]))
-                || (self.lo[r].is_finite() && alpha < beta - Self::dom_row_tol(range, self.lo[r]))
-            {
+            if !self.dom_row_ok(r, alpha, beta, (j, sj, k, sk), &mut span, relax) {
                 ok = false;
                 break;
             }
@@ -1600,9 +1724,7 @@ impl Work {
                 continue;
             }
             let beta = sk * ak;
-            if (self.up[r].is_finite() && 0.0 > beta + Self::dom_row_tol(range, self.up[r]))
-                || (self.lo[r].is_finite() && 0.0 < beta - Self::dom_row_tol(range, self.lo[r]))
-            {
+            if !self.dom_row_ok(r, 0.0, beta, (j, sj, k, sk), &mut span, relax) {
                 ok = false;
                 break;
             }
@@ -1615,8 +1737,17 @@ impl Work {
 
     /// The row-scanning test [`Self::dominates_indexed`] replaced, kept as its oracle.
     #[cfg(test)]
-    fn dominates(&self, j: usize, sj: f64, k: usize, sk: f64) -> bool {
+    fn dominates(
+        &self,
+        j: usize,
+        sj: f64,
+        k: usize,
+        sk: f64,
+        relax: &mut Vec<(usize, f64, f64)>,
+    ) -> bool {
+        relax.clear();
         let range = self.dom_range(j, k);
+        let mut span: Option<f64> = None;
         if sj * self.c[j] > sk * self.c[k] + Self::dom_cost_tol(range) {
             return false;
         }
@@ -1638,10 +1769,7 @@ impl Work {
                 }
                 let alpha = sj * entry(j, r);
                 let beta = sk * entry(k, r);
-                if self.up[r].is_finite() && alpha > beta + Self::dom_row_tol(range, self.up[r]) {
-                    return false;
-                }
-                if self.lo[r].is_finite() && alpha < beta - Self::dom_row_tol(range, self.lo[r]) {
+                if !self.dom_row_ok(r, alpha, beta, (j, sj, k, sk), &mut span, relax) {
                     return false;
                 }
             }
@@ -1675,6 +1803,7 @@ impl Work {
         // left the root LP no time.
         let mut idx = DomIndex::new(self);
         let mut in_j: Vec<bool> = vec![false; self.rows.len()];
+        let mut relax: Vec<(usize, f64, f64)> = Vec::new();
         for j in 0..self.n {
             // Between columns every applied tightening is complete. This rule is the
             // one measured past a deadline: 28 s of one pass on n2seq36q (each column's
@@ -1715,9 +1844,28 @@ impl Work {
                     if !self.col_alive[k] || self.l[k] == self.u[k] || self.l[j] == self.u[j] {
                         break;
                     }
-                    if !self.dominates_indexed(&mut idx, j, sj, k, sk) {
+                    if !self.dominates_indexed(&mut idx, j, sj, k, sk, &mut relax) {
                         continue;
                     }
+                    // Relax first: every reduction below holds for the relaxed problem.
+                    // Undone when nothing is reduced, so a domination left unused costs
+                    // no slack.
+                    let saved: Vec<(usize, f64, f64, f64)> = relax
+                        .iter()
+                        .map(|&(r, _, _)| (r, self.lo[r], self.up[r], self.row_relax[r]))
+                        .collect();
+                    for &(r, add_up, sub_lo) in &relax {
+                        self.up[r] += add_up;
+                        self.lo[r] -= sub_lo;
+                        self.row_relax[r] += add_up.max(sub_lo);
+                    }
+                    let undo = |w: &mut Self| {
+                        for &(r, lo, up, rr) in saved.iter().rev() {
+                            w.lo[r] = lo;
+                            w.up[r] = up;
+                            w.row_relax[r] = rr;
+                        }
+                    };
                     let jstar = if sj > 0.0 { self.u[j] } else { self.l[j] };
                     let kstar = if sk > 0.0 { self.l[k] } else { self.u[k] };
                     if !jstar.is_finite() {
@@ -1726,10 +1874,13 @@ impl Work {
                             self.u[k] = kstar;
                             self.stats.dominated_pairs += 1;
                             changed = true;
+                        } else {
+                            undo(self);
                         }
                         continue;
                     }
                     if !kstar.is_finite() {
+                        undo(self);
                         continue;
                     }
                     // Tighten j away from J (its sj-lower side).
@@ -1771,7 +1922,12 @@ impl Work {
                     let kfix = self.set_side_bound_upper(k, sk, nb, INT_SLACK);
                     if jfix || kfix {
                         self.stats.dominated_pairs += 1;
+                        if !relax.is_empty() {
+                            self.stats.dominated_pairs_relaxed += 1;
+                        }
                         changed = true;
+                    } else {
+                        undo(self);
                     }
                     if self.infeasible {
                         return false;
@@ -3194,6 +3350,74 @@ mod tests {
         );
     }
 
+    /// A near-miss domination must not cut the optimum off (re-review of #2220). In
+    /// `min 1e-11 x_k - 2e6 z` over `x_j + x_k >= 1000`,
+    /// `(1 + 5e-10) x_j + x_k + z <= 1000 + 5e-7` (`x_j, x_k in [0, 1000]`,
+    /// `z in [0, 10]`), x_j misses dominating x_k on the second row by 5e-10. 60dfaccbd
+    /// accepted the miss outright, fixed `x_k = 0`, and left `z <= 0`: objective 0
+    /// against the optimum -0.99999999 at `(0, 1000, 5e-7)` (end to end, with an
+    /// independent `b + w <= 1.5`, a certified -1.5 against -2.49999999). Now the miss
+    /// is admitted only by relaxing that row by `d * span`, so the reduced problem still
+    /// holds a point at least as good as the optimum.
+    #[test]
+    fn a_near_miss_domination_relaxes_the_row_instead_of_cutting_the_optimum() {
+        let f = RowForm {
+            n: 3,
+            rows: vec![
+                (vec![0, 1], vec![1.0, 1.0]),
+                (vec![0, 1, 2], vec![1.0 + 5e-10, 1.0, 1.0]),
+            ],
+            lo: vec![1000.0, -INF],
+            up: vec![INF, 1000.0 + 5e-7],
+            c: vec![0.0, 1e-11, -2e6],
+            l: vec![0.0, 0.0, 0.0],
+            u: vec![1000.0, 1000.0, 10.0],
+            is_int: vec![false, false, false],
+        };
+        let opt = [0.0, 1000.0, 5e-7];
+        assert!(
+            row_form_feasible(&f, &opt, 1e-12),
+            "the optimum must be feasible"
+        );
+        let obj = |x: &[f64]| (0..3).map(|i| f.c[i] * x[i]).sum::<f64>();
+        let mut w = Work::new(&f, 1e-9);
+        let changed = w.dominated_pairs();
+        // Feasible in the reduced problem (live bounds and row sides), exactly.
+        let holds = |w: &Work, x: &[f64]| {
+            (0..3).all(|i| w.l[i] <= x[i] && x[i] <= w.u[i])
+                && (0..2).all(|r| {
+                    let a: f64 = w.rows[r]
+                        .0
+                        .iter()
+                        .zip(&w.rows[r].1)
+                        .map(|(&c, &v)| v * x[c])
+                        .sum();
+                    w.lo[r] <= a && a <= w.up[r]
+                })
+        };
+        // The best point with x_k at 0 the reduced rows allow.
+        let zmax = (w.up[1] - (1.0 + 5e-10) * 1000.0).min(10.0);
+        let alt = [1000.0, 0.0, zmax];
+        let kept = holds(&w, &opt) || (holds(&w, &alt) && obj(&alt) <= obj(&opt) + 1e-12);
+        assert!(
+            kept,
+            "dominated_pairs cut the optimum {:e} off: x_k in [{:e}, {:e}], row up {:e} \
+             (changed {changed}, {:?})",
+            obj(&opt),
+            w.l[1],
+            w.u[1],
+            w.up[1],
+            w.stats
+        );
+        // The near-miss path itself fired (else this test proves nothing about it),
+        // within its budget (a tenth of the driver's 1e-6 row acceptance tolerance).
+        assert_eq!(w.stats.dominated_pairs_relaxed, 1, "{:?}", w.stats);
+        assert!(
+            w.up[1] - f.up[1] <= 1e-7 * (1.0 + f.up[1].abs()),
+            "row relaxed past budget"
+        );
+    }
+
     /// Row-dual dominated columns: a tiny cost on a wide column is not "zero". The
     /// #1603 tiny-coefficient MILP, `min -b0 - b1 - b2 - b3 + 1e-12 y` over
     /// `b0 + b1 - 1e-7 y <= 1.5`, `2 b2 + 2 b3 <= 3`, `y in [0, 1e9]`: its optimum is
@@ -4057,15 +4281,23 @@ mod tests {
                 continue;
             }
             let mut idx = DomIndex::new(&w);
+            let (mut rw, mut rg) = (Vec::new(), Vec::new());
             for j in 0..w.n {
                 for k in 0..w.n {
                     if j == k {
                         continue;
                     }
                     for &(sj, sk) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
-                        let want = w.dominates(j, sj, k, sk);
-                        let got = w.dominates_indexed(&mut idx, j, sj, k, sk);
+                        let want = w.dominates(j, sj, k, sk, &mut rw);
+                        let got = w.dominates_indexed(&mut idx, j, sj, k, sk, &mut rg);
                         assert_eq!(got, want, "trial {t} pair ({j},{sj}) ({k},{sk})");
+                        if want {
+                            let key = |v: &mut Vec<(usize, f64, f64)>| {
+                                v.sort_by(|a, b| a.0.cmp(&b.0));
+                                v.clone()
+                            };
+                            assert_eq!(key(&mut rg), key(&mut rw), "relaxations differ");
+                        }
                         compared += 1;
                         dominated += want as usize;
                         screened += (!idx.may_dominate(j, sj, k, sk)) as usize;
