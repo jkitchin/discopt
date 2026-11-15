@@ -922,3 +922,74 @@ count.
 The loader removes the Python overrun and halves time-to-certificate where the
 engine finishes. It moves no certificate: on the rows that time out, the engine,
 not Python, is the bottleneck. The remaining gap to HiGHS (26 certified) is S3–S5.
+
+### 8.14 S0 / S4 entry, presolve, and the root LP's pivot count (2026-11-15)
+
+Data and scripts: `data/highs-parity/s3/`.
+
+**S0: HiGHS knockouts on the 16 gap rows** (HiGHS certifies them; discopt does not).
+- Setup: patched HiGHS build, 20 s, 1 thread. Every losing cell was re-run on an
+  idle machine and confirmed, 36/36.
+- Removing **cuts** (node cuts plus all separators) loses 11 of 15 certificates.
+- **Presolve** off loses 7: aflow30a, both drayage, mik-4, neos-932721, neos-960392, swath1.
+- Conflict analysis (10teams), symmetry (rlp1) and strong branching (mik-4) lose
+  one each. Restarts and heuristics lose none.
+- neos-498623, neos-555001, neos-827175 and neos-913984 survive every single
+  knockout. nursesched-sprint-hidden09 was not certified by HiGHS here.
+- S5's candidates are mostly at their kill criterion: restart loses no row,
+  symmetry and conflict one each.
+
+**S4 entry: seeded with HiGHS's optimum** (`DISCOPT_MILP_SEED_POINT`, 16/16 seeds
+accepted). Against the presolve-off control that a seed file implies:
+- **Primal-bound rows** (certify only when seeded): 10teams, neos-498623, neos-960392.
+  This passes S4's kill criterion (at least 2).
+- **Presolve blocked the bound** on neos-913984 and neos-960392: off, they certify and
+  reach the optimum's bound respectively.
+
+**Presolve fixes, exact** (`d3acf7b8`, `24fb91b2`).
+- `dominated_pairs` took 15.9 of 20 s on neos-913984 (rows up to 76k long, each
+  coefficient found by a row scan). It now runs on a column-major snapshot with
+  hashed-row sign signatures (HiGHS's idea, re-derived as necessary conditions of
+  this rule's test).
+- `implied_integral` and the aggregator's implied-free test (blp-ic98 17.8 s,
+  tbfp-network 5.9 s) are now answered per epoch: an exact cache, and an
+  interval-bounded screen that defers to the exact test near the threshold.
+- Presolve output is identical on all 112 population instances, time aside. Total
+  presolve 66.5 -> 29.8 s. neos-913984 now certifies (root, 0 nodes).
+
+**S3 entry: pivot count, not pivot cost, on the no-bound rows.**
+
+| root LP | HiGHS iterations | discopt pivots |
+|---|---|---|
+| drayage-25-27 | 554 | 12,208 |
+| neos-827175 | 6,839 | 106,416 |
+| piperout-d27 | 10,113 | 11,104 |
+
+- piperout-d27's root LP is now 4.6 s, against 13.3 s at §8.10.
+- The new per-section timers (`DualChuzr` ... `DualRefresh`, under `DISCOPT_PROFILE`)
+  split the rest.
+- On drayage, 59k of 62k cut-loop pivots were dual-degenerate. One perturbed
+  optimum's true-cost clean-up took 8,851 pivots, because the dual route flips boxed
+  columns and grinds the ties.
+- Separately, its rounds spent the budget and the deadline killed the post-loop root
+  re-solve, leaving no bound although the first root LP took 2.3 s.
+
+Two HiGHS behaviours fix these, graduated default-ON on a bundle panel
+(`population_panel_s3.*`, `flag-retirement-audit.md`):
+- `DISCOPT_MILP_ROOT_ROUND_BOUND`: each root round's NS bound floors the root;
+- `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`: a warm primal phase 2 cleans the perturbation up.
+
+Panel results:
+- 0 violations over 336 solves;
+- certified 13 -> 14 (neos-827175);
+- rows with a bound 99 -> 103;
+- incumbents 87 -> 85, inside the +-2 run-to-run band.
+
+Population now (defaults): **14 certified, 103 with a bound** (HiGHS 26 / 110).
+
+**Next.**
+- S4 bundle on the three primal-bound rows.
+- The remaining pivot-count gap on neos-827175: 15x HiGHS's iterations even with
+  the clean-up. Degeneracy and pricing, so dual steepest edge reopens under §79a's
+  condition.
+- piperout-d27's per-pivot cost.

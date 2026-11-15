@@ -3144,11 +3144,14 @@ fn try_randomized_rounding(
 /// root round's LP). Bound-changing only where the tree's own root bound is weaker
 /// than an earlier round's (after cut cleanup) or missing (a deadline stopped the
 /// post-loop root solve); sound either way, since NS is rigorous for any dual.
-/// Default OFF until its population panel; garbage is refused.
+/// **Default ON** since the 2026-11-15 population panel (bundled with
+/// `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`; `data/highs-parity/population/
+/// population_panel_s3.*`): 0 violations over 336 solves, certified 13 -> 14, rows
+/// with a bound 99 -> 103. `=0` opts out; garbage is refused.
 fn root_round_bound_enabled() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| match std::env::var("DISCOPT_MILP_ROOT_ROUND_BOUND") {
-        Err(_) => false,
+        Err(_) => true,
         Ok(v) => parse_switch("DISCOPT_MILP_ROOT_ROUND_BOUND", &v),
     })
 }

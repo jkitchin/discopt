@@ -304,19 +304,32 @@ def test_a_milp_stopped_with_an_incumbent_returns_its_point():
     incumbent's point with its objective. Under the MILP presolve the reduced
     problem's incumbent was mapped back only for an ``Optimal``/``Feasible`` status,
     so a node-limited one came back as objective 5.0 with ``x = 0``, which violates
-    ``sum x = 1``."""
+    ``sum x = 1``.
+
+    The instance must keep a gap open at the root. The earlier one (a single
+    covering row, ``sum x = 1``, 6 columns) is closed at the root since the root
+    rounds' NS bounds floor the root node (``DISCOPT_MILP_ROOT_ROUND_BOUND``,
+    2026-11-15), so it returned ``optimal`` and no longer reached the node-limited
+    path this test is about. This one (two covering rows, ``sum x = 4``, 12 columns)
+    stops at the root with incumbent 18 and bound 17."""
     from discopt.solvers import SolveStatus
     from discopt.solvers.milp_simplex import solve_milp
 
-    n = 6
-    c = np.arange(1, n + 1, dtype=float)
-    a_ub = np.array([[-3.0, -5.0, -7.0, -9.0, -11.0, -13.0]])
+    n = 12
+    c = np.array([9.0, 10.0, 15.0, 19.0, 1.0, 3.0, 16.0, 19.0, 5.0, 6.0, 17.0, 9.0])
+    a_ub = np.array(
+        [
+            [-6.0, -12.0, -6.0, -7.0, -10.0, -9.0, -4.0, -3.0, -13.0, -12.0, -13.0, -9.0],
+            [-12.0, -6.0, -8.0, -12.0, -4.0, -6.0, -4.0, -8.0, -14.0, -4.0, -7.0, -7.0],
+        ]
+    )
+    b_ub = np.array([-36.4, -32.2])
     r = solve_milp(
         c=c,
         A_ub=a_ub,
-        b_ub=np.array([-10.5]),
+        b_ub=b_ub,
         A_eq=np.ones((1, n)),
-        b_eq=np.array([1.0]),
+        b_eq=np.array([4.0]),
         bounds=[(0.0, 1.0)] * n,
         integrality=np.ones(n, dtype=np.int32),
         max_nodes=0,
@@ -324,8 +337,8 @@ def test_a_milp_stopped_with_an_incumbent_returns_its_point():
     )
     assert r.status == SolveStatus.ITERATION_LIMIT
     assert r.objective is not None and r.x is not None
-    assert abs(r.x.sum() - 1.0) <= 1e-9
-    assert (a_ub @ r.x)[0] <= -10.5 + 1e-9
+    assert abs(r.x.sum() - 4.0) <= 1e-9
+    assert np.all(a_ub @ r.x <= b_ub + 1e-9)
     assert np.all(np.abs(r.x - np.round(r.x)) <= 1e-9)
     assert float(c @ r.x) == pytest.approx(r.objective, abs=1e-9)
 

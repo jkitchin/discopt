@@ -427,15 +427,21 @@ pub(super) fn noise_rows_default() -> bool {
 /// (`highs-mip-replacement-plan.md` §8.8). Kept as an opt-out so the two
 /// routes can be A/B'd: feral does not promise the sparse solves are
 /// bit-identical to the dense ones (they were on every entry compared).
+pub(super) fn sparse_solves_enabled() -> bool {
+    member_env("DISCOPT_LP_DUAL_SPARSE_SOLVES").unwrap_or(true)
+}
+
 /// `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`: clean up a cost-perturbed dual optimum with a
 /// warm primal phase 2 before the dual route (see `cost_perturbed_warm_solve`).
 /// Changes the pivot path and possibly which optimal vertex is returned, never the
-/// LP optimum or a verdict. Default OFF until its panel; garbage is refused.
+/// LP optimum or a verdict. **Default ON** since the 2026-11-15 population panel
+/// (bundled with `DISCOPT_MILP_ROOT_ROUND_BOUND`): 0 violations, certified 13 -> 14
+/// (neos-827175). `=0` opts out; garbage is refused.
 pub(super) fn perturb_primal_cleanup_enabled() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(
         || match std::env::var("DISCOPT_LP_PERTURB_PRIMAL_CLEANUP") {
-            Err(_) => false,
+            Err(_) => true,
             Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => true,
                 "0" | "false" | "no" | "off" | "" => false,
@@ -443,10 +449,6 @@ pub(super) fn perturb_primal_cleanup_enabled() -> bool {
             },
         },
     )
-}
-
-pub(super) fn sparse_solves_enabled() -> bool {
-    member_env("DISCOPT_LP_DUAL_SPARSE_SOLVES").unwrap_or(true)
 }
 
 fn dual_trace_enabled() -> bool {

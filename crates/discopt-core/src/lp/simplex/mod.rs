@@ -176,7 +176,7 @@ pub struct SimplexOptions {
     /// (on unless `=0`); see `dual::sparse_solves_enabled` for the measurement.
     pub dual_sparse_solves: bool,
     /// Clean up a cost-perturbed dual optimum with a warm primal phase 2 before the
-    /// dual route (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`, default OFF; see
+    /// dual route (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`, default ON, `=0` opts out; see
     /// `dual::cost_perturbed_warm_solve`).
     pub perturb_primal_cleanup: bool,
     /// Consecutive degenerate dual pivots after which a **stalled** warm re-solve

@@ -78,6 +78,150 @@ class _NullFrontend:
 # ── integration: real pure-Rust MILP solve ──────────────────────────────────
 
 
+def _tree_knapsack():
+    """A 30-item, 3-row binary multi-knapsack the root does not close (6 nodes,
+    0.07 s, 2026-11-15). The 10-item knapsack these debugger tests used is closed at
+    the root since the root rounds' NS bounds floor the root node
+    (``DISCOPT_MILP_ROOT_ROUND_BOUND``), so the tree checkpoints never fired."""
+    vals = [
+        51,
+        23,
+        15,
+        24,
+        30,
+        50,
+        32,
+        14,
+        26,
+        40,
+        50,
+        46,
+        59,
+        19,
+        54,
+        12,
+        37,
+        23,
+        20,
+        42,
+        25,
+        38,
+        23,
+        17,
+        47,
+        31,
+        43,
+        43,
+        57,
+        31,
+    ]
+    rows = [
+        [
+            12,
+            27,
+            37,
+            38,
+            35,
+            28,
+            18,
+            18,
+            6,
+            11,
+            16,
+            17,
+            25,
+            22,
+            29,
+            36,
+            35,
+            32,
+            39,
+            16,
+            36,
+            37,
+            12,
+            21,
+            24,
+            29,
+            29,
+            8,
+            21,
+            8,
+        ],
+        [
+            38,
+            12,
+            20,
+            35,
+            23,
+            28,
+            22,
+            34,
+            25,
+            27,
+            20,
+            19,
+            25,
+            23,
+            32,
+            25,
+            21,
+            35,
+            12,
+            20,
+            22,
+            36,
+            20,
+            26,
+            7,
+            34,
+            20,
+            22,
+            8,
+            29,
+        ],
+        [
+            27,
+            16,
+            31,
+            23,
+            6,
+            12,
+            14,
+            8,
+            22,
+            6,
+            23,
+            29,
+            25,
+            20,
+            14,
+            36,
+            16,
+            34,
+            20,
+            18,
+            29,
+            39,
+            32,
+            25,
+            8,
+            31,
+            32,
+            19,
+            17,
+            11,
+        ],
+    ]
+    caps = [216.5, 216.5, 192.5]
+    m = do.Model("dbg_tree_knapsack")
+    xs = [m.integer(f"x{i}", lb=0, ub=1) for i in range(len(vals))]
+    for w, cap in zip(rows, caps):
+        m.subject_to(sum(wi * xi for wi, xi in zip(w, xs)) <= cap)
+    m.maximize(sum(v * xi for v, xi in zip(vals, xs)))
+    return m
+
+
 def _knapsack():
     m = do.Model("dbg_rust_milp")
     xs = [m.integer(f"x{i}", lb=0, ub=1) for i in range(10)]
@@ -103,7 +247,7 @@ def test_rust_milp_after_select_exposes_node_boxes():
 
     debug.attach(DebugSession(Inspect()))
     try:
-        res = _knapsack().solve(time_limit=15.0, nlp_solver="simplex")
+        res = _tree_knapsack().solve(time_limit=15.0, nlp_solver="simplex")
     finally:
         debug.detach()
     assert res.status == "optimal"
