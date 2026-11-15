@@ -1518,9 +1518,26 @@ impl Work {
     /// [`Self::dominates`] on the [`DomIndex`] snapshot: the signature screen, then
     /// the same test over the alive rows holding `j` or `k`, with each coefficient
     /// read in O(1). Same answer for every pair (`dominates_index_matches_reference`).
+    /// The tolerance of a domination test between columns `j` and `k`. Moving weight
+    /// from `k` to `j` on a wrongly accepted domination costs up to the tolerance times
+    /// the amount moved, which the columns' ranges bound, so the absolute `DomIndex::EPS`
+    /// is divided by the larger range: the loss stays within `EPS`, and an unbounded
+    /// column gets an exact test. Unscaled, `min 1e-9 x_j` over `x_j + x_k >= 1e9`
+    /// (both in `[0, inf)`) read `1e-9 <= 0 + 1e-9` as a domination, fixed `x_k` at 0 and
+    /// lost 1 of objective (review of #2220;
+    /// `a_tiny_cost_difference_on_wide_columns_is_not_a_domination`).
+    fn dom_tol(&self, j: usize, k: usize) -> f64 {
+        let range = (self.u[j] - self.l[j]).max(self.u[k] - self.l[k]);
+        if range.is_finite() {
+            DomIndex::EPS / range.max(1.0)
+        } else {
+            0.0
+        }
+    }
+
     fn dominates_indexed(&self, idx: &mut DomIndex, j: usize, sj: f64, k: usize, sk: f64) -> bool {
-        const EPS: f64 = DomIndex::EPS;
-        if sj * self.c[j] > sk * self.c[k] + EPS {
+        let eps = self.dom_tol(j, k);
+        if sj * self.c[j] > sk * self.c[k] + eps {
             return false;
         }
         if !idx.may_dominate(j, sj, k, sk) {
@@ -1535,8 +1552,8 @@ impl Work {
         for &(r, aj) in &idx.colvals[j] {
             let alpha = sj * aj;
             let beta = sk * idx.scratch[r];
-            if (self.up[r].is_finite() && alpha > beta + EPS)
-                || (self.lo[r].is_finite() && alpha < beta - EPS)
+            if (self.up[r].is_finite() && alpha > beta + eps)
+                || (self.lo[r].is_finite() && alpha < beta - eps)
             {
                 ok = false;
                 break;
@@ -1557,8 +1574,8 @@ impl Work {
                 continue;
             }
             let beta = sk * ak;
-            if (self.up[r].is_finite() && 0.0 > beta + EPS)
-                || (self.lo[r].is_finite() && 0.0 < beta - EPS)
+            if (self.up[r].is_finite() && 0.0 > beta + eps)
+                || (self.lo[r].is_finite() && 0.0 < beta - eps)
             {
                 ok = false;
                 break;
@@ -1573,8 +1590,8 @@ impl Work {
     /// The row-scanning test [`Self::dominates_indexed`] replaced, kept as its oracle.
     #[cfg(test)]
     fn dominates(&self, j: usize, sj: f64, k: usize, sk: f64) -> bool {
-        const EPS: f64 = 1e-9;
-        if sj * self.c[j] > sk * self.c[k] + EPS {
+        let eps = self.dom_tol(j, k);
+        if sj * self.c[j] > sk * self.c[k] + eps {
             return false;
         }
         let entry = |c: usize, r: usize| -> f64 {
@@ -1595,10 +1612,10 @@ impl Work {
                 }
                 let alpha = sj * entry(j, r);
                 let beta = sk * entry(k, r);
-                if self.up[r].is_finite() && alpha > beta + EPS {
+                if self.up[r].is_finite() && alpha > beta + eps {
                     return false;
                 }
-                if self.lo[r].is_finite() && alpha < beta - EPS {
+                if self.lo[r].is_finite() && alpha < beta - eps {
                     return false;
                 }
             }
@@ -3116,6 +3133,41 @@ mod tests {
     /// class behind the portfol_roundlot OA master's false bound). Aggregating `x` out of
     /// `x - a n - b m = 0` leaves `5e-13 n` in `t - x + (a + 5e-13) n >= 0`, worth 5e-8
     /// at `n = 1e5`; the point below is feasible and must stay feasible after presolve.
+    /// Dominated pairs: the same class as the row-dual rule below, raised in review of
+    /// #2220. `min 1e-9 x_j + 0 x_k` over `x_j + x_k >= 1e9`, both continuous in
+    /// `[0, inf)`. The optimum is 0 (all on `x_k`). An absolute 1e-9 cost tolerance reads
+    /// `1e-9 <= 0 + 1e-9` as "j dominates k", fixes `x_k` at its lower bound 0, and the
+    /// reduced optimum is 1 -- feasible, so no postsolve check could catch it.
+    #[test]
+    fn a_tiny_cost_difference_on_wide_columns_is_not_a_domination() {
+        let f = RowForm {
+            n: 2,
+            rows: vec![(vec![0, 1], vec![1.0, 1.0])],
+            lo: vec![1e9],
+            up: vec![INF],
+            c: vec![1e-9, 0.0],
+            l: vec![0.0, 0.0],
+            u: vec![INF, INF],
+            is_int: vec![false, false],
+        };
+        assert!(
+            row_form_feasible(&f, &[0.0, 1e9], 1e-12),
+            "the optimum must be feasible"
+        );
+        // Called directly: the whole presolve settles this model through the row-dual
+        // rule first (it fixes x_j at 0, correctly), so `dominated_pairs` never sees it.
+        let mut w = Work::new(&f, 1e-9);
+        let changed = w.dominated_pairs();
+        // x_k must still be able to reach the optimum's 1e9.
+        assert!(
+            w.u[1] >= 1e9 && w.l[1] <= 1e9,
+            "dominated_pairs boxed x_k to [{:e}, {:e}] (changed {changed}, {:?})",
+            w.l[1],
+            w.u[1],
+            w.stats
+        );
+    }
+
     /// Row-dual dominated columns: a tiny cost on a wide column is not "zero". The
     /// #1603 tiny-coefficient MILP, `min -b0 - b1 - b2 - b3 + 1e-12 y` over
     /// `b0 + b1 - 1e-7 y <= 1.5`, `2 b2 + 2 b3 <= 3`, `y in [0, 1e9]`: its optimum is
