@@ -1050,3 +1050,18 @@ Next.
   measured change, and the backtracking dive's panel.
 - S3: the per-pivot cost (refactor every 48 updates, ftran 0.16 ms, CHUZR O(m)) and
   HiGHS's DSE/Devex switch.
+
+**S4 bundle panel** (`population_panel_s4.*`: backtracking dive plus the
+work-bounded sub-MIP budget).
+- 0 violations; certified 15 = 15.
+- Primal better/worse 12/7, but dual 5/19, incumbents 89 -> 87, certified-row
+  wall 1.17x: harmful. Both flags stay OFF.
+- The budget is the likely cause: longer sub-MIPs take the tree's time. HiGHS
+  bounds them by its 5 % heuristic-effort share, which our root RENS ignores.
+
+**DSE weight check** (HiGHS `acceptDualSteepestEdgeWeight`): re-choose a row whose
+updated weight is under a quarter of the exact one.
+- Built; it fires on mzzv42z (61 re-choices) without changing its 47-50k pivots.
+- puriri and drayage see none.
+- So DSE's regressions are not weight error. The remaining suspect is the
+  perturbed solve under DSE: on mzzv42z it no longer fits half the budget.

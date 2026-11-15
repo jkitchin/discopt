@@ -2503,6 +2503,25 @@ impl<'a> PreparedDual<'a> {
                 }
             }
             drop(t_btran);
+            // HiGHS's DSE weight check (`HEkkDual::chooseRow`,
+            // `acceptDualSteepestEdgeWeight`): the pivot row gives the exact weight
+            // `||ρ||²` of the chosen row; store it, and if the updated weight was below
+            // a quarter of it (the row looked too attractive), choose again with the
+            // corrected weight instead of pivoting. Re-choosing the same row is then
+            // accepted, so this cannot loop.
+            if use_dse {
+                let wr: f64 = if sparse_solves {
+                    rho_nz.iter().map(|&i| rho[i] * rho[i]).sum()
+                } else {
+                    rho.iter().map(|v| v * v).sum()
+                };
+                let updated = gamma[r];
+                gamma[r] = wr.max(1e-4);
+                if updated < 0.25 * wr {
+                    crate::profile::incr(crate::profile::Ctr::DualDseWeightRejects);
+                    continue;
+                }
+            }
             let t_price = crate::profile::Timer::new(crate::profile::Phase::DualPrice);
             // Row-wise when `ρ` is sparse (HiGHS's PRICE): only the rows where `ρ` is
             // nonzero are visited, and `touched` lists (ascending) the nonbasic columns

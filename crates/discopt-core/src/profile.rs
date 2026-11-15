@@ -569,6 +569,8 @@ counters!(
     DualCostPerturbPrimalCleanup,
     // Dual loops priced by steepest edge (`DISCOPT_LP_DUAL_DSE`).
     DualDseSolves,
+    // DSE rows re-chosen because their updated weight was < 1/4 of the exact one.
+    DualDseWeightRejects,
     // Prepared warm starts re-priced on new costs without a new LU (perturb-first).
     DualPrepRepriced,
     // Node-heuristic slots the HiGHS effort budget (DISCOPT_HIGHS_HEUR_EFFORT) allowed / refused.
