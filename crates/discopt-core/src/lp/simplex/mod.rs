@@ -175,6 +175,10 @@ pub struct SimplexOptions {
     /// over the solves' support. Default from `DISCOPT_LP_DUAL_SPARSE_SOLVES`
     /// (on unless `=0`); see `dual::sparse_solves_enabled` for the measurement.
     pub dual_sparse_solves: bool,
+    /// Clean up a cost-perturbed dual optimum with a warm primal phase 2 before the
+    /// dual route (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`, default OFF; see
+    /// `dual::cost_perturbed_warm_solve`).
+    pub perturb_primal_cleanup: bool,
     /// Consecutive degenerate dual pivots after which a **stalled** warm re-solve
     /// is abandoned for the cold solve; `0` disables the bail (#1013).
     ///
@@ -344,6 +348,7 @@ impl Default for SimplexOptions {
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
             dual_sparse_solves: dual::sparse_solves_enabled(),
+            perturb_primal_cleanup: dual::perturb_primal_cleanup_enabled(),
             dual_stall_patience: dual::stall_patience_default(),
             dual_cost_perturb: dual::cost_perturb_default(),
             dual_noise_rows: dual::noise_rows_default(),

@@ -351,6 +351,7 @@ pub fn solve_lp_py<'py>(
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
         dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+        perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
@@ -496,6 +497,7 @@ pub fn solve_lp_warm_py<'py>(
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
         dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+        perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
@@ -624,6 +626,7 @@ pub fn solve_lp_warm_csc_py<'py>(
         // panel: cert-clean, 0 bounds recovered (performance-plan §18e).
         recover_unstable_pivot: deadline.is_some(),
         dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+        perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
@@ -768,6 +771,7 @@ pub fn solve_lp_batch_py<'py>(
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
         dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+        perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
@@ -2184,6 +2188,7 @@ pub(crate) fn milp_options(
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
             dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+            perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
             // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
             // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
             dual_stall_patience: SimplexOptions::default().dual_stall_patience,

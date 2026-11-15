@@ -3139,6 +3139,20 @@ fn try_randomized_rounding(
     }
 }
 
+/// `DISCOPT_MILP_ROOT_ROUND_BOUND`: floor the root node at the NS bound of each
+/// finished root separation round's LP (HiGHS updates its lower bound from every
+/// root round's LP). Bound-changing only where the tree's own root bound is weaker
+/// than an earlier round's (after cut cleanup) or missing (a deadline stopped the
+/// post-loop root solve); sound either way, since NS is rigorous for any dual.
+/// Default OFF until its population panel; garbage is refused.
+fn root_round_bound_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_ROOT_ROUND_BOUND") {
+        Err(_) => false,
+        Ok(v) => parse_switch("DISCOPT_MILP_ROOT_ROUND_BOUND", &v),
+    })
+}
+
 /// `DISCOPT_MILP_CENTRAL_ROUNDING`: HiGHS's central rounding at the root (default
 /// OFF until its population panel). Garbage is refused.
 fn central_rounding_enabled() -> bool {
@@ -5986,6 +6000,24 @@ fn solve_milp_node_search(
                 lp_iters += root.iters;
                 if root.status != LpStatus::Optimal {
                     break;
+                }
+                // `DISCOPT_MILP_ROOT_ROUND_BOUND`: a finished round's LP (original rows
+                // plus valid cuts, over the root box) is a relaxation of the MILP, so the
+                // NS bound of its duals floors the root node. HiGHS raises its lower
+                // bound from every separation round's LP the same way. Without it a
+                // deadline that stops the post-loop root re-solve leaves no bound at
+                // all: drayage-25-27 solved its first root LP in 2.3 s and still
+                // reported none at 20 s, its cut rounds having spent the rest.
+                if root_round_bound_enabled() {
+                    let (cp, ri, va) = csc_w.raw();
+                    if let Some(g) =
+                        ns_safe_bound_csc(&root.dual, &c_w, cp, ri, va, m_w, n_w, &b_w, &l_w, &u_w)
+                    {
+                        tm.seed_root_bound(g.min(root.obj) + obj_const);
+                        crate::profile::incr(crate::profile::Ctr::RootRoundBoundSeeded);
+                    } else {
+                        crate::profile::incr(crate::profile::Ctr::RootRoundBoundAbstain);
+                    }
                 }
                 // Keep this round's optimal basis for the root B&B node. If the loop
                 // exits now (tailing off / no cuts) it already spans the final matrix;

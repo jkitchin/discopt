@@ -326,6 +326,28 @@ pub fn solve_lp_cols_warm(
     sol
 }
 
+/// [`solve_lp_cols_warm`] without its cold fallback: `None` when `start` is not a
+/// usable primal-feasible warm basis (the caller then keeps its own route). For the
+/// clean-up after a cost-perturbed dual solve, whose optimum is primal feasible and
+/// only needs its remaining dual infeasibilities priced out (HiGHS removes its cost
+/// perturbation and cleans up with the primal simplex the same way).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_lp_cols_warm_only(
+    cols: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: &Basis,
+    opts: &SimplexOptions,
+) -> Option<LpSolve> {
+    Simplex::new_from_cols(cols, m, n, c, l, u, b, opts)
+        .run_warm(start)
+        .ok()
+}
+
 /// Whether `x` satisfies the box `l ≤ x ≤ u` and the equalities `A x = b` to a
 /// small absolute/relative tolerance. Used as the final feasibility audit before
 /// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound

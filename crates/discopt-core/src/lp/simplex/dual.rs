@@ -427,6 +427,24 @@ pub(super) fn noise_rows_default() -> bool {
 /// (`highs-mip-replacement-plan.md` §8.8). Kept as an opt-out so the two
 /// routes can be A/B'd: feral does not promise the sparse solves are
 /// bit-identical to the dense ones (they were on every entry compared).
+/// `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`: clean up a cost-perturbed dual optimum with a
+/// warm primal phase 2 before the dual route (see `cost_perturbed_warm_solve`).
+/// Changes the pivot path and possibly which optimal vertex is returned, never the
+/// LP optimum or a verdict. Default OFF until its panel; garbage is refused.
+pub(super) fn perturb_primal_cleanup_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(
+        || match std::env::var("DISCOPT_LP_PERTURB_PRIMAL_CLEANUP") {
+            Err(_) => false,
+            Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" | "" => false,
+                other => panic!("DISCOPT_LP_PERTURB_PRIMAL_CLEANUP={other:?} is not recognized"),
+            },
+        },
+    )
+}
+
 pub(super) fn sparse_solves_enabled() -> bool {
     member_env("DISCOPT_LP_DUAL_SPARSE_SOLVES").unwrap_or(true)
 }
@@ -1473,11 +1491,49 @@ fn cost_perturbed_warm_solve(
     // same rows and bounds, so it is a legitimate warm start either way: the dual
     // loop takes it when it is still dual feasible for `c`, and the primal warm
     // re-solve (which only needs primal feasibility) takes it when it is not.
-    let clean = match PreparedDual::prepare_cols(sp, m, n, c, l, u, &pert.basis, &attempt) {
-        Some(p) => p.reoptimize(l, u, b, &attempt),
-        None => {
-            super::primal::solve_lp_cols_warm(sp.clone(), m, n, c, l, u, b, &pert.basis, &attempt)
-        }
+    //
+    // `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`: try the primal phase 2 first, as HiGHS
+    // does after removing its perturbation. The dual route repairs the start's dual
+    // infeasibilities by flipping boxed columns to their other bound, which makes it
+    // primal infeasible again, and then grinds through the true costs' ties:
+    // measured 2026-11-15 on drayage-25-27's root, one clean-up took 8,851 dual
+    // pivots (the perturbed solve itself 571, HiGHS's whole LP 554).
+    let primal_first = opts
+        .perturb_primal_cleanup
+        .then(|| {
+            super::primal::solve_lp_cols_warm_only(
+                sp.clone(),
+                m,
+                n,
+                c,
+                l,
+                u,
+                b,
+                &pert.basis,
+                &attempt,
+            )
+        })
+        .flatten()
+        .filter(|s| s.status == LpStatus::Optimal);
+    if primal_first.is_some() {
+        crate::profile::incr(crate::profile::Ctr::DualCostPerturbPrimalCleanup);
+    }
+    let clean = match primal_first {
+        Some(s) => s,
+        None => match PreparedDual::prepare_cols(sp, m, n, c, l, u, &pert.basis, &attempt) {
+            Some(p) => p.reoptimize(l, u, b, &attempt),
+            None => super::primal::solve_lp_cols_warm(
+                sp.clone(),
+                m,
+                n,
+                c,
+                l,
+                u,
+                b,
+                &pert.basis,
+                &attempt,
+            ),
+        },
     };
     if dual_trace_enabled() {
         eprintln!(
@@ -5953,6 +6009,86 @@ mod tests {
         }
         assert_eq!(compared, 10, "every captured LP must have been compared");
         assert!(sparse_pivots > 0, "the sparse route never ran");
+    }
+
+    /// `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`: cleaning a perturbed optimum up with the
+    /// warm primal phase 2 gives the same verdict and optimum as the dual route on
+    /// every captured stall LP, with the perturbed path forced (perturbation on,
+    /// not perturb-first, so the second-stage clean-up runs), and the primal
+    /// clean-up provably taken on at least one.
+    #[test]
+    fn perturbed_cleanup_by_primal_matches_the_dual_route_on_every_captured_lp() {
+        let _guard = crate::profile::test_guard();
+        use crate::profile::{counter, reset, set_enabled, Ctr};
+        let (mut compared, mut primal_cleanups, mut perturbed) = (0usize, 0u64, 0u64);
+        for (name, json) in [
+            (
+                "qplib2170",
+                include_str!("testdata/qplib2170_cold_fail_lp.json") as &str,
+            ),
+            (
+                "tspn12",
+                include_str!("testdata/tspn12_dual_stall_lp.json") as &str,
+            ),
+            (
+                "st_testgr3",
+                include_str!("testdata/st_testgr3_degenerate_stall_lp.json") as &str,
+            ),
+            (
+                "nvs01",
+                include_str!("testdata/nvs01_warm_stall_lp.json") as &str,
+            ),
+            (
+                "bchoco06",
+                include_str!("testdata/bchoco06_unstable_pivot_lp.json") as &str,
+            ),
+        ] {
+            let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+                parse_stall_fixture(json);
+            let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+            let start = Basis {
+                col_status,
+                basic_vars,
+            };
+            let base = SimplexOptions {
+                dual_cost_perturb: COST_PERTURB_EPS,
+                dual_perturb_first: false,
+                ..SimplexOptions::default()
+            };
+            let mut off = base.clone();
+            off.perturb_primal_cleanup = false;
+            let mut on = base;
+            on.perturb_primal_cleanup = true;
+            reset();
+            set_enabled(true);
+            let d = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
+            assert_eq!(
+                counter(Ctr::DualCostPerturbPrimalCleanup),
+                0,
+                "{name}: off arm"
+            );
+            reset();
+            let p = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &on);
+            primal_cleanups += counter(Ctr::DualCostPerturbPrimalCleanup);
+            perturbed += counter(Ctr::DualCostPerturbAttempts);
+            set_enabled(false);
+            assert_eq!(
+                d.status, p.status,
+                "{name}: the clean-up route changed the verdict"
+            );
+            if d.status == LpStatus::Optimal {
+                assert!(
+                    (d.obj - p.obj).abs() <= 1e-9 * (1.0 + d.obj.abs()),
+                    "{name}: obj {} (dual clean-up) vs {} (primal clean-up)",
+                    d.obj,
+                    p.obj
+                );
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, 5);
+        assert!(perturbed > 0, "the perturbed route never ran");
+        assert!(primal_cleanups > 0, "the primal clean-up never ran");
     }
 
     /// #1013: the perturbation must be reachable from the entry the B&B driver

@@ -498,6 +498,9 @@ counters!(
     // Unbounded relaxations re-checked by a zero-objective feasibility solve, and the
     // verdicts that check overturned (`settle_unbounded`).
     MilpUnboundedSettle,
+    // Root rounds whose NS bound seeded the root node / abstained (`DISCOPT_MILP_ROOT_ROUND_BOUND`).
+    RootRoundBoundSeeded,
+    RootRoundBoundAbstain,
     MilpUnboundedDemoted,
     PlungeContinued,
     PlungeStarts,
@@ -559,6 +562,9 @@ counters!(
     //   `DualCostPerturbCleanInLoop` — perturb-first attempts whose optimum was
     //   re-priced on the true costs with the dual loop's own factor (no second LU).
     DualCostPerturbCleanInLoop,
+    // Clean-ups of a perturbed optimum done by the warm primal phase 2
+    // (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`).
+    DualCostPerturbPrimalCleanup,
     // Prepared warm starts re-priced on new costs without a new LU (perturb-first).
     DualPrepRepriced,
     // Node-heuristic slots the HiGHS effort budget (DISCOPT_HIGHS_HEUR_EFFORT) allowed / refused.
