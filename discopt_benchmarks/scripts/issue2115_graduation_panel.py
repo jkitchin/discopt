@@ -80,6 +80,25 @@ _TOL_ABS = 1e-6
 #: on an instance where it did not is time-limit noise), ``leak(off)`` must be 0
 #: (the OFF arm honoured the flag).
 _FLAGS = {
+    # The HiGHS MILP configuration umbrella (graduated on the 120-row MILP population)
+    # on the MINLP corpus, where the MILP engine solves OA / decomposition masters:
+    # review of #2220 (a 2.2x slowdown on a convex-MINLP OA test). The counters are
+    # the umbrella's LP-level members, chosen by measurement: on cvxnonsep_psig40r
+    # (2026-11-15) `SubtolLadderTried`, `DualPrepRepriced` and `HighsSepaCutoffBox`
+    # fire with it on and are 0 with it off, while `MilpPresolveRuns` /
+    # `RootHighsPropagated` are 0 in both arms there (the OA masters skip that path).
+    "DISCOPT_HIGHS_CONFIG": {
+        "fired": lambda off, on: (
+            on["SubtolLadderTried"] + on["DualPrepRepriced"] + on["HighsSepaCutoffBox"]
+        ),
+        "ran": lambda off, on: (
+            on["SubtolLadderTried"] + on["DualPrepRepriced"] + on["HighsSepaCutoffBox"] > 0
+        ),
+        "leak": lambda off: (
+            off["SubtolLadderTried"] + off["DualPrepRepriced"] + off["HighsSepaCutoffBox"]
+        ),
+        "show": ("SubtolLadderTried", "DualPrepRepriced"),
+    },
     # highs-parity S3 (2026-11-15, graduated default-ON on the MILP population): after
     # a cost-perturbed dual, clean up on the true costs with the primal phase 2 first,
     # as HiGHS does. `DualCostPerturbPrimalCleanup` counts the clean-ups it decided;
@@ -255,6 +274,10 @@ _FLAGS = {
     },
 }
 _CTRS = (
+    # DISCOPT_HIGHS_CONFIG.
+    "SubtolLadderTried",
+    "DualPrepRepriced",
+    "HighsSepaCutoffBox",
     # DISCOPT_LP_PERTURB_PRIMAL_CLEANUP.
     "DualCostPerturbAttempts",
     "DualCostPerturbPrimalCleanup",
