@@ -34,6 +34,12 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`discopt[highs]` excludes highspy 1.16.0** (`highspy>=1.11,!=1.12.0,!=1.16.0`). On
+  `main`, the affected test files pass with 1.15.1 and fail 90 tests with 1.16.0: HiGHS
+  fixed defects some falsifier tests rely on, its LP-reader and IIS output changed, and
+  two changes may be regressions (the banner prints with logging off; a raising
+  separator no longer aborts the solve). Adopting 1.16 is tracked in #2221.
+
 - **HiGHS is an optional extra (`pip install 'discopt[highs]'`).** Without `highspy`
   every default path runs on discopt's in-house Rust engine: pure LPs and pure MILPs
   (the Rust simplex and MILP engine, whether or not HiGHS is installed), IIS
