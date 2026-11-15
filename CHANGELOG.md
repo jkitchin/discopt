@@ -74,9 +74,30 @@ The release procedure that produces these entries is documented in
   (`feasible` with no bound, or `unknown` with no point and no bound) instead of
   handing off. The opt-outs that only reached or skipped that tree are gone:
   `DISCOPT_MILP_ENGINE`, `DISCOPT_MILP_NO_STALL_TREE=0`, `DISCOPT_IPX_RACE_STALL_EXIT`,
-  `DISCOPT_P3_FORCE_CUT_PATH`.
+  `DISCOPT_P3_FORCE_CUT_PATH`. A model the classifier calls a MILP but the exact-linearity
+  check rejects now raises a "routing defect" `RuntimeError` instead of falling back to
+  that tree. `batch_size` has no effect on a MILP any more (it sized that tree's batches).
 
 ### Fixed
+
+- **MILP presolve could certify a suboptimal answer when costs or coefficients were tiny
+  against a wide column range.** The row-dual dominated-column rule and the pairwise
+  dominated-columns rule both compared with an absolute 1e-9; a wrong-side fixing costs
+  up to that tolerance times the column's range. Measured: a 1e-12 cost on
+  `y in [0, 1e9]` gave `optimal` 2.999 against a true 2.999995; a 1e-9 cost difference
+  on two unbounded columns fixed the wrong one at 0. Both tolerances are now divided by
+  the column range (exact for an unbounded column).
+- **`compute_iis` reported infeasible matrix-row models as feasible.** Rows added through
+  `add_linear_constraints` -- and, since this release, every row of a linear model read
+  by `from_nl` / `from_mps` / `from_lp` -- were invisible to both IIS engines. They are
+  now rewritten as expression constraints first, **on the model passed in** (the model
+  is mathematically unchanged; its rows move to `model._constraints`).
+- **`from_mps` / `from_lp` refuse a row with an impossible side** (lower bound `+inf`,
+  upper bound `-inf`, or NaN) instead of dropping it and loading an infeasible model as
+  feasible.
+- **`DISCOPT_LP_DUAL_SPARSE_SOLVES=` (empty) no longer turns the default-ON sparse
+  solves off**: an empty value now means unset for every HiGHS-configuration member
+  switch, as for every other flag.
 
 - **`deterministic=True` no longer lets the wall-priced improver governor pick the
   incumbent (#2216).** The #2176 governor (`DISCOPT_HEUR_WALL_COST`) admits RINS /

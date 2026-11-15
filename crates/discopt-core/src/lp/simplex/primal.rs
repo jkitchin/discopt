@@ -1611,7 +1611,7 @@ fn p1_expel_forced_for_test() -> bool {
     false
 }
 
-/// `DISCOPT_LP_PRIMAL_INCR_PRICING` (engine work, default OFF): maintain the primal
+/// `DISCOPT_LP_PRIMAL_INCR_PRICING` (engine work): maintain the primal
 /// simplex's reduced costs incrementally from the pivot row instead of re-pricing
 /// every column every pivot. Read once.
 ///

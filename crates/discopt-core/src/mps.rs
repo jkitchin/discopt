@@ -1,3 +1,7 @@
+//! Provenance: derived from HiGHS source (https://github.com/ERGO-Code/HiGHS, Copyright (c) HiGHS,
+//! MIT License): its behaviour reproduces `io/HMpsFF.cpp` and `lp_data/HighsLpUtils.cpp`, cited
+//! line by line below. See `THIRD_PARTY_NOTICES.md` at the repository root for the license text.
+//!
 //! Free-format MPS reader that reproduces HiGHS 1.15.1's `readModel` -> `getLp`
 //! exactly (highs-parity P6: the in-house replacement for HiGHS's reader in
 //! `discopt.mipcc` and the benchmark loader).

@@ -61,11 +61,12 @@ pounce = ["pounce-solver>=0.17"]
 # both (OMP Error #15 abort). discopt raises OpenMPRuntimeConflictError first (#2205).
 ipopt = ["cyipopt>=1.4"]
 # HiGHS (highs-parity P6.3): an optional extra, not a core dependency. Every default
-# path runs in-house without it (docs/dev/highs-optional-inventory.md); with it, a pure
-# MILP goes to the verified HiGHS route (DISCOPT_LP_MILP_BACKEND, which falls back to
-# the in-house engine when highspy is absent), and the opt-ins `milp_solver="highs"`,
-# `highs_options`, `DISCOPT_LP_BACKEND=highs` etc. become available; without it they
-# raise MissingHighsError naming this extra (`discopt._optional_highs`).
+# path runs in-house with or without it (docs/dev/highs-optional-inventory.md): a pure
+# LP/MILP goes to the in-house Rust engine either way (owner decision 2026-11-09). With
+# it, the opt-ins `milp_backend="highs"` / `DISCOPT_LP_MILP_BACKEND=highs` (the verified
+# HiGHS route), `milp_solver="highs"`, `highs_options`, `DISCOPT_LP_BACKEND=highs` etc.
+# become available; without it they raise MissingHighsError naming this extra
+# (`discopt._optional_highs`).
 # >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
 # which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
 # 1.16.0 is excluded until its behaviour changes are adopted (banner with logging off,

@@ -61,7 +61,7 @@ use super::simplex::sparse::SparseCols;
 const INF: f64 = 1e20;
 /// Minimum fractionality of the scaled rhs (avoids tiny `1 - f0` denominators).
 const FRAC_MIN: f64 = 1e-3;
-/// HiGHS's f0 window (`HighsCutGeneration.cpp:526`), under `DISCOPT_MILP_CMIR_HIGHS`.
+/// HiGHS's f0 window (`HighsCutGeneration.cpp:526`), under the HiGHS design (`design_on`).
 const FRAC_MIN_HIGHS: f64 = 0.005;
 /// HiGHS's feasibility tolerance for "off its bound" and delta deduplication.
 const HIGHS_FEASTOL: f64 = 1e-6;
@@ -703,7 +703,8 @@ fn lifted_mic_knapsack(
     Some((out, cut_rhs))
 }
 
-/// `DISCOPT_MILP_LIFTED_MIC`: the lifted mixed-integer cover of one substituted c-MIR
+/// The lifted mixed-integer cover (HiGHS design, `design_on`; once its own flag,
+/// `DISCOPT_MILP_LIFTED_MIC`, now folded into it) of one substituted c-MIR
 /// base row (`sum a y' + sum cs s <= rhs2`, `y'` complemented integers, `s >= 0`),
 /// mapped back to `z` exactly as [`try_delta`] maps a MIR. Every integer must have a
 /// finite integral range; integers with a negative coefficient are complemented the
@@ -879,8 +880,8 @@ fn cut_at(
     c
 }
 
-/// `DISCOPT_MILP_CMIR_HIGHS`: HiGHS's delta selection, then (with
-/// `DISCOPT_MILP_CMIR_FLIP`) its complementation flip pass. Scalings here are
+/// HiGHS's delta selection, then its complementation flip pass (both under the HiGHS
+/// design, `design_on`; once `DISCOPT_MILP_CMIR_HIGHS` / `_FLIP`, now folded into it). Scalings here are
 /// `1 / delta` in HiGHS's divisor convention.
 fn cmir_row_highs(
     ctx: &Ctx<'_>,

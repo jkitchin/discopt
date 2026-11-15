@@ -1,3 +1,7 @@
+//! Provenance: derived from HiGHS source (https://github.com/ERGO-Code/HiGHS, Copyright (c) HiGHS,
+//! MIT License): the separation round it runs follows `mip/HighsSeparation.cpp`. See
+//! `THIRD_PARTY_NOTICES.md` at the repository root for the license text.
+//!
 //! Bridge from discopt's standard-form root LP to the ported HiGHS separation
 //! subsystem (gap plan P3, option A, phase 4b).
 //!

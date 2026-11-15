@@ -1,3 +1,8 @@
+//! Provenance: discopt code (the switch that enables the HiGHS-derived configuration). The ported
+//! HiGHS components it drives are derived from HiGHS (https://github.com/ERGO-Code/HiGHS, Copyright
+//! (c) HiGHS, MIT License); see `THIRD_PARTY_NOTICES.md` at the repository root for the license
+//! text.
+//!
 //! `DISCOPT_HIGHS_CONFIG`: one switch for the HiGHS configuration of the MILP engine.
 //!
 //! The HiGHS-design components are judged together, as HiGHS's own components are

@@ -1733,8 +1733,8 @@ def solve_lp_std(
 ) -> HighsOutcome:
     """Solve the continuous relaxation of ``sf`` under the §3.1 contract.
 
-    ``engine`` (``highs``, the default, or ``rust``; ``None`` reads
-    ``DISCOPT_LP_STD_ENGINE``) picks who produces the raw answer (P1.1,
+    ``engine`` (``rust``, the default, or ``highs``; ``None`` reads
+    ``DISCOPT_LP_STD_ENGINE``, ``rust`` unless set) picks who produces the raw answer (P1.1,
     :mod:`~discopt.solvers.lp_std_engine`). Every certificate below is the same for both:
     it reads ``sf`` and the returned vectors only.
     """

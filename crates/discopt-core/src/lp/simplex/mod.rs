@@ -176,8 +176,8 @@ pub struct SimplexOptions {
     /// (on unless `=0`); see `dual::sparse_solves_enabled` for the measurement.
     pub dual_sparse_solves: bool,
     /// Clean up a cost-perturbed dual optimum with a warm primal phase 2 before the
-    /// dual route (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`, default ON, `=0` opts out; see
-    /// `dual::cost_perturbed_warm_solve`).
+    /// dual route (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`, default OFF, `=1` opts in; see
+    /// `dual::perturb_primal_cleanup_enabled` for why).
     pub perturb_primal_cleanup: bool,
     /// Dual steepest-edge pricing in the dual loop when the start basis gives exact
     /// weights for free (`DISCOPT_LP_DUAL_DSE`, default OFF; see `dual::run_dual`).

@@ -1,3 +1,8 @@
+//! Provenance: discopt code (a test harness replaying HiGHS dumps through the port). The ported
+//! HiGHS components it drives are derived from HiGHS (https://github.com/ERGO-Code/HiGHS, Copyright
+//! (c) HiGHS, MIT License); see `THIRD_PARTY_NOTICES.md` at the repository root for the license
+//! text.
+//!
 //! Replay of HiGHS `generateCut` dumps through the Rust port, bit for bit.
 //!
 //! Record format (one HiGHS `generateCut` call; floats are C `%a` hex literals):

@@ -1,3 +1,8 @@
+//! Provenance: discopt code (a test harness replaying HiGHS dumps through the port). The ported
+//! HiGHS components it drives are derived from HiGHS (https://github.com/ERGO-Code/HiGHS, Copyright
+//! (c) HiGHS, MIT License); see `THIRD_PARTY_NOTICES.md` at the repository root for the license
+//! text.
+//!
 //! Replay of HiGHS search-control dumps (`HS_DUMP_SEARCH`, written by
 //! `docs/dev/data/highs-parity/search/hs_dump_search.patch`; format in
 //! `docs/dev/highs-mip-replacement-plan.md`, stage 1b).

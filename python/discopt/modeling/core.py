@@ -9940,24 +9940,24 @@ class Model:
             Passed through to :func:`discopt.solver.solve_model`.
         milp_backend : {"highs", "native"}, optional
             Engine for a pure LP or MILP model. The default ``None`` defers to
-            the environment: a MILP to ``DISCOPT_LP_MILP_BACKEND`` (default
-            HiGHS), an LP to ``DISCOPT_LP_BACKEND`` (default the in-house Rust
-            simplex since highs-parity D1; an explicitly set
-            ``DISCOPT_LP_MILP_BACKEND`` still decides an LP when it is unset).
-            ``"highs"`` names HiGHS with discopt-verified
-            certificates, by far the faster choice; its ``node_count`` is
-            HiGHS's own ``mip_node_count``, which counts the root: ``0`` when
-            HiGHS presolve settles the model, ``1`` when the root node closes
-            it, more once HiGHS branches. ``"native"`` forces discopt's own branch and
-            bound so the search can be studied: the in-house LP solve (Rust
-            simplex, POUNCE if it declines) for an LP, discopt's MILP tree for
-            a MILP. On the
-            MILP tree ``node_count`` is the tree's, ``strategy`` selects the
-            next node (``"best_first"``, ``"depth_first"``, ``"best_estimate"``),
-            ``batch_size=1`` evaluates one node at a time (default 16 per
-            batch), ``branching_rule`` picks the variable to branch on,
-            ``node_callback`` fires after every batch, ``max_nodes`` caps the
-            tree and ``milp_cuts`` switches the root cut loop.
+            the environment: a MILP to ``DISCOPT_LP_MILP_BACKEND`` (default: the
+            in-house Rust MILP engine, whether or not ``highspy`` is installed),
+            an LP to ``DISCOPT_LP_BACKEND`` (default: the in-house Rust simplex;
+            an explicitly set ``DISCOPT_LP_MILP_BACKEND`` still decides an LP
+            when it is unset). ``"highs"`` is the opt-in HiGHS route with
+            discopt-verified certificates (needs the ``discopt[highs]`` extra);
+            its ``node_count`` is HiGHS's own ``mip_node_count``, which counts
+            the root: ``0`` when HiGHS presolve settles the model, ``1`` when the
+            root node closes it, more once HiGHS branches. ``"native"`` names
+            discopt's own engines explicitly, with a route label saying so: the
+            in-house LP solve (Rust simplex, POUNCE if it declines) for an LP,
+            the Rust MILP engine for a MILP. On the MILP engine ``node_count`` is
+            the engine's, ``strategy`` selects the next node (``"best_first"``,
+            ``"depth_first"``, ``"best_estimate"``), ``branching_rule`` picks the
+            variable to branch on, ``node_callback`` fires at the engine's node
+            checkpoints, ``max_nodes`` caps the tree and ``milp_cuts`` switches
+            the root cut loop. ``batch_size`` has no effect there (it sized the
+            retired Python MILP tree's batches).
             ``algorithm_route`` names the engine that ran. Refused for a model
             that is not an LP or MILP and with ``nlp_bb=True``; ``"highs"`` is
             refused with any callback, since HiGHS runs none. ``lazy_constraints``,
