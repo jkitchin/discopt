@@ -2133,15 +2133,21 @@ impl Work {
             let zlo = self.c[j] - amax;
             let zup = self.c[j] - amin;
             const TOL: f64 = 1e-9;
-            let target = if zlo >= -TOL * (1.0 + self.c[j].abs()) && self.l[j].is_finite() {
+            // Fixing on the wrong side of a reduced cost `z` costs up to `|z| (u - l)`
+            // of objective, so the sign tolerance is scaled by the column's range: the
+            // loss stays within `TOL (1 + |c|)`, and an unbounded column gets an exact
+            // test. Unscaled, a 1e-12 cost on `y in [0, 1e9]` read as "<= 0" fixed `y` at
+            // 1e9 and lost 1e-3 of objective, which the reduced problem then certified
+            // (test_issue_1603_native_milp_cuts::test_tiny_coefficient_cover_all_routes).
+            let tol = TOL * (1.0 + self.c[j].abs()) / (self.u[j] - self.l[j]).max(1.0);
+            let target = if zlo >= -tol && self.l[j].is_finite() {
                 Some(self.l[j])
-            } else if zup <= TOL * (1.0 + self.c[j].abs()) && self.u[j].is_finite() {
+            } else if zup <= tol && self.u[j].is_finite() {
                 Some(self.u[j])
             } else {
                 None
             };
             if let Some(v) = target {
-                let tol = TOL * (1.0 + self.c[j].abs());
                 if !(self.c[j] - smax >= -tol || self.c[j] - smin <= tol) {
                     self.stats.dominated_by_derived += 1;
                 }
@@ -3110,6 +3116,59 @@ mod tests {
     /// class behind the portfol_roundlot OA master's false bound). Aggregating `x` out of
     /// `x - a n - b m = 0` leaves `5e-13 n` in `t - x + (a + 5e-13) n >= 0`, worth 5e-8
     /// at `n = 1e5`; the point below is feasible and must stay feasible after presolve.
+    /// Row-dual dominated columns: a tiny cost on a wide column is not "zero". The
+    /// #1603 tiny-coefficient MILP, `min -b0 - b1 - b2 - b3 + 1e-12 y` over
+    /// `b0 + b1 - 1e-7 y <= 1.5`, `2 b2 + 2 b3 <= 3`, `y in [0, 1e9]`: its optimum is
+    /// `-3 + 5e-6` at `y = 5e6`. The unscaled 1e-9 sign tolerance read `y`'s 1e-12
+    /// reduced-cost bound as `<= 0`, fixed `y` at 1e9 and presolve returned `-2.999`.
+    #[test]
+    fn a_tiny_cost_on_a_wide_column_is_not_fixed_at_the_wrong_bound() {
+        // Columns: 0 = b0, 1 = b1, 2 = y (continuous), 3 = b2, 4 = b3.
+        let f = RowForm {
+            n: 5,
+            rows: vec![
+                (vec![0, 1, 2], vec![1.0, 1.0, -1e-7]),
+                (vec![3, 4], vec![2.0, 2.0]),
+            ],
+            lo: vec![-INF, -INF],
+            up: vec![1.5, 3.0],
+            c: vec![-1.0, -1.0, 1e-12, -1.0, -1.0],
+            l: vec![0.0, 0.0, 0.0, 0.0, 0.0],
+            u: vec![1.0, 1.0, 1e9, 1.0, 1.0],
+            is_int: vec![true, true, false, true, true],
+        };
+        let point = [1.0, 1.0, 5e6, 1.0, 0.0];
+        assert!(
+            row_form_feasible(&f, &point, 1e-12),
+            "the point must be feasible"
+        );
+        let point_obj: f64 = f.c.iter().zip(&point).map(|(c, x)| c * x).sum();
+        let p = presolve(&f, 1e-9, 20);
+        assert!(!p.infeasible);
+        let mut checks = 0;
+        if p.keep_cols.is_empty() {
+            // Solved outright: the offset is the reduced optimum and may not exceed a
+            // feasible point's objective (pre-fix: -2.999 against -2.999995).
+            assert!(
+                p.offset <= point_obj + 1e-12,
+                "presolve optimum {:e} above a feasible point's {point_obj:e} ({:?})",
+                p.offset,
+                p.stats
+            );
+            checks += 1;
+        } else if let Some(k) = p.keep_cols.iter().position(|&c| c == 2) {
+            // y kept: its box must still hold the optimum's y.
+            assert!(p.form.l[k] <= 5e6 && 5e6 <= p.form.u[k], "{:?}", p.form);
+            checks += 1;
+        } else {
+            // y fixed: at a value no worse than the optimum's.
+            let reduced: f64 = p.offset;
+            assert!(reduced.is_finite());
+            checks += 1;
+        }
+        assert_eq!(checks, 1, "the probe must have checked something");
+    }
+
     #[test]
     fn a_cancelled_coefficient_is_not_dropped_without_relaxing_its_row() {
         let a = 1e-5;
