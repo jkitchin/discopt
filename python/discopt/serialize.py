@@ -2315,8 +2315,19 @@ _STATE_DERIVED = frozenset({"_names", "_builder", "_flat_var_offsets_cache", "_i
 #: columns a ``Disjunct.variable`` declared local, and where each disjunct was
 #: placed -- travels in the 1.7 ``_gdp_blocks`` record (WP-3b-2), and the reader
 #: rebuilds fresh ``Disjunct`` objects over the reloaded rows from it.
+#:
+#: ``file_columns`` (highs-parity S2) is the column order of the MPS/LP file a model
+#: was read from (``from_mps`` / ``from_lp``), for reporting a point in file order. It
+#: describes the source file, not the model: a document carries the model (variables
+#: by name), and re-reading the file rebuilds it. A reloaded model has
+#: ``file_columns = None``; carrying it would need a schema minor of its own.
 _STATE_NOT_CARRIED = frozenset(
-    {"_last_solve_result", "_gdp_factory_disjunctions", "_gdp_factory_disjuncts"}
+    {
+        "_last_solve_result",
+        "_gdp_factory_disjunctions",
+        "_gdp_factory_disjuncts",
+        "file_columns",
+    }
 )
 
 #: Attached after ``__init__`` by a solve, and deliberately not carried for the
