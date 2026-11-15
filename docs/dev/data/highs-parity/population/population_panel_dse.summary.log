@@ -1,0 +1,20 @@
+118 f2gap401600                  ours OPT    0.3  highs OPT    0.2
+119 neos-4393408-tinui           ours time  20.1  highs kTim  20.0
+ours   certified   15 of 120  ERR 8  total_wall   2071.8
+highs  certified   26 of 120  ERR 8  total_wall   1880.1
+ours_dse certified   14 of 120  ERR 8  total_wall   2069.9
+ours_afr certified   15 of 120  ERR 8  total_wall   2072.5
+violations: 0
+solves: 448
+ours {'cert': 15, 'bound': 104, 'inc': 87, 'over25': 0, 'wall': 2071.8}
+ours_dse {'cert': 14, 'bound': 104, 'inc': 86, 'over25': 0, 'wall': 2069.9}
+incumbent gained ['neos-555001', 'neos-4393408-tinui'] lost ['ns2071214', 'air04', 'aflow40b']
+primal better/worse [24, 18] median -9.63e-04 dual better/worse [32, 23]
+cert changes [('neos-827175', True, False, 13.7, 20.5), ('10teams', False, True, 20.1, 11.4), ('app1-1', True, False, 12.4, 20.3)]
+both-certified rows 13 node ratio geomean 0.605 wall ratio geomean 0.88
+ours {'cert': 15, 'bound': 104, 'inc': 87, 'over25': 0, 'wall': 2071.8}
+ours_afr {'cert': 15, 'bound': 104, 'inc': 89, 'over25': 0, 'wall': 2072.5}
+incumbent gained ['nsrand-ipx', 'neos-4393408-tinui'] lost []
+primal better/worse [5, 4] median -3.80e-04 dual better/worse [14, 8]
+cert changes []
+both-certified rows 15 node ratio geomean 1.01 wall ratio geomean 0.981

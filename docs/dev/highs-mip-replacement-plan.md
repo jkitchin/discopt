@@ -1017,3 +1017,36 @@ somewhere else:
 
 The time share is one factor, not the cause. Next: trace each row's RENS (fixing
 rate, dive outcome, sub-MIP status) against HiGHS's `RENS` on the same root point.
+
+### 8.15 S3 pricing and S4 heuristics, second pass (2026-11-15)
+
+Population with all defaults now (`population_panel_dse.*`, `ours` arm): **15 certified,
+104 with a bound, 87 incumbents** (HiGHS 26 / 110 / 93).
+
+**S3, root LP: dual steepest edge.**
+- Root-only, the nine rows without a bound take 1.5-5.4x HiGHS's iterations under our
+  Devex pricing (`data/highs-parity/s3/nobound_lp.txt`).
+- DSE from the free exact weights of the cold slack basis wins large on four
+  (30_70 and reblock420 gain a bound) and loses large on three (mzzv42z loses one).
+- Population: certified 15 -> 14, bounds equal, dual better/worse 32/23.
+- It stays OFF. The loss rows are pivot-count regressions, not bugs: the weights were
+  checked against exact ones.
+- HiGHS itself starts with DSE and switches to Devex when DSE costs too much. That
+  switch, and a MINLP-corpus panel, come before DSE is re-judged.
+
+**S4, primal: per-row RENS traces** (`DISCOPT_RENS_TRACE`).
+- *10teams.* Every RENS neighbourhood is integer-infeasible. HiGHS, given the same
+  boxes, agrees, so our sub-MIP verdicts are correct.
+  - HiGHS's adaptive fixing rate (graduated; +2 incumbents on the population) and
+    its backtracking dive (built, default OFF) both fire and find nothing there.
+  - What HiGHS's root 'L' does differently is not yet identified.
+- *neos-960392.* The RENS sub-MIP never finishes its root inside our 2 s / 25 %
+  budget. HiGHS waits 17.8 s for its 'L'.
+- *neos-498623.* The sub-MIPs return points worse than the incumbent; a larger
+  budget improves it (37.6 -> 22.7).
+
+Next.
+- S4: the sub-MIP time budget (HiGHS bounds sub-MIPs by nodes and leaves only) as a
+  measured change, and the backtracking dive's panel.
+- S3: the per-pivot cost (refactor every 48 updates, ftran 0.16 ms, CHUZR O(m)) and
+  HiGHS's DSE/Devex switch.

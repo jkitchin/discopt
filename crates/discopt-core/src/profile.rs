@@ -448,6 +448,8 @@ counters!(
     SubMipConsidered,
     SubMipPropInfeas,
     SubMipRensRun,
+    // Backtracks taken by the RENS/RINS dive (`DISCOPT_MILP_DIVE_BACKTRACK`).
+    SubMipDiveBacktracks,
     SubMipRinsRun,
     SubMipSubNodes,
     SubMipImproved,

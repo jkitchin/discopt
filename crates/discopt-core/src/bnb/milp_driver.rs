@@ -3372,6 +3372,346 @@ fn fix_and_complete(
     }
 }
 
+/// `DISCOPT_MILP_DIVE_BACKTRACK`: the RENS/RINS dive of [`try_rens_highs`] branches
+/// and backtracks as HiGHS's does (`HighsPrimalHeuristics::RENS`/`RINS` on a
+/// `HighsSearch`). Each bound change is one decision (`x_j >= v` or `x_j <= v`) with
+/// an undo log. A node proved infeasible, by propagation or by its LP, flips the most
+/// recent untried decision, up to 10 times. Today's dive instead reverts the whole
+/// batch and stops. Measured 2026-11-15 on 10teams: every RENS neighbourhood the
+/// current dive built was proved infeasible by its sub-MIP. Changes which
+/// neighbourhood a heuristic searches, never a bound. Default OFF until its panel;
+/// garbage is refused.
+fn dive_backtrack_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_DIVE_BACKTRACK") {
+        Err(_) => false,
+        Ok(v) => parse_switch("DISCOPT_MILP_DIVE_BACKTRACK", &v),
+    })
+}
+
+/// The dive's propagation: the box after propagating `l`/`u`, or `None` (infeasible).
+type DiveProp<'a> = dyn Fn(&[f64], &[f64]) -> Option<(Vec<f64>, Vec<f64>)> + 'a;
+
+/// The read-only inputs of [`dive_with_backtracking`].
+struct DiveCtx<'a> {
+    cut: &'a SubMipBase,
+    order: &'a [usize],
+    inc: Option<(&'a [f64], f64)>,
+    node_x: &'a [f64],
+    root_x: Option<&'a [f64]>,
+    ns: usize,
+    ft: f64,
+    target: f64,
+    min_rate_rins: f64,
+    simplex: &'a SimplexOptions,
+    dive_deadline: std::time::Instant,
+}
+
+/// One branching decision of the dive: `x_j >= val` (`lower`) or `x_j <= val`, with
+/// the bounds it (and its propagation) changed, to restore on backtracking.
+struct DiveDecision {
+    j: usize,
+    lower: bool,
+    val: f64,
+    flipped: bool,
+    undo: Vec<(usize, f64, f64)>,
+}
+
+/// HiGHS's RENS/RINS dive with backtracking (see [`dive_backtrack_enabled`]). Leaves
+/// `l`/`u` at the dive's last feasible node (never at a node proved infeasible); the
+/// caller solves the sub-MIP over that box.
+#[allow(clippy::too_many_arguments)]
+fn dive_with_backtracking(
+    l: &mut Vec<f64>,
+    u: &mut Vec<f64>,
+    x: &mut [f64],
+    basis: &mut Option<Basis>,
+    prop: &DiveProp<'_>,
+    rate: &dyn Fn(&[f64], &[f64]) -> f64,
+    cx: DiveCtx<'_>,
+) {
+    const MAX_BACKTRACKS: usize = 10;
+    let mut stack: Vec<DiveDecision> = Vec::new();
+    let mut nback = 0usize;
+    // Apply one decision and propagate. `false`: the node is infeasible; the decision
+    // is still recorded (flipped later) and `l`/`u` are as before it.
+    let decide = |l: &mut Vec<f64>,
+                  u: &mut Vec<f64>,
+                  stack: &mut Vec<DiveDecision>,
+                  j: usize,
+                  lower: bool,
+                  val: f64,
+                  flipped: bool|
+     -> bool {
+        let (ol, ou) = (l[j], u[j]);
+        let (before_l, before_u) = (l.clone(), u.clone());
+        if lower {
+            l[j] = val;
+        } else {
+            u[j] = val;
+        }
+        match prop(l, u) {
+            Some((pl, pu)) => {
+                let undo: Vec<(usize, f64, f64)> = (0..pl.len())
+                    .filter(|&c| pl[c] != before_l[c] || pu[c] != before_u[c])
+                    .map(|c| (c, before_l[c], before_u[c]))
+                    .collect();
+                *l = pl;
+                *u = pu;
+                stack.push(DiveDecision {
+                    j,
+                    lower,
+                    val,
+                    flipped,
+                    undo,
+                });
+                true
+            }
+            None => {
+                l[j] = ol;
+                u[j] = ou;
+                stack.push(DiveDecision {
+                    j,
+                    lower,
+                    val,
+                    flipped,
+                    undo: Vec::new(),
+                });
+                false
+            }
+        }
+    };
+    // HiGHS `HighsSearch::backtrack`: undo decisions back to the most recent untried
+    // one and take its other side. `false`: nothing left to try (or the backtrack
+    // budget is spent); `l`/`u` are then at the last ancestor reached.
+    let backtrack = |l: &mut Vec<f64>,
+                     u: &mut Vec<f64>,
+                     stack: &mut Vec<DiveDecision>,
+                     nback: &mut usize|
+     -> bool {
+        while let Some(d) = stack.pop() {
+            for &(c, ol, ou) in d.undo.iter().rev() {
+                l[c] = ol;
+                u[c] = ou;
+            }
+            if d.flipped {
+                continue;
+            }
+            *nback += 1;
+            if *nback > MAX_BACKTRACKS {
+                return false;
+            }
+            let (lower, val) = if d.lower {
+                (false, d.val - 1.0)
+            } else {
+                (true, d.val + 1.0)
+            };
+            if (lower && val > u[d.j]) || (!lower && val < l[d.j]) {
+                continue; // the other side is empty: that node is infeasible too
+            }
+            if decide(l, u, stack, d.j, lower, val, true) {
+                crate::profile::incr(crate::profile::Ctr::SubMipDiveBacktracks);
+                return true;
+            }
+        }
+        false
+    };
+    let ft = cx.ft;
+    let mut fixtolpsol = cx.inc.is_some();
+    let mut need_lp = false;
+    for _ in 0..200 {
+        if std::time::Instant::now() >= cx.dive_deadline {
+            break;
+        }
+        if need_lp {
+            // HiGHS `evaluateNode`: the node LP over the current box.
+            let lp = LpView {
+                a: &[],
+                m: cx.cut.m,
+                n: cx.cut.n,
+                c: &cx.cut.c,
+                l,
+                u,
+            };
+            let warm = basis.is_some();
+            let mut sol = match basis.as_ref() {
+                Some(bs) => solve_lp_warm_scaled_csc(&lp, &cx.cut.b, bs, cx.simplex, &cx.cut.csc),
+                None => solve_lp_root_csc(
+                    &cx.cut.csc,
+                    cx.cut.m,
+                    cx.cut.n,
+                    &cx.cut.c,
+                    l,
+                    u,
+                    &cx.cut.b,
+                    cx.simplex,
+                ),
+            };
+            if warm && !matches!(sol.status, LpStatus::Optimal | LpStatus::Infeasible) {
+                sol = solve_lp_root_csc(
+                    &cx.cut.csc,
+                    cx.cut.m,
+                    cx.cut.n,
+                    &cx.cut.c,
+                    l,
+                    u,
+                    &cx.cut.b,
+                    cx.simplex,
+                );
+            }
+            if sol.status == LpStatus::Infeasible {
+                if !backtrack(l, u, &mut stack, &mut nback) {
+                    break;
+                }
+                continue;
+            }
+            if sol.status != LpStatus::Optimal || sol.x.len() < cx.ns {
+                break; // undecided: stop diving at this node
+            }
+            x.copy_from_slice(&sol.x[..cx.ns]);
+            if sol.basis.basic_vars.len() == cx.cut.m && sol.basis.col_status.len() == cx.cut.n {
+                *basis = Some(sol.basis);
+            }
+        }
+        let fixing = rate(l, u);
+        if fixing >= cx.target || nback >= MAX_BACKTRACKS {
+            break;
+        }
+        let stop_rate = (1.0 - (1.0 - fixing) * 0.9).min(cx.target);
+        let mut branched = 0usize;
+        let mut infeasible = false;
+        if let (Some((ix, _)), true) = (cx.inc, fixtolpsol) {
+            let any_frac_agree = cx.order.iter().any(|&j| {
+                l[j] < u[j]
+                    && (x[j] - x[j].round()).abs() > ft
+                    && (cx.node_x[j] - ix[j]).abs() <= ft
+            });
+            if !any_frac_agree {
+                'fix: for &j in cx.order {
+                    if l[j] >= u[j] || (x[j] - ix[j]).abs() > ft {
+                        continue;
+                    }
+                    let v = x[j].round().min(u[j]).max(l[j]);
+                    for lower in [true, false] {
+                        let needed = if lower { l[j] < v } else { u[j] > v };
+                        if !needed {
+                            continue;
+                        }
+                        branched += 1;
+                        if !decide(l, u, &mut stack, j, lower, v, false) {
+                            infeasible = true;
+                            break 'fix;
+                        }
+                    }
+                    if rate(l, u) >= stop_rate {
+                        break;
+                    }
+                }
+                if !infeasible && branched == 0 {
+                    if rate(l, u) >= cx.min_rate_rins {
+                        break;
+                    }
+                    fixtolpsol = false;
+                }
+            }
+        }
+        if cx.inc.is_none() && !infeasible {
+            'box_: for &j in cx.order {
+                if l[j] >= u[j] {
+                    continue;
+                }
+                let down = (x[j] + ft).floor().min(u[j]);
+                let up = (x[j] - ft).ceil().max(l[j]);
+                if l[j] < down {
+                    branched += 1;
+                    if !decide(l, u, &mut stack, j, true, down, false) {
+                        infeasible = true;
+                        break 'box_;
+                    }
+                }
+                if u[j] > up {
+                    branched += 1;
+                    if !decide(l, u, &mut stack, j, false, up, false) {
+                        infeasible = true;
+                        break 'box_;
+                    }
+                }
+                if rate(l, u) >= stop_rate {
+                    break;
+                }
+            }
+        }
+        if !infeasible && branched == 0 {
+            let rins_lp = fixtolpsol && cx.inc.is_some();
+            let fixval = |j: usize, l: &[f64], u: &[f64]| {
+                if rins_lp {
+                    return (cx.node_x[j] + 0.5).floor().min(u[j]).max(l[j]);
+                }
+                let xv = x[j];
+                let rc = cx.root_x.map_or(0.0, |r| xv - r[j]);
+                let v = if rc >= 0.4 {
+                    xv.ceil()
+                } else if rc <= -0.4 {
+                    xv.floor()
+                } else if cx.cut.c[j] > 0.0 {
+                    xv.ceil()
+                } else if cx.cut.c[j] < 0.0 {
+                    xv.floor()
+                } else {
+                    (xv + 0.5).floor()
+                };
+                v.min(u[j]).max(l[j])
+            };
+            let mut frac: Vec<(f64, usize)> = cx
+                .order
+                .iter()
+                .copied()
+                .filter(|&j| l[j] < u[j] && (x[j] - x[j].round()).abs() > ft)
+                .filter(|&j| {
+                    !rins_lp
+                        || cx
+                            .inc
+                            .is_some_and(|(ix, _)| (cx.node_x[j] - ix[j]).abs() <= ft)
+                })
+                .map(|j| ((fixval(j, l, u) - x[j]).abs(), j))
+                .collect();
+            frac.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let mut change = 0.0;
+            for (_, j) in frac {
+                if l[j] >= u[j] {
+                    continue;
+                }
+                let v = fixval(j, l, u);
+                // HiGHS branches one side: up to `v` when rounding up, else down.
+                let lower = v > x[j];
+                branched += 1;
+                if !decide(l, u, &mut stack, j, lower, v, false) {
+                    infeasible = true;
+                    break;
+                }
+                if rate(l, u) >= cx.target {
+                    break;
+                }
+                change += (v - x[j]).abs();
+                if change >= 0.5 {
+                    break;
+                }
+            }
+        }
+        if infeasible {
+            if !backtrack(l, u, &mut stack, &mut nback) {
+                break;
+            }
+            need_lp = true;
+            continue;
+        }
+        if branched == 0 {
+            break;
+        }
+        need_lp = true;
+    }
+}
+
 /// Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's RENS (`HighsPrimalHeuristics.cpp:394-640`).
 ///
 /// 1. Neighbourhood dive (`:430-570`): restrict every integer to `[floor, ceil]` of the
@@ -3479,181 +3819,209 @@ fn try_rens_highs(
         .filter(|b| b.basic_vars.len() == cut.m && b.col_status.len() == cut.n)
         .cloned();
     let mut fixing: f64;
-    for _ in 0..200 {
-        if std::time::Instant::now() >= dive_deadline {
-            break;
-        }
-        fixing = rate(&l, &u);
-        if fixing >= target {
-            break;
-        }
-        let snap = (l.clone(), u.clone());
-        let mut branched = 0usize;
-        let stop_rate = (1.0 - (1.0 - fixing) * 0.9).min(target);
-        let mut infeasible = false;
-        if let (Some((ix, _)), true) = (inc, fixtolpsol) {
-            // RINS phase A: no fractional integer agrees with the incumbent at the node
-            // point -> fix the integers where the current LP equals the incumbent.
-            let any_frac_agree = order.iter().any(|&j| {
-                l[j] < u[j] && (x[j] - x[j].round()).abs() > ft && (node_x[j] - ix[j]).abs() <= ft
-            });
-            if !any_frac_agree {
-                for &j in order {
-                    if l[j] >= u[j] || (x[j] - ix[j]).abs() > ft {
-                        continue;
-                    }
-                    let v = x[j].round().min(u[j]).max(l[j]);
-                    if l[j] < v || u[j] > v {
-                        l[j] = v;
-                        u[j] = v;
-                        branched += 1;
-                        match prop(&l, &u) {
-                            Some((pl, pu)) => {
-                                l = pl;
-                                u = pu;
+    if dive_backtrack_enabled() {
+        dive_with_backtracking(
+            &mut l,
+            &mut u,
+            &mut x,
+            &mut basis,
+            &prop,
+            &rate,
+            DiveCtx {
+                cut,
+                order,
+                inc,
+                node_x,
+                root_x,
+                ns,
+                ft,
+                target,
+                min_rate_rins,
+                simplex: &simplex,
+                dive_deadline,
+            },
+        );
+    } else {
+        for _ in 0..200 {
+            if std::time::Instant::now() >= dive_deadline {
+                break;
+            }
+            fixing = rate(&l, &u);
+            if fixing >= target {
+                break;
+            }
+            let snap = (l.clone(), u.clone());
+            let mut branched = 0usize;
+            let stop_rate = (1.0 - (1.0 - fixing) * 0.9).min(target);
+            let mut infeasible = false;
+            if let (Some((ix, _)), true) = (inc, fixtolpsol) {
+                // RINS phase A: no fractional integer agrees with the incumbent at the node
+                // point -> fix the integers where the current LP equals the incumbent.
+                let any_frac_agree = order.iter().any(|&j| {
+                    l[j] < u[j]
+                        && (x[j] - x[j].round()).abs() > ft
+                        && (node_x[j] - ix[j]).abs() <= ft
+                });
+                if !any_frac_agree {
+                    for &j in order {
+                        if l[j] >= u[j] || (x[j] - ix[j]).abs() > ft {
+                            continue;
+                        }
+                        let v = x[j].round().min(u[j]).max(l[j]);
+                        if l[j] < v || u[j] > v {
+                            l[j] = v;
+                            u[j] = v;
+                            branched += 1;
+                            match prop(&l, &u) {
+                                Some((pl, pu)) => {
+                                    l = pl;
+                                    u = pu;
+                                }
+                                None => {
+                                    infeasible = true;
+                                    break;
+                                }
                             }
-                            None => {
-                                infeasible = true;
+                            if rate(&l, &u) >= stop_rate {
                                 break;
                             }
                         }
-                        if rate(&l, &u) >= stop_rate {
+                    }
+                    if !infeasible && branched == 0 {
+                        if rate(&l, &u) >= min_rate_rins {
                             break;
                         }
+                        fixtolpsol = false;
                     }
                 }
-                if !infeasible && branched == 0 {
-                    if rate(&l, &u) >= min_rate_rins {
-                        break;
-                    }
-                    fixtolpsol = false;
+            }
+            for &j in order {
+                if inc.is_some() {
+                    break; // RINS has no RENS box phase
                 }
-            }
-        }
-        for &j in order {
-            if inc.is_some() {
-                break; // RINS has no RENS box phase
-            }
-            if l[j] >= u[j] {
-                continue;
-            }
-            let down = (x[j] + ft).floor().min(u[j]);
-            let up = (x[j] - ft).ceil().max(l[j]);
-            let mut changed = false;
-            if l[j] < down {
-                l[j] = down;
-                changed = true;
-            }
-            if u[j] > up {
-                u[j] = up;
-                changed = true;
-            }
-            if changed {
-                branched += 1;
-                match prop(&l, &u) {
-                    Some((pl, pu)) => {
-                        l = pl;
-                        u = pu;
-                    }
-                    None => {
-                        infeasible = true;
-                        break;
-                    }
-                }
-                if rate(&l, &u) >= stop_rate {
-                    break;
-                }
-            }
-        }
-        if !infeasible && branched == 0 {
-            // Fix the fractional integers, least change first (`:500-560`).
-            let rins_lp = fixtolpsol && inc.is_some();
-            let fixval = |j: usize, l: &[f64], u: &[f64]| {
-                if rins_lp {
-                    return (node_x[j] + 0.5).floor().min(u[j]).max(l[j]);
-                }
-                let xv = x[j];
-                let rc = root_x.map_or(0.0, |r| xv - r[j]);
-                let v = if rc >= 0.4 {
-                    xv.ceil()
-                } else if rc <= -0.4 {
-                    xv.floor()
-                } else if cut.c[j] > 0.0 {
-                    xv.ceil()
-                } else if cut.c[j] < 0.0 {
-                    xv.floor()
-                } else {
-                    (xv + 0.5).floor()
-                };
-                v.min(u[j]).max(l[j])
-            };
-            let mut frac: Vec<(f64, usize)> = order
-                .iter()
-                .copied()
-                .filter(|&j| l[j] < u[j] && (x[j] - x[j].round()).abs() > ft)
-                .filter(|&j| !rins_lp || inc.is_some_and(|(ix, _)| (node_x[j] - ix[j]).abs() <= ft))
-                .map(|j| ((fixval(j, &l, &u) - x[j]).abs(), j))
-                .collect();
-            frac.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            let mut change = 0.0;
-            for (_, j) in frac {
                 if l[j] >= u[j] {
                     continue;
                 }
-                let v = fixval(j, &l, &u);
-                l[j] = v;
-                u[j] = v;
-                branched += 1;
-                match prop(&l, &u) {
-                    Some((pl, pu)) => {
-                        l = pl;
-                        u = pu;
+                let down = (x[j] + ft).floor().min(u[j]);
+                let up = (x[j] - ft).ceil().max(l[j]);
+                let mut changed = false;
+                if l[j] < down {
+                    l[j] = down;
+                    changed = true;
+                }
+                if u[j] > up {
+                    u[j] = up;
+                    changed = true;
+                }
+                if changed {
+                    branched += 1;
+                    match prop(&l, &u) {
+                        Some((pl, pu)) => {
+                            l = pl;
+                            u = pu;
+                        }
+                        None => {
+                            infeasible = true;
+                            break;
+                        }
                     }
-                    None => {
-                        infeasible = true;
+                    if rate(&l, &u) >= stop_rate {
                         break;
                     }
                 }
-                if rate(&l, &u) >= target {
-                    break;
-                }
-                change += (v - x[j]).abs();
-                if change >= 0.5 {
-                    break;
+            }
+            if !infeasible && branched == 0 {
+                // Fix the fractional integers, least change first (`:500-560`).
+                let rins_lp = fixtolpsol && inc.is_some();
+                let fixval = |j: usize, l: &[f64], u: &[f64]| {
+                    if rins_lp {
+                        return (node_x[j] + 0.5).floor().min(u[j]).max(l[j]);
+                    }
+                    let xv = x[j];
+                    let rc = root_x.map_or(0.0, |r| xv - r[j]);
+                    let v = if rc >= 0.4 {
+                        xv.ceil()
+                    } else if rc <= -0.4 {
+                        xv.floor()
+                    } else if cut.c[j] > 0.0 {
+                        xv.ceil()
+                    } else if cut.c[j] < 0.0 {
+                        xv.floor()
+                    } else {
+                        (xv + 0.5).floor()
+                    };
+                    v.min(u[j]).max(l[j])
+                };
+                let mut frac: Vec<(f64, usize)> = order
+                    .iter()
+                    .copied()
+                    .filter(|&j| l[j] < u[j] && (x[j] - x[j].round()).abs() > ft)
+                    .filter(|&j| {
+                        !rins_lp || inc.is_some_and(|(ix, _)| (node_x[j] - ix[j]).abs() <= ft)
+                    })
+                    .map(|j| ((fixval(j, &l, &u) - x[j]).abs(), j))
+                    .collect();
+                frac.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                let mut change = 0.0;
+                for (_, j) in frac {
+                    if l[j] >= u[j] {
+                        continue;
+                    }
+                    let v = fixval(j, &l, &u);
+                    l[j] = v;
+                    u[j] = v;
+                    branched += 1;
+                    match prop(&l, &u) {
+                        Some((pl, pu)) => {
+                            l = pl;
+                            u = pu;
+                        }
+                        None => {
+                            infeasible = true;
+                            break;
+                        }
+                    }
+                    if rate(&l, &u) >= target {
+                        break;
+                    }
+                    change += (v - x[j]).abs();
+                    if change >= 0.5 {
+                        break;
+                    }
                 }
             }
-        }
-        if infeasible {
-            (l, u) = snap;
-            break;
-        }
-        if branched == 0 {
-            break;
-        }
-        // Re-solve the LP over the restricted box (`heurlp.flushDomain` + evaluateNode).
-        let lp = LpView {
-            a: &[],
-            m: cut.m,
-            n: cut.n,
-            c: &cut.c,
-            l: &l,
-            u: &u,
-        };
-        let warm = basis.is_some();
-        let mut sol = match basis.as_ref() {
-            Some(bs) => solve_lp_warm_scaled_csc(&lp, &cut.b, bs, &simplex, &cut.csc),
-            None => solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex),
-        };
-        if warm && !matches!(sol.status, LpStatus::Optimal | LpStatus::Infeasible) {
-            sol = solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex);
-        }
-        if sol.status != LpStatus::Optimal || sol.x.len() < ns {
-            (l, u) = snap;
-            break;
-        }
-        x.copy_from_slice(&sol.x[..ns]);
-        if sol.basis.basic_vars.len() == cut.m && sol.basis.col_status.len() == cut.n {
-            basis = Some(sol.basis);
+            if infeasible {
+                (l, u) = snap;
+                break;
+            }
+            if branched == 0 {
+                break;
+            }
+            // Re-solve the LP over the restricted box (`heurlp.flushDomain` + evaluateNode).
+            let lp = LpView {
+                a: &[],
+                m: cut.m,
+                n: cut.n,
+                c: &cut.c,
+                l: &l,
+                u: &u,
+            };
+            let warm = basis.is_some();
+            let mut sol = match basis.as_ref() {
+                Some(bs) => solve_lp_warm_scaled_csc(&lp, &cut.b, bs, &simplex, &cut.csc),
+                None => solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex),
+            };
+            if warm && !matches!(sol.status, LpStatus::Optimal | LpStatus::Infeasible) {
+                sol = solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex);
+            }
+            if sol.status != LpStatus::Optimal || sol.x.len() < ns {
+                (l, u) = snap;
+                break;
+            }
+            x.copy_from_slice(&sol.x[..ns]);
+            if sol.basis.basic_vars.len() == cut.m && sol.basis.col_status.len() == cut.n {
+                basis = Some(sol.basis);
+            }
         }
     }
     fixing = rate(&l, &u);
@@ -3818,12 +4186,15 @@ impl FixStats {
 /// after improving ones, around 0.9-1.1x theirs; uniformly between. Measured
 /// 2026-11-15 on 10teams: four RENS sub-MIPs at the constant 0.6 were all proved
 /// infeasible, so the root never got a point. Changes which neighbourhood a heuristic
-/// searches, never a bound. Default OFF until its panel; garbage is refused.
+/// searches, never a bound. **Default ON** since the 2026-11-15 population panel
+/// (`population_panel_dse.*`, arm `ours_afr`): 0 violations, certified 15 = 15,
+/// incumbents 87 -> 89 (none lost), primal better/worse 5/4, dual 14/8. `=0` opts
+/// out; garbage is refused.
 fn adaptive_fixing_rate_enabled() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(
         || match std::env::var("DISCOPT_MILP_ADAPTIVE_FIXING_RATE") {
-            Err(_) => false,
+            Err(_) => true,
             Ok(v) => parse_switch("DISCOPT_MILP_ADAPTIVE_FIXING_RATE", &v),
         },
     )

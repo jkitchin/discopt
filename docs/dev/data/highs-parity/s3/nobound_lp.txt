@@ -1,0 +1,9 @@
+30_70_45_095_98 | HiGHS LP 32580 it 9.9s | ours dual_pivots=79872 primal_pivots=0 dual_loop_ms=59607.03
+dano3_5 | HiGHS LP 59126 it 22.6s | ours dual_pivots=39350 primal_pivots=2873 dual_loop_ms=24851.13
+mzzv11 | HiGHS LP 62165 it 28.9s | ours dual_pivots=55040 primal_pivots=0 dual_loop_ms=59132.13
+mzzv42z | HiGHS LP 9870 it 1.7s | ours dual_pivots=14876 primal_pivots=0 dual_loop_ms=12977.70
+neos-3216931-puriri | HiGHS LP 14915 it 3.7s | ours dual_pivots=13615 primal_pivots=0 dual_loop_ms=7431.12
+neos-799711 | HiGHS LP 14614 it 3.7s | ours dual_pivots=78939 primal_pivots=1212 dual_loop_ms=56781.52
+opm2-z7-s8 | HiGHS LP 5256 it 2.4s | ours dual_pivots=13370 primal_pivots=0 dual_loop_ms=18786.16
+reblock420 | HiGHS LP 5134 it 4.3s | ours dual_pivots=21504 primal_pivots=0 dual_loop_ms=57898.51
+tbfp-network | HiGHS LP 18705 it 12.8s | ours dual_pivots=8942 primal_pivots=0 dual_loop_ms=8565.49
