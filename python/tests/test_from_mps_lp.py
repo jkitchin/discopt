@@ -195,3 +195,28 @@ def test_the_differential_compares_optima():
         model = _random_model(np.random.default_rng(100 + seed), True)
         optimal += _solve(model).status == "optimal"
     assert optimal >= 17, optimal
+
+
+@pytest.mark.parametrize("lo, hi", [(np.inf, np.inf), (-np.inf, -np.inf), (np.nan, 1.0)])
+def test_a_row_with_an_impossible_side_is_refused_not_dropped(lo, hi):
+    """Review of #2220, item 10: a row with lo = +inf or hi = -inf is infeasible. The
+    sense masks used to drop it as "constrains nothing", loading the model as feasible."""
+    import scipy.sparse as sp
+    from discopt.modeling._linear_files import _model_from_arrays
+
+    d = {
+        "n": 2,
+        "integrality": np.array([0, 0]),
+        "col_lb": np.zeros(2),
+        "col_ub": np.ones(2),
+        "col_names": ["a", "b"],
+        "A": sp.csc_matrix(np.array([[1.0, 1.0], [1.0, -1.0]])),
+        "row_lo": np.array([0.0, lo]),
+        "row_hi": np.array([1.0, hi]),
+        "c": np.zeros(2),
+        "offset": 0.0,
+        "maximize": False,
+        "has_hessian": False,
+    }
+    with pytest.raises(ValueError, match="impossible side"):
+        _model_from_arrays(d, "t", None)

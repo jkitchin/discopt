@@ -4784,6 +4784,9 @@ fn settle_unbounded(
             let zero = vec![0.0; n];
             let mut o = clock_from(opts, t0);
             o.initial_incumbent = None;
+            // The caller's node-bound hook bounds the caller's objective, not this
+            // zero-objective feasibility search (review of #2220).
+            o.bound_hook = None;
             o.max_nodes = o.max_nodes.min(UNBOUNDED_SETTLE_MAX_NODES);
             let feas = solve_milp_node_search(csc, m, n, &zero, l, u, b, 0.0, &o, None, lazy, node);
             match feas.status {

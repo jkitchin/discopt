@@ -149,6 +149,17 @@ def _model_from_arrays(d: dict, name: str, hessian) -> object:
     A = sp.csc_matrix(d["A"])[:, perm].tocsr()  # noqa: N806
     lo = np.asarray(d["row_lo"], dtype=np.float64)
     hi = np.asarray(d["row_hi"], dtype=np.float64)
+    # A row with lo = +inf or hi = -inf (or a NaN side) is infeasible, not empty; the
+    # sense masks below would drop it as "constrains nothing" and load the model as
+    # feasible. Refuse it. (A finite lo > hi is kept: it lands in both `le` and `ge`,
+    # so the loaded model stays infeasible, which is what an IIS needs.)
+    bad = np.flatnonzero(np.isnan(lo) | np.isnan(hi) | (lo == np.inf) | (hi == -np.inf))
+    if bad.size:
+        raise ValueError(
+            f"{bad.size} row(s) of the file have an impossible side (lower bound +inf, "
+            f"upper bound -inf, or NaN), first at row index {int(bad[0])}: such a row is "
+            "infeasible and cannot be represented as a constraint."
+        )
     eq = np.isfinite(lo) & np.isfinite(hi) & (lo == hi)
     le = np.isfinite(hi) & ~eq
     ge = np.isfinite(lo) & ~eq

@@ -380,21 +380,34 @@ pub(super) fn subtol_ladder_default() -> bool {
 /// infeasibilities on boxed columns only (median |d_j| ~ 600), each one a primal
 /// phase 1 (56 to the iteration limit). Garbage is refused.
 /// A HiGHS-configuration member's own switch as set (`None` when unset), read once per
-/// variable; garbage refused.
+/// variable; garbage refused. An empty value counts as unset, as every other parser
+/// here treats it: it used to read as `0`, so `DISCOPT_LP_DUAL_SPARSE_SOLVES=` silently
+/// turned a default-ON feature off (review of #2220). The value is parsed before the
+/// cache lock is taken, so a refused value panics without poisoning the mutex.
 fn member_env(var: &'static str) -> Option<bool> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<&'static str, Option<bool>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut c = cache.lock().expect("member_env cache");
-    *c.entry(var).or_insert_with(|| match std::env::var(var) {
-        Err(_) => None,
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" | "" => Some(false),
-            other => panic!("{var}={other:?} is not recognized (expected 1 or 0)"),
-        },
-    })
+    if let Some(v) = cache.lock().ok().and_then(|c| c.get(var).copied()) {
+        return v;
+    }
+    let parsed = parse_member(var, std::env::var(var).ok().as_deref());
+    if let Ok(mut c) = cache.lock() {
+        c.entry(var).or_insert(parsed);
+    }
+    parsed
+}
+
+/// [`member_env`]'s parse table: `None` for unset or empty, garbage refused.
+fn parse_member(var: &str, raw: Option<&str>) -> Option<bool> {
+    let v = raw?.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "" => None,
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        other => panic!("{var}={other:?} is not recognized (expected 1 or 0)"),
+    }
 }
 
 /// The MILP engine's LP options: the HiGHS configuration's LP-level members follow
@@ -3599,6 +3612,16 @@ fn assemble(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_empty_member_switch_counts_as_unset() {
+        assert_eq!(parse_member("X", None), None);
+        assert_eq!(parse_member("X", Some("")), None);
+        assert_eq!(parse_member("X", Some("  ")), None);
+        assert_eq!(parse_member("X", Some("1")), Some(true));
+        assert_eq!(parse_member("X", Some("Off")), Some(false));
+        assert!(std::panic::catch_unwind(|| parse_member("X", Some("maybe"))).is_err());
+    }
     use super::super::primal::solve_lp;
     use super::*;
 

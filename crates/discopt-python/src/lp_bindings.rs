@@ -1063,7 +1063,15 @@ impl MilpBoundHook for PyBoundHook {
                 .callback
                 .bind(py)
                 .call1((PyArray1::from_slice(py, lb), PyArray1::from_slice(py, ub)))
-                .and_then(|v| v.extract::<Option<f64>>());
+                .and_then(|v| v.extract::<Option<f64>>())
+                .and_then(|v| match v {
+                    // A NaN bound is a bug in the hook, not "no bound": report it like a
+                    // raise (the driver also ignores non-finite values).
+                    Some(x) if x.is_nan() => Err(pyo3::exceptions::PyValueError::new_err(
+                        "node bound hook returned NaN",
+                    )),
+                    other => Ok(other),
+                });
             match r {
                 Ok(v) => v,
                 Err(e) => {
