@@ -1,6 +1,0 @@
-ours {'cert': 12, 'bound': 93, 'inc': 83, 'over25': 1, 'wall': 2183.0}
-ours_incr {'cert': 12, 'bound': 94, 'inc': 83, 'over25': 0, 'wall': 2183.1}
-incumbent gained [] lost []
-primal better/worse [9, 12] median +1.82e-03 dual better/worse [15, 13]
-cert changes []
-both-certified rows 5 node ratio geomean 1.0 wall ratio geomean 0.977
