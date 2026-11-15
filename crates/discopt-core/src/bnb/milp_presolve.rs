@@ -298,6 +298,102 @@ impl Presolved {
     }
 }
 
+/// Column-major snapshot of the alive rows for [`Work::dominated_pairs`], with
+/// hashed-row sign signatures (HiGHS `dominatedColumns`' idea, re-derived for this
+/// rule's test). The rule only tightens bounds, so the rows do not change while it
+/// runs and the snapshot stays exact.
+///
+/// Per column `c`, bit `h(r)` (`h` maps a row to 0..32) of:
+/// `[0]` rows with `a_cr > 0`, `[1]` rows with `a_cr < 0`, `[2]` finite-upper rows
+/// with `a_cr > EPS`, `[3]` finite-upper rows with `a_cr < -EPS`, `[4]` finite-lower
+/// rows with `a_cr > EPS`, `[5]` finite-lower rows with `a_cr < -EPS`.
+/// See [`DomIndex::may_dominate`] for why a failed subset test is a proof that the
+/// pair fails [`Work::dominates`].
+struct DomIndex {
+    colvals: Vec<Vec<(usize, f64)>>,
+    sig: Vec<[u32; 6]>,
+    /// Dense row-indexed coefficients of one column at a time (all `0.0` between uses).
+    scratch: Vec<f64>,
+}
+
+impl DomIndex {
+    const EPS: f64 = 1e-9;
+
+    fn bit(r: usize) -> u32 {
+        1u32 << ((r as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 59)
+    }
+
+    fn new(w: &Work) -> Self {
+        let mut colvals: Vec<Vec<(usize, f64)>> = vec![Vec::new(); w.n];
+        let mut sig = vec![[0u32; 6]; w.n];
+        for (r, (cols, vals)) in w.rows.iter().enumerate() {
+            if !w.row_alive[r] {
+                continue;
+            }
+            let b = Self::bit(r);
+            let (upf, lof) = (w.up[r].is_finite(), w.lo[r].is_finite());
+            for (&c, &a) in cols.iter().zip(vals) {
+                // `entry` (`dominates`) reads a column's FIRST entry in a row.
+                if colvals[c].last().is_some_and(|&(rr, _)| rr == r) {
+                    continue;
+                }
+                colvals[c].push((r, a));
+                let sg = &mut sig[c];
+                if a > 0.0 {
+                    sg[0] |= b;
+                } else if a < 0.0 {
+                    sg[1] |= b;
+                }
+                if upf && a > Self::EPS {
+                    sg[2] |= b;
+                }
+                if upf && a < -Self::EPS {
+                    sg[3] |= b;
+                }
+                if lof && a > Self::EPS {
+                    sg[4] |= b;
+                }
+                if lof && a < -Self::EPS {
+                    sg[5] |= b;
+                }
+            }
+        }
+        let m = w.rows.len();
+        DomIndex {
+            colvals,
+            sig,
+            scratch: vec![0.0; m],
+        }
+    }
+
+    /// The signatures of `s x_c`: `(pos, neg, up_pos, up_neg, lo_pos, lo_neg)`.
+    fn signed(&self, c: usize, s: f64) -> [u32; 6] {
+        let g = self.sig[c];
+        if s > 0.0 {
+            g
+        } else {
+            [g[1], g[0], g[3], g[2], g[5], g[4]]
+        }
+    }
+
+    /// `false` only when `sj x_j` provably does not dominate `sk x_k`. With
+    /// `alpha = sj a_jr`, `beta = sk a_kr`, [`Work::dominates`] needs
+    /// `alpha <= beta + EPS` on finite-upper rows and `alpha >= beta - EPS` on
+    /// finite-lower rows. So a finite-upper row with `alpha > EPS` needs `beta > 0`,
+    /// and one with `beta < -EPS` needs `alpha < 0`. A finite-lower row with
+    /// `alpha < -EPS` needs `beta < 0`, and one with `beta > EPS` needs `alpha > 0`.
+    /// Each is a subset relation between row sets, and hashing rows to bits keeps a
+    /// true subset a subset.
+    fn may_dominate(&self, j: usize, sj: f64, k: usize, sk: f64) -> bool {
+        let gj = self.signed(j, sj);
+        let gk = self.signed(k, sk);
+        (gj[2] & !gk[0]) == 0
+            && (gk[3] & !gj[1]) == 0
+            && (gj[5] & !gk[1]) == 0
+            && (gk[4] & !gj[0]) == 0
+    }
+}
+
 struct Work {
     n: usize,
     rows: Vec<(Vec<usize>, Vec<f64>)>,
@@ -1158,6 +1254,63 @@ impl Work {
     /// changes each row by `delta (alpha - beta)` on the safe side and the objective by
     /// `delta (sj c_j - sk c_k) <= 0`, and keeps integrality since both have the same
     /// type.
+    /// [`Self::dominates`] on the [`DomIndex`] snapshot: the signature screen, then
+    /// the same test over the alive rows holding `j` or `k`, with each coefficient
+    /// read in O(1). Same answer for every pair (`dominates_index_matches_reference`).
+    fn dominates_indexed(&self, idx: &mut DomIndex, j: usize, sj: f64, k: usize, sk: f64) -> bool {
+        const EPS: f64 = DomIndex::EPS;
+        if sj * self.c[j] > sk * self.c[k] + EPS {
+            return false;
+        }
+        if !idx.may_dominate(j, sj, k, sk) {
+            return false;
+        }
+        // k's coefficients by row in the scratch, cleared on every exit.
+        for &(r, a) in &idx.colvals[k] {
+            idx.scratch[r] = a;
+        }
+        let mut ok = true;
+        // Rows of j (every alive row holding j, with k's coefficient or 0).
+        for &(r, aj) in &idx.colvals[j] {
+            let alpha = sj * aj;
+            let beta = sk * idx.scratch[r];
+            if (self.up[r].is_finite() && alpha > beta + EPS)
+                || (self.lo[r].is_finite() && alpha < beta - EPS)
+            {
+                ok = false;
+                break;
+            }
+        }
+        for &(r, _) in &idx.colvals[k] {
+            idx.scratch[r] = 0.0;
+        }
+        if !ok {
+            return false;
+        }
+        // Rows of k without j: alpha = 0. Mark j's rows to skip them.
+        for &(r, _) in &idx.colvals[j] {
+            idx.scratch[r] = 1.0;
+        }
+        for &(r, ak) in &idx.colvals[k] {
+            if idx.scratch[r] != 0.0 {
+                continue;
+            }
+            let beta = sk * ak;
+            if (self.up[r].is_finite() && 0.0 > beta + EPS)
+                || (self.lo[r].is_finite() && 0.0 < beta - EPS)
+            {
+                ok = false;
+                break;
+            }
+        }
+        for &(r, _) in &idx.colvals[j] {
+            idx.scratch[r] = 0.0;
+        }
+        ok
+    }
+
+    /// The row-scanning test [`Self::dominates_indexed`] replaced, kept as its oracle.
+    #[cfg(test)]
     fn dominates(&self, j: usize, sj: f64, k: usize, sk: f64) -> bool {
         const EPS: f64 = 1e-9;
         if sj * self.c[j] > sk * self.c[k] + EPS {
@@ -1212,6 +1365,12 @@ impl Work {
     fn dominated_pairs(&mut self) -> bool {
         const INT_SLACK: f64 = 1e-6;
         let mut changed = false;
+        // Column-major snapshot + signatures (see `DomIndex`). Measured 2026-11-15 on
+        // neos-913984 (1,076 rows x 76,000 columns, rows up to 76k long): the
+        // row-scanning test took 15.9 s of a 20 s budget and reduced nothing, which
+        // left the root LP no time.
+        let mut idx = DomIndex::new(self);
+        let mut in_j: Vec<bool> = vec![false; self.rows.len()];
         for j in 0..self.n {
             // Between columns every applied tightening is complete. This rule is the
             // one measured past a deadline: 28 s of one pass on n2seq36q (each column's
@@ -1222,15 +1381,22 @@ impl Work {
             if !self.col_alive[j] || self.l[j] == self.u[j] {
                 continue;
             }
-            // Shortest alive row of j.
+            // Shortest alive row of j, scanned in `col_rows` order as before; row
+            // membership read off the snapshot instead of scanning the row.
+            for &(r, _) in &idx.colvals[j] {
+                in_j[r] = true;
+            }
             let mut best: Option<usize> = None;
             for &r in &self.col_rows[j] {
                 if self.row_alive[r]
-                    && self.rows[r].0.contains(&j)
+                    && in_j[r]
                     && best.is_none_or(|b| self.rows[r].0.len() < self.rows[b].0.len())
                 {
                     best = Some(r);
                 }
+            }
+            for &(r, _) in &idx.colvals[j] {
+                in_j[r] = false;
             }
             let Some(br) = best else { continue };
             let cands: Vec<usize> = self.rows[br].0.clone();
@@ -1245,7 +1411,7 @@ impl Work {
                     if !self.col_alive[k] || self.l[k] == self.u[k] || self.l[j] == self.u[j] {
                         break;
                     }
-                    if !self.dominates(j, sj, k, sk) {
+                    if !self.dominates_indexed(&mut idx, j, sj, k, sk) {
                         continue;
                     }
                     let jstar = if sj > 0.0 { self.u[j] } else { self.l[j] };
@@ -3458,6 +3624,48 @@ mod tests {
             }
         }
         (f, w.offset)
+    }
+
+    /// `dominates_indexed` (snapshot + signature screen) answers exactly as the
+    /// row-scanning `dominates` for every pair and sign, including after passes have
+    /// killed rows and left stale `col_rows` entries. Counts prove both answers occur.
+    #[test]
+    fn dominates_index_matches_reference() {
+        let mut r = Lcg(11);
+        let (mut compared, mut dominated, mut screened) = (0usize, 0usize, 0usize);
+        for t in 0..400 {
+            let f = random_ip_sparsify(&mut r);
+            let mut w = Work::new(&f, 1e-9);
+            for _ in 0..(t % 3) {
+                if w.infeasible || !w.pass() {
+                    break;
+                }
+            }
+            if w.infeasible {
+                continue;
+            }
+            let mut idx = DomIndex::new(&w);
+            for j in 0..w.n {
+                for k in 0..w.n {
+                    if j == k {
+                        continue;
+                    }
+                    for &(sj, sk) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                        let want = w.dominates(j, sj, k, sk);
+                        let got = w.dominates_indexed(&mut idx, j, sj, k, sk);
+                        assert_eq!(got, want, "trial {t} pair ({j},{sj}) ({k},{sk})");
+                        compared += 1;
+                        dominated += want as usize;
+                        screened += (!idx.may_dominate(j, sj, k, sk)) as usize;
+                        assert!(idx.scratch.iter().all(|&v| v == 0.0), "scratch left dirty");
+                    }
+                }
+            }
+        }
+        assert!(
+            compared > 10_000 && dominated > 100 && screened > 100,
+            "{compared} compared, {dominated} dominated, {screened} screened"
+        );
     }
 
     /// The sparsify step alone is exact: on random integer programs, run the other
