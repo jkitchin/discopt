@@ -53,6 +53,17 @@ _BIG = 1e20
 _LAMBDA_MAX = 1e6
 
 
+#: Relative gap each block subproblem is solved to. The dual bound is read from the
+#: block's certified ``bound`` and is sound at any gap; the cutting-plane / bundle model
+#: is built from the block's *point*, and a point optimal only within the outer
+#: ``gap_tolerance`` (1e-4) makes a cut that overestimates ``L(lambda)`` at the very
+#: iterate it is meant to describe, which stalls Kelley (inexact cutting planes).
+#: Measured 2026-11-15 on the #1611 4x12 GAP, Kelley, 100 iterations: block gap 1e-4
+#: stalls at 311.71 (whenever the engine returns a different near-optimal point, as
+#: the default MILP presolve does on 5 of 400 blocks); 1e-6 and 1e-9 reach 331.60.
+_BLOCK_GAP_TOLERANCE = 1e-6
+
+
 @dataclass
 class LagrangianConfig:
     """Configuration for the Lagrangian relaxation solver."""
@@ -290,7 +301,7 @@ def solve_lagrangian(
             b_ub=b_ub,
             bounds=block_bounds[b],
             integrality=block_intg[b],
-            gap_tolerance=cfg.gap_tolerance,
+            gap_tolerance=min(cfg.gap_tolerance, _BLOCK_GAP_TOLERANCE),
         )
         extra = {"confirm_bound_from": math.inf} if lazy_confirm else {}
         res = milp(
