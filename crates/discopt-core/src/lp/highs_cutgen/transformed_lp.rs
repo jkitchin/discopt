@@ -886,10 +886,9 @@ impl TransformedLp {
                 }
             }
         }
-        let rhs_out;
-        if integral {
+        let rhs_out = if integral {
             self.vectorsum.cleanup(|_, v| v.abs() < 0.5);
-            rhs_out = tmp_rhs.to_f64().round();
+            tmp_rhs.to_f64().round()
         } else {
             let smv = ctx.small_matrix_value();
             let feastol = ctx.feastol();
@@ -929,8 +928,8 @@ impl TransformedLp {
                 self.vectorsum.clear();
                 return None;
             }
-            rhs_out = tmp_rhs.to_f64();
-        }
+            tmp_rhs.to_f64()
+        };
         let out_inds = self.vectorsum.nonzeros().to_vec();
         let out_vals: Vec<f64> = if integral {
             out_inds
