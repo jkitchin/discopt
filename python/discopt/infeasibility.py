@@ -361,6 +361,14 @@ def compute_iis(
     iis_engine = _resolve_iis_engine(iis_engine)
     from discopt._iis_milp import _normalize_portfolio
 
+    # Fast-API rows (``add_linear_constraints``, and every row of a linear model read
+    # by ``from_nl``/``from_mps``/``from_lp``) live only in the builder, not in
+    # ``model._constraints``, which is what both IIS engines below enumerate. Without
+    # this they saw no rows and called an infeasible model "feasible". Materialising is
+    # model-preserving (the solver's nonlinear path does the same, #681); the IIS's
+    # constraint indices then refer to the materialised rows, in order.
+    model._materialize_builder_linear_rows()
+
     portfolio = _normalize_portfolio(portfolio)
     if include_integrality:
         return _compute_iis_with_integrality(
