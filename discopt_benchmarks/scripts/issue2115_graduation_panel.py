@@ -127,6 +127,16 @@ _FLAGS = {
         "leak": lambda off: off["LpLogicalRescueAttempts"],
         "show": ("LpLogicalRescueAttempts", "LpLogicalRescueDecided"),
     },
+    # The Rust std-form LP engine's retry of a numerical breakdown on an exact
+    # equilibration (`lp_std_engine.RUST_EQUIL_RETRY_STATS`, Python-side). It runs only
+    # on a `numerical` exit, so `LpStdEquilRetryAttempts` ON is where it ran and any
+    # attempt OFF is a leak; `LpStdEquilRetryDecided` counts the LPs it decided.
+    "DISCOPT_LP_STD_EQUIL_RETRY": {
+        "fired": lambda off, on: on["LpStdEquilRetryDecided"],
+        "ran": lambda off, on: on["LpStdEquilRetryAttempts"] > 0,
+        "leak": lambda off: off["LpStdEquilRetryAttempts"],
+        "show": ("LpStdEquilRetryAttempts", "LpStdEquilRetryDecided"),
+    },
     "DISCOPT_NS_PROJECT": {
         "fired": lambda off, on: on["NodeNsProjectRescue"],
         "ran": lambda off, on: on["NodeNsProjectTry"] > 0,
@@ -328,6 +338,8 @@ _CTRS = (
     "LogicalDualColdRefused",
     "LogicalDualColdFellBack",
     "LogicalDualColdSkippedRepeat",
+    "LpStdEquilRetryAttempts",
+    "LpStdEquilRetryDecided",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 
@@ -363,6 +375,11 @@ if _kps is not None:
     ctrs["KernelPresolveCalls"] = _kps["calls"]
     ctrs["KernelPresolveApplied"] = _kps["applied"]
     ctrs["KernelPresolveEliminated"] = _kps["eliminated"]
+import discopt.solvers.lp_std_engine as _lse
+_ers = getattr(_lse, "RUST_EQUIL_RETRY_STATS", None)
+if _ers is not None:
+    ctrs["LpStdEquilRetryAttempts"] = _ers["attempts"]
+    ctrs["LpStdEquilRetryDecided"] = _ers["decided"]
 
 verified = None
 if res.x:
