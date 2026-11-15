@@ -987,6 +987,15 @@ Panel results:
 
 Population now (defaults): **14 certified, 103 with a bound** (HiGHS 26 / 110).
 
+**Retraction (2026-11-15, same day).** `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP` is back to
+default OFF. CI's full suite caught what the population and the 74-instance MINLP
+corpus panel did not cover: on portfol_roundlot (OA, `test_1263_recertification_gap`)
+the flag costs the certificate. Off: `optimal` in 28.4 / 29.0 s. On: `feasible` at
+120 s with incumbent 0.028402 against 0.028292. Two interleaved runs each, identical.
+That is a certification regression, which section 5 forbids. `DISCOPT_MILP_ROOT_ROUND_BOUND`
+stays ON. The bundle above was only ever panelled as a pair; the default is now
+ROOT_ROUND_BOUND alone, a revert of one member to its pre-panel state.
+
 **Next.**
 - S4 bundle on the three primal-bound rows.
 - The remaining pivot-count gap on neos-827175: 15x HiGHS's iterations even with

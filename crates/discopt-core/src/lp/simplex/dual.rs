@@ -452,14 +452,20 @@ pub(super) fn sparse_solves_enabled() -> bool {
 /// `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`: clean up a cost-perturbed dual optimum with a
 /// warm primal phase 2 before the dual route (see `cost_perturbed_warm_solve`).
 /// Changes the pivot path and possibly which optimal vertex is returned, never the
-/// LP optimum or a verdict. **Default ON** since the 2026-11-15 population panel
-/// (bundled with `DISCOPT_MILP_ROOT_ROUND_BOUND`): 0 violations, certified 13 -> 14
-/// (neos-827175). `=0` opts out; garbage is refused.
+/// LP optimum or a verdict. **Default OFF** (`=1` opts in; garbage is refused).
+/// Graduated 2026-11-15 on the MILP population (bundled with
+/// `DISCOPT_MILP_ROOT_ROUND_BOUND`: 0 violations, certified 13 -> 14) and the MINLP
+/// corpus panel, then returned to OFF the same day: it costs portfol_roundlot (OA,
+/// `test_1263_recertification_gap`) its certificate -- `optimal` in 28.4 / 29.0 s
+/// with it off, `feasible` at 120 s with it on, incumbent 0.028292 -> 0.028402, two
+/// interleaved runs each -- a certification regression CLAUDE.md section 5 forbids.
+/// What would change that: find why the primal clean-up's vertex starves OA's
+/// incumbent search there, fix it, and re-panel including that instance.
 pub(super) fn perturb_primal_cleanup_enabled() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(
         || match std::env::var("DISCOPT_LP_PERTURB_PRIMAL_CLEANUP") {
-            Err(_) => true,
+            Err(_) => false,
             Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => true,
                 "0" | "false" | "no" | "off" | "" => false,
