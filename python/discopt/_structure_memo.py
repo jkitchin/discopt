@@ -32,10 +32,12 @@ different object while the entry lives. The memo lives on the model as
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar, cast
 
 from discopt._evaluator_cache import _value_bytes
 from discopt.modeling.core import Constraint, Model
+
+_T = TypeVar("_T")
 
 _ATTR = "_structure_memo_cache"
 
@@ -69,7 +71,7 @@ def _state_key(model: Model) -> tuple[tuple, tuple] | None:
     return key, pins
 
 
-def structure_memo(model: Model, name: str, compute: Callable[[Model], Any]) -> Any:
+def structure_memo(model: Model, name: str, compute: Callable[[Model], _T]) -> _T:
     """``compute(model)``, memoised under *name* on the model's structure (see the
     module docstring). Exceptions propagate and are never cached."""
     state = _state_key(model)
@@ -83,4 +85,4 @@ def structure_memo(model: Model, name: str, compute: Callable[[Model], Any]) -> 
     values: dict[str, Any] = memo[2]
     if name not in values:
         values[name] = compute(model)
-    return values[name]
+    return cast(_T, values[name])

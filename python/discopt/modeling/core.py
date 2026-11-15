@@ -1627,7 +1627,7 @@ class VarBlock:
         pos = np.repeat(np.arange(len(vs), dtype=np.int64), sizes)
         starts = np.concatenate([[0], np.cumsum(sizes)[:-1]])
         local = np.arange(self.size, dtype=np.int64) - np.repeat(starts, sizes)
-        self._cols = (pos, local)
+        self._cols: tuple[np.ndarray, np.ndarray] = (pos, local)
         # (id(model), its variable count, builder indices) once checked for a model.
         self._checked = None
 
@@ -14436,7 +14436,7 @@ def model_from_repr(rep, name: str) -> Model:
         from discopt._relax.nl_reconstruction import reconstruct_objective
 
         objective_expr = reconstruct_objective(rep, m._variables)
-        constraint_tuples = []
+        constraint_tuples: list = []
     else:
         objective_expr, constraint_tuples = reconstruct_dag(rep, m._variables)
 

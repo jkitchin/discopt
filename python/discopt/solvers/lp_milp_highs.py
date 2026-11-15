@@ -2542,8 +2542,8 @@ def coefficient_tightened(
     has_bin = np.zeros(sf.m, dtype=bool)
     entry_row = np.repeat(np.arange(sf.m), np.diff(A.indptr))
     has_bin[entry_row[is_bin[A.indices]]] = True
-    for i in np.flatnonzero((n_log == 1) & has_bin):
-        i = int(i)
+    for i_np in np.flatnonzero((n_log == 1) & has_bin):
+        i = int(i_np)
         j_s = int(row_logical[i])
         lo, hi = A.indptr[i], A.indptr[i + 1]
         cols = A.indices[lo:hi]

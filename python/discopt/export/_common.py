@@ -123,7 +123,8 @@ def block_flat_columns(x, offsets: dict[int, int]) -> np.ndarray:
                 "that is not registered in the model; cannot export."
             )
         starts.append(base)
-    return np.asarray(starts, dtype=np.int64)[pos] + local
+    cols: np.ndarray = np.asarray(starts, dtype=np.int64)[pos] + local
+    return cols
 
 
 def iter_builder_linear_rows(model: Model) -> list[LinearRow]:

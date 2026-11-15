@@ -36,7 +36,7 @@ def _build_cache(
     cache: list[Optional[Expression]] = [None] * n
 
     if roots is None:
-        order = range(n)
+        order: list[int] | range = range(n)
         fetched: dict = {}
     else:
         # Only the nodes reachable from ``roots``. The arena is topological (a node's
@@ -179,7 +179,11 @@ def reconstruct_objective(nl_repr, variables: list[Variable]) -> Expression:
     """The objective expression alone, building only the nodes it reaches (the
     rows of a linear model are read off the arena as a matrix instead)."""
     obj_id = nl_repr.objective_id()
-    return _build_cache(nl_repr, variables, roots=[obj_id])[obj_id]
+    objective: Optional[Expression] = _build_cache(nl_repr, variables, roots=[int(obj_id)])[
+        int(obj_id)
+    ]
+    assert objective is not None  # the walk always builds its own roots
+    return objective
 
 
 def reconstruct_complementarities(

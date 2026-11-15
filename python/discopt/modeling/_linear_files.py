@@ -65,7 +65,7 @@ class FileColumns:
     def __len__(self) -> int:
         return len(self.names)
 
-    def values(self, result) -> np.ndarray:
+    def values(self, result) -> np.ndarray | None:
         """``result``'s point in file column order (``None`` when it has none)."""
         if result.x is None:
             return None
