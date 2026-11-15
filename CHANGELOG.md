@@ -34,6 +34,10 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`pounce-solver` floor raised to 0.17** (`>=0.17`, core dependency and the `pounce`
+  alias extra). discopt's pounce-facing tests pass on 0.17.0 (432); see the PR for the
+  full-suite run.
+
 - **`discopt[highs]` excludes highspy 1.16.0** (`highspy>=1.11,!=1.12.0,!=1.16.0`). On
   `main`, the affected test files pass with 1.15.1 and fail 90 tests with 1.16.0: HiGHS
   fixed defects some falsifier tests rely on, its LP-reader and IIS output changed, and
