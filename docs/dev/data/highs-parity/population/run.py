@@ -33,7 +33,10 @@ ARM_ENV: dict = {"ours_nlexpr": {"DISCOPT_NL_LINEAR_MATRIX": "0"},
                  "ours_s3": {"DISCOPT_MILP_ROOT_ROUND_BOUND": "1",
                              "DISCOPT_LP_PERTURB_PRIMAL_CLEANUP": "1"},
                  "ours_dse": {"DISCOPT_LP_DUAL_DSE": "1"},
-                 "ours_afr": {"DISCOPT_MILP_ADAPTIVE_FIXING_RATE": "1"}}
+                 "ours_afr": {"DISCOPT_MILP_ADAPTIVE_FIXING_RATE": "1"},
+                 # S4 bundle: HiGHS's backtracking dive + sub-MIP budget by work only.
+                 "ours_s4": {"DISCOPT_MILP_DIVE_BACKTRACK": "1",
+                             "DISCOPT_MILP_SUBMIP_BUDGET_HIGHS": "1"}}
 HIGHS = r'''
 import json, sys, time, highspy
 h = highspy.Highs()

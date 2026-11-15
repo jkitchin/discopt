@@ -2449,6 +2449,35 @@ pub struct MilpOptions {
 const SUB_MIP_MIN_FIXING_RATE: f64 = 0.30;
 /// Gap plan P3: time share of a NESTED sub-MIP (`try_rens_highs` inside a sub-solve).
 const NESTED_SUB_MIP_SHARE: f64 = 0.5;
+
+/// `DISCOPT_MILP_SUBMIP_BUDGET_HIGHS`: a top-level heuristic sub-MIP (RENS, RINS) gets
+/// half the remaining time with no fixed cap. HiGHS bounds its sub-MIPs by nodes,
+/// leaves and stall nodes only (`HighsPrimalHeuristics.cpp:627-632`), which this
+/// keeps via the node budget and `DISCOPT_HIGHS_SUBMIP_LIMITS`. Without it the
+/// budget is `min(share x remaining, 2 s)`. Measured 2026-11-15:
+/// - neos-960392's RENS sub-MIP never finished its root inside 2 s (HiGHS's
+///   sub-MIP found its incumbent at 17.8 s);
+/// - lifting the cap to min(50 %, 10 s) took neos-498623's incumbent 37.6 -> 22.7.
+///
+/// Nested sub-MIPs keep the capped budget. Default OFF until its panel; garbage is
+/// refused.
+fn submip_budget_highs_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_SUBMIP_BUDGET_HIGHS") {
+        Err(_) => false,
+        Ok(v) => parse_switch("DISCOPT_MILP_SUBMIP_BUDGET_HIGHS", &v),
+    })
+}
+
+/// A heuristic sub-MIP's wall budget from the time `left` (s); see
+/// [`submip_budget_highs_enabled`].
+fn sub_mip_budget(left: f64, share: f64, nested: bool) -> f64 {
+    if submip_budget_highs_enabled() && !nested {
+        left * 0.5
+    } else {
+        (left * share).min(2.0)
+    }
+}
 /// Node budget for one sub-MIP.
 const SUB_MIP_NODE_CAP: usize = 500;
 /// Share of the parent search all sub-solves may spend, plus a flat allowance
@@ -2653,7 +2682,7 @@ fn try_sub_mip(
         if left.is_zero() {
             return None;
         }
-        let budget = (left.as_secs_f64() * 0.25).min(2.0);
+        let budget = sub_mip_budget(left.as_secs_f64(), 0.25, in_sub_mip());
         sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
     }
     crate::profile::incr(match kind {
@@ -4055,7 +4084,7 @@ fn try_rens_highs(
     } else {
         0.25
     };
-    let budget = (left * share).min(2.0);
+    let budget = sub_mip_budget(left, share, nested);
     if budget <= 0.05 {
         return None;
     }
