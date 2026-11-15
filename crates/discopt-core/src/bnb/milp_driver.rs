@@ -3410,7 +3410,7 @@ fn try_rens_highs(
     // agrees with it; stop once the fixing rate reaches 0.25.
     let mut fixtolpsol = inc.is_some();
     let min_rate_rins = 0.25;
-    let target = 0.6;
+    let target = target_fixing_rate_here();
     let t0 = std::time::Instant::now();
     let left = deadline.map_or(10.0, |d| d.saturating_duration_since(t0).as_secs_f64());
     if left <= 0.0 {
@@ -3657,6 +3657,17 @@ fn try_rens_highs(
         }
     }
     fixing = rate(&l, &u);
+    let rens_trace = std::env::var_os("DISCOPT_RENS_TRACE").is_some();
+    if rens_trace {
+        eprintln!(
+            "RENS depth={} rins={} free_ints={} fixing={:.3} dive_s={:.3}",
+            MILP_DEPTH.with(|d| d.get()),
+            inc.is_some(),
+            n_total,
+            fixing,
+            t0.elapsed().as_secs_f64()
+        );
+    }
     if fixing < 0.1 {
         return None;
     }
@@ -3711,7 +3722,22 @@ fn try_rens_highs(
         )
     };
     charge_sub_mip(res.lp_iters, fixing, n_int_heur, ns - n_int_heur);
+    if rens_trace {
+        eprintln!(
+            "RENS sub status={:?} obj={:e} bound={:e} nodes={} budget_s={:.2} took_s={:.2} inc={:?}",
+            res.status,
+            res.obj + obj_const,
+            res.bound + obj_const,
+            res.nodes,
+            budget,
+            t0.elapsed().as_secs_f64(),
+            inc.map(|(_, v)| v)
+        );
+    }
     crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
+    if res.status == MilpStatus::Infeasible {
+        record_fixing_outcome(fixing, true, false);
+    }
     if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) || res.x.len() < ns {
         return None;
     }
@@ -3732,6 +3758,10 @@ fn try_rens_highs(
     ) {
         Some((sx, sobj)) => {
             crate::profile::incr(crate::profile::Ctr::SubMipImproved);
+            let better = inc.is_none_or(|(_, v)| sobj + obj_const < v - 1e-9 * (1.0 + v.abs()));
+            if better {
+                record_fixing_outcome(fixing, false, true);
+            }
             Some((sx, sobj + obj_const))
         }
         None => {
@@ -3753,6 +3783,97 @@ thread_local! {
     /// HiGHS's `heuristic_lp_iterations` per driver depth: the sub-MIP iterations a
     /// solve at that depth has spent on heuristics ([`charge_sub_mip`]).
     static HEUR_LP_ITERS: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// HiGHS's heuristic fixing-rate observations per driver depth
+    /// ([`target_fixing_rate_here`]).
+    static HEUR_FIX_STATS: std::cell::RefCell<Vec<FixStats>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// HiGHS's `successObservations` / `infeasObservations` (`HighsPrimalHeuristics.cpp:
+/// 229-243`) and its `randgen` for one solve: the fixing rates of sub-MIPs that
+/// improved the incumbent and of those proved infeasible.
+#[derive(Clone)]
+struct FixStats {
+    succ_sum: f64,
+    succ_n: u32,
+    inf_sum: f64,
+    inf_n: u32,
+    rng: crate::lp::highs_cutgen::random::HighsRandom,
+}
+
+impl FixStats {
+    fn new() -> Self {
+        FixStats {
+            succ_sum: 0.0,
+            succ_n: 0,
+            inf_sum: 0.0,
+            inf_n: 0,
+            rng: crate::lp::highs_cutgen::random::HighsRandom::new(0),
+        }
+    }
+}
+
+/// `DISCOPT_MILP_ADAPTIVE_FIXING_RATE`: RENS/RINS draw their target fixing rate as
+/// HiGHS's `determineTargetFixingRate` does (`HighsPrimalHeuristics.cpp:249-274`)
+/// instead of a constant 0.6: after infeasible sub-MIPs, at most 0.9x their mean rate;
+/// after improving ones, around 0.9-1.1x theirs; uniformly between. Measured
+/// 2026-11-15 on 10teams: four RENS sub-MIPs at the constant 0.6 were all proved
+/// infeasible, so the root never got a point. Changes which neighbourhood a heuristic
+/// searches, never a bound. Default OFF until its panel; garbage is refused.
+fn adaptive_fixing_rate_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(
+        || match std::env::var("DISCOPT_MILP_ADAPTIVE_FIXING_RATE") {
+            Err(_) => false,
+            Ok(v) => parse_switch("DISCOPT_MILP_ADAPTIVE_FIXING_RATE", &v),
+        },
+    )
+}
+
+fn with_fix_stats<R>(f: impl FnOnce(&mut FixStats) -> R) -> R {
+    let d = MILP_DEPTH.with(|x| x.get()) as usize;
+    HEUR_FIX_STATS.with(|v| {
+        let mut v = v.borrow_mut();
+        if v.len() <= d {
+            v.resize(d + 1, FixStats::new());
+        }
+        f(&mut v[d])
+    })
+}
+
+/// The target fixing rate for this depth's next RENS/RINS (HiGHS
+/// `determineTargetFixingRate`); the constant 0.6 when the flag is off.
+fn target_fixing_rate_here() -> f64 {
+    if !adaptive_fixing_rate_enabled() {
+        return 0.6;
+    }
+    with_fix_stats(|st| {
+        let (mut lo, mut hi) = (0.6f64, 0.6f64);
+        if st.inf_n != 0 {
+            hi = 0.9 * (st.inf_sum / st.inf_n as f64);
+            lo = lo.min(hi);
+        }
+        if st.succ_n != 0 {
+            let r = st.succ_sum / st.succ_n as f64;
+            lo = lo.min(0.9 * r);
+            hi = hi.max(r * 1.1);
+        }
+        st.rng.real(lo, hi)
+    })
+}
+
+/// Record a sub-MIP's outcome at `rate` (HiGHS records an infeasible one, and an
+/// improving one).
+fn record_fixing_outcome(rate: f64, infeasible: bool, improved: bool) {
+    with_fix_stats(|st| {
+        if infeasible {
+            st.inf_sum += rate;
+            st.inf_n += 1;
+        }
+        if improved {
+            st.succ_sum += rate;
+            st.succ_n += 1;
+        }
+    });
 }
 
 /// RAII marker for [`SUB_MIP_NEST`] around a heuristic sub-MIP solve.
@@ -3801,8 +3922,10 @@ fn heur_lp_iters_here() -> i64 {
     HEUR_LP_ITERS.with(|v| v.borrow().get(d).copied().unwrap_or(0))
 }
 
-/// Start this depth's heuristic count from zero (a new solve at this depth).
+/// Start this depth's heuristic count from zero (a new solve at this depth), and its
+/// fixing-rate observations with it.
 fn reset_heur_lp_iters_here() {
+    with_fix_stats(|st| *st = FixStats::new());
     let d = MILP_DEPTH.with(|x| x.get()) as usize;
     HEUR_LP_ITERS.with(|v| {
         let mut v = v.borrow_mut();

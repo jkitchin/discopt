@@ -427,6 +427,24 @@ pub(super) fn noise_rows_default() -> bool {
 /// (`highs-mip-replacement-plan.md` §8.8). Kept as an opt-out so the two
 /// routes can be A/B'd: feral does not promise the sparse solves are
 /// bit-identical to the dense ones (they were on every entry compared).
+/// `DISCOPT_LP_DUAL_DSE`: dual steepest-edge pricing (HiGHS's default dual pricing)
+/// from starts whose exact weights are free, i.e. the slack basis of a cold root
+/// solve; Devex otherwise. Measured 2026-11-15 on the nine population rows without a
+/// root bound: our Devex root LPs take 1.5-5.4x HiGHS's iterations (neos-799711
+/// 78,939 vs 14,614, reblock420 21,504 vs 5,134). Changes the pivot path only.
+/// Default OFF until its panel; garbage is refused.
+pub(super) fn dual_dse_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_DSE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_LP_DUAL_DSE={other:?} is not recognized"),
+        },
+    })
+}
+
 pub(super) fn sparse_solves_enabled() -> bool {
     member_env("DISCOPT_LP_DUAL_SPARSE_SOLVES").unwrap_or(true)
 }
@@ -2131,6 +2149,34 @@ impl<'a> PreparedDual<'a> {
         // pricing. Pricing only chooses *which* primal-infeasible row leaves, never
         // affects correctness (any infeasible basic var is a valid leaving choice).
         let mut gamma = vec![1.0f64; m];
+        // Dual steepest edge (`SimplexOptions::dual_dse`): `gamma` then holds the exact
+        // Forrest-Goldfarb weights `w_i = ||e_iᵀB⁻¹||²`. Only from a start whose
+        // weights are known exactly for free -- every basic column a singleton (the
+        // slack basis of a cold root solve), so `B⁻¹` is a scaled permutation and
+        // `w_i = 1/d_i²`. Any other start keeps Devex: exact weights would cost `m`
+        // btrans and unit ones are wrong (performance-plan §79a).
+        let use_dse = opts.dual_dse && {
+            let mut ok = true;
+            let mut seen = vec![false; m];
+            for (slot, &j) in basis.iter().enumerate() {
+                let (rows, vals) = sp.col(j);
+                if rows.len() != 1 || vals[0] == 0.0 || seen[rows[0]] {
+                    ok = false;
+                    break;
+                }
+                seen[rows[0]] = true;
+                gamma[slot] = 1.0 / (vals[0] * vals[0]);
+            }
+            if !ok {
+                gamma.iter_mut().for_each(|g| *g = 1.0);
+            }
+            ok
+        };
+        if use_dse {
+            crate::profile::incr(crate::profile::Ctr::DualDseSolves);
+        }
+        let mut tau = if use_dse { vec![0.0f64; m] } else { Vec::new() };
+        let mut tau_nz: Vec<usize> = Vec::new();
         // The basic variables' bounds by slot (`select_leaving_slots`); `basis`
         // changes only at the pivot slot, where these follow it.
         let mut lb_b: Vec<f64> = basis.iter().map(|&j| l[j]).collect();
@@ -2741,7 +2787,56 @@ impl<'a> PreparedDual<'a> {
                 crate::profile::incr(crate::profile::Ctr::DualUnstablePivotBails);
                 return None; // unstable (near-zero) pivot → robust cold fallback
             }
-            {
+            if use_dse {
+                // Forrest-Goldfarb dual steepest edge, as HiGHS's
+                // `updateWeightDualSteepestEdge`: with `ρ` the pivot row (current basis),
+                // `w_r = ||ρ||²` exactly, `τ = B⁻¹ρᵀ`, and for every other slot on the
+                // entering column's support
+                // `w_i ← w_i - 2 (α_i/α_r) τ_i + (α_i/α_r)² w_r` (floored at 1e-4);
+                // the entering slot gets `w_r / α_r²`. Off the support `α_i = 0` and
+                // the weight is unchanged.
+                const MIN_W: f64 = 1e-4;
+                let wr: f64 = if sparse_solves {
+                    rho_nz.iter().map(|&i| rho[i] * rho[i]).sum()
+                } else {
+                    rho.iter().map(|v| v * v).sum()
+                };
+                for &i in &tau_nz {
+                    tau[i] = 0.0;
+                }
+                tau_nz.clear();
+                if sparse_solves {
+                    sp_rhs.clear();
+                    sp_rhs.extend(rho_nz.iter().map(|&i| (i, rho[i])));
+                    if lu.ftran_sparse(m, &sp_rhs, &mut sp_out).is_err() {
+                        crate::profile::incr(crate::profile::Ctr::DualExitAlphaFtranFail);
+                        return None;
+                    }
+                    for &(i, v) in &sp_out {
+                        tau[i] = v;
+                        tau_nz.push(i);
+                    }
+                } else {
+                    tau.copy_from_slice(&rho);
+                    if lu.ftran(&mut tau).is_err() {
+                        crate::profile::incr(crate::profile::Ctr::DualExitAlphaFtranFail);
+                        return None;
+                    }
+                    tau_nz.extend(0..m);
+                }
+                let mut dse = |i: usize| {
+                    if i != r && alpha[i] != 0.0 {
+                        let ratio = alpha[i] / piv;
+                        gamma[i] = (gamma[i] + ratio * (ratio * wr - 2.0 * tau[i])).max(MIN_W);
+                    }
+                };
+                if sparse_solves {
+                    alpha_nz.iter().for_each(|&i| dse(i));
+                } else {
+                    (0..m).for_each(dse);
+                }
+                gamma[r] = (wr / (piv * piv)).max(MIN_W);
+            } else {
                 // Goldfarb–Reid dual Devex update (uses the still-current basis).
                 let gamma_r = gamma[r];
                 // Off the solve's support `alpha[i] = 0`, so `cand = 0` never beats
@@ -6011,6 +6106,100 @@ mod tests {
         }
         assert_eq!(compared, 10, "every captured LP must have been compared");
         assert!(sparse_pivots > 0, "the sparse route never ran");
+    }
+
+    /// `DISCOPT_LP_DUAL_DSE`: steepest-edge pricing from a slack basis reaches the same
+    /// verdict and optimum as Devex on random bounded LPs (`A x + s = b`, slacks basic,
+    /// `c >= 0` on structurals at their lower bound so the start is dual feasible, and
+    /// mostly negative `b` so it is primal infeasible and the dual loop runs), with the
+    /// DSE counter proving the steepest-edge loop ran.
+    #[test]
+    fn dual_steepest_edge_matches_devex_from_a_slack_basis() {
+        let _guard = crate::profile::test_guard();
+        use crate::profile::{counter, reset, set_enabled, Ctr};
+        let mut seed = 0x5eed_u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f64) / ((1u64 << 31) as f64)
+        };
+        let (mut compared, mut optimal, mut dse_loops) = (0usize, 0usize, 0u64);
+        for _ in 0..60 {
+            let (m, k) = (6 + (next() * 10.0) as usize, 8 + (next() * 12.0) as usize);
+            let n = k + m;
+            let mut cols: Vec<Vec<(usize, f64)>> = Vec::new();
+            for _ in 0..k {
+                let mut col = Vec::new();
+                for i in 0..m {
+                    if next() < 0.4 {
+                        col.push((i, (next() * 10.0 - 5.0).round()));
+                    }
+                }
+                col.retain(|e| e.1 != 0.0);
+                cols.push(col);
+            }
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+            }
+            let mut col_ptr = vec![0usize];
+            let (mut row_idx, mut vals) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    row_idx.push(i);
+                    vals.push(v);
+                }
+                col_ptr.push(row_idx.len());
+            }
+            let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+            let c: Vec<f64> = (0..n)
+                .map(|j| if j < k { (next() * 10.0).round() } else { 0.0 })
+                .collect();
+            let mut l = vec![0.0; n];
+            let mut u: Vec<f64> = (0..n).map(|_| (1.0 + next() * 5.0).round()).collect();
+            for j in k..n {
+                l[j] = 0.0;
+                u[j] = INF;
+            }
+            let b: Vec<f64> = (0..m).map(|_| (next() * 14.0 - 6.0).round()).collect();
+            let start = Basis {
+                basic_vars: (k..n).collect(),
+                col_status: (0..n)
+                    .map(|j| if j < k { AT_LOWER } else { BASIC })
+                    .collect(),
+            };
+            let base = SimplexOptions {
+                dual_perturb_first: false,
+                dual_cost_perturb: 0.0,
+                ..SimplexOptions::default()
+            };
+            let mut devex = base.clone();
+            devex.dual_dse = false;
+            let mut dse = base;
+            dse.dual_dse = true;
+            reset();
+            set_enabled(true);
+            let a = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &devex);
+            assert_eq!(counter(Ctr::DualDseSolves), 0);
+            reset();
+            let d = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &dse);
+            dse_loops += counter(Ctr::DualDseSolves);
+            set_enabled(false);
+            assert_eq!(a.status, d.status, "DSE changed the verdict");
+            if a.status == LpStatus::Optimal {
+                assert!(
+                    (a.obj - d.obj).abs() <= 1e-7 * (1.0 + a.obj.abs()),
+                    "obj {} (Devex) vs {} (DSE)",
+                    a.obj,
+                    d.obj
+                );
+                optimal += 1;
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, 60);
+        assert!(optimal >= 20, "only {optimal} optimal LPs compared");
+        assert!(dse_loops > 0, "the steepest-edge loop never ran");
     }
 
     /// `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`: cleaning a perturbed optimum up with the

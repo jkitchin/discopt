@@ -565,6 +565,8 @@ counters!(
     // Clean-ups of a perturbed optimum done by the warm primal phase 2
     // (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`).
     DualCostPerturbPrimalCleanup,
+    // Dual loops priced by steepest edge (`DISCOPT_LP_DUAL_DSE`).
+    DualDseSolves,
     // Prepared warm starts re-priced on new costs without a new LU (perturb-first).
     DualPrepRepriced,
     // Node-heuristic slots the HiGHS effort budget (DISCOPT_HIGHS_HEUR_EFFORT) allowed / refused.

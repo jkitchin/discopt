@@ -179,6 +179,9 @@ pub struct SimplexOptions {
     /// dual route (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`, default ON, `=0` opts out; see
     /// `dual::cost_perturbed_warm_solve`).
     pub perturb_primal_cleanup: bool,
+    /// Dual steepest-edge pricing in the dual loop when the start basis gives exact
+    /// weights for free (`DISCOPT_LP_DUAL_DSE`, default OFF; see `dual::run_dual`).
+    pub dual_dse: bool,
     /// Consecutive degenerate dual pivots after which a **stalled** warm re-solve
     /// is abandoned for the cold solve; `0` disables the bail (#1013).
     ///
@@ -349,6 +352,7 @@ impl Default for SimplexOptions {
             recover_unstable_pivot: false,
             dual_sparse_solves: dual::sparse_solves_enabled(),
             perturb_primal_cleanup: dual::perturb_primal_cleanup_enabled(),
+            dual_dse: dual::dual_dse_enabled(),
             dual_stall_patience: dual::stall_patience_default(),
             dual_cost_perturb: dual::cost_perturb_default(),
             dual_noise_rows: dual::noise_rows_default(),
