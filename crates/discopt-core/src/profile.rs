@@ -812,6 +812,8 @@ counters!(
     // reads as a zero gain) -- counted, not filtered, for the same audit.
     PseudocostUpdates,
     PseudocostSentinelSkipped,
+    // ... of those, the ones recorded as cutoff (infeasible-child) observations.
+    PseudocostCutoffObservations,
     PseudocostUntrustedChild,
     // #1296: MILP solves whose certificate was withdrawn because an entry sits
     // below the equilibration noise floor of its line while still able to move
