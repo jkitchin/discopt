@@ -96,6 +96,19 @@ def test_unmerged_extended_model_is_not_certified_infeasible(monkeypatch):
     Feasibility is shown without a second solve: the forward pass at any input is an
     exact point of the model (two inputs are checked). The big-M reference solve was
     dropped to fit the fast-lane time budget; its optimum is :data:`SEED0_OPTIMUM`.
+
+    Since #2196 the default route is the native Rust MILP engine, not HiGHS, and it
+    reproduced the same false certificate through its port of HiGHS's path separator:
+    ``HighsTransformedLp::transform`` substitutes ``min(lb, ub)`` for a column narrower
+    than ``small_matrix_value`` whatever its coefficient's sign, which tightens the row
+    for a negative coefficient (here -1003 on a 1.3e-10-wide column). The resulting
+    cuts removed verified-feasible points, and per-node FBBT then emptied the root.
+    The unit tests are ``transformed_lp::narrow_column_soundness``.
+
+    ``time_limit`` is a backstop, not the bar: on the unfixed engine the certified
+    ``infeasible`` came at 2.7 s (1 node); the fixed engine's node LPs on this badly
+    scaled model are slow (3 nodes in 120 s), and any status but a certified
+    ``infeasible`` passes. 30 s is about 10x the time the defect needed to show.
     """
     monkeypatch.setattr(rp, "NEGLIGIBLE_PARTITION_RTOL", 0.0)
     monkeypatch.setattr(rp, "NEGLIGIBLE_PARTITION_ATOL", 0.0)
@@ -112,7 +125,7 @@ def test_unmerged_extended_model_is_not_certified_infeasible(monkeypatch):
         assert vr.objective == pytest.approx(float(net.forward(x_in[None, :]).ravel()[0]))
         n += 1
 
-    r = m.solve(time_limit=120, threads=1, deterministic=True)
+    r = m.solve(time_limit=30, threads=1, deterministic=True)
     assert r.status != "infeasible", (r.status, r.gap_certified)
     n += 1
     assert not (r.gap_certified and r.status != "optimal")
