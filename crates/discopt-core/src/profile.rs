@@ -836,6 +836,9 @@ counters!(
     HighsMipSearchSepLifts,
     HighsMipSearchBasisFits,
     HighsMipSearchSubMipHits,
+    // #2224 (`DISCOPT_MILP_PREINC_SCORE`): branchings the HiGHS-design search took
+    // with the raised pre-incumbent cutoff/inference score weight.
+    PreIncScoreNodes,
     // #2107: noise-floor entries relaxed into their row's slack instead of
     // withdrawing the certificate.
     MilpNoiseEntriesRelaxed,

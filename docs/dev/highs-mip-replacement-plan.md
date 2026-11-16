@@ -1078,3 +1078,66 @@ updated weight is under a quarter of the exact one.
 - puriri and drayage see none.
 - So DSE's regressions are not weight error. The remaining suspect is the
   perturbed solve under DSE: on mzzv42z it no longer fits half the budget.
+
+### 8.16 #2224: branching scores before the first incumbent (2026-11-16)
+
+Measured on `e061a28` (4 cores, highspy 1.15.1). Probe scripts and per-solve output stay in
+the session scratchpad; the commands are `lp_milp_panel.py worker <path> R 120 1e-4 5000`
+with `DISCOPT_LP_MILP_BACKEND=rust DISCOPT_PANEL_DETERMINISTIC=1 DISCOPT_PROFILE=1`, one
+fresh process per solve.
+
+**The issue's premise is stale on the default route.** #2224 was filed against the
+batched search's `Pseudocosts::update` (#2219, still open). Since #2220 the default route is
+the HiGHS-design search, whose own pseudocost (`bnb/highs_search/pseudocost.rs`) never calls
+that code (`PseudocostUpdates` = 0 on all 62 panel rows on #2219's build). On `main` and on
+`main`+#2219, both routes certify `enlight8` (1 node) and `blend2` (1,108 / 729 nodes); the
+one panel row with no incumbent at 5,000 nodes on the default route was `enlight_hard`
+(bound 36, optimum 37). #2219 on the batched route: 47 = 47 certified, 0 violations, nodes
+12,233 -> 14,681 on rows certified by both.
+
+**Which HiGHS component finds the first incumbent** (1 thread, 6 seeds + 5 permutations,
+log source letter): on `enlight8` and `enlight_hard` always the tree (`B`/`T`), at node 5 to
+9,582 on `enlight_hard`, and on 3 of 11 runs HiGHS itself has none at 5,000 nodes; on
+`blend2` sub-MIP (`L`) or randomized rounding (`R`) at node 0; on 16 generated Lights-Out
+instances the tree on 11 and the feasibility pump (`F`, not ported) on 5. So the lever on
+the puzzle rows is the tree's branching, not a heuristic. Conflict analysis was already
+ruled out (gap plan §12.24; parity plan P4.7).
+
+**Weight sweep (ungated, scratch build).** The cutoff and inference terms of `getScore*`
+weighted 1e-2..100 instead of `1e-4`: on `enlight*` x (original + 5 permutations) incumbents
+6/12 -> 8-10/12 (best (1, 1): 10/12; HiGHS 11/12), flat from 1e-2 to 100. Ungated it is
+harmful where an incumbent exists: `bell5` 1,365 -> 3,777 nodes, `neos-3610051-istra` 378 ->
+812, nodes on the 47 rows certified in both 10,724 -> 13,127. Hence the gate.
+
+**Hypothesis and entry (pre-registered kill: gains < 4 net or < 2x losses; any violation;
+any node change on a solve whose gate never opened).** While the search holds no incumbent
+the cost term cannot prune, so the feasibility signals (cutoff rate, inferences) should
+lead; weight 1 for them only then, HiGHS's `1e-4` from the first incumbent on. Population,
+by property: the 62 panel rows; 30 generated Lights-Out instances (n = 7..11, 6 seeds, HiGHS
+optima); `enlight8`/`enlight_hard` x (original + 5 permutations); 3 permutations of each
+panel instance whose ON run branched without an incumbent (9 instances). 132 pairs: **6
+gains (enlight8_p3, enlight_hard, enlight_hard_p4, enlight_hard_p5, neos-2624317-amur_p2,
+_p3), 0 losses, 0 violations, 0 leaks** (84 pairs where the gate never opened are
+bit-identical; `neos-911970` differed only because both arms hit the 120 s wall, and is
+identical with the node limit binding). Passes. Two findings against the earlier read:
+the generated Lights-Out class gains **nothing** gated (its ungated gains, lo9_s1/s3/s4, all
+had an incumbent before branching, so they came from weighting after it); and
+`neos-2624317-amur`'s original ends with a worse incumbent (3.52 -> 23.27) while two of its
+permutations gain one. Node counts on rows certified both ways moved both ways: `flugpl`
+337 -> 82, `22433` 73 -> 47, `issue-2446` 63 -> 85, `enlight8_p5` 4 -> 413.
+
+**§5 panel and outcome: graduated (`DISCOPT_MILP_PREINC_SCORE`, default ON, `=0` opts
+out).** `d2_flag_panel.py --reps 3 --time-limit 20 --jobs 2`: 372 sense-aware checks clean,
+certified 150 -> 153 (+`enlight_hard` 3/3, none lost), nodes on rows certified throughout
+18,168 -> 17,909, 0 dual losses, no incumbent lost, median primal gap equal, wall 939 ->
+924 s; all pre-registered bars pass. In-repo MINLP corpus (74 rows, 20 s): 0 problems, 55 =
+55 certified; a 3-rep re-run under load lost `cvxnonsep_nsig30` in one ON rep at the 20 s
+edge, a row that never reaches this search (`HighsMipSearchRuns` = 0; both arms certify it
+in 70 s). Not a HiGHS component, so the bar is "measurably helpful": one more certified panel
+row and six incumbents/certificates on the puzzle class, at one worse incumbent (`amur`).
+
+What remains on #2224's class: `enlight_hard_p1`/`_p3` and four 10x10 Lights-Out
+instances (lo10 s1, s2, s5, s6) still have no incumbent at 5,000 nodes. HiGHS finds one on 5
+of the 6 `enlight_hard` copies and proves all four Lights-Out optima (4,184-13,137 nodes); on
+generated Lights-Out its first incumbent came from the feasibility pump on 5 of 16, the one
+unported HiGHS primal component this measurement points to.
