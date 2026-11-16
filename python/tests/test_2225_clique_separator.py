@@ -28,9 +28,9 @@ import pytest
 import scipy.sparse as sp
 from discopt._iis_backend import INFEASIBLE, OPTIMAL, make_backend
 
-# Measured on hole(7) (8 pigeons, 7 holes, 203 rows), 2026-11-16, this branch:
-# clique ON 0.0x s and <= 120 nodes; OFF 1,6xx nodes. The bars leave a wide margin both
-# ways; the OFF arm is the anti-vacuity check that the instance needs the cliques.
+# Measured on hole(7) (8 pigeons, 7 holes, 204 rows), 2026-11-16, this branch:
+# clique ON 110 nodes / 0.05 s; OFF 3,955 nodes / 1.1 s. The bars leave a wide margin
+# both ways; the OFF arm is the anti-vacuity check that the instance needs the cliques.
 K = 7
 ON_MAX_NODES = 400
 OFF_MIN_NODES = 1000

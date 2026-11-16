@@ -1974,3 +1974,28 @@ HiGHS's dumped node inputs with one input swapped at a time for discopt's own.
 `DISCOPT_HIGHS_ROOT_POOL=all` were removed with their implementations (measurements above);
 their HiGHS behaviours return inside the search-core replacement
 (`highs-mip-replacement-plan.md`, stages 3-4). The replay resync diagnostic stays.
+
+### 12.40 The clique separator at the root (#2225, 2026-11-16)
+
+**Why.** The IIS engine's Rust backend (`iis_engine="rust"`, default since P6.4) returned the
+whole model on MIPcc27's pigeonhole instances: the full-model probe on `hole9` branched 10,185
+nodes (7.3 s) and `hole10` ran past 60 s, where HiGHS proves both at or near the root. Their
+pairwise rows `-x_ik - x_jk >= -1` have a feasible LP; the hole cliques `sum_i x_ik <= 1` make
+it infeasible. `HighsCliqueTable` was ported (`clique.rs`, stage 7) but not wired in.
+
+**What.** `RootSeparation` (`bridge.rs`) builds the table once from the model rows over the
+round's global box, each side of a ranged row as its own `<=` row (root presolve leaves
+`hole9`'s rows ranged, `[-1, 1.8e-15]`, and the set-packing test needs `row_upper == 1`), runs
+`runCliqueMerging`, and puts every extended packing row into the pool (HiGHS writes the
+extensions into the rows in presolve; discopt re-decides a presolve-infeasible verdict on the
+original rows, so the strengthening must reach the original root). Each round then runs
+`separateCliques` before the LP separators, as `HighsSeparation::separationRound` does. The
+table works on a private copy of the box: its fixings are not applied to the LP (fewer
+reductions than HiGHS, never a wrong one). `DISCOPT_HIGHS_SEPA_CLIQUE`, default ON; `=0` opts out.
+
+**Measured.** Full-model probes, smallset (50 infeasible models, 20 s, presolve off): decided
+36 -> 37 (+hole10, +jjliu_clique, -normalized-3_4_13), nodes over the 35 both decide 16,694 ->
+5,887, no feasible verdict; `hole9` 115 nodes / 0.09 s. §5 panel (`d2_flag_panel.py`,
+MIPLIB-38+M, 3 reps, 20 s): 147 = 147 certified, nothing lost, nodes 18,168 -> 18,061 --
+neutral, graduated as a faithful HiGHS component (CLAUDE.md §5 bar 2). Not yet ported: clique
+separation at nodes, clique-table propagation in the domain, presolve's row extension.
