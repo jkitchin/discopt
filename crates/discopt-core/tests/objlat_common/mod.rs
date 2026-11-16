@@ -84,6 +84,7 @@ pub fn options() -> MilpOptions {
         implied_int_cols: Vec::new(),
         max_stall_nodes: 0,
         max_leaves: 0,
+        max_work: None,
         max_nodes: 200_000,
         max_open_nodes: None,
         time_limit_s: Some(60.0),

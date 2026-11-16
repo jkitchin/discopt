@@ -2150,6 +2150,7 @@ pub(crate) fn milp_options(
         implied_int_cols: Vec::new(),
         max_stall_nodes: 0,
         max_leaves: 0,
+        max_work: None,
         max_nodes,
         max_open_nodes,
         time_limit_s: parse_budget_secs(time_limit_s)?,

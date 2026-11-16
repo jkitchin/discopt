@@ -51,6 +51,7 @@ fn options() -> MilpOptions {
         implied_int_cols: Vec::new(),
         max_stall_nodes: 0,
         max_leaves: 0,
+        max_work: None,
         // Bounded so the test is fast: parity infeasibility needs full enumeration,
         // and the assertions below are about the schedule, not the certificate.
         max_nodes: 4_000,

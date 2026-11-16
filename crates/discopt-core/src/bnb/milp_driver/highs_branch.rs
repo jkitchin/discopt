@@ -1065,6 +1065,9 @@ pub(super) mod e2e {
             iters_before: 0,
             max_stall_nodes: 0,
             max_leaves: 0,
+            max_work: None,
+            work_size: 0,
+            nodes_before: 0,
         };
         let mut res = E2eResult {
             ran: true,

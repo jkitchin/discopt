@@ -2290,10 +2290,13 @@ impl<'a> PreparedDual<'a> {
             // default — e.g. the MILP driver's own deadline route) the exit is
             // the legacy `None`, keeping that pivot path untouched. Polled every
             // 256 pivots to keep the now() cost negligible.
+            // A heuristic sub-MIP's work budget (`crate::work::Limit`) stops the
+            // loop the same way: deterministic, and only inside such a sub-MIP.
             if (pivots & 255) == 0
-                && opts
+                && (opts
                     .deadline
                     .is_some_and(|d| std::time::Instant::now() >= d)
+                    || crate::work::over_limit())
             {
                 if opts.bank_deadline_duals {
                     return Some(banked_deadline_solve(

@@ -89,11 +89,15 @@ fn bits(v: &BigRational) -> u64 {
 fn reduced(cols: &SparseCols, j: usize, y: &[BigRational]) -> BigRational {
     let (rows, vals) = cols.col(j);
     let mut s = BigRational::zero();
+    let mut units = 0u64;
     for (k, &i) in rows.iter().enumerate() {
         if !y[i].is_zero() && vals[k] != 0.0 {
+            // Limb operations of one exact multiply-add (`crate::work`).
+            units += 1 + (bits(&y[i]) + bits(&s)) / 64;
             s += q(vals[k]) * &y[i];
         }
     }
+    crate::work::add(crate::work::Kind::ExactLimb, units);
     s
 }
 
@@ -158,6 +162,7 @@ fn solve_rect(
             let step = (prow.len() as u64 + 1) * (bits(&f) + row_bits);
             work += step;
             *spent += step;
+            crate::work::add(crate::work::Kind::ExactLimb, 1 + step / 64);
             if work > MAX_WORK || *spent > MAX_TOTAL_WORK {
                 return None;
             }

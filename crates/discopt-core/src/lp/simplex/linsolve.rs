@@ -383,9 +383,45 @@ pub struct FeralLU {
     /// double-precision refinement was falsified on this class, #671). `None`
     /// (default) → strict `Fail`, byte-identical to today.
     singular_perturb: Option<f64>,
+    /// Entries a full solve through the current factor touches (`L`, `U` and the
+    /// update etas; `m²` for the dense backend), for the [`crate::work`] count.
+    solve_cost: u64,
+}
+
+/// Credit LU work to the running solve's [`crate::work`] total. The count is the
+/// entries touched, a function of the factor only, so it is deterministic.
+#[inline]
+fn lu_work(units: u64) {
+    crate::work::add(crate::work::Kind::Lu, units);
 }
 
 impl FeralLU {
+    /// Recompute [`Self::solve_cost`] after the factor changed.
+    fn refresh_solve_cost(&mut self) {
+        self.solve_cost = match &self.lu {
+            Some(Factored::Sparse(lu)) => (lu.factor_nnz() + lu.eta_ops()) as u64,
+            Some(Factored::Dense(lu)) => (lu.dim() * lu.dim()) as u64,
+            None => 0,
+        };
+    }
+
+    /// Credit a factorization (`nnz` basis entries) and refresh the solve cost.
+    fn credit_factor(&mut self, nnz: usize) {
+        self.refresh_solve_cost();
+        let extra = match &self.lu {
+            // Dense LU: m³/3 multiply-adds.
+            Some(Factored::Dense(lu)) => (lu.dim() as u64).pow(3) / 3,
+            _ => self.solve_cost,
+        };
+        lu_work(nnz as u64 + extra);
+    }
+
+    /// Credit a hypersparse solve with `nin` input and `nout` output entries: each
+    /// output entry costs about one average factor column.
+    fn credit_sparse_solve(&self, m: usize, nin: usize, nout: usize) {
+        lu_work((nin + nout) as u64 * (1 + self.solve_cost / m.max(1) as u64));
+    }
+
     /// A new, unfactorized solver.
     pub fn new() -> Self {
         Self::default()
@@ -721,7 +757,11 @@ impl FeralLU {
         out: &mut Vec<(usize, f64)>,
     ) -> Result<(), LinError> {
         match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
-            Factored::Sparse(lu) => lu.ftran_sparse(rhs, out).map_err(feral_err),
+            Factored::Sparse(lu) => {
+                lu.ftran_sparse(rhs, out).map_err(feral_err)?;
+                self.credit_sparse_solve(m, rhs.len(), out.len());
+                Ok(())
+            }
             Factored::Dense(lu) => {
                 let mut v = vec![0.0; m];
                 for &(i, x) in rhs {
@@ -729,6 +769,7 @@ impl FeralLU {
                 }
                 lu.ftran(&mut v).map_err(feral_err)?;
                 gather_nonzeros(&v, out);
+                lu_work(self.solve_cost);
                 Ok(())
             }
         }
@@ -742,7 +783,11 @@ impl FeralLU {
         out: &mut Vec<(usize, f64)>,
     ) -> Result<(), LinError> {
         match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
-            Factored::Sparse(lu) => lu.btran_sparse(rhs, out).map_err(feral_err),
+            Factored::Sparse(lu) => {
+                lu.btran_sparse(rhs, out).map_err(feral_err)?;
+                self.credit_sparse_solve(m, rhs.len(), out.len());
+                Ok(())
+            }
             Factored::Dense(lu) => {
                 let mut v = vec![0.0; m];
                 for &(i, x) in rhs {
@@ -750,6 +795,7 @@ impl FeralLU {
                 }
                 lu.btran(&mut v).map_err(feral_err)?;
                 gather_nonzeros(&v, out);
+                lu_work(self.solve_cost);
                 Ok(())
             }
         }
@@ -757,6 +803,7 @@ impl FeralLU {
 
     /// Raw `B' x = rhs` solve through the current factor (no refinement).
     fn ftran_raw(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        lu_work(self.solve_cost);
         match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
             Factored::Sparse(lu) => lu.ftran(rhs).map_err(feral_err),
             Factored::Dense(lu) => lu.ftran(rhs).map_err(feral_err),
@@ -765,6 +812,7 @@ impl FeralLU {
 
     /// Raw `B'ᵀ x = rhs` solve through the current factor (no refinement).
     fn btran_raw(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        lu_work(self.solve_cost);
         match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
             Factored::Sparse(lu) => lu.btran(rhs).map_err(feral_err),
             Factored::Dense(lu) => lu.btran(rhs).map_err(feral_err),
@@ -878,6 +926,7 @@ impl FeralLU {
         crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
         self.lu = Some(Factored::Sparse(lu));
         self.retained = None;
+        self.credit_factor(nnz);
         Ok(())
     }
 }
@@ -905,6 +954,7 @@ impl LinearSolver for FeralLU {
             m,
             cols: cols.iter().map(|c| sparse_of_dense(c)).collect(),
         });
+        self.credit_factor(nnz);
         Ok(())
     }
 
@@ -951,6 +1001,7 @@ impl LinearSolver for FeralLU {
             m,
             cols: canonical_sparse_columns(m, cols),
         });
+        self.credit_factor(nnz);
         Ok(())
     }
 
@@ -984,6 +1035,13 @@ impl LinearSolver for FeralLU {
                 rb.cols[leaving_slot] = sparse_of_dense(entering_col);
             }
         }
+        // The update's own work is the growth of the eta file (or `m²` dense).
+        let before = self.solve_cost;
+        self.refresh_solve_cost();
+        lu_work(match &self.lu {
+            Some(Factored::Dense(_)) => self.solve_cost,
+            _ => self.solve_cost.saturating_sub(before).max(1),
+        });
         res
     }
 

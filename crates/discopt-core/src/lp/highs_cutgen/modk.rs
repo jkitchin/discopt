@@ -61,7 +61,9 @@ impl Splay<'_> {
         let (mut n_left, mut n_right) = (-1i32, -1i32);
         let mut lright = Slot::NRight;
         let mut rleft = Slot::NLeft;
+        let mut steps = 1u64;
         loop {
+            steps += 1;
             let r = root as usize;
             if key < self.key[r] {
                 let left = self.left[r];
@@ -107,6 +109,7 @@ impl Splay<'_> {
         self.set(rleft, rr, &mut n_left, &mut n_right);
         self.left[r] = n_right;
         self.right[r] = n_left;
+        crate::work::add(crate::work::Kind::Sepa, steps);
         root
     }
 
@@ -385,7 +388,8 @@ impl GfkSolve {
         let mut num_pivot = 0usize;
 
         while let Some(Reverse((old_col_size, pivot_col))) = pq.pop() {
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) || crate::work::over_limit()
+            {
                 return;
             }
             let pc = pivot_col as usize;
@@ -501,7 +505,8 @@ impl GfkSolve {
         let mut swap_pos = 0usize;
         loop {
             // One re-solve per basis swap: the long mode on reblock166.
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) || crate::work::over_limit()
+            {
                 return;
             }
             solution.clear();
@@ -670,7 +675,7 @@ pub fn separate_modk(
     }
 
     for k in [2u32, 3, 5, 7] {
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) || crate::work::over_limit() {
             return;
         }
         let num_cuts = pool.num_cuts();

@@ -3182,10 +3182,12 @@ impl<'a> Simplex<'a> {
             // time budget, and the caller treats the loose bound soundly (no
             // prune, gap left uncertified). Checks at _iter == 0 too, so a cold
             // fallback entered already past the deadline returns immediately.
+            // Likewise a heuristic sub-MIP's work budget (`crate::work::Limit`).
             if (_iter & 255) == 0
-                && self
+                && (self
                     .deadline
                     .is_some_and(|d| std::time::Instant::now() >= d)
+                    || crate::work::over_limit())
             {
                 return Err(LpStatus::IterLimit);
             }
