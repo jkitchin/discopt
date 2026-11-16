@@ -38,7 +38,7 @@ from discopt._relax.milp_relaxation import (
     build_milp_relaxation,
 )
 from discopt._relax.term_classifier import NonlinearTerms, classify_nonlinear_terms
-from discopt._relax.uniform_relax import RelaxationBuildAborted
+from discopt._relax.uniform_relax import _OBJ_BOX_FLOOR_GARBAGE_CAP, RelaxationBuildAborted
 from discopt.modeling.core import Model, VarType
 from discopt.solver_tuning import _env_flag
 from discopt.solver_tuning import current as _tuning
@@ -2580,6 +2580,19 @@ class MccormickLPRelaxer:
             # simplex value or a sound-but-harmful bound, not an invalid LP, and the
             # verified route reports an unbounded LP as such.
             _vb, _vx = _verified_free_column_bound(milp, _remaining())
+            if (
+                _vb is not None
+                and getattr(milp, "_objective_bound_valid", True) is False
+                and _vb < -_OBJ_BOX_FLOOR_GARBAGE_CAP
+            ):
+                # The verified value is sound but as garbage-wide as the box floor the
+                # relaxer already distrusts; reporting it pre-empts the rigorous
+                # fallback (alphaBB / prereform interval) that the decline path below
+                # leads to. Measured 2026-11-15 on nvs16 (#248): once the std-form
+                # engine's equilibrated retry let this LP certify, the solve reported
+                # -4.8e10 instead of a bound near the optimum 0.703125. Declining a
+                # valid bound costs bound only, never soundness.
+                _vb = None
             if _vb is not None:
                 BOUND_PROVENANCE["verified_highs"] += 1
                 return MccormickLPResult(
