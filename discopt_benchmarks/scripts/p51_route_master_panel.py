@@ -228,6 +228,16 @@ def main_arms(a, arms) -> int:
     names = [n for n, _ in arms]
     print("header", json.dumps(hdr), "models", len(models), "arms", arms, flush=True)
     rows, errors = [], []
+    done: set[str] = set()
+    if a.resume and Path(a.out).exists():
+        # Resume an interrupted run: keep its rows (same arms, recorded commits).
+        prev = json.loads(Path(a.out).read_text())
+        if [n for n, _ in prev["arms"]] != names:
+            raise SystemExit(f"--resume: {a.out} has arms {prev['arms']}, not {arms}")
+        rows = prev["rows"]
+        done = {r["model"] for r in rows}
+        hdr = {**hdr, "resumed_from": prev["header"]}
+        print("resume", len(rows), "rows kept", flush=True)
 
     def dump(extra=None):
         Path(a.out).write_text(json.dumps({"header": hdr, "args": vars(a), "arms": arms,
@@ -236,6 +246,8 @@ def main_arms(a, arms) -> int:
                                           indent=1, default=str) + "\n")  # fmt: skip
 
     for i, (lab, inst, build) in enumerate(models, 1):
+        if lab in done:
+            continue
         k = i % len(arms)
         order = arms[k:] + arms[:k]
         rec = {"model": lab}
@@ -276,6 +288,7 @@ def main(argv=None) -> int:
     ap.add_argument("--on", default="1")
     ap.add_argument("--off", default="0")
     ap.add_argument("--arms", default="", help='e.g. "off=;k3=DISCOPT_MILP_LAZY_RESTARTS=3"')
+    ap.add_argument("--resume", action="store_true", help="keep the rows already in --out")
     a = ap.parse_args(argv)
     MP._assert_discopt_under_test()
     if a.kernel == "off":
