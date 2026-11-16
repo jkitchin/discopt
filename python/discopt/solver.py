@@ -13123,7 +13123,7 @@ def _root_relaxation_lower_bound(
     uses). When its objective is fully linearized (``objective_bound_valid``), the
     relaxation LP's optimal value is a valid lower bound on the original objective
     over that box — hence over the whole feasible set — for a *minimization*. This
-    mirrors the root-LP-bound seeding ``_solve_milp_bb`` already performs, but for
+    mirrors the root-LP-bound seeding the (retired) Python MILP tree performed, but for
     the spatial path, whose tree ``global_lower_bound`` can be tainted up to the
     incumbent on a nonconvex model and is dropped on an uncertified exit.
 
@@ -13874,9 +13874,8 @@ def _scoped_strategy(fn: _F) -> _F:
                 f"strategy={value!r} was not used: it selects nodes in discopt's own "
                 "branch-and-bound tree, and this solve ran none"
                 + (f" (route: {route})" if route else "")
-                + ". A pure MILP is solved by HiGHS by default; pass "
-                "milp_backend='native' to search it with discopt's MILP tree. An LP "
-                "or convex QP is solved without branching.",
+                + ". The opt-in HiGHS route (milp_backend='highs') runs HiGHS's own "
+                "search; an LP or convex QP is solved without branching.",
                 UserWarning,
                 # Attribute it to the caller's ``solve()`` line, not to the
                 # decorator stack inside discopt.
@@ -14961,11 +14960,10 @@ def solve_model(
         estimate of the subtree optimum — finds good incumbents earlier while
         ``best_first`` still drives the proof of optimality). Any other value
         raises ``ValueError`` (#1722). It steers discopt's own branch-and-bound
-        trees only: a pure MILP goes to HiGHS by default (or to the monolithic
-        Rust MILP engine under ``DISCOPT_LP_MILP_BACKEND=rust``), and an LP or
-        convex QP is solved without branching, so on those routes a
-        non-default value is not used and a ``UserWarning`` says so. Pass
-        ``milp_backend="native"`` to have it select nodes on a MILP.
+        trees only, which include the default pure-MILP route (the Rust MILP
+        engine). The opt-in HiGHS route (``milp_backend="highs"``) runs HiGHS's own
+        search, and an LP or convex QP is solved without branching, so on those
+        routes a non-default value is not used and a ``UserWarning`` says so.
     max_nodes : int, default 100_000
         Maximum number of B&B nodes before stopping.
     milp_backend : {"highs", "native"}, optional
@@ -15060,11 +15058,11 @@ def solve_model(
         spatial branch and bound. It does not decide where a model with only
         linear rows goes (#1724):
 
-        * a pure **LP or MILP** goes to HiGHS by default, every certificate
-          verified by discopt (#1229). ``milp_backend="native"`` (or the
-          ``DISCOPT_LP_MILP_BACKEND`` env var) overrides that: ``"native"``
-          runs discopt's own LP solve / MILP branch and bound, and the
-          env-var-only ``"rust"`` runs the monolithic Rust MILP engine;
+        * a pure **LP or MILP** goes to the in-house Rust simplex / Rust MILP
+          engine by default, whether or not ``highspy`` is installed (owner decision
+          2026-11-09). ``milp_backend="highs"`` (or ``DISCOPT_LP_MILP_BACKEND=highs``)
+          opts into HiGHS with every certificate verified by discopt (#1229);
+          ``"native"`` names discopt's own engines with a route label saying so;
         * the **node LP relaxations** of spatial branch and bound (MINLP,
           nonconvex QP/MIQP) are solved by the in-house Rust simplex, not by
           HiGHS and not by POUNCE.
@@ -17544,9 +17542,9 @@ def solve_model(
                 # redundant) FBBT root presolve on the lifted rows and use
                 # the monolithic Rust simplex MILP engine, unless the
                 # cert:P3.1c cut-reachability experiment keeps the solve
-                # on the cut-carrying _solve_milp_bb path. #1619 C-01b: under
+                # on the cut-carrying path. #1619 C-01b: under
                 # DISCOPT_BINARY_QUADRATIC_MILP the exact MILP instead takes the
-                # default pure-MILP route (HiGHS, #1229), like any user MILP.
+                # default pure-MILP route (the Rust MILP engine), like any user MILP.
                 presolve = False
                 if nlp_solver == "pounce" and not binary_quadratic_milp_enabled():
                     nlp_solver = "simplex"
@@ -18713,8 +18711,8 @@ def solve_model(
                 _declare_route("convex-qp: discopt convex QP solve")
                 return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.MILP:
-            # #748: the specialized MILP engines (``_solve_milp_simplex`` /
-            # ``_solve_milp_bb``) do not receive or consult ``lazy_constraints``
+            # #748: the specialized MILP engines (``_solve_milp_simplex`` / the
+            # HiGHS route) do not receive or consult ``lazy_constraints``
             # / ``incumbent_callback``, so a callback-rejected or cut-off
             # integer-feasible point would be silently accepted as the incumbent
             # — a soundness bug for lazy constraints (the callback defines the
@@ -18730,11 +18728,13 @@ def solve_model(
             # #1535: ``cut_callback`` joins them. Neither MILP engine has a cut hook,
             # so the callback was silently never called on a MILP (0 calls, on both
             # the HiGHS and the native route); the spatial path separates it.
-            # ``node_callback`` needs a tree to observe: HiGHS and the monolithic
-            # Rust engine expose none, so it keeps the MILP on ``_solve_milp_bb``.
+            # ``node_callback`` needs a tree to observe: the Rust engine exposes one
+            # (``_milp_node_callback_hook``); HiGHS does not, so it keeps the MILP off
+            # the HiGHS route.
             _observe_tree = node_callback is not None
             if lazy_constraints is None and incumbent_callback is None and cut_callback is None:
-                # #1229 HiGHS route (default; DISCOPT_LP_MILP_BACKEND=rust opts out). An explicit
+                # #1229 HiGHS route (opt-in: milp_backend="highs" /
+                # DISCOPT_LP_MILP_BACKEND=highs; the Rust engine is the default). An explicit
                 # ``nlp_solver="simplex"`` still names the Rust engine, and
                 # ``lagrangian_bound`` still needs the per-node Python path.
                 # #2042: HiGHS fires no debugger checkpoint either, so an attached
@@ -18762,8 +18762,9 @@ def solve_model(
                 # Warm-started-simplex engine: the whole MILP B&B runs in Rust
                 # with dual-warm-started simplex node solves. Reached explicitly
                 # via ``nlp_solver="simplex"``, and — since the routing panel
-                # below — by DEFAULT for a pure MILP; falls through to the
-                # Python ``_solve_milp_bb`` whenever the engine defers.
+                # below — by DEFAULT for a pure MILP. When the engine declines,
+                # the solve raises a routing error (below); there is no Python tree
+                # to fall back to since its retirement.
                 #
                 # ``lagrangian_bound`` runs on the engine too since the retirement:
                 # the driver's ``MilpBoundHook`` takes the Lagrangian node bound
@@ -18778,7 +18779,6 @@ def solve_model(
                 # Retirement step 11 (R1): ``milp_backend="native"`` is discopt's own MILP
                 # search, which is now the Rust engine -- it takes ``strategy``,
                 # ``branching_rule``, ``milp_cuts`` and ``node_callback``.
-                _want_engine = True  # the Python MILP tree is retired (DISCOPT_MILP_ENGINE too)
                 # #1243: the monolithic engine's default RELATIVE arm is
                 # ``TreeManager::gap()``, whose denominator is FLOORED AT 1.0, so
                 # near a zero optimum it converges on a gap the Python tree's
@@ -18795,49 +18795,48 @@ def solve_model(
                 # passed through to ``MilpOptions`` and the driver stops on either
                 # criterion. It used to be dropped here entirely, making the
                 # documented parameter a no-op on this whole route.
-                if _want_engine:
-                    _simplex_res = _solve_milp_simplex(
-                        model,
-                        time_limit,
-                        gap_tolerance,
-                        max_nodes,
-                        t_start,
-                        initial_point=initial_point,
-                        deferred=_deferred,
-                        prefer_pounce=nlp_solver == "pounce",
-                        # The caller's raw value, not the resolved one: ``None``
-                        # means "this route's established default", which for
-                        # this engine is no absolute criterion at all (#1315).
-                        abs_gap_tolerance=abs_gap_tolerance,
-                        incumbent_time_extension=incumbent_time_extension,
-                        node_callback=node_callback,
-                        root_cuts=milp_cuts is not False,
-                        branching_rule=branching_rule,
-                        lagrangian_bound=lagrangian_bound,
-                        lagrangian_frequency=lagrangian_frequency,
+                _simplex_res = _solve_milp_simplex(
+                    model,
+                    time_limit,
+                    gap_tolerance,
+                    max_nodes,
+                    t_start,
+                    initial_point=initial_point,
+                    deferred=_deferred,
+                    prefer_pounce=nlp_solver == "pounce",
+                    # The caller's raw value, not the resolved one: ``None``
+                    # means "this route's established default", which for
+                    # this engine is no absolute criterion at all (#1315).
+                    abs_gap_tolerance=abs_gap_tolerance,
+                    incumbent_time_extension=incumbent_time_extension,
+                    node_callback=node_callback,
+                    root_cuts=milp_cuts is not False,
+                    branching_rule=branching_rule,
+                    lagrangian_bound=lagrangian_bound,
+                    lagrangian_frequency=lagrangian_frequency,
+                )
+                if (
+                    _simplex_res is not None
+                    and _simplex_res.algorithm_route is None
+                    and _lpm_backend == "native"
+                ):
+                    _simplex_res.algorithm_route = (
+                        f"native-milp: discopt monolithic Rust MILP engine "
+                        f"(milp_backend='native', strategy={strategy!r}, "
+                        f"branching_rule={branching_rule or 'pseudocost'!r}, "
+                        f"root cuts {'off' if milp_cuts is False else 'on'}"
+                        f"{', lagrangian_bound node hook' if lagrangian_bound else ''})"
                     )
-                    if (
-                        _simplex_res is not None
-                        and _simplex_res.algorithm_route is None
-                        and _lpm_backend == "native"
-                    ):
-                        _simplex_res.algorithm_route = (
-                            f"native-milp: discopt monolithic Rust MILP engine "
-                            f"(milp_backend='native', strategy={strategy!r}, "
-                            f"branching_rule={branching_rule or 'pseudocost'!r}, "
-                            f"root cuts {'off' if milp_cuts is False else 'on'}"
-                            f"{', lagrangian_bound node hook' if lagrangian_bound else ''})"
-                        )
-                    if _simplex_res is not None and _simplex_res.algorithm_route is None:
-                        # #1614 C1: the in-house engine answering a MILP must say so.
-                        _why = "nlp_solver=simplex" if nlp_solver == "simplex" else "default"
-                        if lagrangian_bound:
-                            _why += "; lagrangian_bound node hook"
-                        _simplex_res.algorithm_route = (
-                            f"native-milp: discopt monolithic Rust MILP engine ({_why})"
-                        )
-                    if _simplex_res is not None:
-                        return _simplex_res
+                if _simplex_res is not None and _simplex_res.algorithm_route is None:
+                    # #1614 C1: the in-house engine answering a MILP must say so.
+                    _why = "nlp_solver=simplex" if nlp_solver == "simplex" else "default"
+                    if lagrangian_bound:
+                        _why += "; lagrangian_bound node hook"
+                    _simplex_res.algorithm_route = (
+                        f"native-milp: discopt monolithic Rust MILP engine ({_why})"
+                    )
+                if _simplex_res is not None:
+                    return _simplex_res
                 # The Rust engine declined a pure MILP. Since the Python MILP tree was
                 # retired, the engine returns its own (possibly uncertified) result for
                 # every search outcome, so the only declines left are structural: no
@@ -37371,8 +37370,8 @@ def _resolve_lp_milp_backend(milp_backend: Optional[str]) -> str:
     """The engine for a pure LP / MILP: ``"highs"``, ``"rust"`` or ``"native"``.
 
     ``milp_backend=None`` defers to :func:`_lp_milp_backend` (the
-    ``DISCOPT_LP_MILP_BACKEND`` env var; default ``"highs"`` when ``highspy`` is
-    installed, else ``"rust"``), so a solve that does not name a backend is unchanged.
+    ``DISCOPT_LP_MILP_BACKEND`` env var; default ``"rust"`` whether or not ``highspy`` is
+    installed), so a solve that does not name a backend is unchanged.
     An explicit keyword wins over the env var:
 
     * ``"highs"`` -- the #1229 HiGHS route, with discopt-verified certificates.
@@ -37451,6 +37450,14 @@ def _pure_route_presolve_skip_backends() -> tuple[str, ...]:
 
 
 def _milp_is_exactly_linear(model: Model) -> bool:
+    """:func:`_milp_is_exactly_linear_uncached`, memoised on the model's structure
+    (``discopt._structure_memo``): a solve asks it up to three times."""
+    from discopt._structure_memo import structure_memo
+
+    return structure_memo(model, "milp_is_exactly_linear", _milp_is_exactly_linear_uncached)
+
+
+def _milp_is_exactly_linear_uncached(model: Model) -> bool:
     """Whether ``extract_lp_data``'s linear projection of *model* is the model.
 
     ``extract_lp_data`` captures only the LINEAR part of the model; any nonlinear
@@ -38151,6 +38158,50 @@ def _solve_milp_highs(
     )
 
 
+def _milp_root_cmir_mode() -> str:
+    """``DISCOPT_MILP_ROOT_CMIR`` (gap plan P3, default ``highs``): ``"off"`` (``0``),
+    ``"with_gmi"`` (``1``), ``"only"`` (c-MIR without GMI, an entry-experiment arm) or ``"highs"``
+    (the bundle with the root separation run by the faithful port of HiGHS's separation
+    subsystem, ``lp/highs_cutgen``; gap plan §12.16-§12.20).
+
+    Armed, the pure-MILP route's root loop runs the aggregated c-MIR / lifted-cover
+    separator (``lp/cmir.rs``) at HiGHS's design, allows stalled root rounds, and gets
+    3x the root cut and round budget (1,500 / 150).
+
+    Since gap plan §12.10-12.12 the flag also carries the HiGHS-derived root and primal
+    machinery measured on the P3 targets, all in the Rust driver: path c-MIR over every
+    LP row (cuts included), HiGHS's tableau separator in place of GMI, HiGHS's root cut
+    selection (score, adaptive threshold, parallelism 0.1) and stall rule, per-round cut
+    ageing, zero-dual pruning with a basis remap, a cut loop that separates from the
+    dual's vertex when only the sub-tolerance repair failed, full bases in the tree
+    (zero artificials expelled), the HiGHS RENS/RINS port (neighbourhood dive + sub-MIP
+    on the cut LP, one nesting level), incremental propagation in the heuristics, and a
+    plain-root stall redive. It is panelled as a bundle with ``DISCOPT_MILP_RAND_ROUND``
+    and ``DISCOPT_MILP_RUN1_CONTINUE``. The route's loop separated GMI and
+    covers only; SCIP's aggregation separator alone closes the P3 rows' root gap to
+    within 6 % with presolve off, and this configuration reaches it on
+    ``nexp-50-20-1-1`` (0.0 %) and ``neos-911970`` (5.4 %) from 27.6 % / 57.5 % (gap
+    plan §12-12.2). Bound-changing; graduated to ``highs`` by the stage 1d-5 §5 panel
+    with the rest of the HiGHS-design MILP stack (``docs/dev/flag-retirement-audit.md``),
+    ``0`` keeps the legacy root. Every cut is a nonnegative combination of model rows
+    rounded over global bounds (the ``cmir.rs`` soundness argument). The Rust side reads
+    the same variable.
+    """
+    # Default ``highs`` since the stage 1d-5 graduation panel; ``0`` opts out.
+    raw = os.environ.get("DISCOPT_MILP_ROOT_CMIR", "highs").strip().lower() or "highs"
+    if raw in ("1", "true", "yes"):
+        return "with_gmi"
+    if raw == "only":
+        return "only"
+    if raw == "highs":
+        return "highs"
+    if raw in ("", "0", "false", "no"):
+        return "off"
+    raise ValueError(
+        f"DISCOPT_MILP_ROOT_CMIR={raw!r} is not recognized (expected 1, only, highs or 0)"
+    )
+
+
 def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     """Root cut options for the pure-MILP engine, or ``None`` to keep the
     binding's historical ``root_cuts=16, cut_rounds=1`` single pass.
@@ -38209,10 +38260,14 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     """
     if os.environ.get("DISCOPT_MILP_ROOT_CUTS", "1").lower() in ("0", "false", "no"):
         return None
+    _cmir_mode = _milp_root_cmir_mode()
     return {
-        "root_cuts": 500,
-        "cut_rounds": 50,
+        "root_cuts": 1500 if _cmir_mode != "off" else 500,
+        "cut_rounds": 150 if _cmir_mode != "off" else 50,
         "cut_select": True,
+        # Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`, default `highs`): c-MIR in the root loop.
+        "cmir_cuts": _cmir_mode != "off",
+        "gmi_cuts": _cmir_mode != "only",
         # Half the engine's slice, floored so a very short budget still gets one
         # useful pass. The loop stops early on tailing off, so on an instance
         # whose root closes in two rounds this ceiling is never reached.
@@ -38369,7 +38424,13 @@ def _milp_run1_continue_enabled() -> bool:
     cut rows, pool, pseudocosts and incumbent (``HighsMipSolverData.cpp:1316-1420``).
     Changes the search, so gated per CLAUDE.md section 5; read at call time.
     """
-    return os.environ.get("DISCOPT_MILP_RUN1_CONTINUE", "0") == "1"
+    # Default ON since the stage 1d-5 graduation panel; ``0`` opts out.
+    raw = os.environ.get("DISCOPT_MILP_RUN1_CONTINUE", "1").strip().lower()
+    if raw in ("1", "true", "yes", "on", ""):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"DISCOPT_MILP_RUN1_CONTINUE={raw!r} is not recognized (expected 1 or 0)")
 
 
 def _milp_rust_coef_entry_enabled() -> bool:
@@ -38473,47 +38534,65 @@ def _milp_aligned_slacks_enabled() -> bool:
 
 
 def _milp_aligned_lp(lp_data, n_orig: int):
-    """The aligned standard form described in :func:`_milp_aligned_slacks_enabled`."""
+    """The aligned standard form described in :func:`_milp_aligned_slacks_enabled`.
+
+    Assembled directly from the CSC arrays: the structural columns, then per row its
+    singleton slack (or a new unit column), then the remaining columns -- the same
+    matrix, entry for entry and in the same within-column order, as stacking the
+    column slices. It used to slice ``A[:, k]`` once per column and ``hstack`` ~m
+    pieces: 5.2 s of a 20 s budget on reblock420 (15k rows, 2026-11-13), before the
+    engine started (``test_milp_aligned_lp_matches_the_column_stack``).
+    """
     import scipy.sparse as _sp
 
     A = _sp.csc_matrix(lp_data.A_eq)
     m, n = A.shape
-    slack_of_row = [-1] * m
+    indptr, indices, data = A.indptr, A.indices, A.data
+    lens = np.diff(indptr)
+    slack_of_row = np.full(m, -1, dtype=np.int64)
     for k in range(n_orig, n):
-        lo, hi = A.indptr[k], A.indptr[k + 1]
-        if hi - lo == 1:
-            r = int(A.indices[lo])
+        if lens[k] == 1:
+            r = int(indices[indptr[k]])
             if slack_of_row[r] < 0:
                 slack_of_row[r] = k
-    used = {k for k in slack_of_row if k >= 0}
-    rest = [k for k in range(n_orig, n) if k not in used]
+    used = np.zeros(n, dtype=bool)
+    used[slack_of_row[slack_of_row >= 0]] = True
+    rest = np.array([k for k in range(n_orig, n) if not used[k]], dtype=np.int64)
+    # Output column order: -1 marks a new unit column for that row.
+    order = np.concatenate([np.arange(n_orig, dtype=np.int64), slack_of_row, rest])
+    new_row = np.flatnonzero(slack_of_row < 0)  # rows that get a unit column
+    is_new = order < 0
+    out_len = np.where(is_new, 1, lens[np.where(is_new, 0, order)])
+    out_ptr = np.zeros(order.size + 1, dtype=np.int64)
+    np.cumsum(out_len, out=out_ptr[1:])
+    nnz = int(out_ptr[-1])
+    out_idx = np.empty(nnz, dtype=indices.dtype)
+    out_val = np.empty(nnz, dtype=np.float64)
+    # Gather existing columns in one vectorized pass.
+    src_cols = order[~is_new]
+    src_start = indptr[src_cols]
+    dst_start = out_ptr[:-1][~is_new]
+    seg = lens[src_cols]
+    if seg.sum():
+        offs = np.repeat(dst_start - np.cumsum(np.concatenate([[0], seg[:-1]])), seg)
+        src = np.repeat(src_start - np.cumsum(np.concatenate([[0], seg[:-1]])), seg)
+        pos = np.arange(int(seg.sum()))
+        out_idx[pos + offs] = indices[pos + src]
+        out_val[pos + offs] = data[pos + src]
+    # Unit columns for rows without a slack: positions n_orig + r in `order`.
+    new_pos = out_ptr[:-1][is_new]
+    out_idx[new_pos] = new_row
+    out_val[new_pos] = 1.0
     c = np.asarray(lp_data.c, dtype=np.float64)
     xl = np.asarray(lp_data.x_l, dtype=np.float64)
     xu = np.asarray(lp_data.x_u, dtype=np.float64)
-    cols = [A[:, :n_orig]]
-    cc, ll, uu = [c[:n_orig]], [xl[:n_orig]], [xu[:n_orig]]
-    for r in range(m):
-        k = slack_of_row[r]
-        if k >= 0:
-            cols.append(A[:, k])
-            cc.append(c[k : k + 1])
-            ll.append(xl[k : k + 1])
-            uu.append(xu[k : k + 1])
-        else:
-            cols.append(_sp.csc_matrix(([1.0], ([r], [0])), shape=(m, 1)))
-            cc.append(np.zeros(1))
-            ll.append(np.zeros(1))
-            uu.append(np.zeros(1))
-    for k in rest:
-        cols.append(A[:, k])
-        cc.append(c[k : k + 1])
-        ll.append(xl[k : k + 1])
-        uu.append(xu[k : k + 1])
+    take = np.where(is_new, 0, order)
+    zero = np.zeros(order.size)
     return lp_data._replace(
-        A_eq=_sp.hstack(cols, format="csc"),
-        c=np.concatenate(cc),
-        x_l=np.concatenate(ll),
-        x_u=np.concatenate(uu),
+        A_eq=_sp.csc_matrix((out_val, out_idx, out_ptr), shape=(m, order.size)),
+        c=np.where(is_new, zero, c[take]),
+        x_l=np.where(is_new, zero, xl[take]),
+        x_u=np.where(is_new, zero, xu[take]),
     )
 
 
@@ -39346,7 +39425,14 @@ def _solve_milp_simplex(
         # input check (a NaN box) already ran on this exact data in the solve
         # above. A raise here is a defect, not "no root bound".
         _t_root = time.perf_counter()
-        if relu_cuts is None:
+        # Reporting only, so it gets what is left of the caller's budget and no more:
+        # its own 5 s cap ran past the limit (neos-1445738, 2026-11-13 population panel:
+        # the search ended on time at 20.1 s, then this LP ran to 25.2 s of a 20 s
+        # limit). With nothing left it is skipped and the root metrics stay unset.
+        _probe_tl = min(float(_milp_budget), 5.0, _effective_time_limit - (_t_root - t_start))
+        if _probe_tl <= 0.05:
+            _lp_status, _lp_obj = "skipped", None
+        elif relu_cuts is None:
             _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
                 np.ascontiguousarray(_drv.c, dtype=np.float64),
                 _A_m,
@@ -39362,7 +39448,7 @@ def _solve_milp_simplex(
                 float(lp_data.obj_const),
                 1000,  # a relaxed (integer-free) LP solves at the root; headroom to finalize
                 float(gap_tolerance),
-                time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
+                time_limit_s=float(_probe_tl),
             )
         else:
             # #2157: the integer-free LP above never reaches the fractional-node
@@ -39390,7 +39476,7 @@ def _solve_milp_simplex(
                 # its separation rounds and stops as soon as it branches.
                 2,
                 float(gap_tolerance),
-                time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
+                time_limit_s=float(_probe_tl),
                 heuristics=False,
                 **_cut_opts,
             )
@@ -39406,8 +39492,8 @@ def _solve_milp_simplex(
 
         # Relaxation duals at the incumbent. ``SolveResult`` promises named
         # constraint duals / reduced costs for a MILP (test_solver_duals.py,
-        # test_p1_milp_bb_soundness.py), and the Python ``_solve_milp_bb`` path
-        # has always supplied them. Routing a pure MILP here by default must not
+        # test_p1_milp_bb_soundness.py), and the retired Python MILP tree
+        # always supplied them. Routing a pure MILP here by default must not
         # silently drop that half of the contract, so recover them the same way:
         # re-solve the relaxation with the integers fixed at the incumbent. The
         # row decomposition (_A_ub_m/_b_ub_m/_A_eq_m/_b_eq_m) and ``n_orig`` are

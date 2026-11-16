@@ -1,3 +1,8 @@
+//! Provenance: derived from HiGHS source (https://github.com/ERGO-Code/HiGHS, Copyright (c) HiGHS,
+//! MIT License): its behaviour reproduces HiGHS's LP-file reader (`io/FilereaderLp.cpp`,
+//! `io/filereaderlp/*`), cited below. See `THIRD_PARTY_NOTICES.md` at the repository root for the
+//! license text.
+//!
 //! CPLEX-LP-format (`.lp`) reader that reproduces HiGHS 1.15.1's `readModel` ->
 //! `getLp` (and `getModel().hessian_`) exactly, quirks included (highs-parity P6:
 //! the in-house replacement for HiGHS's reader in the benchmark loader, and the

@@ -31,6 +31,11 @@ FLAG = "DISCOPT_MILP_REENTRY_SPEND"
 def _pins(monkeypatch):
     # The native route, not HiGHS (the pure-MILP default).
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
+    # The re-entry exists only on the two-run route. Since DISCOPT_MILP_RUN1_CONTINUE
+    # graduated default-ON, run 1 gets the whole budget (measured: a 2.95 s slice of
+    # time_limit=3) and keeps searching in place, so no leftover and no re-entry
+    # exist; its =0 opt-out restores the half-budget slice this gate governs.
+    monkeypatch.setenv("DISCOPT_MILP_RUN1_CONTINUE", "0")
     # Keep the test short: the slice is ~1.4 s, so the floor must sit below the
     # ~1.4 s the scripted run 1 leaves behind.
     monkeypatch.setattr(_solver, "_MILP_REENTRY_MIN_S", 0.2, raising=False)

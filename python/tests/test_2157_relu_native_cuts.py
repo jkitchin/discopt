@@ -219,17 +219,15 @@ def test_native_route_certifies_and_tightens_the_root(monkeypatch):
 
 def test_rust_engine_route_separates_at_nodes(monkeypatch):
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    # This test is about the native separator firing AT NODES. Since
-    # `DISCOPT_MILP_ROOT_GMI_REPAIR` went default ON (highs-parity P4.4) the root's
-    # GMI cuts close this small network at the root, so no node -- and no separator
-    # call -- exists. Pin the legacy root so the node path is still exercised.
-    monkeypatch.setenv("DISCOPT_MILP_ROOT_GMI_REPAIR", "0")
-    # Likewise `DISCOPT_MILP_ALIGNED_SLACKS` (highs-parity D2, default ON 2026-11-07):
-    # with the slacks aligned the root cut loop closes this network before any
-    # fractional point reaches the separator (0 calls vs 3; both certify the same
-    # optimum in 1 node). Pin the legacy layout so the separator path is exercised.
-    monkeypatch.setenv("DISCOPT_MILP_ALIGNED_SLACKS", "0")
-    net = _net([2, 6, 1], 0)
+    # This test is about the native separator firing AT NODES, so it needs a network
+    # the default root does not close. The [2, 6, 1] network it used closed at the
+    # root once the root GMI repair, aligned slacks and the root-round bound went
+    # default ON (0 separator calls; the first two were pinned off here, the third
+    # closed it anyway). Chosen by measurement on the current defaults (2026-11-15,
+    # nothing pinned): [2, 8, 8, 1] seed 1 takes 7 nodes, 12 separator calls, 25
+    # cuts, 0.5 s; every [2,6,1] / [2,10,1] / [3,12,1] seed 0-1 and [2, 8, 8, 1]
+    # seed 0 closed at the root.
+    net = _net([2, 8, 8, 1], 1)
     ref, _ = _build(net, False)
     r0 = ref.solve(time_limit=60)
     m, nn = _build(net, True)

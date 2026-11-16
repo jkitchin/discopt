@@ -347,12 +347,19 @@ pub fn solve_lp_py<'py>(
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
+        subtol_repair: true,
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
+        dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+        perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
+        dual_dse: SimplexOptions::default().dual_dse,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
+        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+        subtol_ladder: SimplexOptions::default().subtol_ladder,
         cold_dual_start: false,
         warm_flip_boxed: false,
     };
@@ -487,12 +494,19 @@ pub fn solve_lp_warm_py<'py>(
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
+        subtol_repair: true,
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
+        dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+        perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
+        dual_dse: SimplexOptions::default().dual_dse,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
+        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+        subtol_ladder: SimplexOptions::default().subtol_ladder,
         cold_dual_start: false,
         warm_flip_boxed: false,
     };
@@ -597,6 +611,7 @@ pub fn solve_lp_warm_csc_py<'py>(
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
+        subtol_repair: true,
         // #928: this is the one entry point whose deadline-cut solves bank the
         // dual loop's anytime floor (see `SimplexOptions::bank_deadline_duals`).
         // Engaged exactly when the caller bounded this LP in time; the MILP
@@ -612,10 +627,16 @@ pub fn solve_lp_warm_csc_py<'py>(
         // (`DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY`) was retired by #2211 on its §5
         // panel: cert-clean, 0 bounds recovered (performance-plan §18e).
         recover_unstable_pivot: deadline.is_some(),
+        dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+        perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
+        dual_dse: SimplexOptions::default().dual_dse,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
+        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+        subtol_ladder: SimplexOptions::default().subtol_ladder,
         cold_dual_start: false,
         // #1935: see `SimplexOptions::warm_flip_boxed` (default off).
         warm_flip_boxed,
@@ -749,12 +770,19 @@ pub fn solve_lp_batch_py<'py>(
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
+        subtol_repair: true,
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
+        dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+        perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
+        dual_dse: SimplexOptions::default().dual_dse,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+        dual_noise_rows: SimplexOptions::default().dual_noise_rows,
+        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+        subtol_ladder: SimplexOptions::default().subtol_ladder,
         cold_dual_start: false,
         warm_flip_boxed: false,
     };
@@ -1035,7 +1063,15 @@ impl MilpBoundHook for PyBoundHook {
                 .callback
                 .bind(py)
                 .call1((PyArray1::from_slice(py, lb), PyArray1::from_slice(py, ub)))
-                .and_then(|v| v.extract::<Option<f64>>());
+                .and_then(|v| v.extract::<Option<f64>>())
+                .and_then(|v| match v {
+                    // A NaN bound is a bug in the hook, not "no bound": report it like a
+                    // raise (the driver also ignores non-finite values).
+                    Some(x) if x.is_nan() => Err(pyo3::exceptions::PyValueError::new_err(
+                        "node bound hook returned NaN",
+                    )),
+                    other => Ok(other),
+                });
             match r {
                 Ok(v) => v,
                 Err(e) => {
@@ -1624,7 +1660,7 @@ impl PyReluIdealSeparator {
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
-                    node_selection=None, extend_no_incumbent_s=None,
+                    stall_time_s=None, node_selection=None, extend_no_incumbent_s=None,
                     branching_rule=None, rel_gap_max_abs=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_relu_csc_py<'py>(
@@ -1676,6 +1712,7 @@ pub fn solve_milp_relu_csc_py<'py>(
     debug_hook: Option<Py<PyAny>>,
     abs_gap_tol: Option<f64>,
     max_open_nodes: Option<usize>,
+    stall_time_s: Option<f64>,
     node_selection: Option<String>,
     extend_no_incumbent_s: Option<f64>,
     branching_rule: Option<String>,
@@ -1787,7 +1824,7 @@ pub fn solve_milp_relu_csc_py<'py>(
         max_open_nodes,
         Some(&sep),
         MilpExtra {
-            stall_time_s: None,
+            stall_time_s,
             extend_no_incumbent_s,
             selection: parse_node_selection(node_selection.as_deref())?,
             branch_rule: parse_branching_rule(branching_rule.as_deref())?,
@@ -1861,7 +1898,7 @@ pub fn solve_milp_relu_csc_py<'py>(
                     root_cut_prune=true,
                     debug_hook=None,
                     node_callback=None, node_hook_rounds=0, node_hook_cut_cap=0,
-                    abs_gap_tol=None))]
+                    abs_gap_tol=None, rel_gap_max_abs=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_lazy_csc_py<'py>(
     py: Python<'py>,
@@ -1904,6 +1941,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
     node_hook_rounds: usize,
     node_hook_cut_cap: usize,
     abs_gap_tol: Option<f64>,
+    rel_gap_max_abs: bool,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1993,7 +2031,10 @@ pub fn solve_milp_lazy_csc_py<'py>(
         abs_gap_tol,
         None,
         None,
-        MilpExtra::default(),
+        MilpExtra {
+            rel_gap_max_abs,
+            ..MilpExtra::default()
+        },
     )
 }
 
@@ -2106,6 +2147,10 @@ pub(crate) fn milp_options(
     Ok(MilpOptions {
         n_struct,
         integer_cols: int_cols,
+        implied_int_cols: Vec::new(),
+        max_stall_nodes: 0,
+        max_leaves: 0,
+        max_work: None,
         max_nodes,
         max_open_nodes,
         time_limit_s: parse_budget_secs(time_limit_s)?,
@@ -2157,14 +2202,21 @@ pub(crate) fn milp_options(
             // neutral on node count and wall — so per CLAUDE.md §5 it stays OFF
             // (sound but not net-positive is not a graduation).
             expel_zero_artificials: false,
+            subtol_repair: true,
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
+            dual_sparse_solves: SimplexOptions::default().dual_sparse_solves,
+            perturb_primal_cleanup: SimplexOptions::default().perturb_primal_cleanup,
+            dual_dse: SimplexOptions::default().dual_dse,
             // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
             // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
             dual_stall_patience: SimplexOptions::default().dual_stall_patience,
             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+            dual_noise_rows: SimplexOptions::default().dual_noise_rows,
+            dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+            subtol_ladder: SimplexOptions::default().subtol_ladder,
             cold_dual_start: false,
-            warm_flip_boxed: false,
+            warm_flip_boxed: SimplexOptions::default().warm_flip_boxed,
         },
     })
 }

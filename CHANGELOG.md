@@ -12,6 +12,18 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`discopt.modeling.from_mps` / `from_lp`: read MPS and CPLEX-LP files.** Both
+  use the in-house HiGHS-compatible parsers. The model is built in vector form: one
+  integer and one continuous variable (`x_int`, `x_cont`), the rows as matrix blocks
+  (`eq`, `le`, `ge`), and the objective as array sums. A quadratic LP-file objective
+  is included. `model.file_columns` keeps the file's column names and maps a result
+  back to file order (`values(result)`, `as_dict(result)`). Semi-continuous columns
+  and an MPS quadratic section are refused, not dropped. Compared with converting to
+  `.nl` and using `from_nl` (one scalar variable per column), large files skip
+  per-column Python passes. On MIPLIB `tbfp-network` (72,747 columns, 20 s budget),
+  the Rust engine got 20.9 s instead of 19.8 s, and the wall was 21.8 s instead of
+  26.3 s.
+
 - **`discopt mcp`: a Model Context Protocol server.** Install with
   `pip install 'discopt[mcp]'`, then register it with Claude Desktop (or any MCP
   client) using the entry `discopt mcp --print-config` prints. Tools:
@@ -22,12 +34,27 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`pounce-solver` floor raised to 0.17** (`>=0.17`, core dependency and the `pounce`
+  alias extra). discopt's pounce-facing tests pass on 0.17.0 (432); see the PR for the
+  full-suite run.
+
+- **`discopt[highs]` excludes highspy 1.16.0** (`highspy>=1.11,!=1.12.0,!=1.16.0`). On
+  `main`, the affected test files pass with 1.15.1 and fail 90 tests with 1.16.0: HiGHS
+  fixed defects some falsifier tests rely on, its LP-reader and IIS output changed, and
+  two changes may be regressions (the banner prints with logging off; a raising
+  separator no longer aborts the solve). Adopting 1.16 is tracked in #2221.
+
 - **HiGHS is an optional extra (`pip install 'discopt[highs]'`).** Without `highspy`
-  every default path runs on discopt's in-house Rust engine: pure LPs (Rust simplex by
-  default whether or not HiGHS is installed), pure MILPs (Rust MILP engine; with
-  `highspy` installed a pure MILP still defaults to HiGHS), IIS (`iis_engine="rust"`),
-  root cuts, the decomposition and OA masters. Explicit HiGHS opt-ins raise
-  `MissingHighsError` naming the extra.
+  every default path runs on discopt's in-house Rust engine: pure LPs and pure MILPs
+  (the Rust simplex and MILP engine, whether or not HiGHS is installed), IIS
+  (`iis_engine="rust"`), root cuts, the decomposition and OA masters. Explicit HiGHS
+  opt-ins raise `MissingHighsError` naming the extra.
+- **HiGHS for pure LP/MILP performance.** With `discopt[highs]` installed,
+  `Model.solve(milp_backend="highs")` (or `DISCOPT_LP_MILP_BACKEND=highs`) solves a
+  pure LP or MILP with HiGHS, its certificate still verified by discopt. On the
+  120-instance MIPLIB benchmark at 20 s, HiGHS certifies 26 instances to the Rust
+  engine's 15, so MILP-heavy users who want speed should opt in. MINLPs are unaffected:
+  their node LPs always use the in-house simplex.
 - **`highs_options=` on a pure LP is dropped with a `UserWarning`**, because pure LPs
   now solve on the Rust simplex by default. Set `DISCOPT_LP_BACKEND=highs` to keep the
   HiGHS route for LPs.
@@ -47,9 +74,30 @@ The release procedure that produces these entries is documented in
   (`feasible` with no bound, or `unknown` with no point and no bound) instead of
   handing off. The opt-outs that only reached or skipped that tree are gone:
   `DISCOPT_MILP_ENGINE`, `DISCOPT_MILP_NO_STALL_TREE=0`, `DISCOPT_IPX_RACE_STALL_EXIT`,
-  `DISCOPT_P3_FORCE_CUT_PATH`.
+  `DISCOPT_P3_FORCE_CUT_PATH`. A model the classifier calls a MILP but the exact-linearity
+  check rejects now raises a "routing defect" `RuntimeError` instead of falling back to
+  that tree. `batch_size` has no effect on a MILP any more (it sized that tree's batches).
 
 ### Fixed
+
+- **MILP presolve could certify a suboptimal answer when costs or coefficients were tiny
+  against a wide column range.** The row-dual dominated-column rule and the pairwise
+  dominated-columns rule both compared with an absolute 1e-9; a wrong-side fixing costs
+  up to that tolerance times the column's range. Measured: a 1e-12 cost on
+  `y in [0, 1e9]` gave `optimal` 2.999 against a true 2.999995; a 1e-9 cost difference
+  on two unbounded columns fixed the wrong one at 0. Both tolerances are now divided by
+  the column range (exact for an unbounded column).
+- **`compute_iis` reported infeasible matrix-row models as feasible.** Rows added through
+  `add_linear_constraints` -- and, since this release, every row of a linear model read
+  by `from_nl` / `from_mps` / `from_lp` -- were invisible to both IIS engines. They are
+  now rewritten as expression constraints first, **on the model passed in** (the model
+  is mathematically unchanged; its rows move to `model._constraints`).
+- **`from_mps` / `from_lp` refuse a row with an impossible side** (lower bound `+inf`,
+  upper bound `-inf`, or NaN) instead of dropping it and loading an infeasible model as
+  feasible.
+- **`DISCOPT_LP_DUAL_SPARSE_SOLVES=` (empty) no longer turns the default-ON sparse
+  solves off**: an empty value now means unset for every HiGHS-configuration member
+  switch, as for every other flag.
 
 - **`deterministic=True` no longer lets the wall-priced improver governor pick the
   incumbent (#2216).** The #2176 governor (`DISCOPT_HEUR_WALL_COST`) admits RINS /

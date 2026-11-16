@@ -20,6 +20,7 @@ use objlat_common::{build, options, M, N};
 
 #[test]
 fn the_flag_is_re_read_between_solves_in_one_process() {
+    objlat_common::pin_engine();
     std::env::set_var("DISCOPT_PROFILE", "1");
     let (a, b, c, l, u) = build();
     let lp = LpView {

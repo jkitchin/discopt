@@ -1544,6 +1544,10 @@ REPAIR_NOISE_ULPS = 16.0
 #: Largest dense ``|active rows| x |free columns|`` system the repair will factor.
 #: Above it the repair declines (and says so) rather than stall a solve's exit.
 REPAIR_MAX_DENSE = 4_000_000
+#: Systems up to this many cells use the dense SVD (``gelsd``, exactly as before);
+#: larger ones the sparse LSQR of :func:`_min_norm_lstsq_sparse`. 250k cells is a
+#: ~500x500 dense solve, ~0.06 s.
+REPAIR_DENSE_SVD_CELLS = 250_000
 
 
 @dataclass(frozen=True)
@@ -1743,6 +1747,26 @@ def _min_norm_lstsq(A: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.asarray(x, dtype=np.float64)
 
 
+def _min_norm_lstsq_sparse(A, b: np.ndarray) -> np.ndarray:
+    """Minimum-norm least-squares solution of the sparse system ``A x = b``.
+
+    LSQR started from zero converges to the minimum-norm least-squares solution,
+    the same point :func:`_min_norm_lstsq` returns, rank-deficient systems
+    included, while working on ``A``'s nonzeros instead of a dense SVD. Above
+    :data:`REPAIR_DENSE_SVD_CELLS` the dense ``gelsd`` dominated the published
+    incumbent's repair: ~1-3 s on tbfp-network's equality rows single-threaded,
+    and ~19 s when two solves shared four cores with OpenBLAS's threads
+    (neos-4393408-tinui, mc7; 2026-11-14). The repaired point is re-verified by
+    the caller either way, so the solver choice cannot make a point feasible
+    that is not.
+    """
+    from scipy.sparse.linalg import lsqr
+
+    m, n = A.shape
+    out = lsqr(A, b, atol=1e-15, btol=1e-15, conlim=1e15, iter_lim=max(1000, 4 * min(m, n)))
+    return np.asarray(out[0], dtype=np.float64)
+
+
 def _newton_repair(rows_ctx, x, r, viol, J, frozen, excess0):
     """The Newton loop of :func:`repair_point` from ``x`` with ``frozen`` columns.
 
@@ -1761,10 +1785,17 @@ def _newton_repair(rows_ctx, x, r, viol, J, frozen, excess0):
             break
         if rows.size * cols.size > REPAIR_MAX_DENSE:
             return None, excess0, it, f"system {rows.size}x{cols.size} too large"
-        A = J[rows][:, cols].toarray()
-        if not np.all(np.isfinite(A)):
-            break
-        step = _min_norm_lstsq(A, -r[rows])
+        sub = J[rows][:, cols]
+        if rows.size * cols.size <= REPAIR_DENSE_SVD_CELLS:
+            A = sub.toarray()
+            if not np.all(np.isfinite(A)):
+                break
+            step = _min_norm_lstsq(A, -r[rows])
+        else:
+            A = sparse.csr_matrix(sub, dtype=np.float64)
+            if not np.all(np.isfinite(A.data)):
+                break
+            step = _min_norm_lstsq_sparse(A, -r[rows])
         xn = x.copy()
         xn[cols] += step
         hit = (xn < lb) | (xn > ub)

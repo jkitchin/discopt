@@ -997,17 +997,21 @@ class _NLWriter:
         blocks = getattr(self.model, "_builder_linear_blocks", None)
         if not blocks:
             return
+        from discopt.export._common import block_columns
+
         for A, x, sense, b, _name in blocks:
             indptr = A.indptr
             indices = A.indices
             data = A.data
+            col_vars, col_pos, col_local = block_columns(x)
+            col_key = [(col_vars[int(p)].name, int(q)) for p, q in zip(col_pos, col_local)]
             for r in range(A.shape[0]):
                 lin: dict[int, float] = {}
                 for k in range(int(indptr[r]), int(indptr[r + 1])):
                     coeff = float(data[k])
                     if coeff == 0.0:
                         continue
-                    gidx = self._var_index.get((x.name, int(indices[k])))
+                    gidx = self._var_index.get(col_key[int(indices[k])])
                     if gidx is not None:
                         lin[gidx] = lin.get(gidx, 0.0) + coeff
                 rhs = float(b[r])

@@ -326,6 +326,28 @@ pub fn solve_lp_cols_warm(
     sol
 }
 
+/// [`solve_lp_cols_warm`] without its cold fallback: `None` when `start` is not a
+/// usable primal-feasible warm basis (the caller then keeps its own route). For the
+/// clean-up after a cost-perturbed dual solve, whose optimum is primal feasible and
+/// only needs its remaining dual infeasibilities priced out (HiGHS removes its cost
+/// perturbation and cleans up with the primal simplex the same way).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_lp_cols_warm_only(
+    cols: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: &Basis,
+    opts: &SimplexOptions,
+) -> Option<LpSolve> {
+    Simplex::new_from_cols(cols, m, n, c, l, u, b, opts)
+        .run_warm(start)
+        .ok()
+}
+
 /// Whether `x` satisfies the box `l ≤ x ≤ u` and the equalities `A x = b` to a
 /// small absolute/relative tolerance. Used as the final feasibility audit before
 /// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound
@@ -995,6 +1017,18 @@ fn subtol_noise_global_enabled() -> bool {
 /// can improve the objective by more than `floor`, and the vertex is optimal at
 /// that tolerance whatever the suspects' true signs. Only a failed certificate
 /// pays for the dual refinement that settles them (#1953).
+///
+/// With `ladder` (`SimplexOptions::subtol_ladder`), two more rigorous bounds are
+/// tried before declaring the vertex uncertified, the cheap rungs of the B&B
+/// driver's own node-bound ladder (`node_ns_bound`): the NS bound over the box with
+/// each open single-entry slack's upper side closed by the bound its own row
+/// implies ([`slack_upper_bounds`]; every feasible point lies in that box, so the
+/// bound over it is still a lower bound on the LP), and the NS bound from the
+/// open-column dual repair (`scaled_dual_for_open_columns_csc`, valid for any dual).
+/// Measured on neos-911970 (2,000 nodes): 2,730 repairs from this check alone,
+/// 374k primal pivots, the repaired objective equal to the dual's to 1e-12 in
+/// 2,380 of them -- the vertex was optimal, only the plain bound could not say so
+/// (open slacks with reduced costs of -1e-15 times infinite room).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn subtol_suspects_matter(
     cols: &SparseCols,
@@ -1007,30 +1041,73 @@ pub(super) fn subtol_suspects_matter(
     y: &[f64],
     obj: f64,
     floor: f64,
+    ladder: bool,
 ) -> bool {
     let (col_ptr, row_idx, vals) = cols.raw();
     if col_ptr.len() < n_real + 1 || y.len() != m || b.len() < m {
         return true;
     }
-    match super::refine::ns_safe_bound_csc(
+    // NaN gap counts as "can matter": only a proven `obj - g <= floor` clears it.
+    let certifies = |g: Option<f64>| {
+        g.is_some_and(|g| {
+            matches!(
+                (obj - g).partial_cmp(&floor),
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            )
+        })
+    };
+    let ns = |y: &[f64], lb: &[f64], ub: &[f64]| {
+        super::refine::ns_safe_bound_csc(
+            y,
+            &cost[..n_real],
+            &col_ptr[..n_real + 1],
+            row_idx,
+            vals,
+            m,
+            n_real,
+            &b[..m],
+            &lb[..n_real],
+            &ub[..n_real],
+        )
+    };
+    if certifies(ns(y, lb, ub)) {
+        return false;
+    }
+    if !ladder || lb.len() < n_real || ub.len() < n_real || cols.ncols() < n_real {
+        return true;
+    }
+    crate::profile::incr(crate::profile::Ctr::SubtolLadderTried);
+    // Rung 1: open single-entry slacks closed by the bound their row implies.
+    let sub = slack_upper_bounds(cols, m, n_real, b, lb, ub);
+    let mut ub2 = ub[..n_real].to_vec();
+    let mut closed = false;
+    for j in 0..n_real {
+        if ub2[j] >= INF && sub[j] < INF {
+            ub2[j] = sub[j];
+            closed = true;
+        }
+    }
+    if closed && certifies(ns(y, &lb[..n_real], &ub2)) {
+        crate::profile::incr(crate::profile::Ctr::SubtolLadderCertified);
+        return false;
+    }
+    // Rung 2: the open-column dual repair, over the original and the closed box.
+    if let Some(y2) = super::refine::scaled_dual_for_open_columns_csc(
         y,
         &cost[..n_real],
         &col_ptr[..n_real + 1],
         row_idx,
         vals,
-        m,
         n_real,
-        &b[..m],
         &lb[..n_real],
         &ub[..n_real],
     ) {
-        // NaN gap counts as "can matter": only a proven `obj - g <= floor` clears it.
-        Some(g) => !matches!(
-            (obj - g).partial_cmp(&floor),
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        ),
-        None => true,
+        if certifies(ns(&y2, lb, ub)) || (closed && certifies(ns(&y2, &lb[..n_real], &ub2))) {
+            crate::profile::incr(crate::profile::Ctr::SubtolLadderCertified);
+            return false;
+        }
     }
+    true
 }
 
 // The dot-product error factor lives in `crate::numeric` so the reduced-cost fixing
@@ -1234,6 +1311,27 @@ fn slack_upper_bounds(
 /// #1355: when the ray as computed does not certify, and
 /// `DISCOPT_FARKAS_RAY_CLEANUP` is on, the verifier is re-run once on a copy of
 /// `y` with its rounding-noise entries zeroed ([`farkas_ray_certifies_cleaned`]).
+/// [`farkas_ray_certifies_cols`] without its exact-rational rung: the raw and the
+/// cleaned floating-point checks only. For a leaving row whose violation is already
+/// at the noise level (`dual_noise_rows`), where a failure to certify is answered by
+/// tolerating the row (the bound taken is still the NS bound on the duals), so the
+/// exact decision -- measured at ~4 ms per call on p0201's 134x323 node LP, 2,518
+/// calls per 100 nodes -- cannot change what is returned soundly.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn farkas_ray_certifies_cols_float(
+    y: &[f64],
+    cols: &SparseCols,
+    n: usize,
+    m: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    farkas_ray_certifies_raw(y, cols, n, m, b, l, u)
+        || (farkas_ray_cleanup_enabled()
+            && farkas_ray_certifies_cleaned(y, cols, n, m, b, l, u, FARKAS_RAY_NOISE_REL))
+}
+
 pub(super) fn farkas_ray_certifies_cols(
     y: &[f64],
     cols: &SparseCols,
@@ -1513,6 +1611,74 @@ fn p1_expel_forced_for_test() -> bool {
     false
 }
 
+/// `DISCOPT_LP_PRIMAL_INCR_PRICING` (engine work): maintain the primal
+/// simplex's reduced costs incrementally from the pivot row instead of re-pricing
+/// every column every pivot. Read once.
+///
+/// **Default ON since 2026-11-14** (`=0` opts out). Retired 2026-11-08 (`e5eac131`)
+/// on MILP panels whose only certificate losses were the coin-flip row `p0548`;
+/// restored from `deb1b1f1` and re-panelled under CLAUDE.md §5's revised bar 2 (a
+/// HiGHS default component graduates when cert-clean and not harmful). The panel had
+/// to be the MINLP corpus: on the current MILP engine its LPs all take the dual
+/// simplex and the mechanism never fires (every counter 0 on the 120-row MIPLIB
+/// population). `issue2115_graduation_panel.py`, 74 in-repo instances, 30 s, arms
+/// interleaved: 744 checks, 0 violations; fired on 61 instances (3.03 M row-price
+/// updates); certified 54 = 54; bounds 3 tighter, 1 looser; nodes 4977 -> 5119,
+/// wall 805.2 -> 795.5 s.
+pub(crate) fn incr_pricing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_PRIMAL_INCR_PRICING").unwrap_or_default();
+        parse_incr_pricing(&raw)
+    })
+}
+
+/// The parse table behind [`incr_pricing_enabled`]; garbage is refused.
+fn parse_incr_pricing(raw: &str) -> bool {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" => false,
+        "" | "1" | "true" | "yes" => true,
+        other => panic!(
+            "DISCOPT_LP_PRIMAL_INCR_PRICING={other:?} is not recognized (expected 1/true/yes \
+                 or 0/false/no). Refusing rather than silently picking an arm."
+        ),
+    }
+}
+
+/// CSR copy of the real columns of a [`Simplex`] (see `Simplex::row_copy`).
+struct RowCopy {
+    ptr: Vec<usize>,
+    col: Vec<usize>,
+    val: Vec<f64>,
+    nnz: usize,
+}
+
+impl RowCopy {
+    fn build(cols: &SparseCols, m: usize, n: usize) -> Self {
+        let (cp, ri, vv) = cols.raw();
+        let nnz = cp[n];
+        let mut ptr = vec![0usize; m + 1];
+        for &i in &ri[..nnz] {
+            ptr[i + 1] += 1;
+        }
+        for i in 0..m {
+            ptr[i + 1] += ptr[i];
+        }
+        let mut pos = ptr.clone();
+        let mut col = vec![0usize; nnz];
+        let mut val = vec![0.0f64; nnz];
+        for j in 0..n {
+            for k in cp[j]..cp[j + 1] {
+                let i = ri[k];
+                col[pos[i]] = j;
+                val[pos[i]] = vv[k];
+                pos[i] += 1;
+            }
+        }
+        Self { ptr, col, val, nnz }
+    }
+}
+
 struct Simplex<'a> {
     cols: SparseCols, // CSC of the constraint matrix; the sole matrix view (pricing,
     // residual, audit all go through it — no dense `m×n` copy is kept)
@@ -1535,10 +1701,18 @@ struct Simplex<'a> {
     /// Primal unbounded ray (length `n`), captured when [`Self::simplex_loop`]
     /// detects unboundedness so [`Self::assemble`] can export it; empty until then.
     unbounded_ray: Vec<f64>,
+    /// Row-wise (CSR) copy of the real columns for the hyper-sparse pivot row of the
+    /// incremental pricing (HiGHS's persistent `ar_matrix_`, `HEkk.cpp` 2276). `cols`
+    /// never changes inside one `Simplex`, so it is built lazily on the first
+    /// incremental update and reused by every later loop (phase 1, phase 2, warm):
+    /// a solve that takes no incremental pivot never pays the O(nnz) build.
+    row_copy: Option<RowCopy>,
     /// Copied from [`SimplexOptions::expel_zero_artificials`] (P1.0): run the
     /// zero-valued-basic-artificial finalization pass so warm-start gets a full
     /// basis. Default `false` (bound-changing; kernel path opts in).
     expel_zero_artificials: bool,
+    /// Copied from [`SimplexOptions::subtol_ladder`].
+    subtol_ladder: bool,
     /// Suppress the EXPAND bound relaxation entirely (#956 T2'). EXPAND lets each
     /// pivot violate a bound by up to `EXPAND_MAX` (1e-7, ABSOLUTE), which made it
     /// the obvious suspect behind the bound excursions that downgrade solves to
@@ -1621,7 +1795,9 @@ impl<'a> Simplex<'a> {
             lb,
             ub,
             unbounded_ray: Vec::new(),
+            row_copy: None,
             expel_zero_artificials: opts.expel_zero_artificials,
+            subtol_ladder: opts.subtol_ladder,
             no_expand: false,
             last_xb: Vec::new(),
             xb_refresh: xb_refresh_cadence(),
@@ -2787,7 +2963,17 @@ impl<'a> Simplex<'a> {
         // NS bound from `y` fails to certify the vertex in the first place.
         if !suspects.is_empty()
             && subtol_suspects_matter(
-                &self.cols, self.m, self.n, cost, &self.lb, &self.ub, self.b, y, obj, floor,
+                &self.cols,
+                self.m,
+                self.n,
+                cost,
+                &self.lb,
+                &self.ub,
+                self.b,
+                y,
+                obj,
+                floor,
+                self.subtol_ladder,
             )
         {
             cands.extend(self.confirm_suspects(cost, y, art_sign, &suspects)?);
@@ -2968,6 +3154,26 @@ impl<'a> Simplex<'a> {
         // Exact-ratio-test rescues taken when a ray fails certification (#1597),
         // capped like the sub-tol pivots so a pathological LP cannot loop on them.
         let mut ray_rescues = 0usize;
+        // Engine work (`DISCOPT_LP_PRIMAL_INCR_PRICING`): reduced costs kept
+        // incrementally from the pivot row the Devex update already computes, instead
+        // of a fresh BTRAN for `y` plus an O(nnz) re-price every pivot. Re-derived
+        // exactly at loop start, after every refactorization, and before any
+        // optimality claim (so termination is always decided on exact prices).
+        let incr = incr_pricing_enabled();
+        let mut dvec: Option<Vec<f64>> = None;
+        let mut force_exact = false;
+        let mut arow = if incr {
+            vec![0.0f64; self.na]
+        } else {
+            Vec::new()
+        };
+        let mut amark = if incr {
+            vec![false; self.na]
+        } else {
+            Vec::new()
+        };
+        let mut atouched: Vec<usize> = Vec::new();
+        let mut rows_nz: Vec<usize> = Vec::new();
         for _iter in 0..self.max_iter {
             // Poll the wall-clock deadline every 256 pivots (cheap relative to a
             // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
@@ -2976,21 +3182,36 @@ impl<'a> Simplex<'a> {
             // time budget, and the caller treats the loose bound soundly (no
             // prune, gap left uncertified). Checks at _iter == 0 too, so a cold
             // fallback entered already past the deadline returns immediately.
+            // Likewise a heuristic sub-MIP's work budget (`crate::work::Limit`).
             if (_iter & 255) == 0
-                && self
+                && (self
                     .deadline
                     .is_some_and(|d| std::time::Instant::now() >= d)
+                    || crate::work::over_limit())
             {
                 return Err(LpStatus::IterLimit);
             }
-            // price: y = B⁻ᵀ c_B ; reduced cost d_j = c_j − yᵀA_j
-            let mut y: Vec<f64> = self.basis.iter().map(|&j| cost[j]).collect();
-            {
+            // price: y = B⁻ᵀ c_B ; reduced cost d_j = c_j − yᵀA_j (exact), or the
+            // incrementally maintained `dvec` (see `incr` above).
+            let use_incr = incr && !force_exact && dvec.is_some();
+            force_exact = false;
+            let mut y: Vec<f64> = Vec::new();
+            if !use_incr {
+                y = self.basis.iter().map(|&j| cost[j]).collect();
                 let _t = crate::profile::Timer::new(crate::profile::Phase::PriceBtran);
                 if self.lu.btran(&mut y).is_err() {
                     crate::profile::incr(crate::profile::Ctr::PrimalExitPriceBtranFail);
                     return Err(LpStatus::Numerical);
                 }
+            }
+            if incr && !use_incr {
+                let mut d = vec![0.0f64; self.na];
+                for (j, dj) in d.iter_mut().enumerate() {
+                    if self.stat[j] != BASIC {
+                        *dj = cost[j] - self.col_dot(j, &y, art_sign);
+                    }
+                }
+                dvec = Some(d);
             }
             let bland = stall > 2 * (self.na + 1);
             // choose entering: Devex (max dⱼ²/γⱼ over improving cols), with a
@@ -3003,7 +3224,10 @@ impl<'a> Simplex<'a> {
                 if self.stat[j] == BASIC {
                     continue;
                 }
-                let dj = cost[j] - self.col_dot(j, &y, art_sign);
+                let dj = match &dvec {
+                    Some(d) if incr => d[j],
+                    _ => cost[j] - self.col_dot(j, &y, art_sign),
+                };
                 // A free column sits at 0 under an `AT_LOWER` label and may move
                 // in EITHER direction, so it improves on any nonzero reduced
                 // cost. Reading the label alone (`AT_LOWER` ⇒ only `dj < 0`
@@ -3039,6 +3263,13 @@ impl<'a> Simplex<'a> {
                 }
             }
             drop(_t_sweep);
+            if enter.is_none() && use_incr {
+                // Never claim optimality on incrementally updated prices: re-price
+                // exactly and look again (this does not count as a pivot).
+                crate::profile::incr(crate::profile::Ctr::PrimalIncrExactRecheck);
+                force_exact = true;
+                continue;
+            }
             // #1595: before calling the vertex optimal, ask whether a sub-`tol`
             // reduced cost can still move the objective (see `subtol_candidates`
             // and `Self::subtol_entering`). Phase 2 only: phase 1's costs are the
@@ -3091,6 +3322,31 @@ impl<'a> Simplex<'a> {
                 if self.lu.ftran(&mut alpha).is_err() {
                     crate::profile::incr(crate::profile::Ctr::PrimalExitAlphaFtranFail);
                     return Err(LpStatus::Numerical);
+                }
+            }
+            if use_incr {
+                // Check the entering price exactly from the column just FTRANed:
+                // d_q = c_q - c_Bᵀ(B⁻¹A_q). On a sign flip or a material disagreement
+                // the incremental prices have drifted: re-price exactly and choose
+                // again (no pivot taken). Otherwise the exact d_q drives the update.
+                let mut cb_alpha = 0.0;
+                let mut mag = cost[q].abs();
+                for (i, &a) in alpha.iter().enumerate() {
+                    let t = cost[self.basis[i]] * a;
+                    cb_alpha += t;
+                    mag += t.abs();
+                }
+                let dq = cost[q] - cb_alpha;
+                let agree = dq * enter_dj > 0.0
+                    && (dq - enter_dj).abs() <= 1e-9 * mag.max(1.0) + 1e-6 * dq.abs();
+                if !agree {
+                    crate::profile::incr(crate::profile::Ctr::PrimalIncrDriftReprice);
+                    dvec = None;
+                    force_exact = true;
+                    continue;
+                }
+                if let Some(d) = dvec.as_mut() {
+                    d[q] = dq;
                 }
             }
 
@@ -3322,7 +3578,120 @@ impl<'a> Simplex<'a> {
                     // still factorizes it until `update` below). Pivot element is
                     // α at the leaving row; it is nonzero by the ratio test.
                     let pivot = alpha[slot];
-                    if !bland && pivot.abs() > self.tol {
+                    // Set when the pivot row disagrees with the pivot column
+                    // (HiGHS `updateVerify`): refactorize after this pivot.
+                    let mut verify_refac = false;
+                    if incr && dvec.is_some() {
+                        // Reduced-cost update from the pivot row α_r = ρᵀA, ρ = B⁻ᵀe_r
+                        // (old basis): d_j -= (d_q/α_rq)·α_rj; the leaving column gets
+                        // -d_q/α_rq, the entering one 0. Fused with Devex below.
+                        let mut rho = vec![0.0; m];
+                        rho[slot] = 1.0;
+                        // A sub-`tol` pivot (the #1597 ray rescue) would make
+                        // d_q/α_rq ill-conditioned: re-price exactly instead.
+                        if pivot.abs() > self.tol && self.lu.btran(&mut rho).is_ok() {
+                            let d = dvec.as_mut().expect("checked");
+                            let theta = d[q] / pivot;
+                            let do_devex = !bland && pivot.abs() > self.tol;
+                            let gamma_q = gamma[q];
+                            // Row-wise when ρ is sparse enough that its rows hold under
+                            // half the matrix; else the column-wise dot over all
+                            // nonbasic columns (identical α_r either way, up to the
+                            // order of the floating-point sums).
+                            let _t_row =
+                                crate::profile::Timer::new(crate::profile::Phase::PivotRowPrice);
+                            if self.row_copy.is_none() {
+                                self.row_copy = Some(RowCopy::build(&self.cols, m, self.n));
+                            }
+                            let rc = self.row_copy.take().expect("row copy built above");
+                            rows_nz.clear();
+                            rows_nz.extend((0..m).filter(|&i| rho[i] != 0.0));
+                            let row_work: usize =
+                                rows_nz.iter().map(|&i| rc.ptr[i + 1] - rc.ptr[i]).sum();
+                            let mut verify_fail = false;
+                            if 2 * row_work < rc.nnz {
+                                crate::profile::incr(crate::profile::Ctr::PrimalRowPriceSparse);
+                                for &i in &rows_nz {
+                                    let r = rho[i];
+                                    for k in rc.ptr[i]..rc.ptr[i + 1] {
+                                        let j = rc.col[k];
+                                        if !amark[j] {
+                                            amark[j] = true;
+                                            atouched.push(j);
+                                        }
+                                        arow[j] += r * rc.val[k];
+                                    }
+                                    let ja = self.n + i;
+                                    if !amark[ja] {
+                                        amark[ja] = true;
+                                        atouched.push(ja);
+                                    }
+                                    arow[ja] += r * art_sign[i];
+                                }
+                                // HiGHS's `updateVerify` (HEkkPrimal.cpp 2539): the pivot
+                                // read off the row must agree with the FTRANed column's.
+                                let arq = arow[q];
+                                if (arq - pivot).abs() > 1e-7 * pivot.abs().max(1.0) {
+                                    verify_fail = true;
+                                }
+                                for &j in &atouched {
+                                    let arj = arow[j];
+                                    arow[j] = 0.0;
+                                    amark[j] = false;
+                                    if arj != 0.0 && self.stat[j] != BASIC && j != q {
+                                        d[j] -= theta * arj;
+                                        if do_devex {
+                                            let cand = (arj / pivot) * (arj / pivot) * gamma_q;
+                                            if cand > gamma[j] {
+                                                gamma[j] = cand;
+                                            }
+                                        }
+                                    }
+                                }
+                                atouched.clear();
+                            } else {
+                                crate::profile::incr(crate::profile::Ctr::PrimalRowPriceDense);
+                                let arq = self.col_dot(q, &rho, art_sign);
+                                if (arq - pivot).abs() > 1e-7 * pivot.abs().max(1.0) {
+                                    verify_fail = true;
+                                }
+                                for j in 0..self.na {
+                                    if self.stat[j] != BASIC && j != q {
+                                        let arj = self.col_dot(j, &rho, art_sign);
+                                        if arj != 0.0 {
+                                            d[j] -= theta * arj;
+                                            if do_devex {
+                                                let cand = (arj / pivot) * (arj / pivot) * gamma_q;
+                                                if cand > gamma[j] {
+                                                    gamma[j] = cand;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            self.row_copy = Some(rc);
+                            if verify_fail {
+                                crate::profile::incr(crate::profile::Ctr::PrimalRowPriceVerifyFail);
+                                verify_refac = true;
+                            }
+                            let leaving0 = self.basis[slot];
+                            d[leaving0] = -theta;
+                            d[q] = 0.0;
+                            if do_devex {
+                                gamma[leaving0] = (gamma_q / (pivot * pivot)).max(1.0);
+                                if gamma[leaving0] > 1e10 {
+                                    for g in gamma.iter_mut() {
+                                        *g = 1.0;
+                                    }
+                                }
+                            }
+                        } else {
+                            dvec = None; // re-derive exactly next iteration
+                        }
+                    } else if incr {
+                        dvec = None;
+                    } else if !bland && pivot.abs() > self.tol {
                         let gamma_q = gamma[q];
                         let mut rho = vec![0.0; m];
                         rho[slot] = 1.0;
@@ -3367,7 +3736,7 @@ impl<'a> Simplex<'a> {
                     // the factor's nnz — the wide-McCormick-bump regime).
                     let work_gate =
                         refac_work_budget > 0 && self.lu.ft_update_work() > refac_work_budget;
-                    if need_refac || updates >= refac_interval || work_gate {
+                    if need_refac || verify_refac || updates >= refac_interval || work_gate {
                         // THRU-5: attribute the trigger (priority: FT-fail > cap > gate).
                         crate::profile::incr(if need_refac {
                             // ENGINE-1 (#557): split the FT-fail by feral's own
@@ -3409,6 +3778,7 @@ impl<'a> Simplex<'a> {
                             crate::profile::incr(crate::profile::Ctr::PrimalExitXbAfterRefacFail);
                             LpStatus::Numerical
                         })?;
+                        dvec = None; // fresh factor: re-derive the prices exactly
                         updates = 0;
                         since_xb_refresh = 0;
                         refac_work_budget = self.lu.factor_nnz();
@@ -3817,6 +4187,64 @@ mod tests {
         ));
         checked += 2;
         assert_eq!(checked, 7);
+    }
+
+    /// Engine step 2: the row-wise copy behind the hyper-sparse pivot row must
+    /// reproduce α_r = ρᵀA column for column. Deterministic pseudo-random 7x9
+    /// pattern with empty rows and columns; every (ρ, j) pair is compared against
+    /// `SparseCols::dot` (the column-wise arm), and the comparisons are counted.
+    #[test]
+    fn row_copy_reproduces_column_dots() {
+        let (m, n) = (7usize, 9usize);
+        let mut dense = vec![0.0; m * n];
+        let mut seed = 12345u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        for i in 0..m {
+            for j in 0..n {
+                // row 3 and column 5 stay empty
+                if i != 3 && j != 5 && next() < 0.35 {
+                    dense[i * n + j] = next() * 4.0 - 2.0;
+                }
+            }
+        }
+        let sp = SparseCols::from_dense(&dense, m, n);
+        let rc = RowCopy::build(&sp, m, n);
+        assert_eq!(rc.nnz, dense.iter().filter(|v| **v != 0.0).count());
+        let mut checked = 0usize;
+        for trial in 0..20 {
+            let rho: Vec<f64> = (0..m)
+                .map(|i| {
+                    if (i + trial) % 3 == 0 {
+                        next() - 0.5
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mut arow = vec![0.0; n];
+            for i in 0..m {
+                if rho[i] != 0.0 {
+                    for k in rc.ptr[i]..rc.ptr[i + 1] {
+                        arow[rc.col[k]] += rho[i] * rc.val[k];
+                    }
+                }
+            }
+            for j in 0..n {
+                let want = sp.dot(j, &rho);
+                assert!(
+                    (arow[j] - want).abs() <= 1e-14,
+                    "col {j}: {} vs {want}",
+                    arow[j]
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 20 * n);
     }
 
     /// #2115: a reduced cost that is rounding residue of `y` must not pass the
@@ -5475,5 +5903,50 @@ mod tests {
         }
         assert_eq!(raw.status, LpStatus::Optimal);
         assert!(raw.obj <= -0.5 + 1e-9);
+    }
+
+    /// `DISCOPT_LP_SUBTOL_LADDER`: `min -x` s.t. `x + s1 = 1`, `x + s2 = 1`, `x` in
+    /// `[0, 2]`, slacks in `[0, inf)` -- optimum `-1` at a degenerate vertex. Duals
+    /// `y = (-1, 1e-15)` are optimal up to noise, but `s2`'s reduced cost `-1e-15`
+    /// times its infinite room makes the plain NS bound `-inf`, so the vertex reads
+    /// "uncertified" and would be sent to a primal repair. The ladder closes `s2` at
+    /// the `1` its row implies and certifies `-1`; it still refuses a vertex that is
+    /// not optimal (`obj = -0.5`).
+    #[test]
+    fn subtol_ladder_certifies_noise_on_open_slacks_and_nothing_more() {
+        // Columns: x, s1, s2.
+        let cols = SparseCols::from_dense(&[1.0, 1.0, 0.0, 1.0, 0.0, 1.0], 2, 3);
+        let cost = [-1.0, 0.0, 0.0];
+        let lb = [0.0, 0.0, 0.0];
+        let ub = [2.0, INF, INF];
+        let b = [1.0, 1.0];
+        let y = [-1.0, 1e-15];
+        let obj = -1.0;
+        let floor = subtol_impact_floor(obj);
+        assert!(
+            subtol_suspects_matter(&cols, 2, 3, &cost, &lb, &ub, &b, &y, obj, floor, false),
+            "the plain bound must fail to certify (the fixture's premise)"
+        );
+        assert!(
+            !subtol_suspects_matter(&cols, 2, 3, &cost, &lb, &ub, &b, &y, obj, floor, true),
+            "the ladder certifies the optimal vertex"
+        );
+        let worse = -0.5;
+        assert!(
+            subtol_suspects_matter(
+                &cols,
+                2,
+                3,
+                &cost,
+                &lb,
+                &ub,
+                &b,
+                &y,
+                worse,
+                subtol_impact_floor(worse),
+                true
+            ),
+            "the ladder must not certify a non-optimal vertex"
+        );
     }
 }

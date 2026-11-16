@@ -271,24 +271,76 @@ def test_cut_cleaning_moves_a_tiny_coefficient_to_the_rhs_safely():
 def test_a_milp_stopped_without_an_incumbent_returns_no_point():
     """milp_simplex returned the engine's unset vector (zeros) as ``x`` when a
     node cap stopped the search before any incumbent; a GDP master read it as a
-    selection of no disjunct and raised (hda, med_term_purchasing, syngas)."""
+    selection of no disjunct and raised (hda, med_term_purchasing, syngas).
+
+    The fixture is an 8-column equality knapsack built from a known integer point
+    (so it is feasible, asserted below): its root heuristics find no incumbent, so
+    ``max_nodes=0`` stops with none. The original 6-column fixture no longer does --
+    the default root finds its optimum -- and now pins the companion contract below.
+    """
     from discopt.solvers import SolveStatus
     from discopt.solvers.milp_simplex import solve_milp
 
-    n = 6
+    a = np.array([2701, 2273, 2022, 1539, 1615, 1081, 1150, 1033], dtype=float)
+    point = np.array([1, 4, 3, 5, 3, 3, 5, 4], dtype=float)
+    kw = dict(
+        c=np.arange(1, a.size + 1, dtype=float),
+        A_eq=a[None, :],
+        b_eq=np.array([a @ point]),
+        bounds=[(0.0, 30.0)] * a.size,
+        integrality=np.ones(a.size, dtype=np.int32),
+        time_limit=10,
+    )
+    r = solve_milp(max_nodes=0, **kw)
+    assert r.status == SolveStatus.ITERATION_LIMIT and r.objective is None
+    assert r.x is None
+    # Not vacuous: the problem has points, the cap just stopped before one.
+    full = solve_milp(**kw)
+    assert full.status == SolveStatus.OPTIMAL and full.x is not None
+
+
+def test_a_milp_stopped_with_an_incumbent_returns_its_point():
+    """A node cap that stops after the root found an incumbent returns that
+    incumbent's point with its objective. Under the MILP presolve the reduced
+    problem's incumbent was mapped back only for an ``Optimal``/``Feasible`` status,
+    so a node-limited one came back as objective 5.0 with ``x = 0``, which violates
+    ``sum x = 1``.
+
+    The instance must keep a gap open at the root. The earlier one (a single
+    covering row, ``sum x = 1``, 6 columns) is closed at the root since the root
+    rounds' NS bounds floor the root node (``DISCOPT_MILP_ROOT_ROUND_BOUND``,
+    2026-11-15), so it returned ``optimal`` and no longer reached the node-limited
+    path this test is about. This one (two covering rows, ``sum x = 4``, 12 columns)
+    stops at the root with incumbent 18 and bound 17."""
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.milp_simplex import solve_milp
+
+    n = 12
+    c = np.array([9.0, 10.0, 15.0, 19.0, 1.0, 3.0, 16.0, 19.0, 5.0, 6.0, 17.0, 9.0])
+    a_ub = np.array(
+        [
+            [-6.0, -12.0, -6.0, -7.0, -10.0, -9.0, -4.0, -3.0, -13.0, -12.0, -13.0, -9.0],
+            [-12.0, -6.0, -8.0, -12.0, -4.0, -6.0, -4.0, -8.0, -14.0, -4.0, -7.0, -7.0],
+        ]
+    )
+    b_ub = np.array([-36.4, -32.2])
     r = solve_milp(
-        c=np.arange(1, n + 1, dtype=float),
-        A_ub=np.array([[-3.0, -5.0, -7.0, -9.0, -11.0, -13.0]]),
-        b_ub=np.array([-10.5]),
+        c=c,
+        A_ub=a_ub,
+        b_ub=b_ub,
         A_eq=np.ones((1, n)),
-        b_eq=np.array([1.0]),
+        b_eq=np.array([4.0]),
         bounds=[(0.0, 1.0)] * n,
         integrality=np.ones(n, dtype=np.int32),
         max_nodes=0,
         time_limit=10,
     )
-    assert r.status == SolveStatus.ITERATION_LIMIT and r.objective is None
-    assert r.x is None
+    assert r.status == SolveStatus.ITERATION_LIMIT
+    assert r.objective is not None and r.x is not None
+    assert abs(r.x.sum() - 4.0) <= 1e-9
+    assert np.all(a_ub @ r.x <= b_ub + 1e-9)
+    assert np.all(np.abs(r.x - np.round(r.x)) <= 1e-9)
+    assert float(c @ r.x) == pytest.approx(r.objective, abs=1e-9)
 
 
 def test_cut_cleaning_keeps_a_coefficient_without_a_finite_box():

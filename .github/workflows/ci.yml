@@ -306,7 +306,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
+            jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pyscipopt \
             pytest pytest-timeout pytest-xdist hypothesis mcp
@@ -480,7 +480,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
+            jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
@@ -576,7 +576,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
+            jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
@@ -701,7 +701,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy openpyxl scikit-learn pyyaml sympy \
+            jax jaxlib numpy scipy "highspy!=1.16.0" openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
@@ -719,13 +719,14 @@ jobs:
           PYTEST_MEMORY_LIMIT_MB: "32768"
 
   python-highspy-versions:
-    # highspy is the `discopt[highs]` extra (P6.3; the MILP route's default where installed)
+    # highspy is the `discopt[highs]` extra (P6.3; an opt-in MILP backend, not the default)
     # with the floor `highspy>=1.11` (1.9.0 has no getDualRay/getPrimalRay; 1.10.0
     # breaks the lp_nlp_bb HiGHS master, which test_2021_highs_floor.py runs). Every
     # other lane installs the latest highspy, so nothing else would notice a route that
     # quietly needs a newer API. This lane runs the route's own tests against the floor
-    # and the latest release, plus the cross-backend soundness files on the
-    # DISCOPT_LP_MILP_BACKEND=rust opt-out (every other lane runs the HiGHS default).
+    # and the latest release, plus the cross-backend soundness files pinned to
+    # DISCOPT_LP_MILP_BACKEND=rust with highspy installed (the Rust engine is the
+    # default either way since PR #2196; the pin keeps that true if the default moves).
     name: HiGHS route (highspy ${{ matrix.highspy }}, 3.12, ubuntu)
     runs-on: ubuntu-latest
     needs: changes
@@ -734,7 +735,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        highspy: ["==1.11.0", ""]
+        # "latest" excludes 1.16.0 until it is adopted (see pyproject.toml's `highs` extra).
+        highspy: ["==1.11.0", "!=1.16.0"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -766,7 +768,7 @@ jobs:
             python/tests/test_lp_milp_highs_route.py \
             python/tests/test_issue_1229_free_column_sentinel.py \
             python/tests/test_2021_highs_floor.py
-      - name: Cross-backend soundness files on the Rust opt-out route
+      - name: Cross-backend soundness files on the Rust route, highspy installed
         run: |
           source .venv/bin/activate
           pytest -q --tb=short --timeout=300 -p no:cacheprovider \
@@ -809,7 +811,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            numpy scipy highspy openpyxl scikit-learn pyyaml sympy \
+            numpy scipy "highspy!=1.16.0" openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pyscipopt \
             pytest pytest-timeout pytest-xdist hypothesis
@@ -936,7 +938,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt openpyxl scikit-learn pyyaml \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             sympy pyomo litellm onnx onnxruntime xgboost lightgbm pyscipopt \
             pytest pytest-timeout pytest-xdist pytest-cov hypothesis mcp
@@ -1073,7 +1075,7 @@ jobs:
           # ModuleNotFoundError. discopt now degrades to the JAX evaluator when
           # POUNCE is absent, so this lane would pass either way — but it should
           # exercise the same backend as everything else, not the fallback.
-          pip install jax jaxlib numpy scipy highspy pytest pytest-timeout "ruff==0.14.6" \
+          pip install jax jaxlib numpy scipy "highspy!=1.16.0" pytest pytest-timeout "ruff==0.14.6" \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python"
           maturin develop --release
       - name: Test AMP fast battery

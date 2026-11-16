@@ -374,15 +374,34 @@ def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -
     if arm == "H" and not hasattr(solver_mod, "_solve_milp_highs"):
         return {"skipped": "H arm not yet available (discopt.solver has no _solve_milp_highs)"}
     inst = L.read_instance(path)
-    with tempfile.TemporaryDirectory() as td:
-        nl = os.path.join(td, f"{inst.name}.nl")
-        perm = L.write_nl(inst, nl)
-        mdl = from_nl(nl)
-    # from_nl yields scalar variables x0..x{n-1} in .nl column order; .nl position k holds
-    # original column perm[k].
-    names = [v.name for v in mdl._variables]
-    if names != [f"x{k}" for k in range(inst.n)]:
-        raise RuntimeError(f"{inst.name}: unexpected from_nl variable layout {names[:5]}...")
+    # The model is read the way a user reads such a file: ``from_mps`` / ``from_lp``
+    # (vector variables, matrix rows), as HiGHS reads it natively. ``DISCOPT_PANEL_LOADER=nl``
+    # restores the earlier MPS -> .nl -> ``from_nl`` route (one scalar variable per column),
+    # which panels before 2026-11-14 used; its Python passes scale with the column count
+    # (tbfp-network: ~12 s of a 20 s budget, ``highs-mip-replacement-plan.md`` §8.13).
+    loader = os.environ.get("DISCOPT_PANEL_LOADER", "file")
+    if loader not in ("file", "nl"):
+        raise ValueError(f"DISCOPT_PANEL_LOADER={loader!r} (expected 'file' or 'nl')")
+    perm = None
+    if loader == "file":
+        import discopt.modeling as dm
+
+        reader = dm.from_lp if path.endswith((".lp", ".lp.gz", ".LP")) else dm.from_mps
+        mdl = reader(path)
+        if len(mdl.file_columns) != inst.n:
+            raise RuntimeError(
+                f"{inst.name}: {len(mdl.file_columns)} file columns, expected {inst.n}"
+            )
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            nl = os.path.join(td, f"{inst.name}.nl")
+            perm = L.write_nl(inst, nl)
+            mdl = from_nl(nl)
+        # from_nl yields scalar variables x0..x{n-1} in .nl column order; .nl position k
+        # holds original column perm[k].
+        names = [v.name for v in mdl._variables]
+        if names != [f"x{k}" for k in range(inst.n)]:
+            raise RuntimeError(f"{inst.name}: unexpected from_nl variable layout {names[:5]}...")
     t0 = time.perf_counter()
     # Gap plan P0: a deterministic arm bounds the search by work (max_nodes), so ON vs OFF
     # compares the same search, not two loads of the machine.
@@ -391,9 +410,12 @@ def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -
     wall = time.perf_counter() - t0
     viol = None
     if r.x is not None:
-        x = np.empty(inst.n)
-        for k in range(inst.n):
-            x[perm[k]] = float(np.asarray(r.x[f"x{k}"], float).ravel()[0])
+        if perm is None:
+            x = mdl.file_columns.values(r)
+        else:
+            x = np.empty(inst.n)
+            for k in range(inst.n):
+                x[perm[k]] = float(np.asarray(r.x[f"x{k}"], float).ravel()[0])
         viol = L.dense_max_violation(inst, x)
     stats = r.solver_stats or {}
     return {
@@ -416,6 +438,7 @@ def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -
         if stats.get("lp/std_engine_rust") == 1.0
         else "rust",
         "algorithm_route": r.algorithm_route,
+        "loader": loader,
         # Why the solve stopped (highs-parity P4.1: P0.3's Rust MILP rows ended at
         # 10-13 s of a 20 s budget without certifying).
         "termination": None if r.termination is None else str(r.termination),

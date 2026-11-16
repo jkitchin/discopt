@@ -105,7 +105,14 @@ def test_cstr_bigm_node_lps_pin_legacy_verdicts(replay):
     assert len(num) == 12 and len(ctrl) == 4
     executed += 1
     decided = sum(replay[i]["status"] in ("optimal", "infeasible") for i in num)
-    assert decided <= 2, (
+    # 2 -> 3 with highs-parity's dual loop (2026-11-15): lp3, lp7 and lp11, each
+    # optimal at HiGHS's objective on an audited point; the bar below is still 10.
+    for i in num:
+        if replay[i]["status"] == "optimal":
+            ref = float(d[f"lp{i}_highs_obj"])
+            assert abs(replay[i]["obj"] - ref) <= 1e-6 * (1.0 + abs(ref)), f"lp{i}"
+            assert _audit_ok(d, i, np.asarray(replay[i]["x"])), f"lp{i}"
+    assert decided <= 3, (
         f"{decided}/12 decided: the warm dual now decides the #2142 class; move the "
         "strict xfail below to a pass and update this pin"
     )

@@ -147,6 +147,12 @@ timed_phases!(
     SubMip,
     // D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`).
     RandRound,
+    // Pre-root trivial points + feasibility jump (`bnb::feas_jump`).
+    PreRootHeur,
+    // HiGHS central rounding at the root (`bnb::milp_driver::try_central_rounding`).
+    CentralRounding,
+    // The MILP presolve (`milp_presolve::presolve_opts`), top level and sub-MIPs.
+    MilpPresolve,
     // W1 (D2 plan): the node-GMI step's parts.
     NodeGmiScan,
     NodeGmiAugment,
@@ -162,6 +168,8 @@ timed_phases!(
     NodeReduce,
     PriceBtran,
     PriceSweep,
+    // Pivot-row reduced-cost update of the primal incremental pricing (engine step 2).
+    PivotRowPrice,
     AlphaFtran,
     FtUpdate,
     Refactorize,
@@ -175,6 +183,19 @@ timed_phases!(
     DualPrepare,
     DualRecompute,
     DualPivotLoop,
+    // Sections of one dual pivot (`run_dual`), for the S3 root-LP breakdown: leaving
+    // row choice, the row btran, PRICE, the bound-flipping ratio test, the column
+    // ftran, the reduced-cost / x_B / Devex updates, the LU update, refactorizations,
+    // and the exact x_B / d refreshes (periodic and after each refactor).
+    DualChuzr,
+    DualBtran,
+    DualPrice,
+    DualRatio,
+    DualFtran,
+    DualUpdate,
+    DualLuUpdate,
+    DualRefactor,
+    DualRefresh,
     // #1008: the two halves of a SPARSE basis refactorization. `LuSymbolic` is
     // `SparseLuSymbolic::analyze` (AMD on the AᵀA pattern — a fill-reducing
     // ordering recomputed from scratch on every refactorization even though an
@@ -207,12 +228,27 @@ counters!(
     // `DiveHitIntegral` (every integer integral -> an incumbent candidate),
     // `DiveAbandonedInfeasible` (both roundings of the picked integer made the LP
     // infeasible) and `DiveExhaustedSteps` (the step budget ran out with integers
-    // still fractional). `DiveRuns == hit + abandoned + exhausted` is the audit
-    // identity. Without these, "the dive fired and repaired nothing" (measured on
+    // still fractional). `DiveRuns == hit + abandoned + exhausted + capped` is the
+    // audit identity (`DiveCapped`, below, is 0 unless `DISCOPT_MILP_ROOT_CMIR` is on). Without these, "the dive fired and repaired nothing" (measured on
     // nvs02/nvs14: 5-6 off-root firings, 0 hits) is indistinguishable from "the
     // dive never reached the interesting decision", and a fix aimed at the wrong
     // arm would read as a plausible tuning change (CLAUDE.md §6).
     DiveRuns,
+    // Gap plan P3: a dive stopped at its wall cap (`DISCOPT_MILP_ROOT_CMIR`).
+    DiveCapped,
+    // Strong branching stopped probing because the solve's deadline had passed.
+    StrongBranchDeadlineStop,
+    // Gap plan P3: the root loop's c-MIR phase handed over to GMI.
+    RootCmirGmiHandover,
+    // Gap plan P3 option A (`DISCOPT_MILP_ROOT_CMIR=highs`): a root round's reduced-cost
+    // fixing / FBBT over the LP rows (cuts included) tightened the root box.
+    RootHighsPropagated,
+    // Gap plan P3 option A: variable bounds held by the ported separation (model rows
+    // + pool cuts), recorded per round (max).
+    HighsSepaVarBounds,
+    // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global
+    // box tightened by the incumbent's objective cutoff.
+    HighsSepaCutoffBox,
     DiveSteps,
     DiveHitIntegral,
     DiveAbandonedInfeasible,
@@ -272,6 +308,13 @@ counters!(
     // count, and how often that stall crossed the threshold and switched the dual
     // to Bland's smallest-index rule to break a potential cycle.
     DualDegeneratePivots,
+    // Dual simplex pivots taken (every pivot of `run_dual`), and those whose pivot
+    // row was computed row-wise over the nonzeros of rho (`DualRowwisePrice`).
+    DualPivots,
+    DualRowwisePrice,
+    // Dual pivots whose pivot-row and entering-column solves went through the
+    // sparse-in/sparse-out route (`SimplexOptions::dual_sparse_solves`).
+    DualSparseSolvePivots,
     DualBlandActivations,
     // Primal EXPAND anti-degeneracy (discopt#364): degenerate blocking steps that
     // were bumped up to the guaranteed EXPAND minimum step (breaking the stall in
@@ -323,6 +366,9 @@ counters!(
     NodeGmiCuts,
     NodeGmiLpFail,
     NodeGmiNsAbstain,
+    // ...of which the HiGHS node-separation arm kept the (optimal, unverified) LP point
+    // for separation instead of abandoning the node's rounds.
+    NodeGmiNsAbstainKept,
     NodeGmiLifted,
     // Nodes that re-solved with rows inherited from an ancestor.
     NodeGmiInheritSolves,
@@ -375,6 +421,14 @@ counters!(
     LpLogicalRescueAttempts,
     LpLogicalRescueDecided,
     LazyNearIntegralBranch,
+    // Primal incremental pricing: exact re-price before an optimality claim.
+    PrimalIncrExactRecheck,
+    PrimalIncrDriftReprice,
+    // Row-wise (hyper-sparse) pivot row of the incremental pricing, its column-wise
+    // fallback, and the pivot row/column disagreement that forces a refactorization.
+    PrimalRowPriceSparse,
+    PrimalRowPriceDense,
+    PrimalRowPriceVerifyFail,
     // highs-parity D3 `DISCOPT_MILP_TOL_ROBUST`: node LPs infeasible but not robustly
     // so, re-solved over the tolerance-relaxed rows; how many of those were optimal;
     // and Farkas rays refused as a fathom because they do not survive the tolerance.
@@ -394,6 +448,8 @@ counters!(
     SubMipConsidered,
     SubMipPropInfeas,
     SubMipRensRun,
+    // Backtracks taken by the RENS/RINS dive (`DISCOPT_MILP_DIVE_BACKTRACK`).
+    SubMipDiveBacktracks,
     SubMipRinsRun,
     SubMipSubNodes,
     SubMipImproved,
@@ -403,7 +459,58 @@ counters!(
     RandRoundLpFail,
     RandRoundFound,
     RandRoundRejected,
+    // Pre-root heuristics (`bnb::feas_jump`): runs; trivial candidates found /
+    // accepted after validation; feasibility-jump runs, points found, accepted.
+    PreRootHeurRuns,
+    PreRootSkipNoRowForm,
+    TrivialFound,
+    TrivialAccepted,
+    FeasJumpRuns,
+    FeasJumpFound,
+    FeasJumpAccepted,
+    // Central rounding: runs; analytic centres found / not found; rounded points
+    // tried; incumbents found.
+    CentralRoundingRuns,
+    CentralRoundingCenters,
+    CentralRoundingNoCenter,
+    CentralRoundingTries,
+    CentralRoundingFound,
     RcFixRefactor,
+    // Node reduced-cost fixing (gap plan §12.25): calls, nodes where it tightened
+    // at least one integer column, and integer bounds tightened.
+    // Root RENS between root passes (gap plan §12.27): runs, and runs that improved
+    // the incumbent (each earns a second pass of root rounds).
+    // Plunging (gap plan §12.28): batch slots continuing a plunge, and plunge starts.
+    // Root cuts dropped by cleanup that seeded the node pool (gap plan §12.28).
+    RootPoolSeeded,
+    // Sequential search domain (gap plan §12.31): model rebuilds, jumps back to the
+    // global box, nodes proven infeasible by it.
+    HsDomainRebuilds,
+    HsDomainJumps,
+    HsDomainInfeasible,
+    // MILP presolve (gap plan §12.34): runs, columns/rows removed, and fallbacks to the
+    // original problem (presolve claimed infeasible; postsolved point failed).
+    MilpPresolveRuns,
+    // Reduced slack boxes empty within rounding, widened to their ends.
+    MilpPresolveEmptyBoxWidened,
+    MilpPresolveColsRemoved,
+    MilpPresolveRowsRemoved,
+    MilpPresolveInfeasibleFallback,
+    MilpPresolveVerifyFallback,
+    // Unbounded relaxations re-checked by a zero-objective feasibility solve, and the
+    // verdicts that check overturned (`settle_unbounded`).
+    MilpUnboundedSettle,
+    // Root rounds whose NS bound seeded the root node / abstained (`DISCOPT_MILP_ROOT_ROUND_BOUND`).
+    RootRoundBoundSeeded,
+    RootRoundBoundAbstain,
+    MilpUnboundedDemoted,
+    PlungeContinued,
+    PlungeStarts,
+    RootRensRuns,
+    RootRensImproved,
+    RcFixCalls,
+    RcFixNodesHit,
+    RcFixCols,
     DualWarmSolves,
     DualColdFallbacks,
     // Warm dual-simplex stall-guard trips (discopt F2): a warm re-solve that hit
@@ -452,6 +559,32 @@ counters!(
     DualCostPerturbAttempts,
     DualCostPerturbAccepted,
     DualCostPerturbRejected,
+    // Perturbed attempts whose certified Farkas ray settled the true LP infeasible.
+    DualCostPerturbInfeasible,
+    //   `DualCostPerturbCleanInLoop` — perturb-first attempts whose optimum was
+    //   re-priced on the true costs with the dual loop's own factor (no second LU).
+    DualCostPerturbCleanInLoop,
+    // Clean-ups of a perturbed optimum done by the warm primal phase 2
+    // (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`).
+    DualCostPerturbPrimalCleanup,
+    // Dual loops priced by steepest edge (`DISCOPT_LP_DUAL_DSE`).
+    DualDseSolves,
+    // DSE rows re-chosen because their updated weight was < 1/4 of the exact one.
+    DualDseWeightRejects,
+    // Prepared warm starts re-priced on new costs without a new LU (perturb-first).
+    DualPrepRepriced,
+    // Node-heuristic slots the HiGHS effort budget (DISCOPT_HIGHS_HEUR_EFFORT) allowed / refused.
+    HeurEffortAllowed,
+    // HiGHS searches stopped by `mip_max_stall_nodes` (DISCOPT_HIGHS_SUBMIP_LIMITS).
+    SearchStallNodeStops,
+    HeurEffortRefused,
+    // Leaving rows tolerated at the noise level (DISCOPT_LP_DUAL_NOISE_ROWS).
+    DualNoiseRowTolerated,
+    // Objective lattices that needed the interval (inequality) rule.
+    ObjLatticeInterval,
+    // DISCOPT_LP_SUBTOL_LADDER: extra rungs tried / vertex certified by them.
+    SubtolLadderTried,
+    SubtolLadderCertified,
     // THRU-5: split the primal refactorization trigger into its three causes so the
     // wide-McCormick refactor thrash can be attributed. RefacFtFail = the FT
     // (product-form) update returned Err (numerical bump breakdown → forced
@@ -679,6 +812,30 @@ counters!(
     // point's recomputed objective disagreed with the tree's incumbent value
     // (the value every gap test and cutoff used) beyond LP noise.
     MilpIncumbentMisvaluedDecert,
+    // Stage 1d-5: MILP solves whose tree was searched by the HiGHS-design search
+    // (`DISCOPT_HIGHS_MIP_SEARCH`).
+    HighsMipSearchRuns,
+    // Step 2.1: cut rows added to / deleted from the HiGHS search's own LP.
+    HighsSearchCutRowsAdded,
+    HighsSearchCutRowsDeleted,
+    // `performAging(true)` epochs on the search's LP.
+    HighsSearchCutEpochs,
+    // Continuous columns MILP presolve marked implied integer.
+    PresolveImpliedInt,
+    // Presolved MILP results accepted (after the original-problem verification) with
+    // at least one implied-integer column off integral: the heuristics' `integer_cols`
+    // view (`MilpOptions::implied_int_cols`) at work.
+    PresolveImpliedFracResult,
+    HighsSearchPoolSeeded,
+    HighsMipSearchNodes,
+    HighsMipSearchBranched,
+    HighsMipSearchSbIters,
+    HighsMipSearchCommits,
+    HighsMipSearchHeuristicHits,
+    HighsMipSearchSepCalls,
+    HighsMipSearchSepLifts,
+    HighsMipSearchBasisFits,
+    HighsMipSearchSubMipHits,
     // #2107: noise-floor entries relaxed into their row's slack instead of
     // withdrawing the certificate.
     MilpNoiseEntriesRelaxed,
@@ -798,6 +955,9 @@ counters!(
     // the quantity that sets the cost of ALL THREE of the LU hot spots at once
     // (refactorize, each FT update, and every ftran/btran), so it separates "we
     // refactorize too often" from "each factor is far denser than it should be".
+    // Sparse factorizations done in place on the held factor (feral 0.23
+    // `refactor_markowitz`); a subset of `LuSparseFactorizations`.
+    LuInPlaceRefactors,
     LuSparseFactorizations,
     LuBasisNnz,
     LuFactorNnz,

@@ -202,6 +202,7 @@ pub fn objective_granularity(
         spacing,
         shift: 0.0,
         drift,
+        optimum_only: false,
     })
 }
 
@@ -294,6 +295,13 @@ pub struct ObjLattice {
     /// one: the stored coefficients are only within rounding of the rationals the
     /// lattice is built from (#1953). Zero when they are exactly those rationals.
     pub drift: f64,
+    /// The lattice holds at *some* optimal solution, not at every feasible point:
+    /// a term came from [`interval_lattice`] (a continuous column bounded by
+    /// inequalities against lattice columns). Rounding a valid dual bound up stays
+    /// sound (the optimal value is a lattice point), but an incumbent may sit off
+    /// the lattice, so fathoming must cut below the largest lattice point under it
+    /// rather than at `incumbent - spacing` (`TreeManager::cutoff_for`).
+    pub optimum_only: bool,
 }
 
 /// True only for a bit-exactly fixed column.
@@ -362,7 +370,27 @@ pub fn objective_lattice(
     up: &[f64],
     rows: &LatticeRows<'_>,
 ) -> Option<ObjLattice> {
+    objective_lattice_opts(c, is_int, lo, up, rows, None)
+}
+
+/// [`objective_lattice`], and with `interval = Some((lo, up))` a costed continuous
+/// column no equality row pins may still resolve through [`interval_lattice`] over
+/// those bounds; the result is then [`ObjLattice::optimum_only`].
+///
+/// The interval bounds are the model's own, not root-propagated ones: propagation
+/// only adds bounds the rows already imply (the feasible set is unchanged, so the
+/// interval argument holds over it), and it rounds them outward (`4 + 1ulp`), which
+/// the exact-rational test would rightly refuse.
+pub fn objective_lattice_opts(
+    c: &[f64],
+    is_int: &[bool],
+    lo: &[f64],
+    up: &[f64],
+    rows: &LatticeRows<'_>,
+    interval: Option<(&[f64], &[f64])>,
+) -> Option<ObjLattice> {
     let (csc, b, m, n) = (rows.csc, rows.b, rows.m, rows.n);
+    let mut optimum_only = false;
     let ns = is_int.len();
     if lo.len() < n || up.len() < n || c.len() < ns || b.len() < m {
         return None;
@@ -413,12 +441,13 @@ pub fn objective_lattice(
             spacing,
             shift,
             drift,
+            optimum_only: false,
         });
     }
 
     // Row-wise view, built only over the rows the pending columns touch. One
     // O(nnz) pass at the root, and only for models that need it.
-    let mut want = vec![false; m];
+    let mut want = vec![interval.is_some(); m];
     for &j in &pending {
         for &i in csc.col(j).0 {
             if i < m {
@@ -487,6 +516,38 @@ pub fn objective_lattice(
             resolved = true;
             break;
         }
+        if let (false, Some((ilo, iup))) = (resolved, interval) {
+            if ilo.len() < n || iup.len() < n {
+                return None;
+            }
+            let integral_dyn = |k: usize| integral(k);
+            if let Some((lp, lq)) =
+                interval_lattice(j, &rows, csc, m, b, c, ilo, iup, &integral_dyn)
+            {
+                // `c_j z_j = (c_j L) * (z_j / L)` with `z_j / L` an integer at the
+                // optimum the argument picks.
+                let lf = lp as f64 / lq as f64;
+                let l_err = rational_error(lf, lp, lq);
+                let t = c[j] * lf;
+                let prod_err = if c[j].mul_add(lf, -t) == 0.0 {
+                    0.0
+                } else {
+                    mul_up(t.abs(), REL)
+                };
+                let mag = magnitude(lo[j], up[j]).min(magnitude(ilo[j], iup[j]));
+                terms.push(Term {
+                    t,
+                    mag: if mag.is_finite() {
+                        mul_up(div_up(mag, lp as f64), lq as f64)
+                    } else {
+                        mag
+                    },
+                    err: add_up(mul_up(c[j].abs(), l_err), prod_err),
+                });
+                optimum_only = true;
+                resolved = true;
+            }
+        }
         if !resolved {
             return None;
         }
@@ -498,7 +559,217 @@ pub fn objective_lattice(
         spacing,
         shift,
         drift,
+        optimum_only,
     })
+}
+
+/// `v` as an exact rational `p/q` (`q <= MAX_DENOM`): only when the stored float is
+/// that rational bit for bit (#1953's error is then zero, so no drift arises).
+fn exact_rational(v: f64) -> Option<(i64, i64)> {
+    let (p, q) = rationalize(v)?;
+    (rational_error(v, p, q) == 0.0).then_some((p, q))
+}
+
+fn rat_reduce(p: i64, q: i64) -> Option<(i64, i64)> {
+    if q == 0 {
+        return None;
+    }
+    let g = gcd_i64(p, q).max(1);
+    let (p, q) = (p / g, q / g);
+    let (p, q) = if q < 0 {
+        (p.checked_neg()?, -q)
+    } else {
+        (p, q)
+    };
+    (q <= MAX_DENOM).then_some((p, q))
+}
+
+/// `|a / b|` for exact rationals.
+fn rat_abs_div(a: (i64, i64), b: (i64, i64)) -> Option<(i64, i64)> {
+    if b.0 == 0 {
+        return None;
+    }
+    rat_reduce(a.0.checked_mul(b.1)?.abs(), a.1.checked_mul(b.0)?.abs())
+}
+
+/// `|a * b|` for exact rationals.
+fn rat_abs_mul(a: (i64, i64), b: (i64, i64)) -> Option<(i64, i64)> {
+    rat_reduce(a.0.checked_mul(b.0)?.abs(), a.1.checked_mul(b.1)?)
+}
+
+/// The largest rational dividing both (`gcd(0, x) = x`).
+fn rat_gcd(a: (i64, i64), b: (i64, i64)) -> Option<(i64, i64)> {
+    if a.0 == 0 {
+        return rat_reduce(b.0.abs(), b.1);
+    }
+    if b.0 == 0 {
+        return rat_reduce(a.0.abs(), a.1);
+    }
+    let num = gcd_i64(a.0.checked_mul(b.1)?, b.0.checked_mul(a.1)?);
+    rat_reduce(num, a.1.checked_mul(b.1)?)
+}
+
+/// A side or bound value: infinite (the `1e20` sentinel included) is no endpoint.
+fn finite_side(v: f64) -> bool {
+    v.is_finite() && v.abs() < 1e19
+}
+
+/// The lattice `L` a continuous column is *pinned* to at every feasible point: an
+/// equality row (every other column integral or bit-exactly fixed, no free slack)
+/// gives `z_k = (b - Sum a z) / a_k`, a multiple of the gcd of `|a/a_k|` over the
+/// integer columns and `|(b - fixed part)/a_k|`. Exact rationals only.
+fn pinned_lattice(
+    k: usize,
+    rows: &[Vec<(usize, f64)>],
+    col_rows: &[usize],
+    b: &[f64],
+    lo: &[f64],
+    up: &[f64],
+    integral: &dyn Fn(usize) -> bool,
+) -> Option<(i64, i64)> {
+    'rows: for &i in col_rows {
+        let Some(&(_, a_k)) = rows[i].iter().find(|&&(q, _)| q == k) else {
+            continue;
+        };
+        let Some(ak) = exact_rational(a_k).filter(|r| r.0 != 0) else {
+            continue;
+        };
+        let mut l = (0i64, 1i64);
+        let mut rhs = exact_rational(b[i]);
+        for &(q, v) in &rows[i] {
+            if q == k || v == 0.0 {
+                continue;
+            }
+            let Some(rv) = exact_rational(v) else {
+                continue 'rows;
+            };
+            if integral(q) {
+                let Some(g) = rat_abs_div(rv, ak).and_then(|t| rat_gcd(l, t)) else {
+                    continue 'rows;
+                };
+                l = g;
+            } else if is_fixed(lo[q], up[q]) {
+                let Some(fv) = exact_rational(lo[q]) else {
+                    continue 'rows;
+                };
+                let prod = v * lo[q];
+                if v.mul_add(lo[q], -prod) != 0.0 {
+                    continue 'rows;
+                }
+                let Some(pr) = exact_rational(prod) else {
+                    continue 'rows;
+                };
+                let _ = fv;
+                let Some(g) = rat_abs_div(pr, ak).and_then(|t| rat_gcd(l, t)) else {
+                    continue 'rows;
+                };
+                l = g;
+            } else {
+                continue 'rows;
+            }
+        }
+        let Some(rb) = rhs.take() else {
+            continue;
+        };
+        let Some(g) = rat_abs_div(rb, ak).and_then(|t| rat_gcd(l, t)) else {
+            continue;
+        };
+        if g.0 != 0 {
+            return Some(g);
+        }
+    }
+    None
+}
+
+/// The lattice `L` of a costed continuous column `j` that no equality row pins,
+/// when every row it appears in bounds it against lattice values (b-ball's
+/// `max x12 s.t. x12 <= x_k`, each `x_k` half a sum of binaries).
+///
+/// Each row of `j` is `a_j z_j + Sum a_k z_k + s t = b` with every other column
+/// integral, bit-exactly fixed or [`pinned_lattice`], plus at most one slack `t`
+/// that appears in no other row and carries no cost; `t`'s finite bounds are the
+/// row's sides. With the integer columns fixed, `z_j` therefore ranges over an
+/// interval whose finite ends are multiples of `L` (the gcd of every side, bound
+/// and coefficient contribution, divided by `|a_j|`), and `z_j` appears in no other
+/// row: moving it to the end its cost prefers (to a multiple of `L` inside the
+/// interval when its cost is zero) keeps the point feasible and does not worsen the
+/// objective. So *some* optimal solution has `z_j` on the lattice -- not every
+/// feasible point, which is why the result is flagged `optimum_only`. Columns found
+/// this way are never used as "lattice" neighbours of another (only integral,
+/// fixed and pinned ones are), so two of them never share a row and each interval
+/// argument stands alone. Exact rationals only; anything else refuses.
+#[allow(clippy::too_many_arguments)]
+fn interval_lattice(
+    j: usize,
+    rows: &[Vec<(usize, f64)>],
+    csc: &SparseCols,
+    m: usize,
+    b: &[f64],
+    c: &[f64],
+    lo: &[f64],
+    up: &[f64],
+    integral: &dyn Fn(usize) -> bool,
+) -> Option<(i64, i64)> {
+    let mut l = (0i64, 1i64);
+    for bound in [lo[j], up[j]] {
+        if finite_side(bound) {
+            l = rat_gcd(l, exact_rational(bound)?)?;
+        }
+    }
+    let rows_of =
+        |k: usize| -> Vec<usize> { csc.col(k).0.iter().copied().filter(|&i| i < m).collect() };
+    for i in rows_of(j) {
+        let a_j = rows[i].iter().find(|&&(q, _)| q == j)?.1;
+        let aj = exact_rational(a_j).filter(|r| r.0 != 0)?;
+        let mut slack: Option<(f64, usize)> = None;
+        for &(k, v) in &rows[i] {
+            if k == j || v == 0.0 {
+                continue;
+            }
+            let rv = exact_rational(v)?;
+            if integral(k) {
+                l = rat_gcd(l, rat_abs_div(rv, aj)?)?;
+            } else if is_fixed(lo[k], up[k]) {
+                let prod = v * lo[k];
+                if v.mul_add(lo[k], -prod) != 0.0 {
+                    return None;
+                }
+                l = rat_gcd(l, rat_abs_div(exact_rational(prod)?, aj)?)?;
+            } else if slack.is_none() && c.get(k).is_some_and(|&ck| ck == 0.0) && rows_of(k) == [i]
+            {
+                slack = Some((v, k));
+            } else {
+                let lk = pinned_lattice(k, rows, &rows_of(k), b, lo, up, integral)?;
+                l = rat_gcd(l, rat_abs_mul(rat_abs_div(rv, aj)?, lk)?)?;
+            }
+        }
+        // The row's sides: `b - s*t` at each finite bound of the slack, or `b` itself
+        // for an equality row.
+        let sides: Vec<f64> = match slack {
+            None => vec![b[i]],
+            Some((sv, k)) => {
+                let mut v = Vec::new();
+                for t in [lo[k], up[k]] {
+                    if finite_side(t) {
+                        let prod = sv * t;
+                        if sv.mul_add(t, -prod) != 0.0 {
+                            return None;
+                        }
+                        let side = b[i] - prod;
+                        if (b[i] - side) != prod {
+                            return None; // the subtraction rounded
+                        }
+                        v.push(side);
+                    }
+                }
+                v
+            }
+        };
+        for side in sides {
+            l = rat_gcd(l, rat_abs_div(exact_rational(side)?, aj)?)?;
+        }
+    }
+    (l.0 != 0).then_some(l)
 }
 
 #[cfg(test)]
@@ -1015,5 +1286,320 @@ mod tests {
             },
         );
         assert_eq!(got, None);
+    }
+
+    /// Engine form `A z = b` for the interval tests: structural columns first, then
+    /// one slack per inequality row (`row - slack = rhs` with the slack in
+    /// `[0, 1e20]`, i.e. `row >= rhs`; a `<=` row is written negated).
+    struct EngineLp {
+        a: Vec<Vec<f64>>,
+        b: Vec<f64>,
+        lo: Vec<f64>,
+        up: Vec<f64>,
+        c: Vec<f64>,
+        is_int: Vec<bool>,
+    }
+
+    fn engine(
+        ns_lo: &[f64],
+        ns_up: &[f64],
+        c: &[f64],
+        is_int: &[bool],
+        eqs: &[(Vec<f64>, f64)],
+        ges: &[(Vec<f64>, f64)],
+    ) -> EngineLp {
+        let ns = ns_lo.len();
+        let n = ns + ges.len();
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for (row, rhs) in eqs {
+            let mut r = row.clone();
+            r.resize(n, 0.0);
+            a.push(r);
+            b.push(*rhs);
+        }
+        for (k, (row, rhs)) in ges.iter().enumerate() {
+            let mut r = row.clone();
+            r.resize(n, 0.0);
+            r[ns + k] = -1.0;
+            a.push(r);
+            b.push(*rhs);
+        }
+        let mut lo = ns_lo.to_vec();
+        let mut up = ns_up.to_vec();
+        let mut cc = c.to_vec();
+        for _ in ges {
+            lo.push(0.0);
+            up.push(1e20);
+            cc.push(0.0);
+        }
+        EngineLp {
+            a,
+            b,
+            lo,
+            up,
+            c: cc,
+            is_int: is_int.to_vec(),
+        }
+    }
+
+    fn lattice_of(e: &EngineLp, interval: bool) -> Option<ObjLattice> {
+        let (m, n) = (e.a.len(), e.lo.len());
+        let dense: Vec<f64> = e.a.iter().flatten().copied().collect();
+        objective_lattice_opts(
+            &e.c,
+            &e.is_int,
+            &e.lo,
+            &e.up,
+            &LatticeRows {
+                csc: &csc(&dense, m, n),
+                b: &e.b,
+                m,
+                n,
+            },
+            interval.then_some((&e.lo[..], &e.up[..])),
+        )
+    }
+
+    /// b-ball's shape: `max z s.t. z <= x_k`, `2 x_k = sum of binaries`. Each `x_k`
+    /// is pinned to the half-integers and `z` lies between them, so the optimum is a
+    /// half-integer: spacing 1/2, flagged `optimum_only`. The equality-only
+    /// detector refuses (no row pins `z`).
+    #[test]
+    fn interval_rule_finds_b_balls_half_lattice() {
+        // Columns: b0..b3 (binary), x0, x1, z.
+        let lo = [0.0, 0.0, 0.0, 0.0, -1e20, -1e20, 0.0];
+        let up = [1.0, 1.0, 1.0, 1.0, 1e20, 1e20, 1e20];
+        let c = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0];
+        let is_int = [true, true, true, true, false, false, false];
+        let eqs = vec![
+            (vec![-1.0, -1.0, 0.0, 0.0, 2.0, 0.0, 0.0], 0.0),
+            (vec![0.0, 0.0, -1.0, -1.0, 0.0, 2.0, 0.0], 0.0),
+        ];
+        // x_k - z >= 0
+        let ges = vec![
+            (vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0], 0.0),
+            (vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, -1.0], 0.0),
+        ];
+        let e = engine(&lo, &up, &c, &is_int, &eqs, &ges);
+        assert_eq!(lattice_of(&e, false), None);
+        let l = lattice_of(&e, true).expect("interval rule resolves z");
+        assert_eq!(l.spacing, 0.5);
+        assert_eq!(l.shift, 0.0);
+        assert_eq!(l.drift, 0.0);
+        assert!(l.optimum_only);
+
+        // Refusals. A second free continuous column in z's row proves nothing.
+        let mut lo2 = lo.to_vec();
+        let mut up2 = up.to_vec();
+        let mut c2 = c.to_vec();
+        let mut int2 = is_int.to_vec();
+        lo2.push(-1e20);
+        up2.push(1e20);
+        c2.push(0.0);
+        int2.push(false);
+        let mut ges2 = ges.clone();
+        ges2[0].0.push(1.0);
+        let eqs2: Vec<(Vec<f64>, f64)> = eqs
+            .iter()
+            .map(|(r, b)| {
+                let mut r = r.clone();
+                r.push(0.0);
+                (r, *b)
+            })
+            .collect();
+        let mut ges2b = ges2.clone();
+        ges2b[1].0.push(0.0);
+        let e2 = engine(&lo2, &up2, &c2, &int2, &eqs2, &ges2b);
+        assert_eq!(lattice_of(&e2, true), None, "free neighbour must refuse");
+        // An inexact coefficient (0.1 is no binary rational) refuses.
+        let mut ges3 = ges.clone();
+        ges3[0].0[6] = -0.1;
+        let e3 = engine(&lo, &up, &c, &is_int, &eqs, &ges3);
+        assert_eq!(
+            lattice_of(&e3, true),
+            None,
+            "inexact coefficient must refuse"
+        );
+        // A bound off the lattice (z <= 0.3) shrinks the spacing to a common divisor
+        // or refuses; it must never keep 1/2.
+        let mut up4 = up;
+        up4[6] = 0.3;
+        let e4 = engine(&lo, &up4, &c, &is_int, &eqs, &ges);
+        assert!(lattice_of(&e4, true)
+            .is_none_or(|l| (0.3f64 / l.spacing - (0.3f64 / l.spacing).round()).abs() < 1e-9));
+    }
+
+    /// Exact oracle: random problems of the interval shape -- binaries, continuous
+    /// columns pinned by equalities, and a costed continuous `z` bounded by
+    /// inequalities against them. The true optimum (binaries enumerated, `z`'s
+    /// interval solved exactly) must lie on every lattice the detector returns, and
+    /// with the lattice's `optimum_only` cutoff no incumbent value above the optimum
+    /// -- on the lattice or off it -- may fathom a node bounded at the optimum.
+    #[test]
+    fn interval_lattice_holds_at_the_true_optimum() {
+        use crate::bnb::branching::VarBranchInfo;
+        use crate::bnb::pool::SelectionStrategy;
+        use crate::bnb::tree_manager::TreeManager;
+        let mut seed = 99u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) as i64).rem_euclid(hi - lo + 1)
+        };
+        let (mut cases, mut found, mut checked, mut cut_checks) = (0, 0, 0, 0);
+        let mut plain_violations = 0usize;
+        for _ in 0..3000 {
+            let groups = rnd(1, 2) as usize;
+            let per = rnd(1, 3) as usize;
+            let nb = groups * per;
+            let ns = nb + groups + 1;
+            let z = ns - 1;
+            let mut lo = vec![0.0; nb];
+            let mut up = vec![1.0; nb];
+            lo.extend(std::iter::repeat_n(-1e20, groups));
+            up.extend(std::iter::repeat_n(1e20, groups));
+            let zl = [0.0, -3.0][rnd(0, 1) as usize];
+            let zu = [1e20, 7.0, 6.5][rnd(0, 2) as usize];
+            lo.push(zl);
+            up.push(zu);
+            let mut c: Vec<f64> = (0..nb).map(|_| rnd(-2, 2) as f64).collect();
+            c.extend(std::iter::repeat_n(0.0, groups));
+            let cz = [-1.0, 1.0, -2.0, 0.5, -0.5][rnd(0, 4) as usize];
+            c.push(cz);
+            let mut is_int = vec![true; nb];
+            is_int.extend(std::iter::repeat_n(false, groups + 1));
+            // Pins: d_k x_k - sum a_i b_i = r_k.
+            let mut pins = Vec::new();
+            let mut eqs = Vec::new();
+            for g in 0..groups {
+                let d = rnd(1, 4) as f64;
+                let r = [-1.0, 0.0, 1.0, 2.0, 0.5][rnd(0, 4) as usize];
+                let coefs: Vec<f64> = (0..per).map(|_| rnd(1, 3) as f64).collect();
+                let mut row = vec![0.0; ns];
+                for (t, &a) in coefs.iter().enumerate() {
+                    row[g * per + t] = -a;
+                }
+                row[nb + g] = d;
+                eqs.push((row, r));
+                pins.push((d, r, coefs));
+            }
+            // z rows: e*x_g - z >= -s (z <= s + e x_g)  or  z + e*x_g >= s.
+            let mut ges = Vec::new();
+            let mut zrows = Vec::new();
+            for g in 0..groups {
+                let e = rnd(1, 2) as f64;
+                let s = [0.0, 1.0, 0.5, -1.0][rnd(0, 3) as usize];
+                let upper = rnd(0, 1) == 0;
+                let mut row = vec![0.0; ns];
+                if upper {
+                    row[nb + g] = e;
+                    row[z] = -1.0;
+                    ges.push((row, -s));
+                } else {
+                    row[nb + g] = e;
+                    row[z] = 1.0;
+                    ges.push((row, s));
+                }
+                zrows.push((g, e, s, upper));
+            }
+            let lp = engine(&lo, &up, &c, &is_int, &eqs, &ges);
+            cases += 1;
+            // Oracle.
+            let mut opt = f64::INFINITY;
+            let mut attained: Vec<f64> = Vec::new();
+            let mut unbounded = false;
+            for mask in 0..(1u32 << nb) {
+                let bins: Vec<f64> = (0..nb).map(|i| ((mask >> i) & 1) as f64).collect();
+                let xs: Vec<f64> = (0..groups)
+                    .map(|g| {
+                        let (d, r, ref co) = pins[g];
+                        (r + co
+                            .iter()
+                            .enumerate()
+                            .map(|(t, a)| a * bins[g * per + t])
+                            .sum::<f64>())
+                            / d
+                    })
+                    .collect();
+                let (mut zlo, mut zhi) = (zl, if zu >= 1e19 { f64::INFINITY } else { zu });
+                for &(g, e, s, upper) in &zrows {
+                    if upper {
+                        zhi = zhi.min(s + e * xs[g]);
+                    } else {
+                        zlo = zlo.max(s - e * xs[g]);
+                    }
+                }
+                if zlo > zhi + 1e-12 {
+                    continue;
+                }
+                let zstar = if cz > 0.0 { zlo } else { zhi };
+                if !zstar.is_finite() {
+                    unbounded = true;
+                    break;
+                }
+                let base: f64 = (0..nb).map(|i| c[i] * bins[i]).sum();
+                let v = base + cz * zstar;
+                opt = opt.min(v);
+                // Also an off-interval-end point (midpoint) as a possible incumbent.
+                attained.push(v);
+                if zhi.is_finite() {
+                    attained.push(base + cz * 0.5 * (zlo + zhi));
+                }
+            }
+            if unbounded || !opt.is_finite() {
+                continue;
+            }
+            let Some(l) = lattice_of(&lp, true) else {
+                continue;
+            };
+            found += 1;
+            let k = (opt - l.shift) / l.spacing;
+            assert!(
+                (k - k.round()).abs() <= 1e-9 + l.drift / l.spacing,
+                "optimum {opt} off the lattice {l:?}"
+            );
+            checked += 1;
+            // Cutoff: no incumbent above the optimum may fathom a node bounded at it.
+            let mut tm = TreeManager::new(
+                1,
+                vec![0.0],
+                vec![1.0],
+                vec![VarBranchInfo {
+                    offset: 0,
+                    size: 1,
+                    is_integer: true,
+                }],
+                SelectionStrategy::BestFirst,
+            );
+            tm.set_objective_lattice(Some(l.spacing), l.shift, l.drift);
+            tm.set_objective_lattice_optimum_only(l.optimum_only);
+            let mut plain = tm.clone_lattice_probe();
+            plain.set_objective_lattice_optimum_only(false);
+            for &u in &attained {
+                if u > opt + 1e-9 && plain.cutoff_for(u) < opt - 1e-9 {
+                    plain_violations += 1;
+                }
+                if u > opt + 1e-9 {
+                    assert!(
+                        tm.cutoff_for(u) >= opt - 1e-9,
+                        "incumbent {u} cuts off the optimum {opt} ({l:?})"
+                    );
+                    cut_checks += 1;
+                }
+            }
+        }
+        eprintln!("interval lattice: cases {cases} found {found} checked {checked} cutoff checks {cut_checks} plain-rule violations {plain_violations}");
+        // The off-lattice cutoff is load-bearing: `incumbent - spacing` alone would
+        // have fathomed the optimum on these.
+        assert!(
+            plain_violations > 0,
+            "no case exercises the off-lattice incumbent"
+        );
+        assert!(
+            found > 200 && checked == found && cut_checks > 500,
+            "probe fired too little: found {found} checked {checked} cutoff checks {cut_checks}"
+        );
     }
 }

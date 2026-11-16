@@ -69,7 +69,13 @@ def test_secant_rows_hold_exactly_at_true_points():
 
 @pytest.mark.parametrize("c", [1.0, 3.0])
 @pytest.mark.parametrize("npart", [2, 3])
-def test_partitioned_relaxation_keeps_true_optimum(c, npart):
+def test_partitioned_relaxation_keeps_true_optimum(c, npart, monkeypatch):
+    # The subject is the secant rows' exactness, read off the relaxation's optimum to
+    # 1e-9. MILP presolve (default ON since highs-parity) aggregates this 1e9-span
+    # model and its postsolve lands 2.8e-8 short (c=3, npart=2; measured 2026-11-15) --
+    # inside the solver's 1e-6 certificate tolerance, but it would be presolve's
+    # roundoff, not the rows', that this assertion measured. So presolve is off here.
+    monkeypatch.setenv("DISCOPT_MILP_PRESOLVE", "0")
     span, h = 1e9, 0.02
     m = dm.Model()
     x = m.continuous("x", lb=-span, ub=h)

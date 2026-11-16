@@ -181,8 +181,14 @@ def test_round_trip_panel_is_bound_neutral(name):
     )
     original = dm.from_nl(str(path))
     reloaded = loads(dumps(original))
-    r1 = original.solve(time_limit=60)
-    r2 = reloaded.solve(time_limit=60)
+    # deterministic=True: the comparison is exact, so the search must be a function of
+    # the model, not of machine speed. Measured 2026-11-15: clay0303hfsg now takes
+    # ~40 s (not the 5.3 s above) and, without it, its two solves differ in node count
+    # or in the objective's last bits under 2-core `-n 2` contention -- on main as well
+    # as on the highs-parity branch -- while matching exactly when run alone. The time
+    # limit stays a backstop well above the deterministic solve's wall.
+    r1 = original.solve(time_limit=600, deterministic=True)
+    r2 = reloaded.solve(time_limit=600, deterministic=True)
     assert (r1.status, r1.node_count, r1.objective) == (r2.status, r2.node_count, r2.objective)
     # Equal is not enough: both could time out identically. Each panel member is a
     # known optimum solved well inside the limit, so demand the certified answer.

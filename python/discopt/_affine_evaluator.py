@@ -121,10 +121,16 @@ def affine_constraint_rows(
         for A, x, sense, b, _name in builder_blocks:
             A = sp.csr_matrix(A, dtype=np.float64)
             k, n_local = int(A.shape[0]), int(A.shape[1])
-            off = int(model._flat_var_offset(x))
-            if off < 0 or off + n_local > n_orig or sense not in ("<=", ">=", "=="):
+            from discopt.export._common import block_columns
+
+            vs, pos, local = block_columns(x)
+            starts = np.array([int(model._flat_var_offset(v)) for v in vs], dtype=np.int64)
+            flat = starts[pos] + local
+            if n_local != flat.size or flat.size and (flat.min() < 0 or flat.max() >= n_orig):
                 return None
-            M = sp.csr_matrix((A.data, A.indices + off, A.indptr), shape=(k, n_orig))
+            if sense not in ("<=", ">=", "=="):
+                return None
+            M = sp.csr_matrix((A.data, flat[A.indices], A.indptr), shape=(k, n_orig))
             rhs = np.broadcast_to(np.asarray(b, dtype=np.float64), (k,)).copy()
             if sense == ">=":
                 M, g = -M, rhs

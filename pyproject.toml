@@ -33,7 +33,7 @@ dependencies = [
     # JAX is NOT here: it is the `jax` extra below (issue #1873).
     "numpy>=1.24",
     "scipy>=1.10",
-    "pounce-solver>=0.16",
+    "pounce-solver>=0.17",
     # highspy is NOT here: it is the `highs` extra below (highs-parity P6.3).
 ]
 
@@ -56,23 +56,26 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 jax = ["jax>=0.4", "jaxlib>=0.4"]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
-pounce = ["pounce-solver>=0.16"]
+pounce = ["pounce-solver>=0.17"]
 # macOS: cyipopt's Ipopt and torch each bring a libomp; one process cannot load
 # both (OMP Error #15 abort). discopt raises OpenMPRuntimeConflictError first (#2205).
 ipopt = ["cyipopt>=1.4"]
 # HiGHS (highs-parity P6.3): an optional extra, not a core dependency. Every default
-# path runs in-house without it (docs/dev/highs-optional-inventory.md); with it, a pure
-# MILP goes to the verified HiGHS route (DISCOPT_LP_MILP_BACKEND, which falls back to
-# the in-house engine when highspy is absent), and the opt-ins `milp_solver="highs"`,
-# `highs_options`, `DISCOPT_LP_BACKEND=highs` etc. become available; without it they
-# raise MissingHighsError naming this extra (`discopt._optional_highs`).
+# path runs in-house with or without it (docs/dev/highs-optional-inventory.md): a pure
+# LP/MILP goes to the in-house Rust engine either way (owner decision 2026-11-09). With
+# it, the opt-ins `milp_backend="highs"` / `DISCOPT_LP_MILP_BACKEND=highs` (the verified
+# HiGHS route), `milp_solver="highs"`, `highs_options`, `DISCOPT_LP_BACKEND=highs` etc.
+# become available; without it they raise MissingHighsError naming this extra
+# (`discopt._optional_highs`).
 # >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
 # which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
+# 1.16.0 is excluded until its behaviour changes are adopted (banner with logging off,
+# a raising separator no longer aborting the solve, LP-reader/IIS output): issue #2221.
 # >=1.11: the lp_nlp_bb HiGHS master needs Highs.clearCallbacks, an ndarray
 # mip_solution in its callback and the mip_heuristic_run_rins/_rens options,
 # none of which 1.10.0 has. !=1.12.0: it alone returns kSolveError on
 # test_1654's MILP. Measured 2026-10-28 (test_2021_highs_floor.py).
-highs = ["highspy>=1.11,!=1.12.0"]
+highs = ["highspy>=1.11,!=1.12.0,!=1.16.0"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
 # GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.
@@ -122,7 +125,7 @@ sympy = ["sympy>=1.12"]
 dev = [
     # The full test suite exercises the HiGHS routes too; a HiGHS-less tree runs with
     # those tests skipped (`requires_highs` / `pytest.importorskip("highspy")`).
-    "highspy>=1.11,!=1.12.0",
+    "highspy>=1.11,!=1.12.0,!=1.16.0",
     # The full test suite exercises the JAX-only features; a JAX-less tree runs
     # with those tests skipped (`requires_jax` / `pytest.importorskip("jax")`).
     "jax>=0.4",
@@ -184,6 +187,7 @@ module-name = "discopt._rust"
 features = ["pyo3/extension-module"]
 include = [
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "Cargo.toml",
     "Cargo.lock",
     "crates/**/*.rs",

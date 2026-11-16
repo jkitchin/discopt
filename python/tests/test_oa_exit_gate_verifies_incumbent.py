@@ -73,8 +73,26 @@ _RTOL = 1e-4  # conftest's declared rel tolerance
 #
 # Measured: identical results over 3 repeats per budget, 0.6 s at 6 iterations
 # and 1.7 s at 12 -- cheaper than the 10 s budgets they replace.
-_BUDGET = 12
-_CONTROL_BUDGETS = (6, 12)
+#
+# Re-measured at the HiGHS-stack graduation (MILP presolve default-ON): 0.2 s at 6
+# iterations but 108 s at 12, where two masters take ~49 s each to find an exactly
+# feasible lot vector (the presolved master has no equality residual to exploit; see
+# `data/oa_masters/README.md`, portfol_roundlot). The shared run uses 6.
+#
+# The control budgets run with `DISCOPT_MILP_PRESOLVE=0`: with presolve on, no point
+# handed to the gate failed `verify_point` at any budget 1-13 (measured), so the gate
+# would have nothing to repair. Without it, the masters' tolerance-exploiting points
+# still reach the gate: the exit point is rejected at budgets 4, 5, 8 and 9.
+#
+# Re-measured at the HiGHS-configuration graduation (2026-11-12, `DISCOPT_HIGHS_CONFIG`
+# default-ON in the MILP engine): with it on, no point handed to the gate fails
+# `verify_point` at any budget 1-13 even without presolve -- its masters return points
+# the verifier accepts -- while `DISCOPT_HIGHS_CONFIG=0` reproduces 4, 5, 8 and 9 exactly
+# (row 5 violated by 2.7e-6 / 1.8e-6). The control therefore also runs the previous
+# engine. That switch is read once per process, so the control's arms run in a child
+# process with both variables set (`_control`), never by `monkeypatch.setenv`.
+_BUDGET = 6
+_CONTROL_BUDGETS = (4, 5)
 _TL = 300.0  # deliberately non-binding; see above
 
 
@@ -133,7 +151,70 @@ def test_the_certificate_survives_the_gate(oa_run):
         assert r.status == "optimal"
 
 
-def test_the_gate_repairs_without_moving_the_answer(monkeypatch):
+_CONTROL_SCRIPT = r"""
+import json, sys
+import numpy as np
+import discopt.solvers.oa as oa
+from discopt.modeling.core import from_nl
+from discopt.validation.feasibility import verify_point
+
+nl, budget, tl = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+real = oa._exit_verified_incumbent
+handed = []
+
+def _identity(model, x_flat, obj, obj_sign, *, warn=True):
+    handed.append(np.asarray(x_flat, dtype=np.float64).copy())
+    return np.asarray(x_flat, dtype=np.float64), obj, None
+
+def _flat(model, x_dict):
+    return np.concatenate(
+        [np.asarray(x_dict[v.name], dtype=np.float64).ravel() for v in model._variables]
+    )
+
+oa._exit_verified_incumbent = _identity
+m_u = from_nl(nl)
+u = m_u.solve(time_limit=tl, max_nodes=budget, solver="mip-nlp", mip_nlp_method="oa")
+oa._exit_verified_incumbent = real
+m_g = from_nl(nl)
+g = m_g.solve(time_limit=tl, max_nodes=budget, solver="mip-nlp", mip_nlp_method="oa")
+before = verify_point(m_u, handed[-1]) if handed else None
+after = verify_point(m_g, _flat(m_g, g.x)) if g.x is not None else None
+print("CONTROL " + json.dumps({
+    "handed": bool(handed),
+    "before_ok": None if before is None else bool(before.ok),
+    "before_reason": None if before is None else before.reason,
+    "after_ok": None if after is None else bool(after.ok),
+    "after_reason": None if after is None else after.reason,
+    "u": [u.objective, u.bound, u.status, bool(u.gap_certified)],
+    "g": [g.objective, g.bound, g.status, bool(g.gap_certified)],
+}))
+"""
+
+
+def _control(budget):
+    """Both arms of one control budget in a child process running the previous MILP
+    engine without presolve (see `_CONTROL_BUDGETS`)."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, DISCOPT_MILP_PRESOLVE="0", DISCOPT_HIGHS_CONFIG="0")
+    p = subprocess.run(
+        [sys.executable, "-c", _CONTROL_SCRIPT, _NL, str(budget), str(_TL)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=900,
+    )
+    lines = [ln for ln in p.stdout.splitlines() if ln.startswith("CONTROL ")]
+    assert p.returncode == 0 and lines, (
+        f"control child failed (rc={p.returncode}): {p.stderr[-2000:]}"
+    )
+    return json.loads(lines[-1][len("CONTROL ") :])
+
+
+def test_the_gate_repairs_without_moving_the_answer():
     """Regime (a) as a DIFFERENTIAL, over deterministic iteration budgets.
 
     "The repair moves the point, never the answer" is a claim about the gate, so
@@ -148,41 +229,33 @@ def test_the_gate_repairs_without_moving_the_answer(monkeypatch):
     proving nothing, so the test additionally requires that at least one budget
     produced a point the shipped verifier REJECTS before the gate ran.
     """
-    import discopt.solvers.oa as oa
-
-    real = oa._exit_verified_incumbent
-
-    def _identity(model, x_flat, obj, obj_sign, *, warn=True):
-        return np.asarray(x_flat, dtype=np.float64), obj, None
-
     reproduced = []
     for budget in _CONTROL_BUDGETS:
-        monkeypatch.setattr(oa, "_exit_verified_incumbent", _identity)
-        m_u, ungated = _solve(budget)
+        r = _control(budget)
+        ungated, gated = r["u"], r["g"]
+        assert ungated[0] is not None and gated[0] is not None
 
-        monkeypatch.setattr(oa, "_exit_verified_incumbent", real)
-        m_g, gated = _solve(budget)
-
-        assert ungated.objective is not None and gated.objective is not None
-
-        before = verify_point(m_u, _flat(m_u, ungated.x))
-        after = verify_point(m_g, _flat(m_g, gated.x))
-        if not before.ok:
-            reproduced.append((budget, before.reason))
-            assert after.ok, (
+        # The positive control judges the point OA handed to the gate, not the
+        # ungated result: the model-level certificate repair (#1537 E) now projects
+        # a point with a small row excess after the solve, so the ungated RESULT
+        # verifies even when the gate had work to do (measured on every budget 1-9).
+        assert r["handed"], f"max_nodes={budget}: the gate was never called"
+        if not r["before_ok"]:
+            reproduced.append((budget, r["before_reason"]))
+            assert r["after_ok"], (
                 f"max_nodes={budget}: the gate failed to repair a point the "
-                f"verifier rejects: {after.reason}"
+                f"verifier rejects: {r['after_reason']}"
             )
 
         # EXACTLY unchanged -- any drift, in either direction, means the gate is
-        # doing something other than clearing round-off.
-        assert gated.objective == ungated.objective, (
-            f"max_nodes={budget}: gate moved the objective: "
-            f"{ungated.objective!r} -> {gated.objective!r}"
+        # doing something other than clearing round-off. (JSON round-trips a float
+        # exactly: `repr` is shortest-round-trip.)
+        assert gated[0] == ungated[0], (
+            f"max_nodes={budget}: gate moved the objective: {ungated[0]!r} -> {gated[0]!r}"
         )
-        assert gated.bound == ungated.bound
-        assert gated.status == ungated.status
-        assert gated.gap_certified == ungated.gap_certified
+        assert gated[1] == ungated[1]
+        assert gated[2] == ungated[2]
+        assert gated[3] == ungated[3]
 
     assert reproduced, (
         "no budget in "
@@ -268,13 +341,15 @@ def test_a_refusal_downgrades_the_solve_result(monkeypatch):
     """
     import discopt.solvers.oa as oa
 
-    seen: dict = {}
+    seen: list[tuple[float, np.ndarray]] = []
 
     def _always_refuse(model, x_flat, obj, obj_sign, *, warn=True):
-        # Record what the gate was handed, so the assertions below compare the
-        # result against THIS run rather than against a float from one machine.
-        seen["obj"] = obj
-        seen["x"] = np.asarray(x_flat, dtype=np.float64).copy()
+        # Record every point the gate was handed, so the assertions below compare
+        # the result against THIS run rather than against a float from one machine.
+        # The gate runs once per candidate incumbent, and a solve can offer several
+        # with the same objective (measured: points differing by 5e-15 in 6 of 17
+        # entries), so the result is matched against all of them, not the last.
+        seen.append((obj, np.asarray(x_flat, dtype=np.float64).copy()))
         return np.asarray(x_flat, dtype=np.float64), obj, "row 99 violated by 1.000e-03"
 
     monkeypatch.setattr(oa, "_exit_verified_incumbent", _always_refuse)
@@ -284,11 +359,39 @@ def test_a_refusal_downgrades_the_solve_result(monkeypatch):
     assert seen, "the gate was never called -- this test measured nothing"
     assert r.x is not None, "the forced-refusal run lost its incumbent entirely"
     # The point and its objective still reach the caller; the CERTIFICATE does not.
-    assert r.objective == seen["obj"]
-    np.testing.assert_array_equal(_flat(m, r.x)[: seen["x"].size], seen["x"])
+    # The one sanctioned change after the gate is the model-level certificate repair
+    # (#1537 E, `repair_point`), which projects a point with a tiny row excess and
+    # says so in `solver_stats` (measured here: excess 4.3e-10 before, the point moved
+    # 5.5e-15, objective shift 0). Without a recorded repair the point must be
+    # bit-identical to one the gate refused; with one, within the repair's reach and
+    # with the recorded objective shift.
+    stats = r.solver_stats or {}
+    repaired = bool(stats.get("certificate/incumbent_repaired"))
+    shift = abs(float(stats.get("certificate/repair_objective_shift", 0.0)))
+    flat = _flat(m, r.x)
+
+    def _matches(obj, x):
+        if not repaired:
+            return r.objective == obj and np.array_equal(flat[: x.size], x)
+        return abs(r.objective - obj) <= shift + 1e-12 and np.allclose(
+            flat[: x.size], x, rtol=0.0, atol=1e-6
+        )
+
+    handed = [(obj, x) for obj, x in seen if _matches(obj, x)]
+    assert handed, (
+        f"the returned point (objective {r.objective!r}, repaired={repaired}) is none "
+        f"of the {len(seen)} points the gate refused"
+    )
     assert r.status == "feasible"
     assert r.gap_certified is False
-    assert r.gap is None
+    if repaired:
+        # The repair re-verified the projected point (`verify_point`), so it may carry
+        # a gap again -- uncertified, and the one formula applied to that point.
+        from discopt.solvers._gap import reported_gap
+
+        assert r.gap == pytest.approx(reported_gap(r.objective, r.bound, abs_tol=1e-6))
+    else:
+        assert r.gap is None
     # The dual bound comes from the master relaxation, which never saw this
     # point, so a primal defect must not discard it.
     assert r.bound is not None, "a primal refusal discarded a valid dual bound"

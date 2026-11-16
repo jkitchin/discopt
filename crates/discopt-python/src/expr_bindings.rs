@@ -2278,6 +2278,56 @@ impl PyModelBuilder {
         Ok(())
     }
 
+    /// Add linear constraints whose columns span several variable blocks: column `k`
+    /// is element `col_local[k]` of block `col_var[k]` (see the core method).
+    #[pyo3(signature = (indptr, indices, data, col_var, col_local, sense, rhs, name_prefix=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_linear_constraints_cols(
+        &mut self,
+        indptr: numpy::PyReadonlyArray1<i64>,
+        indices: numpy::PyReadonlyArray1<i64>,
+        data: numpy::PyReadonlyArray1<f64>,
+        col_var: numpy::PyReadonlyArray1<i64>,
+        col_local: numpy::PyReadonlyArray1<i64>,
+        sense: &str,
+        rhs: numpy::PyReadonlyArray1<f64>,
+        name_prefix: Option<String>,
+    ) -> PyResult<()> {
+        let cs = parse_constraint_sense(sense)?;
+        let u = |a: &numpy::PyReadonlyArray1<i64>| -> Vec<usize> {
+            a.as_array().iter().map(|&v| v as usize).collect()
+        };
+        let (ip, ix, cv, cl) = (u(&indptr), u(&indices), u(&col_var), u(&col_local));
+        if cv.len() != cl.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "col_var and col_local differ in length",
+            ));
+        }
+        if let Some(&bad) = cv.iter().find(|&&v| v >= self.inner.variables.len()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "column refers to variable block {bad}, which is not in the builder"
+            )));
+        }
+        if ix.iter().any(|&k| k >= cv.len()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "a column index is outside the column maps",
+            ));
+        }
+        let data_v: Vec<f64> = data.as_array().iter().copied().collect();
+        let rhs_v: Vec<f64> = rhs.as_array().iter().copied().collect();
+        self.inner.add_linear_constraints_cols(
+            &ip,
+            &ix,
+            &data_v,
+            &cv,
+            &cl,
+            cs,
+            &rhs_v,
+            name_prefix.as_deref(),
+        );
+        Ok(())
+    }
+
     /// Set a linear objective: c'x + constant.
     #[pyo3(signature = (c, var_idx, constant=0.0, sense="minimize"))]
     fn set_linear_objective(

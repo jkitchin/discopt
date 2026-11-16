@@ -45,16 +45,28 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
      `gap_certified=True` instance regresses to uncertified), objective drift
      within tolerance, and incumbents independently feasibility-verified
      (soundness is non-negotiable; never flip a flag whose run shows any false
-     or looser bound), AND (2) *net-positive*: measurably helpful broadly (node
-     count / wall / bound), not merely sound — the `DISCOPT_CUT_INHERIT` lesson
-     (sound ≠ helpful; a cert-clean but neutral-or-harmful flag stays OFF, with
-     the measurement recorded). A passing panel graduates the flag default-ON
+     or looser bound), AND (2) *not harmful*: no broad regression in node
+     count / wall / bound beyond the run-to-run spread. A cert-clean flag that is
+     measurably helpful graduates. A cert-clean flag that is **neutral** also
+     graduates when it is (a) a faithful port of a component the reference solver
+     we are tracking (HiGHS, for the MILP engine) runs by default, or (b) a stated
+     prerequisite of planned work; record the measurement and which reason applies.
+     Only a measurably harmful flag stays OFF (the `DISCOPT_CUT_INHERIT` lesson
+     still holds for that case: sound ≠ helpful). A passing panel graduates the flag default-ON
      (keep the `=0` opt-out and the legacy path intact); the nightly panel
      remains the ongoing regression watch, not a graduation gate.
      (Policy updated 2026-07-17 by the owner — consecutive-nightly graduation
      was dropped in favor of the panel gate; first applied to the #309 flags.
      One passing graduation-gate run meeting both bars suffices — consecutive
      nightly runs are no longer required.)
+     (Bar 2 relaxed 2026-11-14 by the owner, from "net-positive" to "not
+     harmful, and neutral is enough for a faithful reference-solver component or
+     a prerequisite": a solver's components assume each other, so one measured
+     against a partly ported stack often reads as neutral until the piece it
+     depends on lands. Measured: `DISCOPT_LP_DUAL_SPARSE_SOLVES` was retired as
+     neutral (dual gap 8/8 on the population) and was worth 20% of the root LP
+     and 10/5 on dual gap once the Python set-up stopped hiding it. Retiring on
+     "neutral" stifled progress; soundness (bar 1) is unchanged.)
 
    **A graduation attempt has three outcomes, not two (added 2026-09-19, #1345).**
    "A cert-clean but neutral-or-harmful flag stays OFF, with the measurement
@@ -73,7 +85,9 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
    and a gate in none of them is a defect:
    - **Graduated** — the panel passed both bars. Flip the default, keep the `=0`
      opt-out and the legacy path intact.
-   - **Retired** — the panel ran and did not pass, or nobody is willing to run it.
+   - **Retired** — the panel ran and showed it unsound or harmful, or nobody is
+     willing to run it. (Neutral is not a reason to retire a faithful
+     reference-solver component or a prerequisite; see bar 2.)
      Delete the flag **and the implementation behind it**, in one PR, recording the
      measurement that killed it (or that none was ever taken). Keep reusable
      pieces, regression fixtures and benchmark cases; the entry point goes.
@@ -402,7 +416,7 @@ mypy python/discopt/
 
 - **`python/discopt/modeling/`** — Python modeling API with expression DAG system for MINLP formulation, supporting continuous/binary/integer variables and operator overloading that maps to Rust AST. Imported as `from discopt import Model` or `import discopt.modeling as dm`.
 - **`python/discopt/_relax/`** — the relaxation layer: the numpy factorable engine (`uniform_relax`), the LP-form McCormick relaxation (`mccormick_lp`/`milp_relaxation`), cutting planes, factorable reformulation, convexity detection, and the legacy JAX DAG compiler / NLP evaluator behind the evaluator fallback. The McCormick-NLP route (`relaxation_compiler`, `mccormick_nlp`, the JAX `mccormick`/`envelopes`/`alphabb` primitives, piecewise/OA/Taylor/learned envelopes) was retired in #1873 -- `docs/dev/nlp-mccormick-route-retirement.md`; `_relax/module_status.py` + `test_relax_module_status.py` keep every remaining module either production-imported or declared. Named `_jax` until the JAX removal; it is **numpy**. Do not reason about "the JAX layer" from this directory's contents. (This bullet used to add "and JAX does not enter `sys.modules` during a solve" — that is the unconditional claim the Project Overview above explicitly labels **false**. An *ordinary* solve imports zero `jax` modules; a model with an expression lacking a POUNCE opcode hits the legacy fallback and loads it. Believe the Overview.)
-- **`python/discopt/solvers/`** — external-solver wrappers (`highspy` is the **optional `discopt[highs]` extra** since highs-parity P6.3; cyipopt NLP wrapper). No default path needs HiGHS: without `highspy` a pure MILP falls back to the in-house engine (`solver._lp_milp_backend`, route label says why); the explicit opt-ins (`milp_solver="highs"`, `highs_options`, `DISCOPT_LP_BACKEND=highs`, …) raise `MissingHighsError` naming the extra (`discopt/_optional_highs.py`, the only module that imports `highspy`). A test that needs HiGHS uses `@pytest.mark.requires_highs` or `pytest.importorskip("highspy")`; the guard is `test_highs_optional.py` and CI's `Python without HiGHS` lane; inventory `docs/dev/highs-optional-inventory.md`. NOTE: the default MINLP per-node LP engine is the **in-house Rust simplex** (`MccormickLPRelaxer(backend="simplex")` → `crates/discopt-core/src/lp/simplex/`), not HiGHS — do not plan MINLP node work against a "HiGHS backend". Pure MILP models classified at entry are routed to HiGHS (when `highspy` is installed) with discopt-verified certificates (`docs/dev/lp-milp-highs-routing-plan.md`; opt-out `DISCOPT_LP_MILP_BACKEND=rust`). Pure **LP** models default to the in-house Rust simplex route since highs-parity D1 (2026-11-05, `solver._lp_backend`; opt-out `DISCOPT_LP_BACKEND=highs`, and an explicitly set `DISCOPT_LP_MILP_BACKEND` still decides an LP when `DISCOPT_LP_BACKEND` is unset) — evidence `docs/dev/highs-parity-plan.md` P2.6.
+- **`python/discopt/solvers/`** — external-solver wrappers (`highspy` is the **optional `discopt[highs]` extra** since highs-parity P6.3; cyipopt NLP wrapper). No default path needs HiGHS: without `highspy` a pure MILP falls back to the in-house engine (`solver._lp_milp_backend`, route label says why); the explicit opt-ins (`milp_solver="highs"`, `highs_options`, `DISCOPT_LP_BACKEND=highs`, …) raise `MissingHighsError` naming the extra (`discopt/_optional_highs.py`, the only module that imports `highspy`). A test that needs HiGHS uses `@pytest.mark.requires_highs` or `pytest.importorskip("highspy")`; the guard is `test_highs_optional.py` and CI's `Python without HiGHS` lane; inventory `docs/dev/highs-optional-inventory.md`. NOTE: the default MINLP per-node LP engine is the **in-house Rust simplex** (`MccormickLPRelaxer(backend="simplex")` → `crates/discopt-core/src/lp/simplex/`), not HiGHS — do not plan MINLP node work against a "HiGHS backend". Pure MILP models default to the in-house Rust MILP engine whether or not `highspy` is installed (owner decision 2026-11-09, `solver._lp_milp_backend`); HiGHS is the opt-in (`milp_backend="highs"` / `DISCOPT_LP_MILP_BACKEND=highs`), with discopt-verified certificates (`docs/dev/lp-milp-highs-routing-plan.md`). Pure **LP** models default to the in-house Rust simplex route since highs-parity D1 (2026-11-05, `solver._lp_backend`; opt-out `DISCOPT_LP_BACKEND=highs`, and an explicitly set `DISCOPT_LP_MILP_BACKEND` still decides an LP when `DISCOPT_LP_BACKEND` is unset) — evidence `docs/dev/highs-parity-plan.md` P2.6.
 - **`python/discopt/ml/`** — ML predictor embedding + trainable surrogates (inspired by
   OMLT). Optional dep: `pip install discopt[nn]`. `ls` the directory for the file map; what
   you cannot derive from it:
@@ -511,6 +525,26 @@ alongside `search-arxiv`, `search-openalex`, `lit-scan` and `write-report`.
 in this repo, so treat that README's framing of them as unverified here.
 
 ## Key Constraints
+
+- **Third-party code: always state provenance and why.** discopt translates selected
+  algorithms from other solvers (HiGHS so far) into Rust instead of linking them, for deep
+  integration with its own LP/tree/certificate machinery, compatibility with the original
+  (bit-exact replay where possible), and a pure-Rust build with no C/C++/Fortran compiler or
+  native library to ship. Every translated or derived file must say, in its header, what it
+  is derived from, the upstream copyright and license, and point to `THIRD_PARTY_NOTICES.md`
+  (which holds the license texts and ships in the sdist/wheel via `tool.maturin.include`).
+  Add the upstream license there in the same PR that adds the code. Only port from
+  permissively licensed sources (MIT, BSD, zlib, Apache-2.0); never translate GPL/LGPL source
+  (e.g. libstdc++) -- write an independent implementation and check it against the original's
+  *outputs* instead. Example: the libstdc++ `partition`/`partial_sort`/heap/
+  `upper_bound` translations were replaced by Rust std versions in this way.
+- **Port the idea, not just the code** (owner, 2026-11-14). The goal is eventually to have
+  every reference-solver component (all of HiGHS's heuristics, separators, presolve rules)
+  available in discopt, reimplemented in Rust and improved where we can: better data
+  structures, work limits and deadlines the original lacks, sharper bounds, fewer
+  allocations. A faithful first version is a *verification baseline* (bit-exact replay
+  against the original, where feasible, proves the port before it is changed), not the
+  end state. Improvements over the original ship as measured changes on top of it, per §5.
 
 - **Correctness is non-negotiable**: Every phase gate enforces `incorrect_count ≤ 0`. Never weaken this check.
 - **Numerical tolerances**: abs=1e-6, rel=1e-4, integrality=1e-5, factorization=1e-12

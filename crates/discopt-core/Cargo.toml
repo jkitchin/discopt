@@ -212,7 +212,7 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # entry measurement. Not taken here -- it is a bound-changing default and owes the
 # CLAUDE.md §5 graduation pair on a machine that can run it.
 #
-# 0.18.0 is the current pin, a requirement bump only: no discopt call site or
+# 0.18.0 was the pin before 0.23.0, a requirement bump only: no discopt call site or
 # default changed with it. Source-compatible -- `cargo check -p discopt-core` is
 # clean and `cargo test -p discopt-core` green (15/15 binaries), and the LU
 # surface discopt consumes is unchanged -- the whole of it is the `use feral::`
@@ -226,7 +226,22 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # cert panel, no captured-LP fill/nnz comparison -- so nothing here claims
 # bound-neutrality or net-positivity for 0.16.0 -> 0.18.0. The (a)/(b) split
 # stated above is what that measurement owes when it is taken.
-feral = "0.18.0"
+# 0.23.0 is the current pin (2026-11-14). It carries jkitchin/feral#234: the
+# sparse Markowitz LU keeps its count heap only for the kernel, packs the active
+# submatrix, and adds `SparseLu::refactor_markowitz` (refactor in place, bit-
+# identical to a fresh factor). discopt calls it from
+# `FeralLU::factor_sparse_ordered` whenever it already holds a sparse factor.
+# Measured, the same discopt source built against 0.18.0 and 0.23.0:
+# - per-pivot dual traces (`DISCOPT_LP_DUAL_TRACE`) byte-identical on 7 population
+#   rows (piperout-d27, air04, h80x6320, neos-3048764-nadi, exp-1-500-5-5,
+#   p200x1188c, f2gap401600), and neos-3024952-loue an exact prefix (wall limit);
+# - full solves at 60 s on 5 certified rows: status, nodes, objective and bound
+#   identical (bound-neutral, CLAUDE.md §5);
+# - piperout-d27 root LP 13.1/13.0 s -> 9.5/9.6 s, `LuNumeric` 5.9 -> 2.7 s
+#   (307 of 307 refactors in place);
+# - `cargo test -p discopt-core --lib` 1151 passed. The struct-literal break in
+#   0.23 (`NumericParams`, #231) is on the multifrontal side discopt does not use.
+feral = "0.23.0"
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. The `1.10`
 # requirement is a caret range, so the lockfile resolves 1.12 and the old

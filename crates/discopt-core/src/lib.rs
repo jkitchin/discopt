@@ -9,6 +9,7 @@ pub mod bnb;
 pub mod decomp;
 pub mod expand;
 pub mod expr;
+pub mod highs_config;
 pub mod lp;
 pub mod lp_file;
 pub mod mps;
@@ -20,6 +21,7 @@ pub mod presolve;
 pub mod profile;
 pub mod sat;
 pub mod term_classifier;
+pub mod work;
 
 /// Returns the version string.
 pub fn version() -> &'static str {

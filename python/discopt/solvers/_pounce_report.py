@@ -3,12 +3,13 @@
 POUNCE writes its ``pounce.solve-report/v1`` document -- the same JSON as
 ``pounce --json-output <path> --json-detail full`` -- only to a path handed to
 ``Problem.solve(report_path=..., report_detail=...)``. There is no in-memory
-variant (still none in 0.16.0), so this module routes the report through a
-private temporary directory, parses it, and removes the file before returning.
+variant (none as of 0.16.0; not re-checked at the 0.17.0 bump), so this module
+routes the report through a private temporary directory, parses it, and removes the
+file before returning.
 
 What the report holds (measured, not assumed). The behavior with
 jkitchin/pounce#980 (the fix for pounce#979, POUNCE 672320d; in every release
-from 0.13.0, so in all of discopt's pin ``pounce-solver>=0.16``) is described
+from 0.13.0, so in all of discopt's pin ``pounce-solver>=0.17``) is described
 first:
 
 * ``statistics`` -- ``iteration_count``, the ``final_*`` residuals, evaluation

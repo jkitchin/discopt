@@ -122,6 +122,12 @@ pub struct SimplexOptions {
     /// OFF and is opted into only by the branch-and-cut kernel path (which needs
     /// warm-start to succeed), pending the CLAUDE.md §5 graduation panel.
     pub expel_zero_artificials: bool,
+    /// Run the #1595 sub-tolerance repair after a warm dual `Optimal` (default `true`).
+    /// Gap plan P3 turns it off only for the MILP root cut loop's re-solves, whose LP
+    /// value is never a bound (the root node is re-solved in the tree with it on) and
+    /// whose point only feeds separation; there the repair ran up to ~11k primal pivots
+    /// and failed, ending the loop (`docs/dev/highs-parity-d2-gap-plan.md` §12.11).
+    pub subtol_repair: bool,
     /// Bank the warm dual loop's progress when [`deadline`](Self::deadline) cuts
     /// it short (#928). When `true`, a deadline exit from the dual pivot loop
     /// returns [`LpStatus::IterLimit`] carrying the current (dual-feasible)
@@ -164,6 +170,18 @@ pub struct SimplexOptions {
     /// cert-clean, 0 bounds recovered, retention 72/82 in both arms). Tests and
     /// callers still set the field directly.
     pub recover_unstable_pivot: bool,
+    /// Sparse-in/sparse-out basis solves in the dual pivot loop (pivot row,
+    /// entering column, bound-flip correction), with the Devex and `x_B` updates
+    /// over the solves' support. Default from `DISCOPT_LP_DUAL_SPARSE_SOLVES`
+    /// (on unless `=0`); see `dual::sparse_solves_enabled` for the measurement.
+    pub dual_sparse_solves: bool,
+    /// Clean up a cost-perturbed dual optimum with a warm primal phase 2 before the
+    /// dual route (`DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`, default OFF, `=1` opts in; see
+    /// `dual::perturb_primal_cleanup_enabled` for why).
+    pub perturb_primal_cleanup: bool,
+    /// Dual steepest-edge pricing in the dual loop when the start basis gives exact
+    /// weights for free (`DISCOPT_LP_DUAL_DSE`, default OFF; see `dual::run_dual`).
+    pub dual_dse: bool,
     /// Consecutive degenerate dual pivots after which a **stalled** warm re-solve
     /// is abandoned for the cold solve; `0` disables the bail (#1013).
     ///
@@ -229,6 +247,20 @@ pub struct SimplexOptions {
     /// `DISCOPT_LP_DUAL_COST_PERTURB=0` opts out and restores the previous path
     /// exactly; a float sets a specific size.
     pub dual_cost_perturb: f64,
+    /// Tolerate a leaving row whose violation is at most `1e-7` (HiGHS's primal
+    /// feasibility tolerance) when the dual ratio test is empty and its Farkas ray
+    /// does not certify, instead of sending the LP cold. Default from
+    /// `DISCOPT_LP_DUAL_NOISE_ROWS` (OFF).
+    pub dual_noise_rows: bool,
+    /// Apply the #1013 cost perturbation from the first pivot of every warm dual
+    /// solve, as HiGHS does, instead of after a degenerate run of `PERTURB_ARM_RUN`
+    /// pivots. Default from `DISCOPT_LP_DUAL_PERTURB_FIRST` (OFF).
+    pub dual_perturb_first: bool,
+    /// Let the #1953 sub-tolerance check certify a vertex through the cheap rigorous
+    /// rungs of the node-bound ladder (implied slack bounds, open-column dual
+    /// repair) before handing it to a primal repair. Default from
+    /// `DISCOPT_LP_SUBTOL_LADDER` (OFF).
+    pub subtol_ladder: bool,
     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
     /// slack basis instead of the cold two-phase primal.
     ///
@@ -315,12 +347,19 @@ impl Default for SimplexOptions {
             warm_stall_guard: true,
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
+            subtol_repair: true,
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
+            dual_sparse_solves: dual::sparse_solves_enabled(),
+            perturb_primal_cleanup: dual::perturb_primal_cleanup_enabled(),
+            dual_dse: dual::dual_dse_enabled(),
             dual_stall_patience: dual::stall_patience_default(),
             dual_cost_perturb: dual::cost_perturb_default(),
+            dual_noise_rows: dual::noise_rows_default(),
+            dual_perturb_first: dual::perturb_first_default(),
+            subtol_ladder: dual::subtol_ladder_default(),
             cold_dual_start: false,
-            warm_flip_boxed: false,
+            warm_flip_boxed: dual::warm_flip_boxed_default(),
         }
     }
 }

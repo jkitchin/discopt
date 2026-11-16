@@ -18,6 +18,7 @@ use objlat_common::{build, options, M, N, OPTIMUM};
 #[test]
 fn substitution_recovers_the_lattice_and_closes_the_root_gap() {
     std::env::set_var("DISCOPT_OBJ_LATTICE_SUBST", "1");
+    objlat_common::pin_engine();
     std::env::set_var("DISCOPT_PROFILE", "1");
 
     let (a, b, c, l, u) = build();

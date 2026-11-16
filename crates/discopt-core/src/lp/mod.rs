@@ -11,11 +11,13 @@
 //! LP optimum), so a hand-written rank-revealing elimination is both adequate
 //! and avoids pulling a BLAS/LAPACK stack into the wheel build.
 
+pub mod analytic_center;
 pub mod basis;
 pub mod cmir;
 pub mod cover;
 pub mod crossover;
 pub mod cut_select;
 pub mod gomory;
+pub mod highs_cutgen;
 pub mod mir;
 pub mod simplex;

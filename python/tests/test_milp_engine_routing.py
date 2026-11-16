@@ -58,14 +58,21 @@ def test_root_cut_budget_is_on_by_default(monkeypatch):
     default-off gate this replaces.
     """
     monkeypatch.delenv("DISCOPT_MILP_ROOT_CUTS", raising=False)
+    monkeypatch.delenv("DISCOPT_MILP_ROOT_CMIR", raising=False)
     opts = _milp_root_cut_budget(20.0)
     assert opts is not None, "the graduated budget must reach a plain Model.solve()"
     # Pin the panel's configuration, not merely "some cuts": A0.1's whole failure
     # mode was wiring a *different* budget than the one that was measured.
-    assert opts["root_cuts"] == 500
-    assert opts["cut_rounds"] == 50
+    # Gap plan P3 made root c-MIR (DISCOPT_MILP_ROOT_CMIR=highs) the default, which
+    # triples the budget to HiGHS's; with c-MIR off it is the A0 panel's 500 x 50.
+    assert opts["root_cuts"] == 1500
+    assert opts["cut_rounds"] == 150
+    assert opts["cmir_cuts"] is True and opts["gmi_cuts"] is True
     assert opts["cut_select"] is True
     assert opts["root_cut_time_s"] == 10.0  # half the engine slice
+    monkeypatch.setenv("DISCOPT_MILP_ROOT_CMIR", "0")
+    off = _milp_root_cut_budget(20.0)
+    assert (off["root_cuts"], off["cut_rounds"], off["cmir_cuts"]) == (500, 50, False)
 
 
 @pytest.mark.parametrize("off", ["0", "false", "no", "FALSE", "No"])

@@ -261,6 +261,9 @@ struct ObjLattice {
     spacing: f64,
     offset: f64,
     drift: f64,
+    /// The lattice holds at some optimum only (`obj_integral::ObjLattice::optimum_only`):
+    /// an incumbent may sit off it.
+    optimum_only: bool,
 }
 
 /// Orchestrates the Branch-and-Bound search.
@@ -411,6 +414,12 @@ pub struct TreeManager {
     /// children that call created are `created_from..node_counter`. Debugger
     /// bookkeeping only; the search never reads it.
     created_from: usize,
+    /// Plunging (gap plan §12.28): when `Some`, every integer branching records
+    /// `(parent, preferred child)` in `plunge_children`, the preferred child chosen by
+    /// HiGHS's default rule (`ChildSelectionRule::kRootSol`) against this root LP
+    /// point. `None` (the default) records nothing.
+    plunge_root_sol: Option<Vec<f64>>,
+    plunge_children: Vec<(NodeId, NodeId)>,
 }
 
 impl TreeManager {
@@ -469,7 +478,66 @@ impl TreeManager {
             unbounded_branching: false,
             root_seed: f64::NEG_INFINITY,
             created_from: 0,
+            plunge_root_sol: None,
+            plunge_children: Vec::new(),
         }
+    }
+
+    /// Turn on plunge bookkeeping (gap plan §12.28) with the root LP point `root_sol`
+    /// (one value per variable; an empty vector falls back to "up").
+    pub fn enable_plunging(&mut self, root_sol: Vec<f64>) {
+        self.plunge_root_sol = Some(root_sol);
+    }
+
+    /// The `(parent, preferred child)` pairs recorded since the last call, in
+    /// branching order.
+    pub fn take_plunge_children(&mut self) -> Vec<(NodeId, NodeId)> {
+        std::mem::take(&mut self.plunge_children)
+    }
+
+    /// Like [`Self::export_batch`], but first takes the `preferred` nodes that are
+    /// still pending (in the given order), then fills the batch from the open set.
+    /// Returns the batch and how many of its leading entries came from `preferred`.
+    pub fn export_batch_preferring(
+        &mut self,
+        preferred: &[NodeId],
+        batch_size: usize,
+    ) -> (ExportBatch, usize) {
+        let mut out = ExportBatch {
+            lb: Vec::with_capacity(batch_size),
+            ub: Vec::with_capacity(batch_size),
+            node_ids: Vec::with_capacity(batch_size),
+            parent_solutions: Vec::with_capacity(batch_size),
+        };
+        let mut taken = 0usize;
+        for &nid in preferred {
+            if out.node_ids.len() >= batch_size {
+                break;
+            }
+            if self.pool.get(nid).status != NodeStatus::Pending {
+                continue;
+            }
+            self.take_into(nid, &mut out);
+            taken += 1;
+        }
+        while out.node_ids.len() < batch_size {
+            match self.pool.select_next() {
+                Some(nid) => self.take_into(nid, &mut out),
+                None => break,
+            }
+        }
+        (out, taken)
+    }
+
+    fn take_into(&mut self, nid: NodeId, out: &mut ExportBatch) {
+        self.pool.get_mut(nid).materialize_box();
+        let node = self.pool.get(nid);
+        out.lb.push(node.lb.clone());
+        out.ub.push(node.ub.clone());
+        out.parent_solutions
+            .push(node.parent_solution.as_deref().cloned());
+        out.node_ids.push(nid);
+        self.pool.get_mut(nid).status = NodeStatus::Evaluated;
     }
 
     /// Install an externally-proved rigorous lower bound for the root box
@@ -683,6 +751,37 @@ impl TreeManager {
         let id = self.next_id();
         let root = Node::new(id, None, 0, self.global_lb.clone(), self.global_ub.clone());
         self.pool.add(root);
+    }
+
+    /// Intersect the root node's box with `lb`/`ub` (structural columns), while the
+    /// root is still the only node and has not been exported. For bounds derived
+    /// before the search starts (root-loop propagation over globally valid rows and
+    /// cuts, root reduced-cost fixing against the incumbent). Returns whether the
+    /// root was tightened; a no-op once the search has begun.
+    pub fn tighten_root_box(&mut self, lb: &[f64], ub: &[f64]) -> bool {
+        if self.node_counter != 1 {
+            return false;
+        }
+        let root = self.pool.get_mut(NodeId(0));
+        if !matches!(root.status, NodeStatus::Pending) {
+            return false;
+        }
+        root.materialize_box();
+        if lb.len() != root.lb.len() || ub.len() != root.ub.len() {
+            return false;
+        }
+        let mut changed = false;
+        for j in 0..lb.len() {
+            if lb[j] > root.lb[j] {
+                root.lb[j] = lb[j];
+                changed = true;
+            }
+            if ub[j] < root.ub[j] {
+                root.ub[j] = ub[j];
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Export a batch of up to `batch_size` pending nodes for relaxation evaluation.
@@ -1178,6 +1277,25 @@ impl TreeManager {
                 self.branch_records.insert(left.id, record.clone());
                 self.branch_records.insert(right.id, record);
 
+                if let Some(rs) = self.plunge_root_sol.as_ref() {
+                    // HiGHS `ChildSelectionRule::kRootSol` (`HighsSearch.cpp`), with
+                    // the inference averages at their neutral value.
+                    let bp = result.solution[decision.var_index];
+                    let (dn, upv) = (bp.floor(), bp.ceil());
+                    let (up_prio, down_prio) = match rs.get(decision.var_index) {
+                        Some(&r) => {
+                            let r = r.clamp(dn, upv);
+                            (1.0 + (bp - r), 1.0 + (r - bp))
+                        }
+                        None => (1.0, 1.0),
+                    };
+                    let child = if up_prio + 1e-9 >= down_prio {
+                        right.id
+                    } else {
+                        left.id
+                    };
+                    self.plunge_children.push((result.node_id, child));
+                }
                 self.pool.add(left);
                 self.pool.add(right);
                 stats.branched += 1;
@@ -1876,10 +1994,39 @@ impl TreeManager {
                     spacing: g,
                     offset,
                     drift,
+                    optimum_only: false,
                 })
             }
             _ => None,
         };
+    }
+
+    /// Mark the installed lattice as holding at some optimal solution only
+    /// ([`crate::bnb::obj_integral::ObjLattice::optimum_only`]); a no-op without one.
+    /// [`Self::cutoff_for`] then fathoms below the largest lattice point under an
+    /// off-lattice incumbent instead of at `incumbent - spacing`.
+    pub fn set_objective_lattice_optimum_only(&mut self, on: bool) {
+        if let Some(l) = self.obj_lattice.as_mut() {
+            l.optimum_only = on;
+        }
+    }
+
+    /// Test helper: an empty manager carrying only this one's objective lattice.
+    #[cfg(test)]
+    pub(crate) fn clone_lattice_probe(&self) -> TreeManager {
+        let mut t = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![1.0],
+            vec![crate::bnb::branching::VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        t.obj_lattice = self.obj_lattice;
+        t
     }
 
     /// How far below the incumbent a lattice-fathomed node may still reach:
@@ -1913,12 +2060,40 @@ impl TreeManager {
     /// latter; what it may fathom is the band `[U - 2D, U)`, and the global bound
     /// is capped at `U - 2D` to keep that band in the reported bound.
     pub fn cutoff_value(&self) -> f64 {
+        self.cutoff_for(self.incumbent_value)
+    }
+
+    /// [`Self::cutoff_value`] for an incumbent value `inc` held elsewhere (the
+    /// HiGHS-design search keeps its own incumbent; it prunes on the same lattice).
+    pub fn cutoff_for(&self, inc: f64) -> f64 {
         match self.obj_lattice {
-            Some(ObjLattice { spacing, drift, .. }) if self.incumbent_value.is_finite() => {
-                let c = self.incumbent_value - spacing + 2.0 * drift;
+            Some(ObjLattice {
+                spacing,
+                drift,
+                offset,
+                optimum_only,
+            }) if inc.is_finite() => {
+                let mut c = inc - spacing + 2.0 * drift;
+                if optimum_only {
+                    // The incumbent may sit off the lattice (its continuous column
+                    // need not be at an interval end). A strictly better optimum is
+                    // a lattice point below `inc`; when `inc` is not within the
+                    // drift window of one, the largest such point is `floor`, not
+                    // `inc - spacing`, and every optimal value below `inc` is at
+                    // most that point plus the drift.
+                    let k = (inc - offset) / spacing;
+                    if !k.is_finite() {
+                        return inc;
+                    }
+                    let near = (k - k.round()).abs() * spacing
+                        <= 2.0 * drift + LATTICE_EPS * inc.abs().max(1.0);
+                    if !near {
+                        c = c.max(k.floor() * spacing + offset + drift);
+                    }
+                }
                 c + LATTICE_EPS * c.abs().max(1.0)
             }
-            _ => self.incumbent_value,
+            _ => inc,
         }
     }
 
@@ -1944,6 +2119,7 @@ impl TreeManager {
             spacing,
             offset,
             drift,
+            ..
         }) = self.obj_lattice
         else {
             return v;

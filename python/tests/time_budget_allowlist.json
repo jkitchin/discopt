@@ -55,6 +55,7 @@
 "python/tests/test_1537_translation_rescaling_invariance.py::test_invariance_panel[poly]": 11.83,
 "python/tests/test_1565_shared_dag_walks.py::test_recognizer_deadline_aborts_before_injecting_anything": 9.51,
 "python/tests/test_1595_simplex_subtol_dual.py::test_psig40r_still_certifies_through_the_default_path": 23.21,
+"python/tests/test_1595_simplex_subtol_dual.py::test_row_scaled_psig40r_publishes_no_false_bound[0]": 17.0,
 "python/tests/test_1595_simplex_subtol_dual.py::test_row_scaled_psig40r_publishes_no_false_bound[2]": 29.08,
 "python/tests/test_1611_benders_purge_certificate.py::test_limit_hit_master_incumbent_is_never_kept_as_bound": 7.2,
 "python/tests/test_1611_benders_purge_certificate.py::test_single_cut_benders_certificate_matches_reported_bound[20]": 6.39,

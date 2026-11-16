@@ -80,6 +80,44 @@ _TOL_ABS = 1e-6
 #: on an instance where it did not is time-limit noise), ``leak(off)`` must be 0
 #: (the OFF arm honoured the flag).
 _FLAGS = {
+    # The HiGHS MILP configuration umbrella (graduated on the 120-row MILP population)
+    # on the MINLP corpus, where the MILP engine solves OA / decomposition masters:
+    # review of #2220 (a 2.2x slowdown on a convex-MINLP OA test). The counters are
+    # the umbrella's LP-level members, chosen by measurement: on cvxnonsep_psig40r
+    # (2026-11-15) `SubtolLadderTried`, `DualPrepRepriced` and `HighsSepaCutoffBox`
+    # fire with it on and are 0 with it off, while `MilpPresolveRuns` /
+    # `RootHighsPropagated` are 0 in both arms there (the OA masters skip that path).
+    "DISCOPT_HIGHS_CONFIG": {
+        "fired": lambda off, on: (
+            on["SubtolLadderTried"] + on["DualPrepRepriced"] + on["HighsSepaCutoffBox"]
+        ),
+        "ran": lambda off, on: (
+            on["SubtolLadderTried"] + on["DualPrepRepriced"] + on["HighsSepaCutoffBox"] > 0
+        ),
+        "leak": lambda off: (
+            off["SubtolLadderTried"] + off["DualPrepRepriced"] + off["HighsSepaCutoffBox"]
+        ),
+        "show": ("SubtolLadderTried", "DualPrepRepriced"),
+    },
+    # highs-parity S3 (2026-11-15, graduated default-ON on the MILP population): after
+    # a cost-perturbed dual, clean up on the true costs with the primal phase 2 first,
+    # as HiGHS does. `DualCostPerturbPrimalCleanup` counts the clean-ups it decided;
+    # any OFF is a leak. `DualCostPerturbAttempts` shows how often the perturbed route ran.
+    "DISCOPT_LP_PERTURB_PRIMAL_CLEANUP": {
+        "fired": lambda off, on: on["DualCostPerturbPrimalCleanup"],
+        "ran": lambda off, on: on["DualCostPerturbAttempts"] > 0,
+        "leak": lambda off: off["DualCostPerturbPrimalCleanup"],
+        "show": ("DualCostPerturbAttempts", "DualCostPerturbPrimalCleanup"),
+    },
+    # HiGHS's incremental / row-wise PRICE in the primal simplex (restored 2026-11-14
+    # for a re-panel under the revised bar 2). It runs on every primal pivot whose
+    # reduced costs are updated from the pivot row, counted by the row-price arm used.
+    "DISCOPT_LP_PRIMAL_INCR_PRICING": {
+        "fired": lambda off, on: on["PrimalRowPriceSparse"] + on["PrimalRowPriceDense"],
+        "ran": lambda off, on: on["PrimalRowPriceSparse"] + on["PrimalRowPriceDense"] > 0,
+        "leak": lambda off: off["PrimalRowPriceSparse"] + off["PrimalRowPriceDense"],
+        "show": ("PrimalRowPriceSparse", "PrimalIncrDriftReprice"),
+    },
     # #2212: the engine's last-resort logical-basis dual. It runs only on an engine
     # entry's `Numerical` verdict, so `LpLogicalRescueAttempts` ON is where it ran and
     # any attempt OFF is a leak; `LpLogicalRescueDecided` counts the LPs it decided.
@@ -88,6 +126,16 @@ _FLAGS = {
         "ran": lambda off, on: on["LpLogicalRescueAttempts"] > 0,
         "leak": lambda off: off["LpLogicalRescueAttempts"],
         "show": ("LpLogicalRescueAttempts", "LpLogicalRescueDecided"),
+    },
+    # The Rust std-form LP engine's retry of a numerical breakdown on an exact
+    # equilibration (`lp_std_engine.RUST_EQUIL_RETRY_STATS`, Python-side). It runs only
+    # on a `numerical` exit, so `LpStdEquilRetryAttempts` ON is where it ran and any
+    # attempt OFF is a leak; `LpStdEquilRetryDecided` counts the LPs it decided.
+    "DISCOPT_LP_STD_EQUIL_RETRY": {
+        "fired": lambda off, on: on["LpStdEquilRetryDecided"],
+        "ran": lambda off, on: on["LpStdEquilRetryAttempts"] > 0,
+        "leak": lambda off: off["LpStdEquilRetryAttempts"],
+        "show": ("LpStdEquilRetryAttempts", "LpStdEquilRetryDecided"),
     },
     "DISCOPT_NS_PROJECT": {
         "fired": lambda off, on: on["NodeNsProjectRescue"],
@@ -236,6 +284,18 @@ _FLAGS = {
     },
 }
 _CTRS = (
+    # DISCOPT_HIGHS_CONFIG.
+    "SubtolLadderTried",
+    "DualPrepRepriced",
+    "HighsSepaCutoffBox",
+    # DISCOPT_LP_PERTURB_PRIMAL_CLEANUP.
+    "DualCostPerturbAttempts",
+    "DualCostPerturbPrimalCleanup",
+    # DISCOPT_LP_PRIMAL_INCR_PRICING.
+    "PrimalRowPriceSparse",
+    "PrimalRowPriceDense",
+    "PrimalIncrDriftReprice",
+    "PrimalIncrExactRecheck",
     # #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE (and the spatial kernel's own retry).
     "LpLogicalRescueAttempts",
     "LpLogicalRescueDecided",
@@ -278,6 +338,8 @@ _CTRS = (
     "LogicalDualColdRefused",
     "LogicalDualColdFellBack",
     "LogicalDualColdSkippedRepeat",
+    "LpStdEquilRetryAttempts",
+    "LpStdEquilRetryDecided",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 
@@ -313,6 +375,11 @@ if _kps is not None:
     ctrs["KernelPresolveCalls"] = _kps["calls"]
     ctrs["KernelPresolveApplied"] = _kps["applied"]
     ctrs["KernelPresolveEliminated"] = _kps["eliminated"]
+import discopt.solvers.lp_std_engine as _lse
+_ers = getattr(_lse, "RUST_EQUIL_RETRY_STATS", None)
+if _ers is not None:
+    ctrs["LpStdEquilRetryAttempts"] = _ers["attempts"]
+    ctrs["LpStdEquilRetryDecided"] = _ers["decided"]
 
 verified = None
 if res.x:

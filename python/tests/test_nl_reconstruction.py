@@ -486,7 +486,8 @@ class TestFromNlIntegration:
             import discopt.modeling as dm
 
             model = dm.from_nl(path)
-            assert len(model._constraints) >= 1
+            # Expression rows or, for a linear file, matrix blocks (DISCOPT_NL_LINEAR_MATRIX).
+            assert model.num_constraints >= 1
         finally:
             os.unlink(path)
 

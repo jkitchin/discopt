@@ -832,6 +832,73 @@ impl ModelBuilder {
         }
     }
 
+    /// Add linear constraints from CSR data whose columns may belong to different
+    /// variable blocks: column `k` of the matrix is element `col_local[k]` of block
+    /// `col_var[k]` (a scalar block is referenced by its variable node, as an
+    /// expression-built row references it). Otherwise exactly
+    /// [`Self::add_linear_constraints_csr`]: one `SumOver` of `coef * x` terms per row
+    /// (a coefficient of exactly 1 skips the multiplication), an empty row is the
+    /// constant 0.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_linear_constraints_cols(
+        &mut self,
+        indptr: &[usize],
+        indices: &[usize],
+        data: &[f64],
+        col_var: &[usize],
+        col_local: &[usize],
+        sense: ConstraintSense,
+        rhs: &[f64],
+        name_prefix: Option<&str>,
+    ) {
+        assert_eq!(
+            col_var.len(),
+            col_local.len(),
+            "column maps differ in length"
+        );
+        let m = indptr.len() - 1;
+        self.arena.reserve(data.len() * 2 + m);
+        for row in 0..m {
+            let (row_start, row_end) = (indptr[row], indptr[row + 1]);
+            let body = if row_start == row_end {
+                self.arena.add(ExprNode::Constant(0.0))
+            } else {
+                let mut terms = Vec::with_capacity(row_end - row_start);
+                for k in row_start..row_end {
+                    let (var, local) = (col_var[indices[k]], col_local[indices[k]]);
+                    let x = if self.variables[var].shape.is_empty() {
+                        self.var_expr_ids[var]
+                    } else {
+                        self.get_index_node(var, local)
+                    };
+                    let val = data[k];
+                    if val == 1.0 {
+                        terms.push(x);
+                    } else {
+                        let c = self.arena.add(ExprNode::Constant(val));
+                        terms.push(self.arena.add(ExprNode::BinaryOp {
+                            op: BinOp::Mul,
+                            left: c,
+                            right: x,
+                        }));
+                    }
+                }
+                if terms.len() == 1 {
+                    terms[0]
+                } else {
+                    self.arena.add(ExprNode::SumOver { terms })
+                }
+            };
+            let name = name_prefix.map(|p| format!("{}_{}", p, row));
+            self.constraints.push(ConstraintRepr {
+                body,
+                sense,
+                rhs: rhs[row],
+                name,
+            });
+        }
+    }
+
     /// Set a linear objective: c'x + constant.
     pub fn set_linear_objective(
         &mut self,

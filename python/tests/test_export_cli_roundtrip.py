@@ -84,7 +84,18 @@ def _write_and_reload(model, tmp_path):
     writer = _NLWriter(model)
     path = tmp_path / f"{model.name}.nl"
     path.write_text(writer.write())
-    reloaded = dm.from_nl(str(path))
+    # These tests check the reader's expression reconstruction row by row, so the
+    # reload pins it: a linear file otherwise takes its rows as matrix blocks
+    # (DISCOPT_NL_LINEAR_MATRIX, test_nl_linear_matrix.py), which is not what they cover.
+    old = os.environ.get("DISCOPT_NL_LINEAR_MATRIX")
+    os.environ["DISCOPT_NL_LINEAR_MATRIX"] = "0"
+    try:
+        reloaded = dm.from_nl(str(path))
+    finally:
+        if old is None:
+            os.environ.pop("DISCOPT_NL_LINEAR_MATRIX")
+        else:
+            os.environ["DISCOPT_NL_LINEAR_MATRIX"] = old
     return writer, reloaded
 
 

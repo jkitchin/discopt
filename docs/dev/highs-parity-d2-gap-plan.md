@@ -595,3 +595,1382 @@ branch graduated is responsible (`NODE_GMI`, `CUT_LP`, `SUBMIP`, `SB_ARMED`,
 subject of this plan. Default-path tests stay on the default (allowlisted at their CI
 times, so the default keeps its coverage); the allowlist entries leave when the engine
 closes the gap.
+
+## 12. P3 entry, step 1 (2026-11-09): the family is the lever; our separator is not
+
+**Rust root today** (`discopt_benchmarks/scripts/p3_root_gap.py`, route, `max_nodes=2`;
+`docs/dev/data/highs-parity/gap-plan-p3/p3_root_base.json`): beavma 18.4 %, nexp-1-1
+27.6 %, nexp-4-2 9.9 %, sp150x300d 15.9 %, neos-911970 57.5 %, mik-1 4.1 %.
+
+**The W4 core, restored for the entry only** (not committed; `cmir.rs` from
+`e5eac131^`, routed by a root-loop `cmir_cuts` switch): arm a (c-MIR alone) beavma
+14.6 %, sp150x300d 18.8 % (worse), the rest within 1.5 pp; arm b (+ HiGHS delta
+selection) mik-1 3.8 %, the rest unchanged or worse; arm c (+ flip, lifted MIC)
+sp150x300d 10.1 %, nexp-4-2 12.7 % (worse). Kill-level on its own (< 2 pp on 4 of 6).
+
+**SCIP root ablation, presolve off, node limit 1**
+(`gap-plan-p3/p3_scip_root_ablation.{py,jsonl}`): root gap %
+
+| row | none | all | aggregation only | gomory | implied bounds | mcf | zerohalf | all but aggregation |
+|---|---|---|---|---|---|---|---|---|
+| beavma | 58.66 | 0.02 | **1.07** | 28.53 | 58.66 | 11.11 | 58.66 | 2.74 |
+| nexp-50-20-1-1 | 55.49 | 0.00 | **0.00** | 16.48 | 55.49 | 0.00 | 55.49 | 0.00 |
+| nexp-50-20-4-2 | 30.86 | 0.91 | **0.78** | 13.02 | 30.86 | 4.84 | 30.86 | 2.11 |
+| sp150x300d | 51.89 | 3.18 | **4.63** | 21.69 | 51.89 | 41.91 | 51.89 | 18.81 |
+| neos-911970 | 57.52 | 2.75 | **5.96** | 57.52 | 57.52 | 57.52 | 57.52 | 57.52 |
+| mik-250-20-75-1 | 18.62 | 2.54 | **2.73** | 4.54 | 18.62 | 18.62 | 18.62 | 5.33 |
+
+(In SCIP 6 `aggregation` emits nothing unless the `cmir` / `flowcover` / `knapsackcover`
+dummy separators are on; a first run that missed this measured `agg` = `none` and is
+superseded.) SCIP's path-aggregated c-MIR / flow cover alone closes every row to within
+6 %, and is the only family that moves `neos-911970` at all. So P3's hypothesis
+survives the zero-code test: the root gap on these rows is an aggregation-separator gap.
+
+**Where ours falls short (one row, `nexp-50-20-1-1`, route + `cmir_cuts`).** The
+separator runs: 1,058 c-MIR cuts over 18 root rounds, 1,000 generated, 282 kept, and
+the root bound stays at 21 against SCIP's 29 from the same family. The defect is cut
+strength, not missing plumbing. Next: compare one round's cuts against SCIP's on a
+single flow-conservation row of this instance (aggregation path, bound substitution
+choice, delta / complementation), then fix the construction, then re-run this entry.
+
+### 12.1 P3 entry, step 2: isolating the separator (`gap-plan-p3/p3_root_arms.py`)
+
+The route's root with the cut families switched per arm (driver kwargs patched, root
+only; W4 core restored for the entry, not committed; `p3_root_arms_w4.jsonl`):
+
+| row | no cuts | GMI (default) | c-MIR only | GMI + c-MIR | SCIP none -> aggregation |
+|---|---|---|---|---|---|
+| nexp-50-20-1-1 | 14 | 21 | 23 | 21 | 12.9 -> 29 |
+| beavma | 172,135 | 312,687 | 309,683 | 327,186 | 158,460 -> 379,184 |
+| mik-250-20-75-1 | -57,326 | -51,757 | -52,544 | -51,762 | -58,972 -> -51,076 |
+
+Two defects, separately: our c-MIR alone is far weaker than SCIP's aggregation alone,
+and GMI + c-MIR can be worse than c-MIR alone (`nexp-1-1` 21 vs 23: the shared budget
+and selection crowd c-MIR cuts out). With W4's HiGHS delta selection + flip + lifted MIC
+on the c-MIR-only arm: `beavma` 10.2 %, `mik-1` 3.6 %; `nexp-1-1` stays 23 and
+`neos-911970` 57.5 %.
+
+**Ruled out:**
+- the base construction: the textbook flow cover (`x1 + x2 >= 7`, `x_i <= 5 y_i`, LP
+  `y = 0.7`) comes out exactly, `y1 + y2 >= 2`.
+- aggregation depth: `CMIR_MAX_AGGR` 2 -> 6 leaves `nexp-1-1` at 22, `neos-911970`
+  unchanged, `beavma` 20.8 % and `sp150x300d` 29.0 % (worse).
+- walking into variable-bound rows: skipping them as aggregation candidates changes
+  nothing measurable.
+
+`neos-911970` has no variable bounds at all (48 free continuous columns carrying the
+whole objective, 48 mixed rows, 59 integer-only rows), and SCIP's aggregation still
+takes it from 57.5 % to 6 %. So the missing piece is not variable-bound handling either.
+
+**Next (not yet run):** read SCIP's applied aggregation cuts at the root of
+`nexp-50-20-1-1` and `neos-911970` (pyscipopt, presolve off) and reconstruct which rows
+each one aggregates and which bound substitutions and delta it used. That turns "our
+separator is weaker" into a named difference, before any further code.
+
+### 12.2 P3 entry, step 3: SCIP's root cuts read, and the named differences
+
+**What SCIP applies** (`gap-plan-p3/p3_scip_root_cuts.{py,json.gz}`; aggregation
+separators only, presolve off, root): on `nexp-50-20-1-1` 440 cuts over 37 rounds (216
+c-MIR, 202 flow cover, 22 knapsack cover); of the 41 binding at the final root LP, 18 are
+lifted covers that are pure binary (`y_a + y_b >= 1`: "one of these arcs opens"), 17
+flow covers, 6 c-MIR. On `neos-911970` (an assignment model with knapsack-type cost rows
+`sum a_j y_j - x_k <= 6.5`, one continuous `x_k` per row carrying the objective) all
+97 binding cuts are single-row c-MIR over one cost row's binaries and its `x_k`.
+
+**Our separator on `neos-911970`, first root round** (temporary dump): 80 c-MIR cuts,
+all violated at the LP point (up to 0.93), 40 of them on an objective column, the same
+shape as SCIP's. The bound still did not move, because of the root loop's stop rule.
+
+**Named differences, each measured on the route's root (c-MIR-only arm unless stated;
+`p3_root_arms_stall.jsonl`, `p3_root_arms_3x.jsonl`):**
+
+1. **The root loop stops at the first stalled round.** `milp_driver.rs` breaks as soon as
+   one round fails to raise the bound by 1e-7 relative; a dual-degenerate LP (the
+   assignment rows) needs several rounds before the bound moves. SCIP allows stalled
+   rounds at the root. With 10 allowed: `neos-911970` 57.5 % -> 31.9 %.
+2. **The start-row filter requires a nearly tight row** (`MAX_BASE_SLACK` = 0.1 of the
+   row's largest coefficient). A knapsack-type row's cover / MIR cut is violated
+   exactly when the row is slack. Relaxing it, with W4's HiGHS delta selection, flip and
+   lifted MIC and the stall allowance: `neos-911970` 21.9 %, `beavma` 8.1 %, `nexp-1-1` 24.
+3. **The root cut budget.** With 3x the route's cut and round budget (1,500 / 150), c-MIR
+   alone reaches **`nexp-50-20-1-1` 0.0 % (29 = optimum)** and **`neos-911970` 5.4 %**,
+   matching SCIP's aggregation-only root (0.0 % and 6.0 %); `mik-1` 3.1 %, `beavma` 8.1 %.
+4. **GMI + c-MIR together lose to the wall-clock cap on the root loop, not to the cuts.**
+   On `nexp-1-1` the c-MIR-only arm runs 125 rounds to 29; the combined arm stops at 23
+   rounds and 19 (below GMI alone, 49 rounds, 21): dense GMI rows slow every re-solve and
+   the loop's time ceiling ends it. Which arm wins differs by row: combined is better on
+   `sp150x300d` (11.6 % vs 23.2 %), `nexp-50-20-4-2` (12.7 % vs 28.2 %) and `mik-1` (2.7 %
+   vs 3.1 %).
+
+Root gap %, combined table (route, root only):
+
+| row | today (GMI) | c-MIR 3x | GMI + c-MIR 3x | SCIP aggregation | HiGHS presolve off |
+|---|---|---|---|---|---|
+| beavma | 18.4 | 8.1 | 8.1 | 1.1 | 0.9 |
+| nexp-50-20-1-1 | 27.6 | **0.0** | 34.5 | 0.0 | 3.8 |
+| nexp-50-20-4-2 | 9.9 | 28.2 | 12.7 | 0.8 | 0.6 |
+| sp150x300d | 15.9 | 23.2 | 11.6 | 4.6 | 2.6 |
+| neos-911970 | 57.5 | **5.4** | 30.9 | 6.0 | 4.8 |
+| mik-250-20-75-1 | 4.1 | 3.1 | 2.7 | 2.7 | 1.75 |
+
+No arm put a bound past its optimum (every comparison checked by the instrument).
+
+**Not yet explained:** the flow-cover and lifted-cover share of SCIP's binding cuts on
+`nexp` (we reach its optimum by c-MIR alone, so not needed there), and the rows where c-MIR
+alone is worse than today (`nexp-4-2`, `sp150x300d`: the GMI cuts it displaces were doing
+the work). All of the above ran with temporary environment knobs; nothing of it is
+committed code.
+
+**Design this points to (to build next, default OFF, one flag):** the W4 c-MIR core with
+HiGHS's delta / flip / lifted MIC folded in; root stall rounds; no tight-row start filter
+(rank start rows instead); and a root loop that budgets families by measured yield per
+LP second instead of one shared cap (so GMI stays where it pays and stops where its dense
+rows only slow the loop). Then the pre-registered entry on these six rows at the route's
+real budget, then the §5 panel.
+
+### 12.3 P3: the consolidated flag and its entry (2026-11-09)
+
+`DISCOPT_MILP_ROOT_CMIR` (default OFF) replaces the experiment knobs: the W4 c-MIR core
+with HiGHS's delta selection, flip and lifted MIC, no tight-row start filter, 10 stalled
+root rounds, and a 1,500 / 150 root budget; `1` keeps GMI, `only` drops it. Rust tests:
+`textbook_flow_cover_is_separated_under_both_designs`,
+`design_cuts_hold_at_every_sampled_feasible_point` (40 seeds, every cut checked at every
+sampled integer-feasible point), `root_cmir_parse_refuses_garbage`. The aggregation-depth
+and variable-bound-row knobs were falsified (§12.1) and are gone.
+
+**Entry, as pre-registered** (route, root only, the panel's 20 s; `p3_entry20_*.json`):
+
+| row | today | `=1` | `=only` | HiGHS presolve off |
+|---|---|---|---|---|
+| beavma | 18.4 | **8.1** | **8.1** | 0.9 |
+| nexp-50-20-1-1 | 27.6 | 34.5 | **0.0** | 3.8 |
+| nexp-50-20-4-2 | 9.9 | 12.7 | 28.2 | 0.6 |
+| sp150x300d | 15.9 | **11.6** | 23.2 | 2.6 |
+| neos-911970 | 57.5 | **30.9** | **5.4** | 4.8 |
+| mik-250-20-75-1 | 4.1 | 2.7 | 3.1 | 1.75 |
+
+No bound past an optimum (6 / 6 comparisons per arm). **Neither arm meets the bar**
+(>= 2 pp on >= 4 of 6; each reaches 3). `only` also meets the kill clause as written
+(< 2 pp on >= 3 rows), but that clause encoded "the family is not the lever", which the
+SCIP ablation (§12) refutes directly, so the result is recorded as *not passed*, not as
+a kill. The best of the two arms per row would pass (>= 2 pp on 4; within 2 pp of
+HiGHS on 3), so what is missing is (a) budgeting the families per solve and (b) the
+separator strength on `nexp-50-20-4-2` and `sp150x300d`, where SCIP's aggregation alone
+reaches 0.8 % / 4.6 % and ours is worse than GMI. Half of SCIP's binding root cuts on
+`nexp-1-1` come from its flow-cover and lifted-cover generators (§12.2), which `cmir.rs`
+has no counterpart for. Also measured: the `=1` arm spends the whole 20 s at the root on
+`nexp-1-1` and `neos-911970`; the loop's time ceiling (checked at the top of a round)
+does not hold when a round's GMI re-solves are slow, which a full-solve arm would pay.
+
+**Next (as first written, retracted below):** a flow-cover generator over the same
+aggregated rows, then per-solve family budgeting, then this entry again.
+
+**Retracted before building (same day).** SCIP's aggregation separator with exactly one
+generator on (`p3_scip_root_ablation.py` arms `agg_cmir` / `agg_flow` / `agg_knap`;
+`p3_scip_generator_ablation.jsonl`), root gap %:
+
+| row | aggregation | c-MIR only | flow cover only | knapsack cover only |
+|---|---|---|---|---|
+| nexp-50-20-4-2 | 0.78 | **0.94** | 7.25 | 30.86 |
+| sp150x300d | 4.63 | **5.23** | 44.22 | 51.89 |
+| nexp-50-20-1-1 | 0.00 | **0.00** | 30.79 | 55.49 |
+| beavma | 1.07 | **0.84** | 48.17 | 55.52 |
+| neos-911970 | 5.96 | **5.96** | 57.52 | 57.52 |
+| mik-250-20-75-1 | 2.73 | **2.42** | 6.47 | 18.62 |
+
+SCIP's c-MIR generator alone does the work on every row; its flow-cover and lifted-cover
+rows in the final root LP (§12.2) were incidental. So the "half of SCIP's binding cuts
+are flow / lifted covers" reading of §12.2 does not identify the missing piece, and a
+flow-cover generator is not the next step. What remains is c-MIR strength on
+`nexp-50-20-4-2` (ours 28.2 % alone vs SCIP's c-MIR 0.94 %) and `sp150x300d` (23.2 % vs
+5.23 %): SCIP's aggregation path (row scoring, aggregation depth, which rows it walks
+to), its bound-substitution choice, or its delta / complementation. **Next:** the §12.2
+procedure on `nexp-50-20-4-2` with the `agg_cmir` arm (SCIP's c-MIR cuts against ours
+on the same rows), then per-solve family budgeting, then this entry again.
+
+### 12.4 SCIP's c-MIR on `nexp-50-20-4-2`, and aggregation depth re-measured
+
+SCIP with only `aggregation` + `cmir` on (`p3_scip_nexp42_cmir_cuts.json.gz`): root bound
+70.34 (optimum 71) from 283 cuts in the final root LP, 157 binding, cut names up to
+round 48. Binding cuts are large: median 16 integer columns (max 48), median 1
+continuous column, 47 of them pure-integer; the top ones read as cut-set inequalities
+over several arcs' capacity modules (`t_x.<arc>.<module>`), i.e. aggregations of several
+flow-conservation rows.
+
+Aggregation depth 2 -> 6 under the full P3 design (temporary constant change, reverted;
+`p3_entry20_aggr6_*.json`), root gap %, 20 s:
+
+| row | `only`, depth 2 | `only`, depth 6 | `1`, depth 2 | `1`, depth 6 |
+|---|---|---|---|---|
+| nexp-50-20-4-2 | 28.2 | 23.9 | 12.7 | 11.3 |
+| sp150x300d | 23.2 | 26.1 | 11.6 | 7.2 |
+| nexp-50-20-1-1 | 0.0 | 3.4 | 34.5 | 17.2 |
+| neos-911970 | 5.4 | 5.4 | 30.9 | 30.9 |
+| beavma | 8.1 | 6.9 | 8.1 | 6.4 |
+| mik-250-20-75-1 | 3.1 | 3.1 | 2.7 | 2.7 |
+
+Mixed, and `nexp-50-20-4-2` stays near 24 % against SCIP's c-MIR 0.94 %: depth is not
+the missing piece either. What SCIP builds there (16-48-column cut-set rows from many
+rounds) points at *which* rows the path walks: SCIP scores aggregation candidates by
+the continuous column's bound distance and the row's density and slack, and walks along
+flow rows; ours eliminates the column farthest from its bound through the tightest row
+containing it, so on a network it can keep re-selecting the same few rows. Next: log
+the rows our aggregation uses from one `nexp-4-2` start row against the support of a
+binding SCIP cut, and change the path rule only if that shows the divergence.
+
+### 12.5 The aggregation path, traced (2026-11-09)
+
+Temporary trace in `cmir.rs` (knobs saved as `gap-plan-p3/p3_path_trace_knobs.patch`, not
+on the solve path), `nexp-50-20-4-2`, `DISCOPT_MILP_ROOT_CMIR=only`, root:
+
+* **Our cuts are tiny.** 240 of 13,580 start-row attempts yield a cut; cut support is a
+  median 2 integer columns (max 8), against SCIP's binding c-MIR cuts at median 16
+  (max 48).
+* **Every refusal is "no violated MIR", on single-arc rows.** 15,112 of 15,461 refused
+  substituted rows carry exactly 4 integer columns: one arc's 4 capacity-module
+  binaries. The separator works almost only on capacity rows `flow <= sum_k cap_k y_ak`,
+  which alone yield nothing violated.
+* **Why it never builds cut sets.** (1) `has_int_structure` skips start rows with no
+  integer column and no detected variable bound, i.e. every flow-conservation row;
+  (2) the variable-bound reader takes 2-3-nonzero rows only, so a 4-module capacity row
+  is no variable bound and the flows have none; (3) when a flow is eliminated, the
+  candidate rows (the next node's conservation row, slack 0, and the flow's capacity
+  row, tight at the LP) tie on slack, so the path often walks into the next
+  conservation row, which adds flows and no integers. Skipping variable-bound rows
+  (§12.1's knob) changes nothing at all: they are never candidates.
+
+Measured with the three removed (continuous start rows, candidate rows ranked by their
+continuous count before slack, depth 6/10; `p3_entry20_path_*.json`, 24 comparisons, no
+bound past an optimum), root gap %:
+
+| row | `only` before | `only` + path, depth 10 | `1` + path, depth 10 |
+|---|---|---|---|
+| nexp-50-20-4-2 | 28.2 | **7.0** | 7.0 |
+| nexp-50-20-1-1 | 0.0 | 0.0 | 20.7 |
+| neos-911970 | 5.4 | 5.4 | 30.9 |
+| mik-250-20-75-1 | 3.1 | 3.7 | 3.2 |
+| sp150x300d | 23.2 | 29.0 | 14.5 |
+| beavma | 8.1 | **37.4** | 12.5 |
+
+The path is a real lever on the network row (`nexp-4-2` 28.2 -> 7.0 %, cut support
+median 7, max 31), but a lexicographic "fewest continuous first" rule breaks `beavma`
+(8.1 -> 37.4 %). SCIP's `aggregateNextRow` blends density, slack and integer content
+into one score per candidate row; that blend, not a lexicographic rule, is the next
+thing to port, then this table again. The `1` arm's 20 s root on `nexp-4-2` and
+`neos-911970` (the time-ceiling overrun of §12.3) is unchanged.
+
+### 12.6 HiGHS's path rules, ported under the flag (2026-11-09)
+
+Under `DISCOPT_MILP_ROOT_CMIR`, `cmir.rs` now aggregates the way `HighsPathSeparator.cpp`
+does (lines 30-420): every row starts a path except a substitution row; an *equality* row
+in which exactly one continuous column is off its bound is that column's substitution
+row and is applied whenever the column appears; the next row for the eliminated column
+is drawn pseudo-randomly (deterministic in start row, level and column) among the tight
+rows containing it whose multiplier lies in [1e-6, 1e6], rotating from the draw
+(`findRow`); path length 6 (`maxPathLen`). Off the flag the separator is unchanged.
+Soundness does not depend on these choices (every row of the standard form is an
+equality); the design sampling test covers the new path (40 seeds).
+
+First cut of the port blocked inequality rows with one continuous column as start rows,
+which HiGHS does not (`kEq` only): `neos-911970` 5.4 -> 44.6 %. With substitution rows
+restricted to rows without a slack column (`p3_entry20_hpath2_*.json`; the first cut is
+`p3_entry20_hpath_*.json`), root gap %, 20 s, no bound past an optimum (12 / 12):
+
+| row | today | `only` §12.3 | `only` + path | `1` §12.3 | `1` + path | HiGHS presolve off |
+|---|---|---|---|---|---|---|
+| beavma | 18.4 | 8.1 | **4.8** | 8.1 | **4.2** | 0.9 |
+| nexp-50-20-1-1 | 27.6 | 0.0 | 0.0 | 34.5 | 24.1 | 3.8 |
+| nexp-50-20-4-2 | 9.9 | 28.2 | **8.5** | 12.7 | **7.0** | 0.6 |
+| sp150x300d | 15.9 | 23.2 | 21.7 | 11.6 | 14.5 | 2.6 |
+| neos-911970 | 57.5 | 5.4 | 5.4 | 30.9 | 30.9 | 4.8 |
+| mik-250-20-75-1 | 4.1 | 3.1 | 3.1 | 2.7 | 2.5 | 1.75 |
+
+Against the pre-registered bar: `1` gains >= 2 pp on **4 of 6** (beavma, nexp-1-1,
+nexp-4-2, neos-911970) but ends within 2 pp of HiGHS on 1 (mik-1; 2 needed); `only`
+gains on 3 and is within 2 pp of HiGHS on 3. Not passed; `1` is one row short on the
+second clause. Still open: `sp150x300d` (SCIP's c-MIR alone 5.2 %), the `1` arm's root
+time overrun (21 s / 20 s on beavma / neos-911970), and the GMI / c-MIR split (`only`
+wins nexp-1-1 and neos-911970, `1` wins sp150x300d).
+
+### 12.7 The `=1` arm's time overrun, root-caused (2026-11-09)
+
+`neos-911970`, `DISCOPT_MILP_ROOT_CMIR=1`, root-only probe at 20 s returned at 39.5 s.
+Profile (one driver call): root cut loop 10.2 s (inside its `root_cut_time_s`), root dive
+9.4 s, then with the dive capped, a RENS sub-MIP 19.8 s and strong branching 33.7 s over
+8 calls. Three defects, fixed in that order:
+
+1. **The root dive is unbounded.** Over the cut-augmented LP (215 dense rows) each of
+   its up-to-840 fixings re-solves the LP. Under the flag a dive now stops at
+   `ROOT_DIVE_SHARE` = 10 % of the time left, at most 2 s (`DiveCapped`). HiGHS budgets
+   heuristics as a share of the search.
+2. **Strong branching checked the deadline once per node, before probing.** It now
+   stops probing past the deadline and branches on the best candidate so far
+   (`StrongBranchDeadlineStop`; only the branching variable can change). 33.7 -> 19.9 s.
+3. **A heuristic sub-solve inherited the parent's `extend_no_incumbent_s`** (the
+   NO_STALL_TREE rule: with no incumbent at the time limit, move the deadline to the
+   whole remaining budget). RENS runs exactly when there is no incumbent, so its 2 s
+   sub-budget became the parent's full budget, counted from the sub-solve's start:
+   19.8 s. `sub_solve_options` now drops the parent's deadline policies
+   (`extend_no_incumbent_s`, `stall_time_s`) for every sub-solve (RENS/RINS and the P1
+   stall re-solve); regression test `sub_solve_options_drop_the_parents_deadline_policies`.
+   **This one is a default-path bug** (it lives in #2196's code); on the last §5 panel's
+   default arm it shows as 1 overrun in 372 solves (`sp150x300d` 21.1 s at 20 s), because
+   the default root dive usually supplies an incumbent first. Ported to #2196.
+
+After all three: 19.2 s, inside the limit. The `=1` arm's root bound on `neos-911970`
+(30.9 %) is unchanged: that is the GMI / c-MIR split, still open.
+
+### 12.8 c-MIR first, GMI on stall: the entry bar is met (2026-11-09)
+
+HiGHS's length cap (100 + 0.15 n) already applies to every root cut (`CUT_LEN_BASE`,
+`CUT_LEN_FRAC`), so GMI density is not the issue. Under `DISCOPT_MILP_ROOT_CMIR=1` the root
+loop now separates c-MIR alone until the bound stalls (or c-MIR finds nothing), then GMI
+joins with a fresh stall allowance (`RootCmirGmiHandover`). A per-solve, measured rule:
+the rows `only` won (nexp-1-1, neos-911970) are closed by c-MIR before it stalls; GMI
+still runs where c-MIR runs dry. `p3_entry20_cmirfirst_1.json`, root gap %, 20 s:
+
+| row | today | c-MIR first, then GMI | HiGHS presolve off |
+|---|---|---|---|
+| beavma | 18.4 | **3.9** | 0.9 |
+| nexp-50-20-1-1 | 27.6 | **0.0** | 3.8 |
+| nexp-50-20-4-2 | 9.9 | **7.0** | 0.6 |
+| sp150x300d | 15.9 | 21.7 | 2.6 |
+| neos-911970 | 57.5 | **6.4** | 4.8 |
+| mik-250-20-75-1 | 4.1 | 2.5 | 1.75 |
+
+**Pre-registered entry bar: met.** >= 2 pp on 4 of 6 (beavma, nexp-1-1, nexp-4-2,
+neos-911970); within 2 pp of HiGHS on 3 (nexp-1-1, neos-911970, mik-1); no root bound
+past an optimum (6 / 6). Caveats for the panel: `sp150x300d` is worse than today
+(GMI now arrives only after c-MIR stalls), and the root takes 17-20 s of 20 on three rows
+(nexp-1-1, nexp-4-2, neos-911970), which a full solve pays in tree time. Next: the §5
+panel (`d2_flag_panel.py --flag DISCOPT_MILP_ROOT_CMIR --fired RootCmirGmiHandover`,
+MIPLIB-38 + M, 3 reps, 20 s) and the corpus differential.
+
+### 12.9 §5 panel (2026-11-09): not graduated; the root starves the tree
+
+`d2_flag_panel.py --flag DISCOPT_MILP_ROOT_CMIR --fired RootCmirGmiHandover` (MIPLIB-38 + M,
+3 reps, 20 s, 372 solves; `gap-plan-p3/p3_root_cmir_panel.json.gz`): bar 1 passes (no bound
+past an optimum); certified 126 -> 127 (`gesa2` 0 -> 3, `nexp-50-20-1-1` 0 -> 1,
+`neos-3610051-istra` 3 -> 0); nodes on the always-certified set 60,244 -> 34,685 (-42 %).
+Fails: bar 1b (`istra`), 2c (6 dual losses, cap 1), 2d (incumbent lost on 7: `enlight8`,
+`neos-911970`, `nexp-50-20-1-1`, `nexp-50-20-4-2`, `sp150x300d`, `istra`,
+`neos-3118745-obra`), 2e (median primal gap 0.137 -> 0.212). The bound side works; the
+cost is the §12.8 caveat: the root takes most of the 20 s, so the tree and its primal
+heuristics starve. Default OFF. One rework is justified by the measurement (bound the
+root's share of the budget under the flag, then re-panel); if that panel fails too, the
+flag and its implementation are retired.
+
+### 12.10 Primal starvation fixed from HiGHS evidence; presolve hypothesis falsified (2026-11-09)
+
+The §12.9 starvation was chased in quick 20 s target solves (not panels), with every step
+taken from HiGHS's source or its logs rather than guessed:
+
+- **HiGHS's incumbent sources** on the rows the flag lost (`p3_highs_solution_sources.*`):
+  sub-MIP at the root (`L`) — sp150x300d 0.1 s, nexp-50-20-4-2 1.6 s, neos-911970 2.1 s.
+- **Ported** (`P3_*` experiment knobs, flag-on path only): per-round cut ageing as
+  `performAging` (`HighsLpRelaxation.cpp:629-675`), randomized rounding after every root
+  round with no incumbent (`HighsMipSolverData.cpp:1858`), RENS/RINS as
+  `HighsPrimalHeuristics.cpp` (fixing dive to 0.6 / RINS 0.25, sub-MIP on the cut LP with
+  ≤ 5 rounds, no strong branching, `200 + nodes/20`, one recursion level). Tree LPs expel
+  zero artificials (short bases had refused every warm start). Incumbents came back on every
+  row that had lost one; certified on the targets 0 -> 3 (istra guard, beavma, gesa2).
+- **Falsified: "presolve is why HiGHS solves our RENS neighbourhood".** HiGHS solves the
+  neighbourhood discopt builds (dumped, `P3_RENS_DUMP`) at 1 node with presolve OFF and
+  heuristics OFF alike (`p3_highs_on_rens_dump.py`). What does it is the root cut loop:
+  LP 64.0 -> 68.998 (sp150, opt 69) and 16.2 -> 29 (nexp-50-20-1-1, opt 29) in ≤ 0.3 s. On
+  the same MPS, discopt's root reaches 67 (1.4 s) and 26 (12 s with c-MIR on). Presolve was
+  not built.
+- **Bug found:** `lifted_mic_knapsack`'s cover sort used a tolerance comparator that is not a
+  total order; Rust's sort panicked on it (mik-250-20-75-1 in a sub-MIP). Fixed with buckets.
+
+Next is the separator itself — strength and speed on these neighbourhoods, where HiGHS's
+root is the measured reference (`nbhd_*.mps` can be regenerated with `P3_RENS_DUMP`).
+
+### 12.13 §5 bundle panel (2026-11-10): not graduated
+
+Bundle `DISCOPT_MILP_ROOT_CMIR,DISCOPT_MILP_RAND_ROUND,DISCOPT_MILP_RUN1_CONTINUE` after the
+fold (`62e83dab`), `d2_flag_panel.py --fired SepCmirCuts`, MIPLIB-38 + M, 3 reps, 20 s, 372
+solves (`gap-plan-p3/p3_bundle_panel.json.gz`). Bar 1 passes (372 checks, no bound past an
+optimum). Certified 129 -> 123 (incl. bimodal p0548): gained `gesa2` 0 -> 3,
+`nexp-50-20-4-2` 0 -> 3; lost `2122` 3 -> 0, `b-ball` 3 -> 0, `dcmulti` 6 -> 0 (bar 1b).
+Nodes on the 37 always-certified rows 38,370 -> 33,357 (-13 %). Dual losses 4 (cap 2),
+incumbent lost on `enlight8`, median primal gap 0.012 -> 0.045. Fails 1b, 2a-2e.
+
+The losses are tree-side, not root time: `b-ball` runs 20,135 nodes (off 5,753) and ends at
+a WEAKER bound (-1.5499 vs -1.50015, certified off in 2.3 s); `dcmulti` (off 4 s) ends with a
+worse bound and incumbent. Under the flag the tree differs in its root cut set (all-row
+c-MIR + tableau, pruned/remapped), full bases (expelled artificials) and the RENS/RINS
+port; which one weakens the node bound on these rows is the next measurement. Default OFF.
+
+### 12.14 Where the HiGHS gap is: a population-wide ablation of HiGHS itself (2026-11-10)
+
+The instance-by-instance P3 work (§12.10-12.13) netted **zero**: on MIPLIB-38 + M at 20 s
+(1 rep, `p3_ab_main_vs_branch.*`) main certifies 43/62, this branch 43 (flag off) and 41
+(flag bundle on), HiGHS 59. So the question was re-asked structurally: which HiGHS stages
+account for its lead? HiGHS (ref source, ablation build `p3_highs_*.patch`, 1 thread, 20 s)
+with one stage off per arm (`p3_highs_ablate_population.*`):
+
+| arm | certified | lost vs default |
+|---|---|---|
+| default | 60 | - |
+| presolve off / restarts off / symmetry off / heuristics off / strong branching off | 60 each | 0 |
+| conflict analysis off | 61 | 0 |
+| presolve + restarts + symmetry + conflicts all off | 60 | 0 |
+| **cuts off** (all separators, root and node) | **47** | **13** |
+
+At this budget on this population HiGHS's lead is its **cut separation**: without cuts it
+certifies 47 (discopt: 43); without presolve, restarts, symmetry and conflict analysis
+together it still certifies 60. The 13 rows lost without cuts are the P3 target list
+(beavma, sp150x300d x2, nexp-50-20-1-1/-4-2, neos-911970, neos17, gsvm2rl3, enlight_hard,
+fiber, issue-2446, b-ball, neos-3611689-kaihu). This retires the "missing presolve /
+restarts / conflicts" hypotheses for this panel and makes one general component the work.
+
+Per family (`p3_highs_ablate_separators.*`): no single family is decisive. Tableau off 58,
+path off 58, mod-k off 60, implied-bound + clique off 59, node cuts off 58; **path only 58,
+tableau only 57**. The families back each other up, so HiGHS with *either* its tableau or
+its path separator alone keeps almost all of its lead. Discopt's flag ports both and its
+certified count did not move, so the gap is in how the same families perform on full
+models, or downstream of them.
+
+Root bound, HiGHS (presolve off, root only) vs discopt (flag bundle, root only), on the
+cut-dependent rows (`p3_root_cmp_highs.py`): HiGHS tighter on beavma 0.82 vs 5.81 %,
+sp150x300d 0.00 vs 2.90, nexp-4-2 0.00 vs 1.41, neos-911970 4.77 vs 13.70, neos17 2.60 vs
+9.97, b-ball 6.55 vs 21.21, enlight_hard 29.7 vs 46.0, enlight8 25.9 vs 59.3, fiber 2.11 vs
+3.07, mik-1 1.75 vs 2.40; comparable or better for discopt on nexp-1-1 (0/0),
+gsvm2rl3 (23.9/22.2), neos-3611689-kaihu (4.2/2.5). And HiGHS's root takes **0.2-1.8 s**
+where discopt's takes **2-20 s**. Two general gaps follow: root cut quality on full models
+(10 of 14 rows) and root cost (5-20x), which leaves the tree little time; on the rows with
+a comparable root, HiGHS still certifies via its tree.
+
+### 12.15 Separator differential on full models (2026-11-10)
+
+Method (`p3_cut_eval_same_lp.py`, `p3_cut_single_gain.py`, dumps from
+`p3_highs_separation_trace_dump.patch` / `p3_separator_differential_instruments.patch`): each
+solver's root cuts, round by round, are added to the **same** LP relaxation (HiGHS's LP,
+presolve off; discopt's structural columns verified equal to the MPS columns via the
+objective). beavma:
+
+| cuts from rounds | HiGHS cuts -> bound | discopt cuts -> bound |
+|---|---|---|
+| 1 | 11 -> 171,642 | 13 -> 156,315 |
+| 2 | 33 -> 223,139 | 22 -> 159,736 |
+| 20 | 191 -> 348,816 | 148 -> 291,371 |
+
+(LP without cuts 155,778.) The strong first round is HiGHS's path separator (path-only: 22
+cuts -> 176,761). Per-cut single gains show discopt's **generator** is not the round-1
+problem: its 82 round-1 candidates include cuts worth 4,535 / 2,131 / 2,096 alone (sum 47k
+vs HiGHS's 22 path cuts 23.7k; all 82 together 168,688). Its **selection** kept the 13
+weakest (single gains 0-139). Cause: a porting bug in the score's active-entry rule — HiGHS
+counts an entry active unless its column sits at the activity-minimising bound
+(`HighsCutPool.cpp:309-330`); the port counted only columns strictly inside both bounds, so a
+zero-gain cut with an active norm of 3.7e-4 scored highest and set the adaptive threshold.
+
+Fixing the rule makes round 1 stronger (8 cuts -> 163,953) but the root WORSE overall on
+the 14 cut-dependent rows (beavma 5.8 -> 47.2 %, sp150x300d 2.9 -> 26.1 %): with a correct
+score, the 0.1 parallelism filter leaves 2-8 cuts per round from discopt's 80-160
+candidates and the loop stalls; HiGHS keeps 10-22 per round under the same filter
+(parallelism measures verified identical). Keeping unselected candidates in a persistent
+pool, as HiGHS does, recovers some rows (nexp-50-20-4-2 0.0 %, gsvm2rl3 6.9 %) but not the
+big ones (beavma 33.8 %). Both changes are reverted (patch kept); the measured lesson is that
+HiGHS's selection only works on HiGHS's candidate population, which is far less redundant
+than ours after round 1. Porting pieces in isolation does not transfer.
+
+### 12.16 Option A, phase 1: HiGHS's cut-generation core ported and replayed bit for bit (2026-11-10)
+
+Owner decision after §12.15: port HiGHS's root separation subsystem wholesale, bottom-up,
+checking each layer against HiGHS itself before building the next. Phase 1 is the layer
+every separator calls: `HighsCutGeneration`'s single-row core.
+
+**Ported** (`crates/discopt-core/src/lp/highs_cutgen/`), statement for statement:
+`HighsCDouble` (`cdouble.rs`); `HighsRandom` and the hash helpers (`random.rs`);
+`pdqsort`/`pdqsort_branchless` and the libstdc++ `partition`, `partial_sort`, heap and
+`upper_bound` (`stdalgo.rs`), because the cover comparator is not a strict weak order and
+the cut depends on the algorithm's comparison sequence; `HighsIntegers` (`integers.rs`);
+and `preprocessBaseInequality`, `determineCover`, the knapsack, mixed-binary and
+mixed-integer lifted covers, `cmirCutGenerationHeuristic`, `tryGenerateCut` and
+`postprocessCut` (`core.rs`). Not ported: the `lpSol = false` cover order, which only
+conflict generation uses.
+
+**Instrument.** A HiGHS build patched to print every main-solve `generateCut` call
+(`p3_highs_generatecut_dump.patch`, `HS_DUMP_GC=<file>`): the transformed row, bounds, LP
+values and integrality going in, the random state, the core's cut (compensated rhs, both
+parts) and integrality flags, the untransformed cut with its global bounds, and the
+postprocessed cut. Collected at the root (`opt_root.txt`, presolve off) on the
+MIPLIB-38+M population, at most 3000 records per instance (`p3_highs_generatecut_collect.py`).
+
+**Result.** 117,534 records from 50 instances (the rest generate no cuts at the root):
+40,198 core cuts and 40,023 postprocessed cuts. **0 mismatches** in outcome, indices,
+coefficient bits, rhs bits (both parts), integrality flags and random state after the
+call. Paths exercised: mixed-integer cover 23,176, mixed-binary cover 13,353, knapsack
+cover 859, c-MIR 2,810. The forced c-MIR route for an unbounded integer occurs 0 times
+in this population.
+
+**Is the probe live (§6)?** Three of four injected deviations are caught:
+- an extra `lo * v.hi` term in `CDouble * CDouble`: 1,916 mismatches;
+- the cover's contribution order reversed: 3,014 mismatches;
+- the cover's hash tiebreak reversed, or its random draw replaced by 0: **0 mismatches**.
+
+The tiebreak never decides a recorded cut, so the replay does not verify the hash. It is
+pinned instead by `hash_and_generator_match_highs_reference_values`, whose values come
+from a C++ program built against HiGHS's own headers
+(`p3_highs_random_hash_reference.cpp`).
+
+**Tests.** `fixture_replays_bit_identically` replays a 331-record sample committed as
+`crates/discopt-core/tests/data/highs_cutgen_replay.txt`: at most 2 records of each outcome
+kind per instance, rows of 120 nonzeros or fewer. The full replay is the `#[ignore]`d
+`full_dump_replay`, run with `DISCOPT_HIGHS_CUTGEN_REPLAY=<dump dir>`.
+
+**Next (phase 2).** `HighsTransformedLp` (bound substitution with variable bounds, slack
+substitution, `untransform`) and `HighsLpAggregator`, replayed the same way: dump
+`transform`'s input (the aggregated row and the LP state), compare its output with what
+the core consumed here. After that, the path and tableau separators (phase 3) and the cut
+pool, selection, ageing and separation round (phase 4). No solver path calls the port yet,
+so this phase changes no result.
+
+### 12.17 Option A, phase 2: `HighsTransformedLp` ported and replayed (2026-11-10)
+
+`transformed_lp.rs` ports `HighsTransformedLp` (constructor, `transform`,
+`untransform`) and the variable-bound choice it depends on
+(`HighsImplications::getBestVub`/`getBestVlb`, and `cleanupVub`/`cleanupVlb` with
+`allowBoundChanges = false`, the form `transform` calls). `sparse_vec.rs` ports
+`HighsSparseVectorSum`, whose first-touch order and back-to-front `cleanup` swap fix
+the column order of every row built through it.
+
+**Instrument.** `p3_highs_transformedlp_dump.patch` (`HS_DUMP_TL=<file>`,
+`HS_DUMP_TL_MAX` objects per run) dumps each transformed LP's inputs at construction:
+LP values and reduced costs, global and slack bounds, integrality, and each column's
+variable bounds after `cleanupVarbounds`, in the store's iteration order with the
+node-queue counts. It then dumps the constructor's outputs and every
+`transform`/`untransform` call on that object, in order. Each call carries the
+bounds it reads, because the global domain can tighten between calls; an
+untransform also carries the LP rows of the slacks it resubstitutes. Collected at
+the root on MIPLIB-38+M, at most 12 objects per instance
+(`p3_highs_transformedlp_collect.py`).
+
+**Result.** 526 constructions on 47 instances; 29,659 columns with variable bounds;
+984,577 transforms (915,403 returning a row) and 104,525 untransforms (104,520
+returning a cut). **0 mismatches**: constructor distances and chosen variable bounds,
+and every output row, bound, LP value and rhs are bit-identical.
+
+**Variable bounds matter here.** HiGHS has them on 29 of the 47 instances even with
+presolve off. They come from its clique-table and implication setup, which discopt
+has no counterpart for. The port reads them through `TlSetup`; wiring it in will
+need a source for them (§12.18).
+
+**Is the probe live (§6)?** On a six-instance subset (132,485 transforms):
+- dropping `getBestVub`'s distance filter: 7,339 mismatches;
+- a stable `cleanup` in place of HiGHS's swap: 5,742 mismatches;
+- flipping the integral simple-bound tie in `transform`'s first loop: 0 mismatches.
+  That choice is always overwritten by the integer loop that follows, so it is dead
+  in HiGHS too.
+
+Committed sample: `crates/discopt-core/tests/data/highs_transformedlp_replay.txt`,
+the first transformed LP of egout, gr4x6, bell5, enlight8 and lseu
+(`transformed_lp_fixture_replays_bit_identically`). The full replay is
+`full_transformed_lp_replay` with `DISCOPT_HIGHS_TL_REPLAY=<dir>`.
+
+### 12.18 Option A, phase 3: path and tableau separators ported and replayed (2026-11-10)
+
+`separators.rs` ports `HighsLpAggregator`, the `generateCut` and `finalizeAndAddCut`
+wrappers (transform, core, untransform, postprocess, violation check,
+`HighsDomain::tightenCoefficients`, pool submission), `HighsPathSeparator` (path
+aggregation and the path-mixing cut) and `HighsTableauSeparator`. They read the LP
+through `SepContext`/`TableauContext` and the pool through `CutSink`, so the same code
+runs on discopt's LP and pool once it is wired in.
+
+**Instrument.** `p3_highs_separator_dump.patch` supersedes the phase 1 and 2
+patches (it contains them). It adds the LP to each transformed-LP dump: row bounds and
+duals, the column-wise matrix, every row, and max row coefficients. It brackets each
+path and tableau call in a section with the separator's state: the path generator's
+random state, the tableau separator's `numTries`/`numCalls`, the cut generator's seed,
+the basis, the DSE weights, and every B^-1 row HiGHS fetched, in HiGHS's index order.
+Every pool submission is recorded with the pool's answer and its cut count. The replay
+runs the ported separator on the replayed transformed LP, answers its pool submissions
+from that record, and requires the same cuts in the same order. It also requires the
+same number of transform/untransform calls and the same set of B^-1 rows requested.
+
+**Result.** At most 6 transformed LPs per instance, root, presolve off: 272 path
+calls, 272 tableau calls, **41,117 cuts, 0 mismatches**.
+
+**The first run had 7 mismatched calls, and the cause was the replay, not the port.**
+HiGHS's pool propagates each accepted cut into the global domain, so bounds tighten
+in the middle of a separator call. The first replay loaded bounds once per call,
+which gave beavma (path) a different aggregation path and flugpl/p0548 (tableau)
+last-bit rhs differences. `TlContext::begin_call` now applies the bounds HiGHS read
+at each transform/untransform; after that fix, all calls match. **For the wiring:**
+HiGHS's cuts see bounds tightened by earlier cuts of the same round. Pool
+propagation into the global domain is part of the subsystem, not a detail.
+
+**Is the probe live (§6)?** On a 4-instance subset (2,435 cuts):
+- path length 6 -> 5: 10 mismatches;
+- tableau tries cap 200 -> 20: 12 mismatches;
+- tableau weight ratio 1e4 -> 1e2: 19 mismatches;
+- the tableau's second score factor 0.01 -> 0.02: 0 mismatches. It applies only after
+  50 cuts in one call and is never decisive in that subset.
+
+Committed sample: `tests/data/highs_transformedlp_replay.txt` (first transformed LP
+of egout, gr4x6, bell5, flugpl, beavma). It is replayed at the transformed-LP level
+(`transformed_lp_fixture_replays_bit_identically`) and at the separator level
+(`separators_fixture_replay_bit_identically`).
+
+### 12.19 Option A, phase 4a: `HighsCutPool` ported and replayed (2026-11-10)
+
+`pool.rs` ports the single-threaded `HighsCutPool`. That covers storage in reusable
+row slots (`HighsDynamicRowMatrix`: deleted row indices are reused last-in
+first-out, which fixes the index every selection tiebreak hashes) and duplicate
+rejection through `compute_cut_hash` (`vector_hash` + `double_hash_code`, pinned by
+reference values from HiGHS's headers in `p3_highs_vector_hash_reference.cpp`). It
+also covers `separate` (active-norm score, adaptive `minScoreFactor`, the 0.1
+parallelism filter), `performAging`, `lpCutRemoved`, `resetAge`, and the
+propagation-row density limits. Propagation itself stays outside the pool: a
+`PoolObserver` hears about added and deleted cuts.
+
+**Instrument.** `p3_highs_pool_dump.patch` (`HS_DUMP_POOL=<file>`) logs every
+operation on the main solve's global pool, in order: `addCut` inputs and the
+returned index; `separate`'s solution and domain, the selected indices and the
+score state after; `performAging`; `lpCutRemoved`; and `resetAge` (called by
+propagation when a cut tightens a bound).
+
+**Result.** Root, presolve off, MIPLIB-38+M: 199,956 `addCut` calls (116,733
+accepted, 83,223 duplicates), 1,147 selection calls choosing 8,333 cuts, 225
+agings, 5,151 LP removals, 11,970 age resets. **0 mismatches** in returned indices,
+selections and score state.
+
+**First run:** a mismatch at the 629th `addCut` on egout. The port's
+`vector_hash` lacked HiGHS's final `* fibonacci_muliplier()`. More cuts collided, so
+the port rejected a cut HiGHS kept. Caught by the replay, fixed, and pinned by the
+reference test.
+
+**Is the probe live (§6)?** On a 5-instance subset:
+- maxpar 0.1 -> 0.2: 92 mismatches;
+- initial `minScoreFactor` 0.9 -> 0.8: 46 mismatches;
+- duplicate threshold `1 - 1e-6` -> `1 - 1e-3`: 0 mismatches. No pair with the same
+  hash and support has parallelism in that band.
+
+Committed sample: `tests/data/highs_cutpool_replay.txt` (egout, gr4x6, flugpl,
+bell5, issue-2173; `cut_pool_fixture_replays_bit_identically`).
+
+**Remaining for the wiring (phase 4b):** the root separation loop
+(`HighsMipSolverData::evaluateRootNode`: at most `2*sqrt(maxTreeSizeLog2)` rounds
+and the smoothed-progress stall rule); `HighsSeparation::separationRound` (separate,
+propagate, resolve, add the pool's selection to the LP, LP ageing via
+`HighsLpRelaxation::performAging`); and cut propagation into the global domain.
+
+### 12.20 Option A, phase 4b: the port wired into the root loop, and its first panel (2026-11-10)
+
+`DISCOPT_MILP_ROOT_CMIR=highs` (default OFF; a new arm of the P3 flag) runs the root
+rounds through the port. `bridge.rs` builds HiGHS's LP view from the standard-form root
+LP each round: each row's range comes from its singleton slack column, or it is an
+equality when it has none. B^-1 rows are rescaled to HiGHS's slack sign. Integral rows'
+bounds and integer columns' bounds are rounded as HiGHS's setup rounds them. The view is
+fed through the ported tableau and path separators into the persistent ported pool; the
+pool's selection becomes the round's `>=` cuts. Rows the LP drops are reported back
+(`lpCutRemoved`), so the pool can offer them again. Not ported: propagation of pool cuts
+into the global domain, variable bounds (clique table / implications), and the
+implied-bound, clique and mod-k separators.
+
+**Soundness defect found in the bridge and fixed before any measurement counted.**
+The first wired run returned false certificates: fiber "optimal" at 1,306,143
+(optimum 405,935), nexp-50-20-4-2 at 124 (71), beavma "infeasible". The cause was
+discopt's `1e20` infinity sentinel (CLAUDE.md "Key Constraints"). Passed through
+unmapped, it failed HiGHS's `== kHighsInf` tests, so the generator complemented
+against a bound of 1e20 and the cancellation produced invalid cuts. Every bound is now
+mapped at the bridge.
+
+**Instruments.** `DISCOPT_HIGHS_SEPA_CHECK_POINT=<file>` checks every pool cut against a
+reference point. It first checks the point itself: rows, bounds, and integrality in the
+view. `DISCOPT_MILP_DUMP_INCUMBENT=<path>` writes the top-level incumbent of each engine
+call that has integer columns. With a genuine integer reference, rounds 1-2 on fiber
+and nexp-50-20-4-2 have 0 violated cuts (106 and 213 checked in round 1).
+
+**Retracted (§11).** Two earlier probe verdicts were wrong:
+- "Most cuts are invalid" (made after the infinity fix) used a point that failed the
+  integrality check: the dump had captured the output of an LP-only engine call.
+- "issue-2446 and 2122 violate their oracles" (made during the panel) came from my
+  checker assuming minimisation; both instances are maximisation problems.
+
+**Root gap vs the bundle** (route, root only, 13 cut-dependent rows): better on 8.
+- beavma 5.81 -> 0.21 %
+- neos17 9.97 -> 1.67
+- b-ball 21.21 -> 0.11
+- nexp-50-20-4-2 1.41 -> 0.00
+- gsvm2rl3 22.24 -> 15.07
+- enlight_hard 45.95 -> 40.54
+- fiber 3.07 -> 2.41
+
+Worse on 3:
+- sp150x300d 2.90 -> 5.80
+- mik-250-20-75-1 2.48 -> 4.88
+- neos-3611689-kaihu 2.52 -> 3.36
+
+Unchanged: neos-911970, enlight8, nexp-50-20-1-1. Root wall is lower on every row.
+
+**Population A/B** (`p3_ab_highs_port.py`, MIPLIB-38+M, 62 rows, 20 s, 2 in parallel,
+arm order rotated). Certified: **bundle 41, port 45, HiGHS 59**. Total wall: 525.8 /
+410.1 / 225.8 s. The port gains nexp-50-20-1-1, beavma and dcmulti (dcmulti appears
+twice in the population) and loses nothing. Cert-clean: 512 checks
+(`p3_ab_score_sense.py`, sense from the panel loader), 0 violations.
+
+Still certified by HiGHS only (13 rows):
+- the four mik-250-20-75 rows: a dual gap; the port's root is weaker than the
+  bundle's here;
+- enlight8, sp150x300d, neos-911970, neos17, b-ball, bppc8-02, gsvm2rl3, 2122,
+  issue-2446.
+
+b-ball's root is at 0.11 %, so on b-ball the gap is in the tree, not the root.
+
+**Next.** HiGHS's root still beats ours on neos-911970, sp150x300d, the mik family and
+enlight. The unported pieces this panel points at:
+- propagation of pool cuts into the global domain: the replay showed HiGHS tightens
+  bounds within a single round;
+- variable bounds, which HiGHS has on 29 of 47 instances;
+- `evaluateRootLp`'s per-round propagation and reduced-cost fixing.
+
+### 12.21 Root propagation, reduced-cost fixing and variable bounds in the port (2026-11-10)
+
+These are the three pieces §12.20 named, each behind its own lever inside the
+`highs` arm.
+
+- **Propagation + reduced-cost fixing** (`DISCOPT_HIGHS_SEPA_PROPAGATE`). Each root
+  round runs reduced-cost fixing against the incumbent (LP value less a 1e-6 relative
+  margin), then FBBT over every LP row, cuts included. The tightened bounds go into
+  the next round's box and into the still-pending root node
+  (`TreeManager::tighten_root_box`), as HiGHS's `propagateAndResolve`,
+  `evaluateRootLp` and `addRootRedcost` do.
+- **Variable bounds** (`DISCOPT_HIGHS_SEPA_VBOUNDS`, `vbound.rs`). The VUB/VLB halves
+  of HiGHS's `extractCliques` (model rows, once) and `extractCliquesFromCut` (every
+  accepted pool cut of length <= 100), with `addVUB`/`addVLB` semantics, feeding the
+  transformed LP's `getBestVub`/`getBestVlb`. HiGHS runs model-row extraction only
+  inside presolve, which my dumps had off; its bounds there come from probing and
+  cuts. On the first transformed LP, 1,082 bounds match HiGHS's, 2,193 are HiGHS's
+  alone (probing, not ported) and 16,861 are ours alone (row extraction)
+  (`variable_bound_discovery_vs_highs`).
+
+**Soundness.**
+- `derived_variable_bounds_hold_at_every_feasible_point` samples every feasible point
+  of a small box.
+- The check-point probe now judges only the top-level solve. On 7 instances
+  (22433, 23588, sp150x300d, neos17, fiber, nexp-50-20-4-2, beavma) it reports 0
+  violated cuts of ~89k checked, with variable bounds on and off.
+
+**Retracted (§11):** "the baseline port makes invalid cuts in late rounds". The
+probe judged cuts from the RENS/RINS sub-MIPs, whose root loops run inside fixed
+neighbourhoods, against a reference outside them. Those cuts are valid where they
+are used. A first propagation panel was discarded because my own compiles loaded the
+machine (load 8.8 on 4 cores, §9).
+
+**Four-arm panel** (`p3_ab_highs_four.*`, 62 rows, 20 s, idle machine; 668 sense-aware
+soundness checks, 0 violations):
+
+| arm | certified | total wall |
+|---|---|---|
+| port alone | 45 | 427.2 s |
+| + propagation/RC fixing | 45 | 420.6 s |
+| + variable bounds | **47** | 397.3 s |
+| + both | 47 | 399.1 s |
+
+- **Variable bounds:** +2122 (certified at 20.4 s), +sp150x300d (both copies;
+  1 s / 19 nodes, against a time-out at 10k nodes), -bell5.
+- **bell5 is systematic:** 3/3 reps certify in 1.2 s without variable bounds and 0/3
+  within 20 s with them (130-139k nodes). Its root is *tighter* with them (3.38 vs
+  3.84 %), so the loss is in what the tree inherits; it is not yet diagnosed.
+- **Propagation/RC fixing:** neutral, alone or combined, so it is default OFF and kept
+  as a documented opt-in (§5).
+
+**Decision.** In the `highs` arm, `VBOUNDS` stays ON and `PROPAGATE` is OFF. HiGHS
+certifies 59. Still HiGHS-only: the mik family (4), enlight8, neos-911970, neos17,
+b-ball, bppc8-02, gsvm2rl3, issue-2446, plus bell5 under variable bounds.
+
+### 12.22 Where the remaining gap is: HiGHS stripped to discopt's feature set (2026-11-10)
+
+The single-stage ablations of §12.14 found most HiGHS stages worth 0 because the others
+back them up. This round strips HiGHS **cumulatively** toward the features discopt has
+(`p3_highs_strip.py`, 62 rows, 20 s, 1 thread). What HiGHS loses on the way is what
+discopt still lacks, ranked by measured impact.
+
+| step | certified | lost (vs previous) |
+|---|---|---|
+| HiGHS default | 59 | |
+| A1 presolve off everywhere, sub-MIPs included (`mip_root_presolve_only`) | 57 | enlight_hard, issue-2446, neos-911970 (one gained) |
+| A2 + restart, symmetry, conflict off | 58 | noise (±1) |
+| A3 + node cuts, mod-k, implied-bound and clique separators off | **51** | **b-ball, bell5, enlight_hard, mik-3, neos-3610040-iskar, neos-3610051-istra, neos-911970** |
+| A4 + heuristics discopt lacks off (feasibility jump, ZI round, shifting, root red-cost) | 50 | net -1 |
+| A5 + RENS/RINS off | 48 | net -2 |
+
+**HiGHS stripped to discopt's features certifies 48; discopt certifies 47.** So
+the 12-row gap is accounted for by the features removed above.
+
+A3 split, each removed from A2 (`p3_highs_strip_split.py`):
+
+| removed | certified | lost |
+|---|---|---|
+| node cut separation | **53 (-5)** | b-ball, mik-1, mik-3, neos-3610040-iskar, neos-3610051-istra |
+| mod-k separator | 56 (-2) | enlight_hard, neos-911970 |
+| implied-bound + clique separators | 57 (-1) | neos-911970 |
+
+**Supporting measurements.**
+- **Node counts.** On the mik rows HiGHS needs 91-453 nodes; discopt processes
+  5-6.6k nodes at 2-10x HiGHS's node rate and stays 1.6-3 % open. The gap is in what
+  each node proves, consistent with node separation.
+- **Sub-MIP presolve.** HiGHS presolves every sub-MIP (`HighsPrimalHeuristics.cpp:124-130`)
+  even with top-level presolve off. The §12.14 "presolve off: 0" arm kept sub-MIP
+  presolve; turning it off too costs 2 (`p3_highs_submip_presolve.py`).
+- **Primal sources.** HiGHS's improving solutions on the open rows are mostly `L`
+  (sub-MIP) at node 0. discopt's RENS runs 5 times on neos17 (1,407 sub-nodes) and 3
+  times on neos-911970 without an improvement.
+
+**Priority:**
+1. **node separation:** run the ported separators and pool re-separation at tree
+   nodes, feeding the existing node-LP cut fold (`CUT_LP`); cuts built against the
+   global box so they stay globally valid; -5;
+2. **mod-k separator:** -2;
+3. **sub-MIP strength** (presolve inside sub-MIPs): -2;
+4. implied-bound and clique separators: -1;
+5. feasibility jump: -1.
+
+Restart, symmetry and conflict analysis stay unported (0). The revisited flow
+diagram is published as an artifact.
+
+### 12.23 Node separation and mod-k: ported, not shown to help (2026-11-10)
+
+`DISCOPT_HIGHS_SEPA_NODE=1` runs the ported tableau and path separators on node LPs over
+the global box (`bridge::separate_node`), replacing node GMI in the existing node-cut
+rounds. `DISCOPT_HIGHS_SEPA_MODK=1` adds the ported `HighsModkSeparator` (GF(k) solve with
+HiGHS's splay trees and heap tie-breaking) after the path separator. Both default OFF.
+
+Entry experiment on the five rows §12.22 attributed to node cuts: **neutral**. iskar and
+istra already certify without node cuts; b-ball, mik-1, mik-3 stay uncertified with 3 or 10
+rounds per node, though it fired (mik-1: 4,282 node cuts, 1,179 node bounds lifted vs 413).
+No reference-point violations. No population panel has been run for either lever.
+
+**Retraction (§11).** §12.22 ranked work by what HiGHS loses when one of *its* features is
+stripped and read that as what discopt would gain. That transfer was never tested, and for
+node cuts it was wrong. §12.24 replaces it with a direct comparison.
+
+### 12.24 Where the gap is, measured directly (2026-11-10)
+
+`p3_gap_diagnostic.py`: per row, HiGHS default, discopt (highs arm) full and root-only, 20 s;
+`p3_gap_diagnostic_stripped_highs.py`: HiGHS with presolve, restarts, symmetry and conflict
+off on the 12 rows HiGHS certifies and discopt does not. (The report keys by name, so 4 rows
+with duplicate names in the population are dropped: 58 compared.) Stripped HiGHS still
+certifies 11 of the 12, so none of presolve, restarts, symmetry or conflict explains them.
+
+| class | rows | evidence (stripped HiGHS vs discopt) |
+|---|---|---|
+| root cut loop | mik-250-20-75-{1,2,3,5} | root gap 1.5-2.0 % vs 2.9-4.9 %, no presolve/restart on either side |
+| tree | bell5, b-ball, neos17, enlight8, enlight_hard | root equal or ours better (bell5 3.41/3.38, b-ball 14.9/0.11); HiGHS closes in 104-10,227 nodes, discopt open after 10k-76k |
+| primal / throughput | bppc8-02, issue-2446 | bppc8-02: same root (4.04), our incumbent 2.37 % off; issue-2446: no incumbent, 7 nodes in 19 s |
+| needs presolve | neos-911970 | stripped HiGHS fails too |
+
+The tree class is the largest and the most surprising: on bell5 the roots match and HiGHS
+needs 325 nodes, discopt 76,405 without closing. Node propagation is already on in discopt.
+
+### 12.25 bell5: the tree gap is plunging, measured (2026-11-10)
+
+bell5 is the cleanest tree row in §12.24: equal roots (HiGHS 3.41 %, discopt 3.38 %), and HiGHS
+needs 325 nodes where discopt is still open after 76k. `p3_highs_tree_knockout.py` runs HiGHS on
+bell5 stripped to a bare tree (presolve, restarts, symmetry, conflict, every separator, strong
+branching and every heuristic off), then knocks out one more component per arm through env
+switches added to the patched build (`p3_highs_tree_knockout.patch`; the diff also carries the
+earlier dump/ablation hooks in those files).
+
+| HiGHS arm (bare tree) | nodes | 20 s result |
+|---|---|---|
+| bare | 5,893 | certified, 1.5 s |
+| no objective propagation | 7,745 | certified |
+| branching score = pseudocost only | 7,941 | certified |
+| no node reduced-cost fixing | 101,471 | open, bound 8,961,242 |
+| no node propagation | 107,291 | open |
+| plunge <= 20 nodes (`HS_NODE_LIM=20`) | 10,199 | certified |
+| plunge <= 5 nodes | 14,243 | certified |
+| no plunging (`HS_NODE_LIM=1`) | 36,364 | open |
+
+discopt on bell5 (default highs arm): ~89k node LPs in 20 s, bound ~8,963,600, open. New
+counters (`RcFixCalls`, `RcFixNodesHit`, `RcFixCols`): 92,321 calls, 76 % tighten something,
+291,843 bounds tightened; HiGHS (`p3_highs_rc_count.sh`): 7,586 calls, 46 %, 15,542. So
+discopt's reduced-cost fixing is present and fires; the tightenings reach the children
+(`set_node_bounds`). What discopt lacks is the search order that makes them compound: it
+evaluates batches of 64 best-first nodes and never plunges, and HiGHS without plunging fails
+bell5 as discopt does. `strategy="depth_first"` is not a substitute (bound 8,957,769, the
+incumbent degrades): it takes the 64 deepest nodes, not a single dive.
+
+Next: `p3_highs_plunge_population.py` (HiGHS with vs without plunging over all 62 rows) decides
+whether plunging is worth building beyond bell5.
+
+### 12.26 Population check of plunging; node separation and mod-k panels (2026-11-10)
+
+**Plunging is not the population lever.** `p3_highs_plunge_population.py`: HiGHS default with
+and without plunging certifies 59 of 62 both ways (-23588, +gsvm2rl3). §12.25's bell5 result
+holds only in a cut-free tree, where plunging and node cuts substitute for each other. Not
+built. (HiGHS's node counter under `HS_NODE_LIM=1` reads implausibly low, e.g. b-ball 2, so
+only the statuses are used.)
+
+**Node separation helps bell5 in discopt.** On bell5 our node GMI hurts (bound 8,963,628 with
+it, 8,965,317 without) and the ported node separators certify it (30k nodes); §12.23's
+"neutral" came from five rows chosen by the strip ranking and missed this. On neos-1425699 the
+ported separators find no cuts at the top level, so `=1` (replace) removed the node GMI cuts
+that led the tree to its incumbent (257 nodes -> no incumbent in 75k); `=add` keeps both and
+restores it.
+
+**Panels** (62 rows, 20 s, 3 arms rotated, 2 in parallel on an idle 4-core machine;
+`p3_ab_node_modk.jsonl`, soundness re-scored by sense, 0 violations):
+
+| arm | certified | vs default |
+|---|---|---|
+| default highs arm | 46 | |
+| node `=1` | 46 | +bell5, +gesa2, -neos-1425699, -2122 |
+| node `=1` + mod-k | 46 | +enlight8, +gesa2, -neos-1425699, -2122 |
+| mod-k (root) | **48** | +enlight8 (3.1 s, 1 node), +gesa2 (20.5 s); none lost |
+| node `=add` + mod-k | 47 | +enlight8, +gesa2 (11.4 s); -2122 (incumbent) |
+
+Wall on the 42 rows all arms certify: 72.0 / 72.8 / 77.7 s (default / mod-k / add+mod-k).
+Mod-k graduates ON within the `highs` arm (`=0` opt-out). Node separation stays a documented
+opt-in. bell5 sits at the 0.01 % line under every node-separation arm (bound gap ~0.012 %), so
+its certification flips between runs.
+
+### 12.27 The mik root gap: root reduced-cost fixing against a root incumbent (2026-11-10)
+
+**HiGHS knock-out** (`p3_highs_root_knockout.py`; root only, presolve/restarts/symmetry/conflict
+off; `HS_NO_ROOT_REDCOST` added to the patched build, `p3_highs_root_redcost_switch.patch`):
+
+| HiGHS root gap | mik-1 | mik-2 | mik-3 | mik-5 |
+|---|---|---|---|---|
+| stripped | 1.75 % | 1.53 % | 2.03 % | 1.63 % |
+| no root reduced-cost fixing | 7.40 % | 7.09 % | 6.06 % | 6.76 % |
+| no heuristics (no root incumbent) | 5.08 % | 4.50 % | 7.08 % | 5.21 % |
+| no tableau / no path | 2.2 / 2.8 % | 2.0 / 2.3 % | 2.1 / 2.5 % | 2.2 / 2.6 % |
+| no mod-k, implied-bound or clique cuts | unchanged | | | |
+
+HiGHS's mik root comes from fixing integer bounds by the root LP's reduced costs against an
+incumbent its root heuristics find (RENS in `evaluateRootNode`), then separating again on the
+smaller box; its separators are not the difference.
+
+**Entry experiment in discopt** (`p3_mik_seed_root.py`, diagnostic `DISCOPT_MILP_SEED_POINT`):
+seeding our root loop with our own incumbent and turning on the root fixing that already existed
+(`DISCOPT_HIGHS_SEPA_PROPAGATE`) takes the root gap from 4.88/3.20/4.35/2.92 % to
+2.03/1.58/1.99/1.57 %. Seed alone, fixing off: unchanged. This is why the propagate lever measured
+neutral in §12.21: our root loop never had an incumbent while it ran.
+
+**Built** (`DISCOPT_HIGHS_ROOT_RENS`, default OFF): after the first pass of root rounds, the ported
+RENS runs on the root LP point; an improved incumbent earns a second pass of rounds with root
+reduced-cost fixing and propagation. Root only (`p3_mik_root_rens.py`): 1.95/1.59/1.99/1.62 %,
+HiGHS's level.
+
+**Panel** (62 rows, 20 s, `p3_ab_root_rens.jsonl`): cert-clean (341 checks, 0 violations);
+certified 48 -> 47 (-2122, which sits at the 20 s edge in every run: 19.0 s vs 20.7 s). Final dual
+gaps: mik-1 2.98 -> 1.44 %, mik-2 2.10 -> 0.82, mik-3 2.91 -> 1.37, mik-5 1.60 -> 1.01,
+enlight_hard 8.1 -> 2.7, neos17 0.80 -> 0.48. Not net-positive in certifications, so it stays OFF
+(documented opt-in, audit row) until the tree can use it.
+
+**Where mik now stands.** Root bound at HiGHS's level; HiGHS then closes in 70-1,100 nodes, discopt
+is 0.8-1.4 % open after 8-9k. Stripped HiGHS with no cuts at all cannot solve mik
+(`p3_highs_tree_knockout_mik.py`: ~15 % gap at 20 s in every arm), and the §12.22 strip showed
+node cuts off alone loses mik-1, so HiGHS's tree closes mik with node separation. Root RENS plus
+our ported node separation (`=add`) does not certify mik either (gaps unchanged). **Retraction:**
+in the conversation I said HiGHS certifies mik with no separators; that held only with presolve
+and restarts on (`hs_ablate_pop` `cuts_off` arm). The open question is how HiGHS's node cuts
+differ from ours in use: HiGHS separates at the start of every dive and the cuts stay in that
+dive's LP; ours run on 8 best-bound nodes per batch and reach the shared LP at batch boundaries.
+
+### 12.28 The HiGHS search configuration as one bundle (2026-11-10)
+
+Built under the `highs` arm, all default OFF, to be judged together (owner, 2026-11-10: "if
+HiGHS has it, we need it, and probably it isn't wired correctly"):
+`DISCOPT_HIGHS_ROOT_RENS` (§12.27), `DISCOPT_HIGHS_DIVE` (each batch continues the previous
+batch's plunges into the preferred child, HiGHS `kRootSol`, up to 100 nodes, then fills
+best-first; node separation at plunge starts), `DISCOPT_HIGHS_SEPA_NODE=add`,
+`DISCOPT_HIGHS_ROOT_POOL` (root cuts dropped by cleanup seed the node pool),
+`DISCOPT_HIGHS_SB_TREE` (reliability strong branching for the whole tree; it was capped at the
+first 48 nodes, `sb_node_budget`). Mod-k is ON with the arm (§12.26).
+
+Panel (`p3_ab_bundle.jsonl`, 62 rows, 20 s): cert-clean (343 checks); **48 -> 49**: +bell5
+(1.8 s, 3,037 nodes; default 105k nodes open), +enlight_hard (7.2 s, 169 nodes; default 8.1 %
+open), -2122 (incumbent not found: 1,607 nodes vs 12,877). mik final gaps 2.95/2.05/2.87/1.56 ->
+0.97/0.33/1.25/0.54 %; neos17 0.79 -> 0.44 %. Wall on the 44 common rows 81 -> 94 s. A
+knock-out-per-lever run was stopped half way (`p3_ab_bundle_ablation_partial.jsonl`):
+enlight_hard needs root RENS; mik needs root RENS and SB through the tree.
+
+HiGHS on mik with cuts on (presolve/restarts/symmetry/conflict off,
+`p3_highs_tree_knockout_mik_cuts.py`): no single knock-out stops it certifying (no node cuts
+19 s, no heuristics 19 s, every other component < 10 s). Its tree is redundant; the components
+compound.
+
+### 12.29 Why progress was slow, and the plan that replaces piece-by-piece porting (2026-11-10)
+
+**Accounting.** The cumulative HiGHS strip (§12.22, `p3_highs_strip.jsonl`): default 59;
+presolve off 57; + restarts/symmetry/conflict off 58; + node separation, mod-k, implied-bound and
+clique separators off **51**; + heuristics 50; + RENS/RINS 48. discopt is at 49. So ~7 rows are
+HiGHS's cuts *inside its search loop*, ~2 presolve.
+
+**Why the ported parts did not convert.** Parts with a local effect transferred (root separators
+41 -> 45, variable bounds +2, mod-k +2). Parts whose value depends on how the search runs (node
+cuts, plunging, reduced-cost fixing in dives, strong-branching reliability) were grafted onto a
+different search loop and measured neutral, and §5's per-flag "net-positive alone" rule turned
+complementary parts off one at a time. The 20 s certified count also hid real gains (the mik
+gaps halving) while edge rows (2122 at 18-22 s, bell5 at the 0.01 % line) flipped on timing.
+
+**The loop itself is the blocker** (`p3_ab_dive_batch.jsonl`, `DISCOPT_HIGHS_DIVE_BATCH`, an
+experiment knob). HiGHS searches sequentially: one dive at a time in one LP that keeps the dive's
+cuts, reduced-cost fixing applied to the node in place and the node re-evaluated
+(`HighsSearch::evaluateNode` returns `evaluateNode()` when the local domain changed). discopt
+evaluates 64-node batches and folds cuts in at batch boundaries. Shrinking the batch makes it
+more HiGHS-like and slower: batch 1 finds 2122's incumbent (0.08 % vs 762 % at 64) but runs 713
+nodes on mik-1 in 20 s (HiGHS: 1,099 nodes in 8 s with separation), bell5 15.7 s vs 1.1 s. The
+batch machinery costs milliseconds per batch, so a faithful sequential search cannot be emulated
+inside it.
+
+**Plan.** Port HiGHS's search loop as a dedicated sequential module under the `highs` arm
+(`bnb/highs_search.rs`), reusing discopt's simplex (warm solves, NS-safe bounds), FBBT, the
+ported separators/cut pool (`lp/highs_cutgen`), strong branching and the RENS/RINS port:
+
+1. `HighsNodeQueue`: open nodes with bound-change stacks, best-bound / best-estimate selection,
+   pruning at the optimality limit.
+2. `HighsSearch`: node stack, `installNode`, `evaluateNode` (propagate, LP, reduced-cost fixing in
+   place and re-evaluate, pseudocost/inference/cutoff observations), `branch` (reliability SB with
+   HiGHS's iteration budget, child by `kRootSol`), `backtrack`/`backtrackPlunge` (plunge limit
+   100), `openNodesToQueue`.
+3. One persistent node LP (`HighsLpRelaxation` role): working rows + cuts, aging
+   (`mip_lp_age_limit`), warm basis along the dive.
+4. Main loop (`HighsMipSolver::run` `processNodes`): separation rounds at each node taken from the
+   queue (ported separators + cut-pool separation), heuristics schedule, dive, backtrack-plunge.
+5. Later layers: lurking root reduced-cost bounds, cut-pool and conflict-pool propagation,
+   conflict analysis, presolve.
+
+**Measurement.** Iterate on a fast panel (the rows HiGHS certifies and discopt does not, plus
+~10 sentinels) scored by final gap as well as certification, with the baseline run twice for the
+noise band; the 62-row certification panel only decides graduation. Judge the configuration
+whole until the loop is in; only then ablate.
+
+**Update (same day): what the per-node overhead at batch size 1 is.** Profile of bell5 under the
+bundle at `DISCOPT_HIGHS_DIVE_BATCH=1`: 271 sub-MIPs took 16.0 s of the 28.5 s search, because
+the sub-MIP stride counts *batches* (16), i.e. every 16 nodes at batch size 1. Under dives the
+stride now counts nodes (16 x 64). After that fix (`p3_ab_dive_batch_stride.jsonl`,
+`p3_bell5_batch1_profile_tail.log`): node separation 10.2 s over 3,821 plunge starts (node GMI
+plus the ported separators, each call rebuilding the LP view and B^-1 rows), FBBT 5.6 s (0.4 ms
+per call: discopt re-propagates every row at every node; HiGHS's `HighsDomain` propagates only
+the rows of columns whose bounds changed), LP 3.4 s, sub-MIP 1.4 s. So the search-loop port's
+first two pieces are (a) incremental domain propagation (a `HighsDomain` port: activities kept
+per row, a changed-column queue; also the base for cut-pool and conflict propagation) and (b)
+node separation against a persistent LP view instead of a rebuilt one.
+
+### 12.30 Search-loop port, piece 1: `HighsDomain` incremental propagation (2026-11-10)
+
+`lp/highs_cutgen/domain.rs` ports the model-row core of `HighsDomain`: per-row min/max
+activities in double-double with infinite contributions counted apart, updated per bound
+change (`updateActivityLb/UbChange`, reversed on infeasibility), the capacity threshold that
+keeps rows that cannot tighten anything off the queue (`markPropagate`,
+`recomputeCapacityThreshold`), HiGHS's acceptance rules for new bounds (`adjustedUb/Lb`: integer
+rounding with `feastol`, a 30 % relative-improvement rule for continuous columns), the change
+stack with previous values (`changeBound`, `backtrack` to the last branching,
+`backtrackToGlobal`, `getColLower/UpperPos`), and `propagate` over the queued rows only.
+
+Tests: on 400 random small integer programs with enumerated feasible points, a random branching
+then propagation never removes a feasible point and every infeasible verdict is right; the
+incremental activities equal recomputed ones (HiGHS's `#ifndef NDEBUG` asserts); backtracking to
+global restores bounds and activities exactly. The test asserts it fired (> 1,000 point checks,
+> 100 propagations, > 10 infeasibility proofs).
+
+Not yet ported: objective propagation, cut-pool and conflict-pool propagation, conflict
+analysis, clique-table/implication fixings on binaries. Not yet wired: the incremental gain
+needs one domain persisting along a dive (change, propagate, backtrack); the batch loop rebuilds
+each node independently, so the domain lands with the sequential search loop (next piece).
+A replay against HiGHS's own domain (as for the separators) is pending: HiGHS's local domain also
+runs objective, cut-pool and clique propagation, so the replay needs those switched off in the
+patched build first.
+
+### 12.31 Sequential search loop: built, diagnosed, and a threading confound (2026-11-10)
+
+`DISCOPT_HIGHS_SEARCH=1` (default OFF): dives at batch size 1, one plunge at a time; the node cut
+pool, its ageing, the fold into the shared LP and cut-row deletion run only at plunge starts, so
+the LP stays fixed along a dive (HiGHS adds pool cuts only in `separate` at the node from the
+queue). Two fixes made it run at all: the domain rebuild is keyed on an `lp_version` counter
+bumped where the working matrix changes (`cut_lp_epoch` advances every batch), and the sub-MIP
+stride counts nodes under dives (§12.29).
+
+**The HiGHS domain gives looser node boxes than discopt's FBBT, and the LP pays.** bell5, 10 s:
+batch 1 without the search 1.4 pivots per node LP (0.22 ms); search with the domain 93 pivots
+(2.6 ms); search without the domain 1.6 pivots (0.20 ms), certified. Comparing the two boxes at
+the same nodes: the domain is looser on ~39 columns per node, mostly continuous, often by more
+than 30 % of the width, because HiGHS's acceptance rule (`adjustedUb/Lb`: a continuous bound
+moves only on a >= 30 % relative improvement) rejects moderate tightenings that start chains FBBT
+follows (bell5 column 13: 0 -> 382 of 1,511, rejected, so column 0's 79 % tightening never
+happens), and the domain propagates only change-triggered rows. Lowering the threshold to 0.05 or
+0.001 still left ~40 pivots per LP. Running FBBT for slack columns only on top of the domain box
+restores ~2 pivots: discopt's warm dual simplex flips bounds on boxed slacks instead of pivoting,
+and FBBT's slack ranges come from its tighter structural box. Slack ranges from the domain's own
+row activities did not help (they inherit its looser box). So node boxes stay FBBT;
+`DISCOPT_HIGHS_SEARCH_DOMAIN=1` keeps the domain path as a documented opt-in for the cut-pool and
+conflict propagation layers.
+
+**Threading confound.** The batch loop evaluates its 64 nodes in parallel (rayon); every HiGHS
+run in this plan used `threads = 1`. On mik-1 the batch-64 run's separation timers sum to 19 s of
+a 20 s wall. Six probe rows, bundle (batch 64) vs search, 20 s (`p3_ab_sequential_search_*`):
+
+| row | bundle, multi-thread | search | bundle, 1 thread | search, 1 thread |
+|---|---|---|---|---|
+| bell5 | cert 1.4 s | cert 3.3 s | cert 3.5 s | cert 3.6 s |
+| enlight_hard | 2.7 % | 8.1 % | 8.1 % | 8.1 % |
+| mik-1 | 0.83 % | 1.33 % | 1.18 % | 1.30 % |
+| neos17 | 0.34 % (p 8.0 %) | 0.52 % | 0.55 % | 0.45 % (p 22.5 %) |
+| 2122 (p) | 762 % | 5.0 % | 762 % | 5.0 % |
+| b-ball | 0.08 % | 0.12 % | 0.09 % | 0.12 % |
+
+Single-threaded, the two loops are about even, and the bundle's enlight_hard certification
+(§12.28) came from parallelism. Every discopt-vs-HiGHS count in this plan (47, 48, 49 vs 59)
+compared multi-threaded discopt with single-threaded HiGHS. A fair comparison runs both at the
+same thread count; the counts at one thread are not yet measured. In the sequential search the
+dominant cost on mik is FBBT at 5.2 ms per node (1,257 calls, 6.5 s of 20 s).
+
+### 12.32 Parallel plunges, and the first equal-thread count (2026-11-10)
+
+The sequential search now runs 8 fixed plunge slots per batch, evaluated in parallel (fixed, not
+the thread count, so the search is identical on every machine); pool maintenance runs after any
+batch in which a slot started a plunge. Six probe rows (`p3_ab_parallel_plunges_t{1,2}.jsonl`):
+better gap or incumbent than the batch-64 bundle on mik-1, neos17, 2122, b-ball, enlight_hard at
+1 and 2 threads; bell5 slower (8.8k nodes vs 4.2k).
+
+**62 rows, one thread each (`RAYON_NUM_THREADS=1`), 20 s** (`p3_ab_one_thread.jsonl`;
+HiGHS's 59 is also one thread): cert-clean (512 checks).
+
+| arm | certified | mean final gap, 15 rows not all certify | SGM wall, 44 common rows |
+|---|---|---|---|
+| default highs arm | 47 | 15.6 % | 1.21 s |
+| bundle (§12.28) | 48 | 15.5 % | 1.36 s |
+| parallel-plunge search | 48 | 15.4 % | 1.32 s |
+
+The only difference is bell5. At equal threads the HiGHS configuration built in §12.27-§12.32
+moves one row and almost no gap, and the HiGHS gap is 47-48 vs 59. The multi-threaded counts
+earlier in this plan (48, 49) overstated discopt against single-threaded HiGHS.
+
+### 12.33 Presolve: what it wins for HiGHS, and where (2026-11-10)
+
+Repeated runs, HiGHS 1 thread, 20 s (`p3_highs_presolve_noise.py`): with presolve, issue-2446
+certifies in 0.2 s, enlight_hard in 12.6 s, neos-911970 in 11 s (both runs each); with presolve
+off everywhere (top level and sub-MIPs, `presolve = off` + `mip_root_presolve_only = true`)
+issue-2446 and enlight_hard fail both runs, neos-911970 certifies once at 19.2 s. issue-2446 and
+enlight_hard are rows discopt loses.
+
+Where (`p3_highs_presolve_rules.py`, `p3_highs_presolve_where.py`):
+- **issue-2446** needs a broad structural presolve. HiGHS reduces it from 1,963 rows x 2,200
+  columns to 857 x 856 (nonzeros 5,206 -> 2,543). Switching off any single rule
+  (`presolve_rule_off`) still solves it in <= 0.2 s; parallel rows/columns (-1,024 instead of
+  -1,344 columns when off), probing and the aggregator contribute most. discopt on the
+  unreduced model: 10 node LPs in 20 s, ~200 ms per node LP, strong branching 7.2 s over 3 calls.
+- **enlight_hard, neos-911970**: HiGHS's top-level presolve removes nothing ("Not reduced").
+  Top-level presolve off alone, sub-MIP presolve off alone, or restarts off alone all still
+  certify; only presolve off everywhere loses them. The contribution is redundant across the
+  top level (bound/coefficient work and probing that remove no rows) and the sub-MIPs.
+
+Plan: a MILP presolve on the pure-MILP route, Rust, with primal postsolve, translated from
+HiGHS's `HPresolve` with provenance (§ licensing in CLAUDE.md), starting with the rules
+issue-2446 exercises (parallel rows/columns, probing, aggregator, doubleton equations, plus empty/
+singleton rows, fixed/empty columns, forcing rows, dominated columns, dual fixing), then the same
+presolve on RENS/RINS sub-MIPs.
+
+### 12.34 MILP presolve: inventory and design (2026-11-10)
+
+**Inventory** (`p3_discopt_presolve_probe.py`, issue-2446). discopt's root presolve
+(`_relax/presolve_pipeline.run_root_presolve`: eliminate, aggregate, redundancy, implied bounds,
+FBBT, probing, ...) is MINLP-oriented and runs on the model repr; on the pure-MILP route only its
+*bounds* are written back (`propagate_bounds_to_model`), so the engine always receives the
+unreduced model. On issue-2446 it hit its 30 s budget (5 s on the route, `0.25 x time_limit`)
+after 2 sweeps: 66 aggregations, 0 redundant rows (1.7 M row pairs compared pairwise), 657 bound
+tightenings. HiGHS: 0.1 s, 1,106 rows and 1,344 columns removed, most by its always-on core rules
+(empty/singleton/redundant rows, empty/fixed/dominated columns) plus parallel rows/columns.
+
+**Design.** A MILP presolve inside the Rust engine on the LP it receives, `bnb/milp_presolve.rs`:
+row form (`lo <= a x <= up` from the standard form's singleton slacks), the HiGHS `HPresolve`
+rule set translated with provenance (CLAUDE.md), better rules where a measurement justifies them,
+and a postsolve stack replayed in reverse to map the reduced solution back. Soundness: every
+reduction exact (no tolerance-based removal of a row that could bind); objective offset carried;
+the postsolved incumbent re-verified on the original rows before it counts, and the certificate
+withdrawn if it fails. Order of work, by measured value on issue-2446: core rules (empty /
+singleton / redundant rows, empty / fixed / dominated columns, dual fixing, forcing rows);
+parallel rows and columns (hashing, not pairwise); doubleton equations and the aggregator;
+probing on binaries (with the ported `HighsDomain`); then the same presolve on RENS/RINS
+sub-MIPs and after root restarts. Rules HiGHS lacks are candidates only with evidence.
+
+### 12.35 MILP presolve: layout fix, doubleton equations, and the parity table (2026-11-10)
+
+**Panel of phase 1** (`DISCOPT_MILP_PRESOLVE`, 62 rows, 1 thread): cert-clean (337 checks) but
+48 -> 45 certified, small rows ~3 s slower. Cause, isolated with an identity rebuild (no
+reductions): the rebuilt standard form re-oriented every row's slack, which the engine's aligned
+slacks depend on (supportcase14 0.7 -> 4.0 s, beavma 0.9 -> 11 s with no reduction at all). The
+rebuild now keeps each kept row's own slack column and shifts its right-hand side; identity
+matches baseline exactly. **Doubleton equations** added (postsolve stack of fixings and
+substitutions). issue-2446 now certifies (1963x2200 -> 1124x1297); fiber 4.2 -> 3.6 s, p0201
+5.1 -> 3.1 s; blend2 5.4 -> 8.0 s, kaihu lost this run.
+
+**Parity** (`p3_presolve_parity.py`: sizes ours vs HiGHS; `p3_highs_presolve_rule_table.py`:
+HiGHS's per-rule log, `presolve_rule_logging` allowed for MIPs by
+`p3_highs_presolve_rule_log_mip.patch`), summed over the 53 rows HiGHS presolves:
+
+| HiGHS rule | rows | cols | discopt |
+|---|---|---|---|
+| singleton row | 2,089 | 390 | yes (bounds only; HiGHS also removes the column, 390) |
+| doubleton equation | 948 | 948 | yes |
+| aggregator | 644 | 633 | missing |
+| fixed column | 0 | 901 | yes |
+| dominated column | 0 | 658 | partial (simple dual fixing) |
+| parallel rows / columns | 221 | 428 | rows yes, columns missing |
+| empty column | 0 | 461 | yes |
+| redundant row | 324 | 0 | yes |
+| empty row | 286 | 0 | yes |
+| forcing row | 106 | 44 | yes |
+| free-column substitution | 37 | 37 | missing |
+| forcing column | 4 | 4 | missing |
+| sparsify | 3 | 1 | missing |
+
+Probing, dependent equations, enumeration, dual fixing (as a separate rule) and column stuffing
+remove nothing on this population. Largest size gaps: gen (ours unchanged, HiGHS 780x870 ->
+388x521: aggregator 144, dominated 37, forcing rows 97), neos-2624317-amur (aggregator 127),
+supportcase14/16, p0548, egout; HiGHS solves several small issue-* rows in presolve (0x0).
+
+Parity order by measured volume: aggregator; dominated columns (HiGHS's dual-bound test);
+parallel columns; singleton-row column removal; free-column substitution; forcing columns;
+sparsify last.
+
+### 12.36 mik per-node diagnosis: HiGHS's pool cuts at plunge starts (2026-11-10)
+
+A side diagnosis (separate worktree; HiGHS at `threads=1` with presolve, restarts, symmetry and
+conflict analysis off, node counts identical across reruns; discopt bundle + search config with
+the loaded build asserted) asked why HiGHS certifies mik-250-20-75-1 in 672 nodes and discopt
+does not. The root bound is not it: capping HiGHS's root at 19-23 rounds gives a root as weak as
+or weaker than discopt's (-50,718 to -50,628 vs -50,684), and HiGHS still certifies in 391-586
+nodes. Per node over the first ~1,000 nodes:
+
+| | HiGHS | discopt |
+|---|---|---|
+| reduced-cost fixings | 37 | 10 |
+| integer-column tightenings by propagation | 22.6 | 6.5 (FBBT) |
+| node-cut bound lift at plunge starts (median) | 103 | 3.9 |
+| gap closed at depth 12-17 (same root value) | 0.82-0.91 | 0.66-0.75 |
+
+HiGHS knock-outs (nodes to certify): base 672; no node separation 5,267 (and the gap closed by
+depth drops to 0.63-0.74, discopt's level); node separation re-adding pool cuts only, no new
+cuts, 813; no cut-pool propagation 1,161; no node reduced-cost fixing 1,266; no node
+propagation 1,520; all three of pool propagation, node reduced-cost fixing and pool-only node
+separation 8,136. Pool size is a dose-response: `mip_pool_soft_limit` 400 / 200 / 100 -> 1,522 /
+2,756 / 4,580 nodes (HiGHS's pool holds 5,087 cuts after the root, 1,913 at node 300; discopt's
+node pool about 115 plus about 130 cut rows in the LP, with 312 rows relaxed out and never
+re-admitted, violated 35,659 times).
+
+All 366 distinct HiGHS cuts that tighten bounds are pure-integer (108 of 112 pure-integer root
+cuts come from mod-k); discopt has no pure-integer cut anywhere (node pool, LP rows, or the
+3,731-cut root pool of the ported separators): each carries 7-20 of mik's 20 continuous
+columns, which are unbounded above, so cut-pool propagation prototyped in discopt found 0
+tightenings. discopt knock-ins: re-admitting relaxed rows 1.15 -> 1.05 % at ~1,540 nodes;
+seeding the root pool into the node pool, no gain per node; SB only for the first 48 nodes,
+much worse.
+
+**What this says to build, in order:** (1) separate at plunge starts *before* branching, in the
+shared LP, re-adding violated pool cuts and keeping them for the dive (HiGHS's `separate()`
+placement; 672 vs 5,267 nodes); (2) find why the ported mod-k yields no pure-integer cut on mik,
+then port cut-pool propagation; (3) a HiGHS-sized global pool (keep the root pool, return
+dropped LP rows to it, age per node). Open: which HiGHS mechanism makes its node cuts
+pure-integer; the discopt-side gain of (1) is inferred from the knock-outs, not measured.
+Unverified finding to check: `TreeManager::process_evaluated` may feed a pruned-infeasible
+child's 1e30 sentinel bound into the pseudocosts (did not fire on mik).
+
+### 12.37 MILP presolve at near-parity, and its solve panel (2026-11-10)
+
+**Rules now in `bnb/milp_presolve.rs`** (beyond §12.35): the aggregator with HiGHS's acceptance
+(pivot against the row's or the column's largest entry, implied integrality by any equality
+row, no row-length cap); bound propagation (integer bounds tightened, continuous columns keep
+implied bounds with their source row for the implied-free test); dominated columns by row-dual
+bounds (HiGHS `detectDominatedCol`) and pairwise with predictive bound analysis (Achterberg et
+al. 2020 6.4, Gamrath et al. 2015 Thm. 3, HiGHS `dominatedColumns`); parallel columns with a
+split postsolve; redundant rows over implied bounds (source-excluded).
+
+**Sizes** (`p3_presolve_parity.json`, `p3_presolve_parity_gap.py`, 62 rows): original
+15,282 x 25,323, discopt 11,021 x 21,228, HiGHS 10,724 x 20,705: 93 % of HiGHS's row
+reductions and 89 % of its column reductions (mik now identical; issue-2446 879 x 862 vs
+857 x 856). Running HiGHS on discopt's reduced problems (`DISCOPT_MILP_PRESOLVE_DUMP`) shows the
+rest is mostly order-dependent: on supportcase14 HiGHS removes nothing more from our output
+(75 x 224) yet reaches 44 x 117 from the original; blend2's extra aggregations open up only after
+HiGHS's other reductions. HiGHS runs cheap rules from change queues to a fixed point and the
+expensive ones (aggregator, parallel, pairwise domination, probing) gated by > 5 % progress;
+ours sweeps every rule in a fixed order. Missing rules (probing, free-column substitution,
+forcing column, sparsify) are small on this population.
+
+**Three soundness bugs found by the tests and fixed** (all behind the default-OFF flag, none in
+a certifying run): the aggregator's implied-free tolerance became infinite at an infinite
+implied bound, dropping bounds of a column with an unbounded implied range (the engine test
+then saw `Unbounded` on a problem with certified optimum -105; the issue-2446 size 717 x 715
+reported earlier in this work came from it and is **retracted**); `solve_presolved` passed a
+reduced problem's `Unbounded` through (it now falls back, the reduced problem being a
+relaxation); pairwise domination used an integer column's worst-case bound before flooring it
+(2.5 became `x >= 3`, cutting every feasible point).
+
+**Solve panel** (`p3_ab_presolve.py`, 62 rows, 20 s, `RAYON_NUM_THREADS=1`, bundle + search
+config, presolve OFF vs ON, two solves at a time with arm order rotated, idle machine;
+`p3_ab_presolve_parity.jsonl`): **48 -> 50 certified**, none lost (+2122 20.4 -> 3.4 s,
++issue-2446 13.6 s uncertified -> 7.1 s); total wall 405.9 -> 383.9 s; on the 44 names both
+certify, shifted geometric-mean wall ratio 0.953. Faster > 1.5x: gesa2 13.0 -> 2.0, iskar
+8.0 -> 3.2, bell5 7.7 -> 4.2, kaihu 11.5 -> 7.3, supportcase16, sp150x300d; slower > 1.5x:
+app2-2 3.9 -> 13.5, nexp-50-20-1-1 0.9 -> 3.7, jijia 12.1 -> 19.3, dcmulti 2.9 -> 4.7.
+Soundness (`p3_score_ab.py`, sense-aware): 345 checks, 0 violations (the panel script's own
+minimisation-only check flags issue-2446's baseline bound, which is on the right side of a
+maximisation optimum).
+
+**Decision.** Cert-clean and net-positive on the search configuration: presolve joins the HiGHS
+bundle. Graduating it for the default MILP route needs the same A/B on the default
+configuration (§5); until then the flag stays default OFF. Closing the remaining size gap
+(restructuring into HiGHS's queue-driven loop) is deferred: +2 certificates came from the rules,
+and the next measured lever is the plunge-start pool separation of §12.36.
+
+### 12.38 Separation at plunge starts before branching (`DISCOPT_HIGHS_SEP_FIRST`) (2026-11-10)
+
+Built: a plunge start's first visit skips strong branching, reports its violated pool cuts and
+its new cuts scored at its point, and is re-queued with its proven bound; the batch boundary
+folds the selected cuts into the shared LP and the node re-solves there, repeating under HiGHS's
+progress rule (`HighsSeparation::separate`), then a final visit branches and the dive keeps the
+rows (HiGHS's `separateAndStoreBasis` placement).
+
+Measured on mik-250-20-75-1 (20 s, 1 thread, bundle + search): ~318 plunge starts, ~1 round
+each; the re-solve moves the shared LP by a median 1.1 (mean 9.2) against HiGHS's median 97 per
+node separation (HiGHS: 64 node separations over 672 nodes, median 3 rounds, 21 cuts). Panel
+(`p3_ab_sepfirst.py`, 62 rows, 20 s, 1 thread): **48 -> 45 certified**, total wall 408.5 ->
+451.6 s; cert-clean (339 sense-aware checks). Sound but harmful alone: the placement is
+right, the cuts it re-solves with are weak.
+
+Correction to §12.36: HiGHS puts **0** pure-integer cuts into the LP at mik's root and 23 of
+2,664 over the whole solve; its mod-k adds 2 root cuts. The "108 of 112 pure-integer root cuts
+from mod-k" figure there is **retracted**. discopt's mod-k cuts on mik are rejected as exact
+duplicates of the path separator's single-row cuts, correctly.
+
+### 12.39 Same-node comparison: the port is exact, the node inputs differ (2026-11-10)
+
+**Experiment.** HiGHS's transformed-LP dump (`HS_DUMP_TL`) over a full mik-250-20-75-1 solve
+(270 separation rounds, root and nodes, 157,011 transform calls) replayed through the ported
+path and tableau separators (`replay_tl.rs`, `DISCOPT_HIGHS_SEP_REPLAY`). Without resync the
+path separator's RNG diverges once at TL46 and everything after inherits it; with the one-off
+resync (`DISCOPT_HIGHS_SEP_REPLAY_RESYNC`, diagnostic) **all 16,117 cuts equal HiGHS's, in
+order, node rounds included**. Given HiGHS's node inputs, the port produces HiGHS's node cuts.
+Weak discopt node cuts therefore come from the inputs.
+
+**Inputs tried.**
+- *Pool content* (`DISCOPT_HIGHS_ROOT_POOL=all`: every live cut of the ported root pool, 5,686
+  on mik, seeds the node pool, sized at HiGHS's soft limit): worse on mik (817 nodes,
+  -50,287 with sep-first; 1,489 nodes, -50,266 without) as the LP grows (1,774 rows folded vs
+  ~690).
+- *Global domain.* HiGHS's dumped global bounds tighten through the tree: 53 fixed columns at
+  root start, 115 at the end of the root, 145 mid-tree, 171 late (integer width 7,622 ->
+  6,077 -> 3,317); discopt's global box is fixed after the root. `DISCOPT_HIGHS_TREE_RCFIX`
+  ports two of HiGHS's sources: root reduced-cost fixing re-applied on each incumbent
+  improvement (`HighsRedcostFixing`; inert on mik: discopt's incumbent does not improve in the
+  tree, 1 bound) and the open-node hull with propagation (`HighsNodeQueue::
+  pruneInfeasibleNodes` + `propagate`; 60 + 14 bounds on mik). Measured: bound **worse**
+  (-50,280 vs -50,232, outside the ±15 run-to-run spread), slightly fewer nodes. Unexplained;
+  a tighter global box should not weaken the bound. Suspect warm-start cost from bases with
+  nonbasic columns at bounds now outside the box; not yet tested.
+
+**Status.** Three default-OFF levers (`SEP_FIRST`, `ROOT_POOL=all`, `TREE_RCFIX`), none
+net-positive alone on mik. The open question is which node input makes HiGHS's node cuts strong
+(LP rows, LP point, global domain); the next experiment is to feed discopt's separators
+HiGHS's dumped node inputs with one input swapped at a time for discopt's own.
+
+**Retired (2026-11-10).** `DISCOPT_HIGHS_SEP_FIRST`, `DISCOPT_HIGHS_TREE_RCFIX` and
+`DISCOPT_HIGHS_ROOT_POOL=all` were removed with their implementations (measurements above);
+their HiGHS behaviours return inside the search-core replacement
+(`highs-mip-replacement-plan.md`, stages 3-4). The replay resync diagnostic stays.

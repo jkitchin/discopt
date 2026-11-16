@@ -24,6 +24,8 @@ provenance (``highs_status``).
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol
 
@@ -146,24 +148,66 @@ class RustEngine:
     max_iter = 100_000
 
     def solve(self, sf, *, time_limit, presolve, tight_tolerances) -> LpRaw:
-        from discopt._rust import solve_lp_warm_csc_py
-
         if sf.n == 0 and sf.m == 0:
             return LpRaw("empty", "rust:empty")
-        A = sf.A.tocsc()
+        t0 = time.perf_counter()
+        raw = self._solve(sf.c, sf.A, sf.b, sf.xl, sf.xu, time_limit)
+        if raw.name != "rust:numerical" or not _equilibrated_retry_enabled():
+            return raw
+        # The simplex broke down numerically ("numerical" -> ``undecided``). Measured on
+        # ex14_1_7's McCormick root LP (658 rows; |b| to 2e11, coefficients 9e-11..2e8,
+        # finite bounds to 2e9): the cold solve breaks down at 200 pivots with or
+        # without a deadline and at tol 1e-7, HiGHS calls it optimal (0), and the same
+        # solve on an exact power-of-two equilibration of it is optimal in 325 pivots
+        # (original-space residual 6e-8). So retry once on that equilibration. The
+        # transform is exact (x = C x', y = R y'), and nothing it returns is trusted:
+        # ``solve_lp_std`` re-verifies the point, the NS bound and any ray against
+        # ``sf`` itself.
+        rem = None if time_limit is None else float(time_limit) - (time.perf_counter() - t0)
+        if rem is not None and rem <= 0.0:
+            return raw
+        RUST_EQUIL_RETRY_STATS["attempts"] += 1
+        R, C, As = _pow2_equilibration(sf.A)
+        with np.errstate(over="ignore", invalid="ignore"):
+            xl = np.where(np.isfinite(sf.xl), sf.xl / C, sf.xl)
+            xu = np.where(np.isfinite(sf.xu), sf.xu / C, sf.xu)
+        scaled = self._solve(C * sf.c, As, R * sf.b, xl, xu, rem)
+        if scaled.name == "rust:numerical":
+            return raw
+        RUST_EQUIL_RETRY_STATS["decided"] += 1
+        out = LpRaw(
+            scaled.status,
+            scaled.name + "+equilibrated",
+            iters=raw.iters + scaled.iters,
+            _dual_ray=lambda: _mul(R, scaled.dual_ray()),
+            _primal_ray=lambda: _mul(C, scaled.primal_ray()),
+        )
+        if scaled.status == "optimal":
+            out.x = C * scaled.x
+            out.y = R * scaled.y
+            out.rc = np.asarray(sf.c, dtype=np.float64) - sf.A.T @ out.y
+        elif scaled.x_primal is not None:
+            out.x_primal = C * scaled.x_primal
+        return out
+
+    def _solve(self, c, A, b, xl, xu, time_limit) -> LpRaw:
+        from discopt._rust import solve_lp_warm_csc_py
+
+        m, n = A.shape
+        A = A.tocsc()
         kw: dict[str, Any] = {"max_iter": self.max_iter}
         if time_limit is not None:
             kw["time_limit_s"] = max(0.0, float(time_limit))
         status, x, _obj, iters, _cs, _bv, dual, ray = solve_lp_warm_csc_py(
-            np.ascontiguousarray(sf.c, dtype=np.float64),
-            sf.m,
-            sf.n,
+            np.ascontiguousarray(c, dtype=np.float64),
+            m,
+            n,
             np.ascontiguousarray(A.indptr, dtype=np.int64),
             np.ascontiguousarray(A.indices, dtype=np.int64),
             np.ascontiguousarray(A.data, dtype=np.float64),
-            np.ascontiguousarray(sf.b, dtype=np.float64),
-            np.ascontiguousarray(sf.xl, dtype=np.float64),
-            np.ascontiguousarray(sf.xu, dtype=np.float64),
+            np.ascontiguousarray(b, dtype=np.float64),
+            np.ascontiguousarray(xl, dtype=np.float64),
+            np.ascontiguousarray(xu, dtype=np.float64),
             None,
             None,
             **kw,
@@ -187,11 +231,58 @@ class RustEngine:
         if st == "optimal":
             raw.x = np.asarray(x, dtype=np.float64)
             raw.y = dual_a.copy()
-            raw.rc = np.asarray(sf.c, dtype=np.float64) - sf.A.T @ raw.y
-        elif st == "unbounded" and np.asarray(x).shape == (sf.n,):
+            raw.rc = np.asarray(c, dtype=np.float64) - A.T @ raw.y
+        elif st == "unbounded" and np.asarray(x).shape == (n,):
             # A candidate; ``solve_lp_std`` re-checks it as a primal point before use.
             raw.x_primal = np.asarray(x, dtype=np.float64)
         return raw
+
+
+#: Process-wide counts of the numerical-breakdown retry: ``attempts`` (the cold solve broke
+#: down and the retry ran) and ``decided`` (the equilibrated solve did not break down).
+RUST_EQUIL_RETRY_STATS: dict[str, int] = {"attempts": 0, "decided": 0}
+
+
+def _equilibrated_retry_enabled() -> bool:
+    """Retry a numerical breakdown of the Rust engine on an exact equilibration
+    (``DISCOPT_LP_STD_EQUIL_RETRY``; ``=0`` opts out). Bound-changing only in that a
+    solve that was an ``error`` can now return a verified answer; the certificate
+    ladder in ``solve_lp_std`` is unchanged and still judges it against ``sf``.
+
+    Default ON from its ON/OFF panel (2026-11-15; ``issue2115_graduation_panel.py
+    --flag DISCOPT_LP_STD_EQUIL_RETRY --time-limit 45``, 74 MINLP-corpus instances, 812
+    checks): 0 violations, 0 looser bounds, certified 58 -> 59 (ex14_1_7: feasible at 45 s
+    with bound -341 -> optimal in 3 nodes), fired on ex14_1_7 and nvs05 only, total wall
+    953 -> 911 s."""
+    return os.environ.get("DISCOPT_LP_STD_EQUIL_RETRY", "1") != "0"
+
+
+def _pow2_equilibration(A, iters: int = 20):
+    """``(R, C, R·A·C)``: Ruiz infinity-norm row/column sweeps with every factor a
+    power of two, so the scaling is exact in floating point (the same scheme as
+    ``_relax.milp_relaxation.equilibrate_relaxation_lp``, on an equality form)."""
+    import scipy.sparse as sp
+
+    M = sp.csr_matrix(A, dtype=np.float64, copy=True)
+    m, n = M.shape
+    R = np.ones(m)
+    C = np.ones(n)
+    for _ in range(iters):
+        rmax = abs(M).max(axis=1).toarray().ravel()
+        rmax[rmax == 0.0] = 1.0
+        dr = 2.0 ** np.round(np.log2(1.0 / np.sqrt(rmax)))
+        M = sp.diags(dr) @ M
+        R *= dr
+        cmax = abs(M).max(axis=0).toarray().ravel()
+        cmax[cmax == 0.0] = 1.0
+        dc = 2.0 ** np.round(np.log2(1.0 / np.sqrt(cmax)))
+        M = M @ sp.diags(dc)
+        C *= dc
+    return R, C, M.tocsc()
+
+
+def _mul(s: np.ndarray, v: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    return None if v is None else s * v
 
 
 ENGINES: dict[str, LpEngine] = {"highs": HighsEngine(), "rust": RustEngine()}

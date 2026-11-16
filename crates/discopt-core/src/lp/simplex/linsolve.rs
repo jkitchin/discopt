@@ -15,6 +15,7 @@
 //!   cross-checking `FeralLU` in tests — not performance.
 
 use super::refine::residual_matvec_dd_sparse;
+use super::sparse::SparseCols;
 use feral::{
     should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuPivoting, LuSingularAction,
     RefactorCause, SparseColMatrix, SparseLu, SparseLuSymbolic,
@@ -382,9 +383,45 @@ pub struct FeralLU {
     /// double-precision refinement was falsified on this class, #671). `None`
     /// (default) → strict `Fail`, byte-identical to today.
     singular_perturb: Option<f64>,
+    /// Entries a full solve through the current factor touches (`L`, `U` and the
+    /// update etas; `m²` for the dense backend), for the [`crate::work`] count.
+    solve_cost: u64,
+}
+
+/// Credit LU work to the running solve's [`crate::work`] total. The count is the
+/// entries touched, a function of the factor only, so it is deterministic.
+#[inline]
+fn lu_work(units: u64) {
+    crate::work::add(crate::work::Kind::Lu, units);
 }
 
 impl FeralLU {
+    /// Recompute [`Self::solve_cost`] after the factor changed.
+    fn refresh_solve_cost(&mut self) {
+        self.solve_cost = match &self.lu {
+            Some(Factored::Sparse(lu)) => (lu.factor_nnz() + lu.eta_ops()) as u64,
+            Some(Factored::Dense(lu)) => (lu.dim() * lu.dim()) as u64,
+            None => 0,
+        };
+    }
+
+    /// Credit a factorization (`nnz` basis entries) and refresh the solve cost.
+    fn credit_factor(&mut self, nnz: usize) {
+        self.refresh_solve_cost();
+        let extra = match &self.lu {
+            // Dense LU: m³/3 multiply-adds.
+            Some(Factored::Dense(lu)) => (lu.dim() as u64).pow(3) / 3,
+            _ => self.solve_cost,
+        };
+        lu_work(nnz as u64 + extra);
+    }
+
+    /// Credit a hypersparse solve with `nin` input and `nout` output entries: each
+    /// output entry costs about one average factor column.
+    fn credit_sparse_solve(&self, m: usize, nin: usize, nout: usize) {
+        lu_work((nin + nout) as u64 * (1 + self.solve_cost / m.max(1) as u64));
+    }
+
     /// A new, unfactorized solver.
     pub fn new() -> Self {
         Self::default()
@@ -398,11 +435,41 @@ impl FeralLU {
     /// and they have completely different fixes. The split measured numeric
     /// ≈50% of total LP wall and symbolic ≈11% (2.7%–25.5% across 18 captured
     /// QPLIB relaxation LPs) — see the #1008 record.
+    ///
+    /// **In place when it can be** (feral 0.23, jkitchin/feral#232). Under the
+    /// default Markowitz pivoting, `SparseLu::factor` is `factor_markowitz`, and
+    /// `refactor_markowitz` on the factor this solver already holds returns
+    /// exactly what it would (same pivots, same `L`/`U` bits, pending updates
+    /// discarded) while reusing that factor's memory: 7.3 -> 5.65 ms per factor
+    /// on piperout-d27's basis (feral#234). On `Err` feral leaves the old factor
+    /// intact and it is put back, so a failed factorization leaves `self.lu` as
+    /// the fresh path does.
     fn factor_sparse_ordered(
         &mut self,
         a: &SparseColMatrix,
         params: LuParams,
-    ) -> Result<SparseLu, LinError> {
+    ) -> Result<Box<SparseLu>, LinError> {
+        if params.pivoting == LuPivoting::Markowitz && matches!(self.lu, Some(Factored::Sparse(_)))
+        {
+            if let Some(Factored::Sparse(mut prev)) = self.lu.take() {
+                // `refactor_markowitz` validates `params` first, as `factor`
+                // does before its Markowitz dispatch.
+                let res = {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
+                    prev.refactor_markowitz(a, params)
+                };
+                return match res {
+                    Ok(()) => {
+                        crate::profile::incr(crate::profile::Ctr::LuInPlaceRefactors);
+                        Ok(prev)
+                    }
+                    Err(e) => {
+                        self.lu = Some(Factored::Sparse(prev));
+                        Err(feral_err(e))
+                    }
+                };
+            }
+        }
         let sym = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::LuSymbolic);
             symbolic_for(a, &params)?
@@ -411,7 +478,7 @@ impl FeralLU {
             let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
             SparseLu::factor(a, &sym, params).map_err(feral_err)?
         };
-        Ok(lu)
+        Ok(Box::new(lu))
     }
 
     /// Enable numeric-focus mode with the default refinement depth: refined
@@ -676,8 +743,67 @@ impl FeralLU {
         Ok(())
     }
 
+    /// Raw `B x = rhs` with both sides sparse: `rhs` as `(row, value)` pairs
+    /// (repeats accumulate), the nonzeros of `x` written to `out` sorted by row, exact
+    /// zeros dropped. On the sparse route this is feral's work-proportional
+    /// `SparseLu::ftran_sparse` (no term in `m`); the dense route solves densely and
+    /// gathers. **Not bit-identical** to [`LinearSolver::ftran`] on the sparse route
+    /// (feral sums the same terms in another order), so a caller switching to it changes
+    /// its rounding trajectory. Raw, like the hot-loop `ftran`: no refinement.
+    pub fn ftran_sparse(
+        &mut self,
+        m: usize,
+        rhs: &[(usize, f64)],
+        out: &mut Vec<(usize, f64)>,
+    ) -> Result<(), LinError> {
+        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
+            Factored::Sparse(lu) => {
+                lu.ftran_sparse(rhs, out).map_err(feral_err)?;
+                self.credit_sparse_solve(m, rhs.len(), out.len());
+                Ok(())
+            }
+            Factored::Dense(lu) => {
+                let mut v = vec![0.0; m];
+                for &(i, x) in rhs {
+                    v[i] += x;
+                }
+                lu.ftran(&mut v).map_err(feral_err)?;
+                gather_nonzeros(&v, out);
+                lu_work(self.solve_cost);
+                Ok(())
+            }
+        }
+    }
+
+    /// The transpose twin of [`Self::ftran_sparse`]: `Bᵀ x = rhs`, sparse in and out.
+    pub fn btran_sparse(
+        &mut self,
+        m: usize,
+        rhs: &[(usize, f64)],
+        out: &mut Vec<(usize, f64)>,
+    ) -> Result<(), LinError> {
+        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
+            Factored::Sparse(lu) => {
+                lu.btran_sparse(rhs, out).map_err(feral_err)?;
+                self.credit_sparse_solve(m, rhs.len(), out.len());
+                Ok(())
+            }
+            Factored::Dense(lu) => {
+                let mut v = vec![0.0; m];
+                for &(i, x) in rhs {
+                    v[i] += x;
+                }
+                lu.btran(&mut v).map_err(feral_err)?;
+                gather_nonzeros(&v, out);
+                lu_work(self.solve_cost);
+                Ok(())
+            }
+        }
+    }
+
     /// Raw `B' x = rhs` solve through the current factor (no refinement).
     fn ftran_raw(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        lu_work(self.solve_cost);
         match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
             Factored::Sparse(lu) => lu.ftran(rhs).map_err(feral_err),
             Factored::Dense(lu) => lu.ftran(rhs).map_err(feral_err),
@@ -686,11 +812,23 @@ impl FeralLU {
 
     /// Raw `B'ᵀ x = rhs` solve through the current factor (no refinement).
     fn btran_raw(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        lu_work(self.solve_cost);
         match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
             Factored::Sparse(lu) => lu.btran(rhs).map_err(feral_err),
             Factored::Dense(lu) => lu.btran(rhs).map_err(feral_err),
         }
     }
+}
+
+/// `out` = the nonzeros of `v` as `(index, value)`, ascending.
+fn gather_nonzeros(v: &[f64], out: &mut Vec<(usize, f64)>) {
+    out.clear();
+    out.extend(
+        v.iter()
+            .enumerate()
+            .filter(|(_, &x)| x != 0.0)
+            .map(|(i, &x)| (i, x)),
+    );
 }
 
 /// The symbolic analysis `SparseLu::factor` needs under `params` (#1935).
@@ -716,6 +854,83 @@ fn feral_err(e: feral::FeralError) -> LinError {
     LinError::Backend(format!("{e:?}"))
 }
 
+impl FeralLU {
+    /// Factorize the basis `B = A[:, basis]` straight from the CSC view `sp`.
+    ///
+    /// Same factor as [`LinearSolver::factorize_sparse`] on the per-slot
+    /// `(row, value)` lists the simplex used to build from `sp.col(basis[slot])`,
+    /// without building them: on piperout-d27 (m = 17 470, ~300 refactors in
+    /// the root LP) those `m` small vectors, which `from_sparse_columns` then
+    /// scattered, sorted and copied again, cost 0.73 s of the root LP. When every
+    /// basis column has strictly ascending rows, the canonical form
+    /// `from_sparse_columns` produces (rows sorted, no duplicates, exact zeros
+    /// dropped) is the slice itself with its exact zeros removed, so the matrix
+    /// is assembled in one copy. Anything else (an unsorted or repeated row, a
+    /// non-finite or out-of-range entry, numeric-focus retention) takes the
+    /// list path, which keeps that path's canonicalization and its error.
+    pub fn factorize_basis(
+        &mut self,
+        m: usize,
+        sp: &SparseCols,
+        basis: &[usize],
+    ) -> Result<(), LinError> {
+        let fallback = |lu: &mut Self| {
+            let cols: Vec<Vec<(usize, f64)>> = basis
+                .iter()
+                .map(|&j| {
+                    let (rows, vals) = sp.col(j);
+                    rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+                })
+                .collect();
+            lu.factorize_sparse(m, &cols)
+        };
+        if self.refine_enabled() || basis.len() != m {
+            return fallback(self);
+        }
+        let params = self.params();
+        // Raw entry count, explicit zeros included: what `factorize_sparse`
+        // routes on (the sum of its list lengths).
+        let nnz: usize = basis.iter().map(|&j| sp.col(j).0.len()).sum();
+        if want_dense_route(m, nnz, &params) {
+            return fallback(self);
+        }
+        let mut col_ptr = Vec::with_capacity(m + 1);
+        let mut row_idx = Vec::with_capacity(nnz);
+        let mut values = Vec::with_capacity(nnz);
+        col_ptr.push(0);
+        for &j in basis {
+            let (rows, vals) = sp.col(j);
+            let mut prev: Option<usize> = None;
+            for (&r, &v) in rows.iter().zip(vals) {
+                if r >= m || prev.is_some_and(|p| p >= r) || !v.is_finite() {
+                    return fallback(self);
+                }
+                prev = Some(r);
+                if v != 0.0 {
+                    row_idx.push(r);
+                    values.push(v);
+                }
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let a = SparseColMatrix {
+            m,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        a.validate().map_err(feral_err)?;
+        let lu = self.factor_sparse_ordered(&a, params)?;
+        crate::profile::incr(crate::profile::Ctr::LuSparseFactorizations);
+        crate::profile::incr_by(crate::profile::Ctr::LuBasisNnz, nnz as u64);
+        crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
+        self.lu = Some(Factored::Sparse(lu));
+        self.retained = None;
+        self.credit_factor(nnz);
+        Ok(())
+    }
+}
+
 impl LinearSolver for FeralLU {
     fn factorize(&mut self, m: usize, cols: &[Vec<f64>]) -> Result<(), LinError> {
         debug_assert_eq!(cols.len(), m);
@@ -739,6 +954,7 @@ impl LinearSolver for FeralLU {
             m,
             cols: cols.iter().map(|c| sparse_of_dense(c)).collect(),
         });
+        self.credit_factor(nnz);
         Ok(())
     }
 
@@ -779,12 +995,13 @@ impl LinearSolver for FeralLU {
             crate::profile::incr(crate::profile::Ctr::LuSparseFactorizations);
             crate::profile::incr_by(crate::profile::Ctr::LuBasisNnz, nnz as u64);
             crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
-            Factored::Sparse(Box::new(lu))
+            Factored::Sparse(lu)
         });
         self.retained = self.refine_enabled().then(|| RetainedBasis {
             m,
             cols: canonical_sparse_columns(m, cols),
         });
+        self.credit_factor(nnz);
         Ok(())
     }
 
@@ -818,6 +1035,13 @@ impl LinearSolver for FeralLU {
                 rb.cols[leaving_slot] = sparse_of_dense(entering_col);
             }
         }
+        // The update's own work is the growth of the eta file (or `m²` dense).
+        let before = self.solve_cost;
+        self.refresh_solve_cost();
+        lu_work(match &self.lu {
+            Some(Factored::Dense(_)) => self.solve_cost,
+            _ => self.solve_cost.saturating_sub(before).max(1),
+        });
         res
     }
 
@@ -927,6 +1151,201 @@ impl LinearSolver for DenseLU {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ftran_sparse` / `btran_sparse` agree with the dense raw solves (to rounding:
+    /// on the sparse route feral sums in another order) on both factor routes, emit
+    /// sorted, zero-free supports, and keep agreeing after a Forrest-Tomlin update.
+    /// Counts its comparisons (CLAUDE.md section 6).
+    /// `factorize_basis` (direct CSC assembly) must give the factor the list
+    /// path gives: identical solves bit for bit, on a basis that is a permuted
+    /// subset of the columns and carries explicit zeros, and on an unsorted
+    /// column, which must take the list path.
+    /// A refactor through the held factor (feral 0.23 `refactor_markowitz`)
+    /// must be the factor a fresh solver builds: identical ftran/btran bits on a
+    /// second basis after a first, across a dimension change, with the
+    /// in-place counter proving the path ran (CLAUDE.md §6).
+    #[test]
+    fn in_place_refactor_is_bit_identical_to_a_fresh_factor() {
+        let _guard = crate::profile::test_guard();
+        use crate::profile::{counter, reset, set_enabled, Ctr};
+        let mut checked = 0usize;
+        reset();
+        set_enabled(true);
+        let mut held = FeralLU::new();
+        for (m, bump) in [(512usize, 0.25), (512, 0.4), (300, 0.3), (700, 0.2)] {
+            let cols = tridiagonal_basis(m, bump);
+            held.factorize_sparse(m, &cols).unwrap();
+            let mut fresh = FeralLU::new();
+            fresh.factorize_sparse(m, &cols).unwrap();
+            assert!(matches!(held.lu, Some(Factored::Sparse(_))), "m = {m}");
+            for seed in 0..3usize {
+                let rhs: Vec<f64> = (0..m)
+                    .map(|i| ((i * 29 + seed * 11) % 17) as f64 - 8.0)
+                    .collect();
+                let (mut x1, mut x2) = (rhs.clone(), rhs.clone());
+                held.ftran(&mut x1).unwrap();
+                fresh.ftran(&mut x2).unwrap();
+                let (mut y1, mut y2) = (rhs.clone(), rhs);
+                held.btran(&mut y1).unwrap();
+                fresh.btran(&mut y2).unwrap();
+                for i in 0..m {
+                    assert_eq!(x1[i].to_bits(), x2[i].to_bits(), "m {m} ftran row {i}");
+                    assert_eq!(y1[i].to_bits(), y2[i].to_bits(), "m {m} btran row {i}");
+                    checked += 2;
+                }
+            }
+        }
+        let in_place = counter(Ctr::LuInPlaceRefactors);
+        set_enabled(false);
+        // The first factorization of `held` and every `fresh` one are fresh.
+        assert_eq!(
+            in_place, 3,
+            "the held factor must refactor in place 3 times"
+        );
+        assert_eq!(checked, 2 * 3 * (512 + 512 + 300 + 700));
+    }
+
+    #[test]
+    fn factorize_basis_is_bit_identical_to_the_list_path() {
+        let m = 400usize;
+        let tri = tridiagonal_basis(m, 0.25);
+        // n = m + 50 columns: the tridiagonal columns with an explicit zero
+        // appended where the row is free, plus 50 decoy unit columns.
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut vals = Vec::new();
+        for (k, col) in tri.iter().enumerate() {
+            let mut c = col.clone();
+            let z = (k + 3) % m;
+            if !c.iter().any(|&(r, _)| r == z) {
+                c.push((z, 0.0));
+            }
+            c.sort_by_key(|&(r, _)| r);
+            for (r, v) in c {
+                row_idx.push(r);
+                vals.push(v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        for k in 0..50 {
+            row_idx.push((7 * k) % m);
+            vals.push(1.0);
+            col_ptr.push(row_idx.len());
+        }
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        // Basis slots in reversed order.
+        let basis: Vec<usize> = (0..m).rev().collect();
+        let lists: Vec<Vec<(usize, f64)>> = basis
+            .iter()
+            .map(|&j| {
+                let (r, v) = sp.col(j);
+                r.iter().zip(v).map(|(&r, &v)| (r, v)).collect()
+            })
+            .collect();
+        let mut checked = 0usize;
+        let mut compare = |sp: &SparseCols, lists: &[Vec<(usize, f64)>]| {
+            let mut a = FeralLU::new();
+            let mut b = FeralLU::new();
+            a.factorize_basis(m, sp, &basis).unwrap();
+            b.factorize_sparse(m, lists).unwrap();
+            assert!(matches!(a.lu, Some(Factored::Sparse(_))));
+            for seed in 0..4usize {
+                let rhs: Vec<f64> = (0..m)
+                    .map(|i| ((i * 31 + seed * 17) % 13) as f64 - 6.0)
+                    .collect();
+                let (mut x1, mut x2) = (rhs.clone(), rhs.clone());
+                a.ftran(&mut x1).unwrap();
+                b.ftran(&mut x2).unwrap();
+                let (mut y1, mut y2) = (rhs.clone(), rhs);
+                a.btran(&mut y1).unwrap();
+                b.btran(&mut y2).unwrap();
+                for i in 0..m {
+                    assert_eq!(x1[i].to_bits(), x2[i].to_bits(), "ftran row {i}");
+                    assert_eq!(y1[i].to_bits(), y2[i].to_bits(), "btran row {i}");
+                    checked += 2;
+                }
+            }
+        };
+        compare(&sp, &lists);
+        // An unsorted column: swap the first two entries of column 5.
+        let (cp, ri, vv) = sp.raw();
+        let (cp, mut ri, mut vv) = (cp.to_vec(), ri.to_vec(), vv.to_vec());
+        let s5 = cp[5];
+        assert!(cp[6] - s5 >= 2);
+        ri.swap(s5, s5 + 1);
+        vv.swap(s5, s5 + 1);
+        let sp2 = SparseCols::from_csc(cp, ri, vv);
+        assert!(!sp2.rows_ascending());
+        let lists2: Vec<Vec<(usize, f64)>> = basis
+            .iter()
+            .map(|&j| {
+                let (r, v) = sp2.col(j);
+                r.iter().zip(v).map(|(&r, &v)| (r, v)).collect()
+            })
+            .collect();
+        compare(&sp2, &lists2);
+        assert_eq!(checked, 2 * 2 * 4 * m);
+    }
+
+    #[test]
+    fn sparse_solves_match_the_dense_solves_on_both_routes() {
+        let mut checked = 0usize;
+        for (m, want_sparse) in [(512usize, true), (6, false)] {
+            let cols = tridiagonal_basis(m, 0.25);
+            let mut lu = FeralLU::new();
+            lu.factorize_sparse(m, &cols).unwrap();
+            assert_eq!(
+                matches!(lu.lu, Some(Factored::Sparse(_))),
+                want_sparse,
+                "m = {m}"
+            );
+            let mut check = |lu: &mut FeralLU, rhs: &[(usize, f64)]| {
+                for transpose in [false, true] {
+                    let mut dense = vec![0.0; m];
+                    for &(i, v) in rhs {
+                        dense[i] += v;
+                    }
+                    let mut out = Vec::new();
+                    if transpose {
+                        lu.btran(&mut dense).unwrap();
+                        lu.btran_sparse(m, rhs, &mut out).unwrap();
+                    } else {
+                        lu.ftran(&mut dense).unwrap();
+                        lu.ftran_sparse(m, rhs, &mut out).unwrap();
+                    }
+                    assert!(out.windows(2).all(|w| w[0].0 < w[1].0), "unsorted support");
+                    assert!(out.iter().all(|&(_, v)| v != 0.0), "explicit zero emitted");
+                    let mut got = vec![0.0; m];
+                    for &(i, v) in &out {
+                        got[i] = v;
+                    }
+                    for i in 0..m {
+                        let tol = 1e-12 * (1.0 + dense[i].abs());
+                        assert!(
+                            (got[i] - dense[i]).abs() <= tol,
+                            "m {m} row {i}: {} vs {}",
+                            got[i],
+                            dense[i]
+                        );
+                        checked += 1;
+                    }
+                }
+            };
+            for r in [0, m / 2, m - 1] {
+                check(&mut lu, &[(r, 1.0)]);
+            }
+            check(&mut lu, &[(1, 2.0), (m - 2, -3.0), (1, 0.5)]);
+            // After an update: replace slot 1 with a different column.
+            let mut col = vec![0.0; m];
+            col[0] = 1.0;
+            col[1] = 4.0;
+            col[2] = -1.0;
+            lu.update(1, &col).unwrap();
+            check(&mut lu, &[(0, 1.0)]);
+            check(&mut lu, &[(1, 1.0), (2, -2.0)]);
+        }
+        assert!(checked > 6000, "{checked}");
+    }
 
     /// A tridiagonal basis of order `m`: same sparsity pattern every time, values
     /// shifted by `bump` so successive factorizations are numerically distinct.

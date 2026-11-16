@@ -1,5 +1,10 @@
 //! Rust-internal MILP branch-and-bound driven by the warm-started simplex.
 //!
+//! Provenance: the gap-plan-P3 primal heuristics (RENS/RINS, randomized rounding),
+//! child selection and strong-branching rules marked as HiGHS's below are derived from
+//! HiGHS (https://github.com/ERGO-Code/HiGHS, Copyright (c) HiGHS, MIT License); see
+//! `THIRD_PARTY_NOTICES.md` at the repository root.
+//!
 //! This runs the *entire* pure-MILP solve in Rust (roadmap P4): it reuses the
 //! existing [`TreeManager`] (selection, pruning, branching, pseudocosts,
 //! incumbent, gap) but solves each node's LP relaxation in-process with the
@@ -12,6 +17,10 @@
 //! POUNCE/JAX path); only linear MILP reaches here.
 
 use std::collections::{HashMap, HashSet};
+
+mod highs_branch;
+mod highs_env;
+mod highs_eval;
 
 use crate::bnb::branching::VarBranchInfo;
 use crate::bnb::node::{NodeId, NodeLineage};
@@ -47,6 +56,20 @@ const CUT_MIN_EFFICACY: f64 = 1e-4;
 /// leaves the root at -5519 / -3195 (claim -2647 / -1150), one step reaches
 /// -2657 / -1749 in SCIP; two steps were not better on syn and helped rsyn.
 const CMIR_MAX_AGGR: usize = 2;
+/// Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): HiGHS's path length
+/// (`HighsPathSeparator.cpp:170`, `maxPathLen = 6`).
+const CMIR_MAX_AGGR_DESIGN: usize = 6;
+/// Gap plan P3: under `DISCOPT_MILP_ROOT_CMIR` one dive may take this share of the
+/// time left, at most [`ROOT_DIVE_MAX_S`]. Measured: on `neos-911970` the root dive
+/// over the cut-augmented LP (215 dense rows) took 9.4 s of a 20 s solve, one LP
+/// re-solve per fixed binary (gap plan §12.7); HiGHS budgets heuristics as a share of
+/// the search (`mip_heuristic_effort`).
+const ROOT_DIVE_SHARE: f64 = 0.1;
+const ROOT_DIVE_MAX_S: f64 = 2.0;
+/// Gap plan P3: consecutive stalled root cut rounds allowed under
+/// `DISCOPT_MILP_ROOT_CMIR` (10 took `neos-911970`'s root from 57.5 % to 31.9 % with
+/// c-MIR alone; gap plan §12.2).
+const ROOT_CMIR_STALL_ROUNDS: usize = 10;
 /// #2107: c-MIR candidates kept per round before selection (most efficacious first).
 const CMIR_MAX_CUTS: usize = 200;
 /// Drop a candidate cut whose direction is more than this parallel (|cos|) to an
@@ -620,6 +643,453 @@ fn row_tolerances(
     eps
 }
 
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether each root round propagates its LP
+/// rows (cuts included) and fixes by reduced cost into the root box, as HiGHS's
+/// root does (`DISCOPT_HIGHS_SEPA_PROPAGATE=1`).
+///
+/// **Default OFF, kept as a documented opt-in (CLAUDE.md §5).** Measured on the
+/// four-arm panel (gap plan §12.21, MIPLIB-38+M, 62 rows, 20 s): sound (0 violations
+/// in 668 checks) but neutral, 45 = 45 certified with no instance gained or lost,
+/// alone or with variable bounds. HiGHS's version also propagates through its
+/// clique table and implications, and receives bounds from probing; what would
+/// make this worth turning on is one of those (clique-table propagation or
+/// probing) landing in the port. Read per solve, refusing garbage, so a
+/// differential panel cannot silently run one arm twice.
+fn highs_sepa_propagate() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_PROPAGATE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEPA_PROPAGATE={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the ported separators (root rounds
+/// and, with `DISCOPT_HIGHS_SEPA_NODE`, node rounds) read the global box tightened by
+/// the incumbent's objective cutoff (`DISCOPT_HIGHS_SEPA_CUTOFF_BOX=1`).
+///
+/// HiGHS's transformed LP reads the **global domain** (`HighsTransformedLp.cpp:45-67`),
+/// and that domain propagates the objective row `c x <= upper_limit` once an incumbent
+/// exists (`HighsMipSolverData.cpp:980`, `setupObjectivePropagation`). discopt handed
+/// the separators the root box alone. On a model whose columns are bounded only through
+/// the objective, every aggregation then holds a free column and `transform` refuses it:
+/// measured on `gsvm2rl3` (61 free columns: `b` and the 60 `u_k`, bounded in HiGHS by
+/// `s_k <= cutoff`, `-s_k <= u_k <= s_k`), 3,434-3,942 of 3,434-3,942 `transform` calls
+/// per round refused for a free column and 0 cuts at the root and at every node, while
+/// HiGHS's root separates 55 cuts (0.012 -> 0.031).
+///
+/// Soundness: the box is FBBT over the global rows plus `c x <= incumbent` (rounded
+/// outward, never HiGHS's strict `incumbent - feastol`), so a cut derived over it is
+/// valid for every feasible point at least as good as the incumbent -- the points a
+/// search with that incumbent must keep. Incumbents only decrease, so a cut stays valid
+/// as the cutoff tightens; this is the guarantee reduced-cost fixing already relies on.
+///
+/// **Default OFF** (bound-changing, CLAUDE.md §5) until a corpus panel: flag-retirement
+/// audit row. Read per call, refusing garbage.
+fn highs_sepa_cutoff_box() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_CUTOFF_BOX") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!(
+                    "DISCOPT_HIGHS_SEPA_CUTOFF_BOX={other:?} is not recognized (expected 1 or 0)"
+                )
+            }
+        },
+    }
+}
+
+/// The global box `[l, u]` (all `n` columns of `A x = b`) tightened by FBBT over the rows
+/// and the objective cutoff `c x <= incumbent - obj_const` (rounded up), for the ported
+/// separators under [`highs_sepa_cutoff_box`]. `None` when there is no finite incumbent
+/// or the cutoff empties the box (no point beats the incumbent: nothing to separate for).
+/// Only ever tightens: every returned bound is within `[l, u]`.
+#[allow(clippy::too_many_arguments)]
+fn sepa_cutoff_box(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    c: &[f64],
+    incumbent: Option<f64>,
+    obj_const: f64,
+    tol: f64,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let inc = incumbent.filter(|v| v.is_finite() && *v < INFEAS_SENTINEL - 1.0)?;
+    let mut w = c.to_vec();
+    w.resize(n, 0.0);
+    let pr = fbbt_rows_with_row(
+        csc,
+        m,
+        n,
+        l,
+        u,
+        b,
+        is_int,
+        tol,
+        Some((&w, sub_up(inc, obj_const))),
+    );
+    if pr.infeasible {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::HighsSepaCutoffBox);
+    let gl: Vec<f64> = (0..n).map(|j| pr.l[j].max(l[j])).collect();
+    let gu: Vec<f64> = (0..n).map(|j| pr.u[j].min(u[j])).collect();
+    Some((gl, gu))
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the root loop runs the ported RENS on
+/// the root LP point once its cut rounds stop and, when that improves the incumbent,
+/// runs a second pass of rounds with root reduced-cost fixing and propagation against
+/// it (gap plan §12.27; HiGHS `evaluateRootNode`: heuristics, then "if there are new
+/// global bound changes we re-evaluate the LP and do one more separation round").
+/// Default ON since the stage 1d-5 graduation panel (`docs/dev/flag-retirement-audit.md`);
+/// `DISCOPT_HIGHS_ROOT_RENS=0` opts out. Read per solve, refusing garbage.
+fn highs_root_rens() -> bool {
+    if crate::lp::cmir::legacy_defaults() {
+        return false;
+    }
+    match std::env::var("DISCOPT_HIGHS_ROOT_RENS") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_ROOT_RENS={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the tree plunges (gap plan §12.28):
+/// each batch first continues the plunges of the previous one (each branched node's
+/// preferred child, HiGHS `kRootSol`), up to [`PLUNGE_LIMIT`] nodes per plunge, then
+/// fills from the best-bound queue; node separation runs at plunge starts only (HiGHS
+/// `processNodes`: `separateAndStoreBasis` on the node taken from the queue, then
+/// `dive`). Default OFF; `DISCOPT_HIGHS_DIVE=1` opts in. Read per solve, refusing
+/// garbage.
+fn highs_dive() -> bool {
+    match std::env::var("DISCOPT_HIGHS_DIVE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_HIGHS_DIVE={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether root cuts dropped by the root cut
+/// cleanup go to the node cut pool instead of being discarded (gap plan §12.28; HiGHS
+/// keeps every root cut in its global pool and re-adds violated ones at nodes,
+/// `HighsCutPool::separate`). Default ON since the stage 1d-5 graduation panel (`docs/dev/flag-retirement-audit.md`);
+/// `DISCOPT_HIGHS_ROOT_POOL=0` opts out. Read per solve, refusing garbage.
+fn highs_root_pool() -> bool {
+    if crate::lp::cmir::legacy_defaults() {
+        return false;
+    }
+    match std::env::var("DISCOPT_HIGHS_ROOT_POOL") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_ROOT_POOL={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether reliability branching keeps
+/// strong-branching unreliable columns for the whole tree instead of only the first
+/// `sb_node_budget` nodes (gap plan §12.28; HiGHS's reliability branching probes any
+/// column with fewer than `mip_pscost_minreliable` observations at every node).
+/// Default OFF; `DISCOPT_HIGHS_SB_TREE=1` opts in. Read per solve, refusing garbage.
+fn highs_sb_tree() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SB_TREE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_HIGHS_SB_TREE={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: the sequential HiGHS search (gap plan §12.31):
+/// dives at batch size 1 (one plunge at a time, the LP and cut pool fixed along a dive).
+/// Implies [`highs_dive`]. Default OFF; `DISCOPT_HIGHS_SEARCH=1` opts in. Read per solve,
+/// refusing garbage.
+fn highs_search() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEARCH") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_HIGHS_SEARCH={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests force the `DISCOPT_HIGHS_MIP_SEARCH` route without touching the process
+    /// environment (tests run in parallel).
+    static FORCE_HIGHS_MIP_SEARCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+fn highs_mip_search() -> bool {
+    if crate::lp::cmir::legacy_defaults() {
+        return false;
+    }
+    #[cfg(test)]
+    if let Some(v) = FORCE_HIGHS_MIP_SEARCH.with(|f| f.get()) {
+        return v;
+    }
+    // `DISCOPT_HIGHS_MIP_SEARCH` (stage 1d-5 of `docs/dev/highs-mip-replacement-plan.md`):
+    // run the HiGHS-design search (translated control, queue, local domain, node
+    // evaluation through `node_lp`'s safety layer, reliability strong branching with
+    // `HighsPseudocost`) from the root working LP instead of the batched search, for
+    // models with no lazy or node hook (a debugger or a bound hook runs on it) and the default branching rule
+    // and node selection. Default ON since the stage 1d-5 graduation panel; `0`
+    // restores the batched search (flag-retirement audit row).
+    match std::env::var("DISCOPT_HIGHS_MIP_SEARCH") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_MIP_SEARCH={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// Under the sequential search: node boxes from the persistent incremental `HighsDomain`
+/// instead of per-node FBBT (gap plan §12.31). Default OFF, a documented opt-in: the
+/// HiGHS-faithful domain (30 % acceptance rule for continuous columns, change-triggered
+/// rows) gives looser boxes than discopt's FBBT, and discopt's warm dual simplex pays
+/// for the looser structural and slack boxes (bell5: ~90 pivots per node LP vs ~2,
+/// 2.6 ms vs 0.2 ms). Kept for the layers that need the domain (cut-pool and conflict
+/// propagation); turn on when those land and a panel shows it pays.
+fn highs_search_domain() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEARCH_DOMAIN") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEARCH_DOMAIN={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// The working LP `A x = b` (structural columns `0..ns`, slacks after) as the rows of a
+/// [`crate::lp::highs_cutgen::domain::DomainModel`] over the structural columns: a row
+/// with one singleton slack takes its range from the slack's bounds, a row with no slack
+/// is an equality, and a row whose slack structure is anything else is left free (it
+/// never propagates). The `1e20` sentinel maps to infinity.
+#[allow(clippy::too_many_arguments)]
+fn domain_model_from_lp(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    ns: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    is_int: &[bool],
+) -> (
+    crate::lp::highs_cutgen::domain::DomainModel,
+    Vec<Option<(usize, f64)>>,
+) {
+    let lo = |v: f64| if v <= -INF { f64::NEG_INFINITY } else { v };
+    let hi = |v: f64| if v >= INF { f64::INFINITY } else { v };
+    let mut rows: Vec<(Vec<usize>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
+    for j in 0..ns {
+        let (ri, rv) = csc.col(j);
+        for (&i, &v) in ri.iter().zip(rv) {
+            if v != 0.0 && i < m {
+                rows[i].0.push(j);
+                rows[i].1.push(v);
+            }
+        }
+    }
+    let mut slack_count = vec![0usize; m];
+    let mut slack_of: Vec<Option<(usize, f64)>> = vec![None; m];
+    for j in ns..n {
+        let (ri, rv) = csc.col(j);
+        let nz: Vec<(usize, f64)> = ri
+            .iter()
+            .zip(rv)
+            .filter(|(&i, &v)| v != 0.0 && i < m)
+            .map(|(&i, &v)| (i, v))
+            .collect();
+        for &(i, _) in &nz {
+            slack_count[i] += 1;
+        }
+        if nz.len() == 1 {
+            slack_of[nz[0].0] = Some((j, nz[0].1));
+        }
+    }
+    let mut rl = vec![f64::NEG_INFINITY; m];
+    let mut ru = vec![f64::INFINITY; m];
+    for i in 0..m {
+        match (slack_count[i], slack_of[i]) {
+            (0, _) => {
+                rl[i] = b[i];
+                ru[i] = b[i];
+            }
+            (1, Some((j, sigma))) => {
+                // a x + sigma s = b, s in [sl, su]  =>  a x in b - sigma [sl, su].
+                let (sl, su) = (lo(l[j]), hi(u[j]));
+                let (e1, e2) = (b[i] - sigma * sl, b[i] - sigma * su);
+                let (a, c) = if sigma > 0.0 { (e2, e1) } else { (e1, e2) };
+                rl[i] = if a.is_nan() { f64::NEG_INFINITY } else { a };
+                ru[i] = if c.is_nan() { f64::INFINITY } else { c };
+            }
+            _ => {}
+        }
+    }
+    let slack_map: Vec<Option<(usize, f64)>> = (0..m)
+        .map(|i| {
+            if slack_count[i] == 1 {
+                slack_of[i]
+            } else {
+                None
+            }
+        })
+        .collect();
+    (
+        crate::lp::highs_cutgen::domain::DomainModel::from_rows(
+            ns,
+            &rows,
+            rl,
+            ru,
+            is_int[..ns].to_vec(),
+        ),
+        slack_map,
+    )
+}
+
+/// The working-LP box of a domain (gap plan §12.31): the structural columns take the
+/// domain's bounds (infinity to the `1e20` sentinel), and a row's singleton slack
+/// takes the range implied by the row's activity over the domain's box
+/// (`a x + sigma s = b`), relaxed by 1e-9 relative and intersected with the slack's
+/// own bounds. Boxed slacks let the warm dual simplex flip bounds instead of
+/// pivoting (without them a node LP took ~90 pivots, with them ~2). `b`, `l`, `u`
+/// are the working LP's (`l`/`u` over all `n_w` columns).
+fn domain_lp_box(
+    d: &crate::lp::highs_cutgen::domain::Domain,
+    slacks: &[Option<(usize, f64)>],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    ns: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let (m_w, n_w) = (b.len(), l.len());
+    let map = |v: f64, inf: f64| if v.is_infinite() { inf } else { v };
+    let mut fl: Vec<f64> = d.col_lower.iter().map(|&v| map(v, -INF)).collect();
+    let mut fu: Vec<f64> = d.col_upper.iter().map(|&v| map(v, INF)).collect();
+    fl.extend_from_slice(&l[ns..n_w]);
+    fu.extend_from_slice(&u[ns..n_w]);
+    for (row, sm) in slacks.iter().enumerate() {
+        let Some((sj, sigma)) = *sm else { continue };
+        if sj >= n_w || row >= m_w {
+            continue;
+        }
+        let (amin, nmin, amax, nmax) = d.row_activity(row);
+        let amin = if nmin > 0 { f64::NEG_INFINITY } else { amin };
+        let amax = if nmax > 0 { f64::INFINITY } else { amax };
+        let (e_hi, e_lo) = ((b[row] - amin) / sigma, (b[row] - amax) / sigma);
+        let (mut slo, mut shi) = if sigma > 0.0 {
+            (e_lo, e_hi)
+        } else {
+            (e_hi, e_lo)
+        };
+        if slo.is_nan() {
+            slo = f64::NEG_INFINITY;
+        }
+        if shi.is_nan() {
+            shi = f64::INFINITY;
+        }
+        slo -= 1e-9 * (1.0 + slo.abs());
+        shi += 1e-9 * (1.0 + shi.abs());
+        let (nl, nu) = (fl[sj].max(map(slo, -INF)), fu[sj].min(map(shi, INF)));
+        if nl <= nu {
+            fl[sj] = nl;
+            fu[sj] = nu;
+        }
+    }
+    (fl, fu)
+}
+
+/// Row -> the working LP's singleton slack `(column, coefficient)` of that row.
+type SlackMap = Vec<Option<(usize, f64)>>;
+
+/// A domain over the working LP's rows (`domain_model_from_lp`) at the working LP's
+/// structural bounds, propagated and committed as its global baseline, with the
+/// row-to-slack map; `None` when the rows alone are infeasible over the global box.
+#[allow(clippy::too_many_arguments)]
+fn domain_from_lp(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    ns: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    is_int: &[bool],
+) -> Option<(crate::lp::highs_cutgen::domain::Domain, SlackMap)> {
+    let (model, slack_map) = domain_model_from_lp(csc, m, n, ns, b, l, u, is_int);
+    let gl: Vec<f64> = l[..ns]
+        .iter()
+        .map(|&v| if v <= -INF { f64::NEG_INFINITY } else { v })
+        .collect();
+    let gu: Vec<f64> = u[..ns]
+        .iter()
+        .map(|&v| if v >= INF { f64::INFINITY } else { v })
+        .collect();
+    let mut d = crate::lp::highs_cutgen::domain::Domain::new(
+        std::sync::Arc::new(model),
+        &gl,
+        &gu,
+        1e-6,
+        1e-9,
+    );
+    d.propagate();
+    if d.infeasible() {
+        return None;
+    }
+    d.clear_changed_cols();
+    d.commit_as_global();
+    Some((d, slack_map))
+}
+
+/// A node's box after the sequential search's domain propagation: `None` inside when
+/// the domain proved it infeasible (gap plan §12.31).
+type DomainPre = (NodeId, Option<(Vec<f64>, Vec<f64>)>);
+
+/// Concurrent plunges under the sequential search (gap plan §12.32): each batch slot
+/// continues its own dive and the slots are evaluated in parallel. Fixed (not the thread
+/// count) so the search is the same on every machine; threads only change its speed, up
+/// to this many. HiGHS gets parallelism the same way (workers each running dives).
+const HIGHS_SEARCH_PLUNGE_SLOTS: usize = 8;
+
+/// Nodes per plunge before it returns to the queue (HiGHS `processNodes`'s
+/// `plungeLimit`).
+const PLUNGE_LIMIT: usize = 100;
+
 /// The driver's FBBT: exact rows, or rows relaxed by [`row_tolerances`] under
 /// [`tol_robust_enabled`].
 #[allow(clippy::too_many_arguments)]
@@ -634,6 +1104,194 @@ fn fbbt_rows(
     tol: f64,
 ) -> crate::lp::simplex::presolve::PresolveResult {
     fbbt_rows_with_row(csc, m, n, l, u, b, is_int, tol, None)
+}
+
+/// Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): incremental bound propagation over `A x = b` for the
+/// primal heuristics, in the role of HiGHS's `HighsDomain::propagate` after each fix
+/// (`HighsPrimalHeuristics.cpp:1125-1150`). A bound change queues only that column's
+/// rows; a queued row is re-propagated from a freshly computed activity range (no
+/// incremental drift). Like [`fbbt_rows_exact`] it only steers which candidates the
+/// heuristic tries: every resulting point is re-verified on the original rows.
+struct IncProp {
+    rows: Vec<Vec<(usize, f64)>>,
+    cols: Vec<Vec<usize>>,
+    b: Vec<f64>,
+    is_int: Vec<bool>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    queue: Vec<usize>,
+    queued: Vec<bool>,
+    work: usize,
+}
+
+impl IncProp {
+    const WORK_CAP: usize = 50_000_000;
+
+    fn new(
+        csc: &SparseCols,
+        m: usize,
+        n: usize,
+        b: &[f64],
+        is_int: &[bool],
+        l: &[f64],
+        u: &[f64],
+    ) -> Self {
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        let mut cols: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let (cp, ri, va) = csc.raw();
+        for j in 0..n {
+            for k in cp[j]..cp[j + 1] {
+                if va[k] != 0.0 {
+                    rows[ri[k]].push((j, va[k]));
+                    cols[j].push(ri[k]);
+                }
+            }
+        }
+        IncProp {
+            rows,
+            cols,
+            b: b.to_vec(),
+            is_int: is_int.to_vec(),
+            l: l.to_vec(),
+            u: u.to_vec(),
+            queue: Vec::new(),
+            queued: vec![false; m],
+            work: 0,
+        }
+    }
+
+    fn push_col(&mut self, j: usize) {
+        for &r in &self.cols[j] {
+            if !self.queued[r] {
+                self.queued[r] = true;
+                self.queue.push(r);
+            }
+        }
+    }
+
+    /// Set `j`'s bounds to `[lo, hi]` and propagate; `false` when the box is empty.
+    fn set(&mut self, j: usize, lo: f64, hi: f64) -> bool {
+        if lo > self.l[j] || hi < self.u[j] {
+            self.l[j] = self.l[j].max(lo);
+            self.u[j] = self.u[j].min(hi);
+            if self.l[j] > self.u[j] + 1e-9 {
+                return false;
+            }
+            self.push_col(j);
+        }
+        self.propagate()
+    }
+
+    fn propagate(&mut self) -> bool {
+        while let Some(r) = self.queue.pop() {
+            self.queued[r] = false;
+            if self.work > Self::WORK_CAP {
+                self.queue.clear();
+                return true; // budget spent: stop tightening (never a wrong verdict)
+            }
+            let row = std::mem::take(&mut self.rows[r]);
+            self.work += row.len();
+            let (mut mn, mut mx) = (0.0f64, 0.0f64);
+            let (mut mn_inf, mut mx_inf) = (0usize, 0usize);
+            for &(j, a) in &row {
+                let (lo, hi) = (self.l[j], self.u[j]);
+                let (cmin, cmax) = if a > 0.0 {
+                    (a * lo, a * hi)
+                } else {
+                    (a * hi, a * lo)
+                };
+                if !cmin.is_finite() || cmin.abs() >= INF {
+                    mn_inf += 1
+                } else {
+                    mn += cmin
+                }
+                if !cmax.is_finite() || cmax.abs() >= INF {
+                    mx_inf += 1
+                } else {
+                    mx += cmax
+                }
+            }
+            let br = self.b[r];
+            let scale = 1e-6 * (1.0 + br.abs());
+            if (mn_inf == 0 && mn > br + scale) || (mx_inf == 0 && mx < br - scale) {
+                self.rows[r] = row;
+                return false;
+            }
+            let mut changed: Vec<usize> = Vec::new();
+            for &(k, a) in &row {
+                let (lo, hi) = (self.l[k], self.u[k]);
+                let (cmin, cmax) = if a > 0.0 {
+                    (a * lo, a * hi)
+                } else {
+                    (a * hi, a * lo)
+                };
+                let cmin_inf = !cmin.is_finite() || cmin.abs() >= INF;
+                let cmax_inf = !cmax.is_finite() || cmax.abs() >= INF;
+                // rest = sum over the others: [rest_min, rest_max].
+                let rest_min = if mn_inf - usize::from(cmin_inf) > 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    mn - if cmin_inf { 0.0 } else { cmin }
+                };
+                let rest_max = if mx_inf - usize::from(cmax_inf) > 0 {
+                    f64::INFINITY
+                } else {
+                    mx - if cmax_inf { 0.0 } else { cmax }
+                };
+                // a x_k = br - rest  ->  a x_k in [br - rest_max, br - rest_min].
+                let (vlo, vhi) = (br - rest_max, br - rest_min);
+                let (mut nlo, mut nhi) = if a > 0.0 {
+                    (vlo / a, vhi / a)
+                } else {
+                    (vhi / a, vlo / a)
+                };
+                if self.is_int[k] {
+                    if nlo.is_finite() {
+                        nlo = (nlo - 1e-6).ceil();
+                    }
+                    if nhi.is_finite() {
+                        nhi = (nhi + 1e-6).floor();
+                    }
+                }
+                let mut hit = false;
+                let eps = 1e-7 * (1.0 + lo.abs().min(1e9));
+                let cont_gain = if self.is_int[k] {
+                    0.0
+                } else {
+                    // min/max, not clamp: clamp would propagate a NaN width.
+                    #[allow(clippy::manual_clamp)]
+                    let w = (hi - lo).min(1e9).max(1e-9);
+                    1e-3 * w
+                };
+                if nlo.is_finite() && nlo > lo + eps + cont_gain {
+                    self.l[k] = nlo;
+                    hit = true;
+                }
+                let eps = 1e-7 * (1.0 + hi.abs().min(1e9));
+                if nhi.is_finite() && nhi < hi - eps - cont_gain {
+                    self.u[k] = nhi;
+                    hit = true;
+                }
+                if hit {
+                    if self.l[k] > self.u[k] + 1e-6 * (1.0 + self.u[k].abs()) {
+                        self.rows[r] = row;
+                        return false;
+                    }
+                    if self.l[k] > self.u[k] {
+                        let m = 0.5 * (self.l[k] + self.u[k]);
+                        self.l[k] = m;
+                        self.u[k] = m;
+                    }
+                    changed.push(k);
+                }
+            }
+            self.rows[r] = row;
+            for k in changed {
+                self.push_col(k);
+            }
+        }
+        true
+    }
 }
 
 /// The exact-row FBBT, for the primal heuristics (sub-MIP, randomized rounding, the
@@ -1212,9 +1870,18 @@ struct LocalLp {
     m: usize,
     n: usize,
     x: Vec<f64>,
+    /// Row duals of the last optimal solve (the HiGHS path separator reads them).
+    y: Vec<f64>,
     basis: Basis,
     best: Option<f64>,
     pivots: usize,
+    /// When the NS verification abstains on an optimal LP, keep its point for
+    /// separation instead of abandoning the node's rounds (the HiGHS node-separation
+    /// arm under `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`; see [`LocalLp::step`]). Measured on
+    /// `gsvm2rl3` (2,000 nodes) with the root's cuts seeded into the search's pool: NS
+    /// abstained on 22 of 22 local solves (free columns with a dual residual), 20 of
+    /// them the inherited-pool solve that precedes separation, so 5 node rounds ran.
+    keep_unverified: bool,
 }
 
 impl LocalLp {
@@ -1260,6 +1927,17 @@ impl LocalLp {
         drop(t_ns);
         let Some(g) = ns else {
             crate::profile::incr(crate::profile::Ctr::NodeGmiNsAbstain);
+            if self.keep_unverified {
+                // The LP is optimal; only its bound is unproven (NS abstains on a free
+                // column with a dual residual). Its point, duals and basis still serve
+                // separation, whose cuts never read the bound: adopt them, record no
+                // bound, and report no improvement (the caller stops after this round).
+                crate::profile::incr(crate::profile::Ctr::NodeGmiNsAbstainKept);
+                self.x = sol.x;
+                self.y = sol.dual;
+                self.basis = sol.basis;
+                return Some(false);
+            }
             return None;
         };
         let g = g.min(sol.obj);
@@ -1268,6 +1946,7 @@ impl LocalLp {
             self.best = Some(g);
         }
         self.x = sol.x;
+        self.y = sol.dual;
         self.basis = sol.basis;
         Some(g > prev + 1e-9 * prev.abs().max(1.0))
     }
@@ -1284,14 +1963,18 @@ impl LocalLp {
 /// Every solve is warm from the node's plain optimal basis extended over the new rows,
 /// and every bound is NS-verified over the augmented matrix. The shared LP is never
 /// touched; the pool is updated by the caller between batches.
+#[allow(clippy::too_many_arguments)]
 fn node_local_gmi_bound(
     ctx: &NodeCtx<'_>,
     full_l: &[f64],
     full_u: &[f64],
     x0: &[f64],
+    y0: &[f64],
     basis0: &Basis,
     pool_rows: &[GomoryCut],
     rounds: usize,
+    seed: i64,
+    incumbent: Option<f64>,
 ) -> LocalGmi {
     let tol = ctx.opts.simplex.tol;
     let mut lp = LocalLp {
@@ -1304,9 +1987,11 @@ fn node_local_gmi_bound(
         m: ctx.m_w,
         n: ctx.n_w,
         x: x0.to_vec(),
+        y: y0.to_vec(),
         basis: basis0.clone(),
         best: None,
         pivots: 0,
+        keep_unverified: ctx.highs_node.is_some() && highs_sepa_cutoff_box(),
     };
     let mut new_cuts: Vec<GomoryCut> = Vec::new();
     if !pool_rows.is_empty() {
@@ -1330,20 +2015,95 @@ fn node_local_gmi_bound(
         gl.resize(lp.n, 0.0);
         gu.resize(lp.n, INF);
         let t_sep = crate::profile::Timer::new(crate::profile::Phase::NodeGmiSep);
-        let cuts = crate::lp::gomory::separate_gomory_cols_global(
-            &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis, &lp.is_int,
-            tol, 1e7,
-        );
-        drop(t_sep);
-        crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
-        // The cuts are truncated to the working columns; select on the point there.
-        let sel = select_cuts(
-            cuts,
-            &lp.x[..ctx.n_w],
-            NODE_GMI_MAX_CUTS,
-            CUT_MIN_EFFICACY,
-            CUT_MAX_PARALLEL,
-        );
+        let sel = if let Some(h) = ctx.highs_node.as_ref() {
+            // Gap plan §12.23: HiGHS's tableau and path separators over the global
+            // box (`gl`/`gu`, slacks included), selected by a fresh ported pool; with
+            // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX` that box carries the objective cutoff, as
+            // HiGHS's global domain does.
+            if highs_sepa_cutoff_box() {
+                if let Some((cl, cu)) = sepa_cutoff_box(
+                    &lp.csc,
+                    lp.m,
+                    lp.n,
+                    &gl,
+                    &gu,
+                    &lp.b,
+                    &lp.is_int,
+                    &lp.c,
+                    incumbent,
+                    ctx.obj_const,
+                    tol,
+                ) {
+                    gl = cl;
+                    gu = cu;
+                }
+            }
+            let cuts = crate::lp::highs_cutgen::bridge::separate_node(
+                &crate::lp::highs_cutgen::bridge::StdFormRound {
+                    csc: &lp.csc,
+                    m: lp.m,
+                    n: lp.n,
+                    ns: ctx.ns,
+                    b: &lp.b,
+                    l: &gl,
+                    u: &gu,
+                    is_int: &lp.is_int,
+                    x: &lp.x,
+                    y: &lp.y,
+                    basic_vars: &lp.basis.basic_vars,
+                    deadline: ctx.deadline,
+                },
+                &crate::lp::highs_cutgen::bridge::NodeSepa {
+                    node_l: &lp.l[..ctx.ns],
+                    node_u: &lp.u[..ctx.ns],
+                    model_rows: h.model_rows,
+                    model_nnz: h.model_nnz,
+                    vbounds: h.vbounds,
+                    seed: seed + lp.pivots as i64,
+                    top_level: h.top_level,
+                    max_cuts: NODE_GMI_MAX_CUTS,
+                },
+            );
+            drop(t_sep);
+            crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
+            let mut out: Vec<GomoryCut> = cuts
+                .into_iter()
+                .map(|mut k| {
+                    k.coeffs.resize(ctx.n_w, 0.0);
+                    k
+                })
+                .collect();
+            if h.add_gmi {
+                let gmi = crate::lp::gomory::separate_gomory_cols_global(
+                    &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis,
+                    &lp.is_int, tol, 1e7,
+                );
+                crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, gmi.len() as u64);
+                out.extend(select_cuts(
+                    gmi,
+                    &lp.x[..ctx.n_w],
+                    NODE_GMI_MAX_CUTS,
+                    CUT_MIN_EFFICACY,
+                    CUT_MAX_PARALLEL,
+                ));
+            }
+            out
+        } else {
+            let cuts = crate::lp::gomory::separate_gomory_cols_global(
+                &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis, &lp.is_int,
+                tol, 1e7,
+            );
+            drop(t_sep);
+            crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
+            // The cuts are truncated to the working columns; select on the point there.
+            select_cuts(
+                cuts,
+                &lp.x[..ctx.n_w],
+                NODE_GMI_MAX_CUTS,
+                CUT_MIN_EFFICACY,
+                CUT_MAX_PARALLEL,
+            )
+        };
         if sel.is_empty() {
             break;
         }
@@ -1452,6 +2212,29 @@ pub struct MilpOptions {
     pub n_struct: usize,
     /// Structural column indices that are integer-constrained.
     pub integer_cols: Vec<usize>,
+    /// The subset of `integer_cols` that is integer only because presolve proved it
+    /// (`Presolved::implied_int_cols`): continuous in the caller's problem. HiGHS's
+    /// `integer_cols` / `integral_cols` split (`HighsMipSolverData.cpp:1013-1050`):
+    /// branching, node integer feasibility, cuts, propagation, reduced-cost fixing and
+    /// the objective lattice use all of `integer_cols`; the primal heuristics (rounding,
+    /// RENS/RINS fixings, diving, snapping) and the integrality check of a heuristic's
+    /// point use `integer_cols` minus these (`HighsPrimalHeuristics.cpp:44`), since a
+    /// point with one of them fractional is feasible for the caller's problem. Empty
+    /// (every integer column is a true integer) at every entry point but the presolved
+    /// solve.
+    pub implied_int_cols: Vec<usize>,
+    /// Stop after this many consecutive queue installs whose estimate is at or above
+    /// the cutoff (HiGHS `mip_max_stall_nodes`; 0 = no limit). Honoured by the HiGHS
+    /// search; set for heuristic sub-MIPs ([`sub_solve_options`]).
+    pub max_stall_nodes: usize,
+    /// Stop after this many leaves (HiGHS `mip_max_leaves`; 0 = no limit). Honoured by
+    /// the HiGHS search; set for heuristic sub-MIPs.
+    pub max_leaves: usize,
+    /// Stop, uncertified, once the search has spent this much deterministic work
+    /// ([`sub_mip_work`]: LP iterations, nodes and exact arithmetic). `None` = no
+    /// limit. Set for heuristic sub-MIPs ([`submip_work_budget`]), where a wall-clock
+    /// share would make what a certifying parent finds depend on machine load.
+    pub max_work: Option<u64>,
     /// Node-creation cap.
     pub max_nodes: usize,
     /// Open-frontier cap (#1874). `Some(k)`: the search stops, uncertified, once
@@ -1669,6 +2452,200 @@ pub struct MilpOptions {
 
 /// Minimum share of integer columns a neighbourhood must fix (before propagation).
 const SUB_MIP_MIN_FIXING_RATE: f64 = 0.30;
+/// Gap plan P3: time share of a NESTED sub-MIP (`try_rens_highs` inside a sub-solve).
+const NESTED_SUB_MIP_SHARE: f64 = 0.5;
+
+/// `DISCOPT_MILP_SUBMIP_BUDGET_HIGHS`: the top-level ROOT RENS sub-MIP gets half the
+/// remaining time with no fixed cap (in-tree RENS/RINS keep the cap: applying it to
+/// them too was harmful on the dual side, `population_panel_s4.*`, dual better/worse
+/// 5/19). HiGHS bounds its sub-MIPs by nodes,
+/// leaves and stall nodes only (`HighsPrimalHeuristics.cpp:627-632`), which this
+/// keeps via the node budget and `DISCOPT_HIGHS_SUBMIP_LIMITS`. Without it the
+/// budget is `min(share x remaining, 2 s)`. Measured 2026-11-15:
+/// - neos-960392's RENS sub-MIP never finished its root inside 2 s (HiGHS's
+///   sub-MIP found its incumbent at 17.8 s);
+/// - lifting the cap to min(50 %, 10 s) took neos-498623's incumbent 37.6 -> 22.7.
+///
+/// Nested sub-MIPs keep the capped budget. Default OFF: the root-only scope was
+/// also harmful (`population_panel_rb.*`: incumbents 89 -> 87, dual better/worse
+/// 10/15, certified-row wall 1.13x). Re-judge once root RENS is effort-gated as
+/// HiGHS's is (`moreHeuristicsAllowed`). Garbage is refused.
+fn submip_budget_highs_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_SUBMIP_BUDGET_HIGHS") {
+        Err(_) => false,
+        Ok(v) => parse_switch("DISCOPT_MILP_SUBMIP_BUDGET_HIGHS", &v),
+    })
+}
+
+/// `DISCOPT_MILP_SUBMIP_WORK=<W>`: every heuristic sub-MIP runs under a budget of `W`
+/// deterministic work units ([`sub_mip_work`]) and the parent's deadline, instead of a
+/// share of the wall clock left ([`sub_mip_budget`]). The share is a #1116 role-2
+/// clock: it decided what a certifying solve found, so `test_1236`'s nvs02 tree changed
+/// with machine load (`[2, 4, 2]` nodes in #2220's CI).
+///
+/// Default [`SUBMIP_WORK_DEFAULT`] (about 2 s on the calibration machine, the share's
+/// own cap). Measured on #2220's 112-row MIPLIB population at 30 s against the share
+/// (both arms with nested budgets and [`sub_mip_found_point`]): 0 violations,
+/// certified 13 -> 13, incumbents 90 -> 91, dual bound better/worse 13/9, primal
+/// 14/6 (noise floor of an arm against itself: 8/2 and 3/4). Half of it (1.25e9) was
+/// primal 8/11 with incumbents 90 -> 89. `0` is the opt-out to the wall share,
+/// kept so the two can be A/B'd. Garbage is refused.
+fn submip_work_budget() -> u64 {
+    static F: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_SUBMIP_WORK") {
+        Err(_) => SUBMIP_WORK_DEFAULT,
+        Ok(v) => v
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|w| w.is_finite() && *w >= 0.0)
+            .map(|w| w as u64)
+            .unwrap_or_else(|| panic!("DISCOPT_MILP_SUBMIP_WORK={v:?} is not a work budget")),
+    })
+}
+
+/// The default [`submip_work_budget`].
+const SUBMIP_WORK_DEFAULT: u64 = 2_500_000_000;
+
+/// Work units (about 0.8 ns each on the calibration machine) of one LP iteration
+/// per row-plus-column (pricing and ratio test).
+const WORK_ITER_PER_DIM: u64 = 3;
+/// Work units of one LP iteration, flat.
+const WORK_ITER: u64 = 7086;
+/// Work units of one search node, per row-plus-column (propagation, bookkeeping).
+const WORK_NODE_PER_DIM: u64 = 58;
+/// Work units of one 64-bit limb operation of exact arithmetic ([`crate::work`]).
+const WORK_EXACT_LIMB: u64 = 1125;
+/// Work units of one LU entry touched ([`crate::work::Kind::Lu`]).
+const WORK_LU: u64 = 8;
+/// Work units of one mod-k splay step ([`crate::work::Kind::Sepa`]).
+const WORK_SEPA: u64 = 2;
+
+/// A sub-MIP's deterministic work so far, in units of roughly 0.8 ns on the machine
+/// it was calibrated on: `iters * (3 (m + n) + 7086) + nodes * (m + n) * 58 +
+/// limb_ops * 1125 + lu_entries * 8 + modk_splay_steps * 2`.
+///
+/// LP iterations are not the work. Measured on #2220's population (114 sub-MIPs
+/// over 30 ms, 16 instances, `DISCOPT_RENS_TRACE` traces with the budget out of
+/// reach): a `gen-ip054` RENS sub-MIP spent 3.44 s on 1,036 iterations, nearly all of
+/// it in the exact rational Farkas check (`lp::simplex::farkas_exact`, 4.5e6 limb
+/// operations), and a `reblock166` one spent 6.3 s at its root with no iterations
+/// counted, in its basis factorizations (4.1e8 LU entries) and the mod-k
+/// separator (1.8e9 splay steps). Without those terms the best fit of this form
+/// predicted it at about 0 s; with them this fit (non-negative least squares on
+/// relative error) predicts every one of the 114 within a factor of 0.22-2.2
+/// (5th-95th percentile 0.56-1.39). The limb, LU and splay counts come from the solve's [`crate::work`] scope, which the
+/// parallel node loop carries into its tasks, so the total does not depend on
+/// scheduling.
+pub(super) fn sub_mip_work(lp_iters: usize, nodes: usize, size: usize) -> u64 {
+    use crate::work::{current_total, Kind};
+    work_units(
+        lp_iters,
+        nodes,
+        size,
+        current_total(Kind::ExactLimb),
+        current_total(Kind::Lu),
+        current_total(Kind::Sepa),
+    )
+}
+
+/// [`sub_mip_work`] from explicit totals.
+fn work_units(lp_iters: usize, nodes: usize, size: usize, limbs: u64, lu: u64, sepa: u64) -> u64 {
+    let size = size as u64;
+    lp_iters as u64 * (size * WORK_ITER_PER_DIM + WORK_ITER)
+        + nodes as u64 * size * WORK_NODE_PER_DIM
+        + limbs * WORK_EXACT_LIMB
+        + lu * WORK_LU
+        + sepa * WORK_SEPA
+}
+
+/// Whether a heuristic sub-MIP's result carries a point to try as an incumbent.
+///
+/// `NodeLimit` with a finite objective is a sub-MIP that found a point and then
+/// stopped on its node or work cap ([`decide_status`] reports the cap before
+/// `Feasible`). Accepting only `Optimal | Feasible` threw those points away: under
+/// the work budget a sub-MIP stops on its cap, not the clock, and `trento1` and
+/// `neos-4393408-tinui` (#2220) lost their only incumbent that way. The point is
+/// still checked against the original rows ([`validate_seed_incumbent`]) before
+/// it is used.
+fn sub_mip_found_point(res: &MilpResult) -> bool {
+    found_point(res.status, res.obj)
+}
+
+fn found_point(status: MilpStatus, obj: f64) -> bool {
+    match status {
+        MilpStatus::Optimal | MilpStatus::Feasible => true,
+        MilpStatus::NodeLimit => obj.is_finite(),
+        _ => false,
+    }
+}
+
+/// The work budget of a sub-MIP started now: `w`, or a quarter of what the
+/// enclosing sub-MIP has left when there is one (see [`run_sub_mip_budgeted`]).
+fn nested_work_budget(w: u64) -> u64 {
+    crate::work::remaining().map_or(w, |left| w.min(left / 4))
+}
+
+/// Runs a heuristic sub-MIP of size `m + n` = `size` under [`submip_work_budget`].
+/// `work` is the work-budget options (its time limit the parent's remaining time);
+/// `share` the legacy wall-share options, `None` when the legacy rule would skip the
+/// sub-MIP. With the budget off, runs `share` (the legacy behaviour).
+fn run_sub_mip_budgeted(
+    size: usize,
+    mut work: MilpOptions,
+    share: Option<MilpOptions>,
+    solve: impl Fn(&MilpOptions) -> MilpResult,
+) -> Option<MilpResult> {
+    let w = submip_work_budget();
+    if w == 0 {
+        return share.map(|o| solve(&o));
+    }
+    // A sub-MIP nested inside another (the root RENS of a RENS sub-MIP) gets a
+    // quarter of what its enclosing sub-MIP has left, as the wall-share rule gives
+    // it a quarter of the time left. With the full `w` instead, the nested solve
+    // spent 1.44 s of its parent's 1.95 s on `air04` (#2220) and left the parent
+    // one node where the wall share explored 62 and found the incumbent; the
+    // panel lost three incumbents that way.
+    let w = nested_work_budget(w);
+    if w == 0 {
+        return None;
+    }
+    work.max_work = Some(w);
+    // The limit covers the LU and exact-arithmetic part of [`work_units`], so the
+    // simplex can stop inside a single long LP (`reblock166`: one root LP of a
+    // 35,712-dimensional sub-MIP ran 11 s against a 2 s budget when the budget was
+    // checked only between nodes). That part alone reaching `w` implies the total
+    // has, so this never stops a sub-MIP the full count would let run.
+    let (scope, sink) = crate::work::Scope::new_solve(Some(crate::work::Limit {
+        units: w,
+        weight: [WORK_EXACT_LIMB, WORK_LU, WORK_SEPA],
+    }));
+    let t0 = std::time::Instant::now();
+    let a = solve(&work);
+    let took = t0.elapsed().as_secs_f64();
+    drop(scope);
+    let limbs = sink.get(crate::work::Kind::ExactLimb);
+    let lu = sink.get(crate::work::Kind::Lu);
+    let sepa = sink.get(crate::work::Kind::Sepa);
+    if std::env::var_os("DISCOPT_RENS_TRACE").is_some() {
+        eprintln!(
+            "SUBWORK lp_iters={} extra={} lu={} sepa={} size={} took={:.4} nodes={} status={:?}",
+            a.lp_iters, limbs, lu, sepa, size, took, a.nodes, a.status
+        );
+    }
+    Some(a)
+}
+
+/// A heuristic sub-MIP's wall budget from the time `left` (s); see
+/// [`submip_budget_highs_enabled`].
+fn sub_mip_budget(left: f64, share: f64, capped: bool) -> f64 {
+    if submip_budget_highs_enabled() && !capped {
+        left * 0.5
+    } else {
+        (left * share).min(2.0)
+    }
+}
 /// Node budget for one sub-MIP.
 const SUB_MIP_NODE_CAP: usize = 500;
 /// Share of the parent search all sub-solves may spend, plus a flat allowance
@@ -1731,6 +2708,45 @@ struct SubMipBase {
 enum SubMipKind {
     Rens,
     Rins,
+}
+
+/// The options of a heuristic sub-solve (sub-MIP, P3 stall re-solve) derived from the
+/// parent's: its own node budget and seed, and **none of the parent's deadline
+/// policies**. `extend_no_incumbent_s` moves a run's deadline to the parent's whole
+/// remaining budget when it holds no incumbent, which is exactly when RENS runs: a
+/// sub-solve that inherited it ran 19.8 s against its 2 s sub-budget and took a 20 s
+/// solve to 39.5 s (`neos-911970`, gap plan §12.7). `stall_time_s` is a parent-run
+/// policy too. The caller then caps `time_limit_s` to the sub-budget.
+fn sub_solve_options(opts: &MilpOptions, max_nodes: usize, seed: Option<Vec<f64>>) -> MilpOptions {
+    let mut sub = opts.clone();
+    sub.max_nodes = max_nodes;
+    sub.initial_incumbent = seed;
+    sub.extend_no_incumbent_s = None;
+    sub.stall_time_s = None;
+    if submip_limits_enabled() {
+        // `HighsPrimalHeuristics::RENS/RINS` -> `solveSubMip(.., 500, 200 + nodes/20, 12)`.
+        sub.max_leaves = 500;
+        sub.max_stall_nodes = 12;
+    }
+    sub
+}
+
+/// `DISCOPT_HIGHS_SUBMIP_LIMITS`: heuristic sub-MIPs stop on HiGHS's work limits --
+/// 500 leaves and 12 stall nodes (consecutive queue installs whose estimate is at or
+/// above the cutoff), `HighsPrimalHeuristics.cpp:627-632` / `HighsMipSolver.cpp:641-650`
+/// -- in addition to the node budget and the wall-clock share. Member of
+/// `DISCOPT_HIGHS_CONFIG`; garbage refused.
+fn submip_limits_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SUBMIP_LIMITS") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SUBMIP_LIMITS={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
 }
 
 /// Build a neighbourhood sub-box (a contraction of `base.l`/`base.u`), propagate it,
@@ -1826,43 +2842,60 @@ fn try_sub_mip(
         (SubMipKind::Rins, Some((ix, v))) => (Some(ix[..ns].to_vec()), Some(v)),
         _ => (None, inc.map(|(_, v)| v)),
     };
-    let mut sub = opts.clone();
-    sub.max_nodes = node_budget;
     // The RINS seed lies in the sub-box by construction (every fixed column is fixed
     // to its own value). FBBT only removes points violating a row, so it keeps it.
-    sub.initial_incumbent = seed;
+    let mut sub = sub_solve_options(opts, node_budget, seed);
+    let mut work = None;
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
             return None;
         }
-        let budget = (left.as_secs_f64() * 0.25).min(2.0);
+        let mut w = sub.clone();
+        w.time_limit_s = Some(
+            sub.time_limit_s
+                .map_or(left.as_secs_f64(), |t| t.min(left.as_secs_f64())),
+        );
+        work = Some(w);
+        let budget = sub_mip_budget(left.as_secs_f64(), 0.25, true);
         sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
     }
+    let work = work.unwrap_or_else(|| sub.clone());
     crate::profile::incr(match kind {
         SubMipKind::Rens => crate::profile::Ctr::SubMipRensRun,
         SubMipKind::Rins => crate::profile::Ctr::SubMipRinsRun,
     });
     let res = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
-        solve_milp_node_hooked(
-            base.csc.clone(),
-            base.m,
-            base.n,
-            &base.c,
-            &sub_l,
-            &sub_u,
-            &base.b,
-            obj_const,
-            &sub,
-            None,
-            None,
-            None,
-        )
+        let _nest = SubMipNest::enter();
+        run_sub_mip_budgeted(base.m + base.n, work, Some(sub), |o| {
+            solve_milp_node_hooked(
+                base.csc.clone(),
+                base.m,
+                base.n,
+                &base.c,
+                &sub_l,
+                &sub_u,
+                &base.b,
+                obj_const,
+                o,
+                None,
+                None,
+                None,
+            )
+        })
     };
+    // `None`: a nested sub-MIP whose enclosing one has no work left to give it.
+    let res = res?;
+    charge_sub_mip(
+        res.lp_iters,
+        fixed as f64 / n_int.max(1) as f64,
+        n_int,
+        ns - n_int,
+    );
     *spent += res.nodes;
     crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
-    if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) {
+    if !sub_mip_found_point(&res) {
         return None;
     }
     let good = match cutoff {
@@ -1926,16 +2959,17 @@ fn try_stall_redive(
     deadline: Option<std::time::Instant>,
     spent: &mut usize,
 ) -> Option<(Vec<f64>, f64)> {
-    let mut sub = opts.clone();
-    sub.max_nodes = STALL_REDIVE_MAX_NODES;
+    let mut sub = sub_solve_options(opts, STALL_REDIVE_MAX_NODES, Some(inc_x[..ns].to_vec()));
     sub.root_cuts = STALL_REDIVE_ROOT_CUTS;
     sub.cut_rounds = 1;
     sub.cut_select = false;
+    // P3 (under `DISCOPT_MILP_ROOT_CMIR`): run 2's root had no c-MIR (the flag was off); a redive
+    // that inherits the flag's c-MIR/tableau root lands its dive elsewhere.
+    if crate::lp::cmir::root_cmir_mode().on() {
+        sub.cmir_cuts = false;
+    }
     sub.root_cut_time_s = None;
-    sub.stall_time_s = None;
-    sub.extend_no_incumbent_s = None;
     sub.max_open_nodes = None;
-    sub.initial_incumbent = Some(inc_x[..ns].to_vec());
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
@@ -1952,6 +2986,7 @@ fn try_stall_redive(
     crate::profile::incr(crate::profile::Ctr::StallRediveRun);
     let res = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
+        let _nest = SubMipNest::enter();
         solve_milp_node_hooked(
             base.csc.clone(),
             base.m,
@@ -1967,6 +3002,7 @@ fn try_stall_redive(
             None,
         )
     };
+    charge_sub_mip(res.lp_iters, 0.0, 1, 0);
     *spent += res.nodes;
     if !matches!(
         res.status,
@@ -1991,7 +3027,7 @@ fn try_stall_redive(
 }
 
 // ---------------------------------------------------------------------------
-// D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`, default OFF)
+// D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`, default ON since stage 1d-5)
 // ---------------------------------------------------------------------------
 // HiGHS's first incumbent on the no-incumbent D2 rows comes from randomized rounding
 // (`HighsPrimalHeuristics.cpp:1117-1202`, source letter `R`: `2122` and `issue-2446` at
@@ -2005,8 +3041,178 @@ fn try_stall_redive(
 // Soundness is the sub-MIP argument: a point is injected only after
 // `validate_seed_incumbent` re-verifies every original row, bound and integrality.
 
-/// `DISCOPT_MILP_RAND_ROUND`, read once; default OFF. Garbage is refused.
+/// `DISCOPT_MILP_FEAS_JUMP` / `DISCOPT_MILP_TRIVIAL_HEUR`: HiGHS's pre-root
+/// heuristics (`bnb::feas_jump`), run once before the root LP of a top-level solve
+/// with no seed. **Default ON** since the 2026-11-14 population panel (120 rows, 20 s,
+/// interleaved, BLAS pinned; `highs-mip-replacement-plan.md` §9): 0 violations over
+/// 336 solves, certified 11 -> 12, incumbents 63 -> 83, dual gap better/worse 11/5,
+/// primal 7/9 at a median +0.2%. `=0` opts out; garbage is refused.
+fn trivial_heur_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_TRIVIAL_HEUR") {
+        Err(_) => true,
+        Ok(v) => parse_switch("DISCOPT_MILP_TRIVIAL_HEUR", &v),
+    })
+}
+
+/// `DISCOPT_MILP_FEAS_JUMP`: see [`trivial_heur_enabled`] (same panel, same default).
+fn feas_jump_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_FEAS_JUMP") {
+        Err(_) => true,
+        Ok(v) => parse_switch("DISCOPT_MILP_FEAS_JUMP", &v),
+    })
+}
+
+/// A set `0`/`1` heuristic switch; garbage is refused.
+fn parse_switch(var: &str, v: &str) -> bool {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" | "" => false,
+        other => panic!("{var}={other:?} is not recognized (expected 1 or 0)"),
+    }
+}
+
+/// HiGHS's pre-root heuristics on the working standard form: the trivial points
+/// (pure-integer models) and then feasibility jump, started from the best trivial
+/// point when there is one, as HiGHS starts it from its incumbent
+/// (`HighsMipSolver.cpp:187-210`). Every candidate is re-verified by
+/// [`validate_seed_incumbent`]; the best verified one is returned as a seed in
+/// structural space. `None` when neither flag is on, the rows cannot be put in
+/// row form (a slack that is not a zero-cost singleton), or nothing verified.
+#[allow(clippy::too_many_arguments)]
+fn pre_root_heuristic_seed(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    ns: usize,
+    b: &[f64],
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    is_int_full: &[bool],
+    heur_is_int: &[bool],
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<f64>> {
+    let (trivial_on, fj_on) = (trivial_heur_enabled(), feas_jump_enabled());
+    if !(trivial_on || fj_on) || ns == 0 {
+        return None;
+    }
+    let _t = crate::profile::Timer::new(crate::profile::Phase::PreRootHeur);
+    crate::profile::incr(crate::profile::Ctr::PreRootHeurRuns);
+    let fin = |v: f64| {
+        if v <= -INF {
+            f64::NEG_INFINITY
+        } else if v >= INF {
+            f64::INFINITY
+        } else {
+            v
+        }
+    };
+    // Row form `lo <= A_s x <= up` (structural columns), each inequality's range
+    // from its singleton slack, as `solve_presolved` builds it.
+    let mut slack: Vec<Option<(usize, f64)>> = vec![None; m];
+    for (j, &cj) in c.iter().enumerate().take(n).skip(ns) {
+        let (ri, rv) = csc.col(j);
+        let nz: Vec<(usize, f64)> = ri
+            .iter()
+            .zip(rv)
+            .filter(|(_, &v)| v != 0.0)
+            .map(|(&i, &v)| (i, v))
+            .collect();
+        if nz.len() != 1 || cj != 0.0 || slack[nz[0].0].is_some() {
+            crate::profile::incr(crate::profile::Ctr::PreRootSkipNoRowForm);
+            return None;
+        }
+        slack[nz[0].0] = Some((j, nz[0].1));
+    }
+    let (mut lo, mut up) = (vec![0.0; m], vec![0.0; m]);
+    for i in 0..m {
+        match slack[i] {
+            None => {
+                lo[i] = b[i];
+                up[i] = b[i];
+            }
+            Some((j, sigma)) => {
+                let (e1, e2) = (b[i] - sigma * fin(l[j]), b[i] - sigma * fin(u[j]));
+                let (a, z) = if sigma > 0.0 { (e2, e1) } else { (e1, e2) };
+                lo[i] = if a.is_nan() { f64::NEG_INFINITY } else { a };
+                up[i] = if z.is_nan() { f64::INFINITY } else { z };
+            }
+        }
+    }
+    let mut row_ptr = vec![0usize; m + 1];
+    for j in 0..ns {
+        for &i in csc.col(j).0 {
+            row_ptr[i + 1] += 1;
+        }
+    }
+    for i in 0..m {
+        row_ptr[i + 1] += row_ptr[i];
+    }
+    let mut next = row_ptr.clone();
+    let nnz = row_ptr[m];
+    let (mut row_idx, mut row_val) = (vec![0usize; nnz], vec![0.0; nnz]);
+    for j in 0..ns {
+        let (ri, rv) = csc.col(j);
+        for (&i, &v) in ri.iter().zip(rv) {
+            row_idx[next[i]] = j;
+            row_val[next[i]] = v;
+            next[i] += 1;
+        }
+    }
+    let ls: Vec<f64> = l[..ns].iter().map(|&v| fin(v)).collect();
+    let us: Vec<f64> = u[..ns].iter().map(|&v| fin(v)).collect();
+    let model = crate::bnb::feas_jump::RowModel {
+        row_ptr: &row_ptr,
+        row_idx: &row_idx,
+        row_val: &row_val,
+        lo: &lo,
+        up: &up,
+        l: &ls,
+        u: &us,
+        c: &c[..ns],
+        is_int: &is_int_full[..ns],
+    };
+    let validate = |x: &[f64]| validate_seed_incumbent(x, ns, heur_is_int, csc, b, c, l, u, m, n);
+    let mut best: Option<(Vec<f64>, f64)> = None;
+    let keep = |cand: (Vec<f64>, f64), best: &mut Option<(Vec<f64>, f64)>| {
+        if best.as_ref().is_none_or(|(_, v)| cand.1 < *v) {
+            *best = Some(cand);
+        }
+    };
+    if trivial_on {
+        for p in crate::bnb::feas_jump::trivial_points(&model) {
+            crate::profile::incr(crate::profile::Ctr::TrivialFound);
+            if let Some(v) = validate(&p) {
+                crate::profile::incr(crate::profile::Ctr::TrivialAccepted);
+                keep(v, &mut best);
+            }
+        }
+    }
+    if fj_on {
+        crate::profile::incr(crate::profile::Ctr::FeasJumpRuns);
+        let start = best.as_ref().map(|(x, _)| x.clone());
+        let stop = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        if let Some((x, _effort)) =
+            crate::bnb::feas_jump::feasibility_jump(&model, start.as_deref(), stop)
+        {
+            crate::profile::incr(crate::profile::Ctr::FeasJumpFound);
+            if let Some(v) = validate(&x) {
+                crate::profile::incr(crate::profile::Ctr::FeasJumpAccepted);
+                keep(v, &mut best);
+            }
+        }
+    }
+    best.map(|(x, _)| x)
+}
+
+/// `DISCOPT_MILP_RAND_ROUND`, read once. Default ON since the stage 1d-5 graduation panel (`docs/dev/flag-retirement-audit.md`); `0` opts out.
+/// Garbage is refused.
 fn rand_round_enabled() -> bool {
+    if crate::lp::cmir::legacy_defaults() {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         let raw = std::env::var("DISCOPT_MILP_RAND_ROUND").unwrap_or_default();
@@ -2016,8 +3222,9 @@ fn rand_round_enabled() -> bool {
 
 fn parse_rand_round(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(false),
-        "1" | "true" | "yes" => Ok(true),
+        // Default ON since stage 1d-5's graduation panel; `0` opts out.
+        "" | "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
         other => Err(format!(
             "DISCOPT_MILP_RAND_ROUND={other:?} is not recognized (expected 1/true/yes or \
              0/false/no). Refusing rather than silently picking an arm."
@@ -2108,45 +3315,246 @@ fn try_randomized_rounding(
     let feastol = opts.simplex.tol.max(1e-6);
     let mut rng = seed ^ 0xD1B5_4A32_D192_ED03;
     let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
-    let nnz = base.csc.raw().2.len().max(1);
-    let stride = (ints.len() * nnz).div_ceil(RAND_ROUND_WORK).max(1);
-    let (mut sl, mut su) = (base.l.clone(), base.u.clone());
-    for (k, &j) in ints.iter().enumerate() {
+    let mut value = |j: usize| {
         let x = node_x[j];
-        let v = if locks.0[j] == 0 {
+        if locks.0[j] == 0 {
             (x - feastol).ceil()
         } else if locks.1[j] == 0 {
             (x + feastol).floor()
         } else {
             (x + 0.1 + 0.8 * rr_uniform(&mut rng)).floor()
-        };
-        let v = v.min(su[j]).max(sl[j]);
-        sl[j] = v;
-        su[j] = v;
-        if (k + 1) % stride == 0 || k + 1 == ints.len() {
-            let pr = fbbt_rows_exact(
-                &base.csc,
-                base.m,
-                base.n,
-                &sl,
-                &su,
-                &base.b,
-                &base.is_int_full,
-                opts.simplex.tol,
-            );
-            if pr.infeasible {
-                crate::profile::incr(crate::profile::Ctr::RandRoundPropInfeas);
-                return None;
+        }
+    };
+    match fix_and_complete(
+        base, obj_const, ns, is_int, &ints, &mut value, opts, deadline,
+    ) {
+        Ok(found) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundFound);
+            Some(found)
+        }
+        Err(FixFail::PropInfeasible) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundPropInfeas);
+            None
+        }
+        Err(FixFail::LpFailed) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundLpFail);
+            None
+        }
+        Err(FixFail::Rejected) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundRejected);
+            None
+        }
+        Err(FixFail::NoTime) => None,
+    }
+}
+
+/// `DISCOPT_MILP_ROOT_ROUND_BOUND`: floor the root node at the NS bound of each
+/// finished root separation round's LP (HiGHS updates its lower bound from every
+/// root round's LP). Bound-changing only where the tree's own root bound is weaker
+/// than an earlier round's (after cut cleanup) or missing (a deadline stopped the
+/// post-loop root solve); sound either way, since NS is rigorous for any dual.
+/// **Default ON** since the 2026-11-15 population panel (bundled with
+/// `DISCOPT_LP_PERTURB_PRIMAL_CLEANUP`; `data/highs-parity/population/
+/// population_panel_s3.*`): 0 violations over 336 solves, certified 13 -> 14, rows
+/// with a bound 99 -> 103. `=0` opts out; garbage is refused.
+fn root_round_bound_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_ROOT_ROUND_BOUND") {
+        Err(_) => true,
+        Ok(v) => parse_switch("DISCOPT_MILP_ROOT_ROUND_BOUND", &v),
+    })
+}
+
+/// `DISCOPT_MILP_CENTRAL_ROUNDING`: HiGHS's central rounding at the root (default
+/// OFF until its population panel). Garbage is refused.
+fn central_rounding_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_CENTRAL_ROUNDING") {
+        Err(_) => false,
+        Ok(v) => parse_switch("DISCOPT_MILP_CENTRAL_ROUNDING", &v),
+    })
+}
+
+/// HiGHS uses the analytic centre after this many root separation rounds
+/// (`HighsMipSolverData.cpp:2202`, `nseparounds >= 5`), or at the end of the root
+/// when the loop stops sooner (`:2312`).
+const CENTRAL_ROUNDING_AFTER_ROUNDS: usize = 5;
+
+/// Share of the remaining wall budget the analytic centre and the rounding may use
+/// (discopt's addition: HiGHS computes the centre in a parallel task with only an
+/// iteration limit).
+const CENTRAL_ROUNDING_TIME_SHARE: f64 = 0.1;
+
+/// HiGHS's central rounding (`HighsPrimalHeuristics::centralRounding` /
+/// `linesearchRounding`, `HighsPrimalHeuristics.cpp:1061-1115, 1697-1714`): the analytic
+/// centre of the base relaxation (`lp::analytic_center`), then rounding along the
+/// segment from the first root LP point to it. At each step every integer column is
+/// rounded up when nothing locks it up, down when nothing locks it down, and to the
+/// nearest integer of the convex combination otherwise; the step advances to the next
+/// alpha at which some column's rounding changes. Each rounded point goes through
+/// [`fix_and_complete`] and the first that completes and verifies is returned.
+#[allow(clippy::too_many_arguments)]
+fn try_central_rounding(
+    base: &SubMipBase,
+    locks: &(Vec<u32>, Vec<u32>),
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    first_lp_x: &[f64],
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+) -> Option<(Vec<f64>, f64)> {
+    if first_lp_x.len() < ns {
+        return None;
+    }
+    let _t = crate::profile::Timer::new(crate::profile::Phase::CentralRounding);
+    crate::profile::incr(crate::profile::Ctr::CentralRoundingRuns);
+    let local = deadline.map(|d| {
+        let left = d.saturating_duration_since(std::time::Instant::now());
+        std::time::Instant::now() + left.mul_f64(CENTRAL_ROUNDING_TIME_SHARE)
+    });
+    let center = crate::lp::analytic_center::analytic_center(
+        &base.csc,
+        base.m,
+        base.n,
+        &base.b,
+        &base.l,
+        &base.u,
+        crate::lp::analytic_center::MAX_ITER,
+        local,
+    );
+    let Some(center) = center else {
+        crate::profile::incr(crate::profile::Ctr::CentralRoundingNoCenter);
+        return None;
+    };
+    crate::profile::incr(crate::profile::Ctr::CentralRoundingCenters);
+    let p2 = &center.x[..ns];
+    let p1 = &first_lp_x[..ns];
+    let feastol = opts.simplex.tol.max(1e-6);
+    let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+    let mut rounded = vec![0.0; ns];
+    let mut alpha = 0.0f64;
+    while alpha < 1.0 {
+        if local.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
+        let mut next_alpha = 1.0f64;
+        let mut reached_p2 = true;
+        for &j in &ints {
+            if locks.0[j] == 0 {
+                rounded[j] = (p1[j].max(p2[j]) - feastol).ceil();
+                continue;
             }
-            sl = pr.l;
-            su = pr.u;
+            if locks.1[j] == 0 {
+                rounded[j] = (p1[j].min(p2[j]) + feastol).floor();
+                continue;
+            }
+            let comb = (1.0 - alpha) * p1[j] + alpha * p2[j];
+            let int_p2 = (p2[j] + 0.5).floor();
+            rounded[j] = (comb + 0.5).floor();
+            if rounded[j] == int_p2 {
+                continue;
+            }
+            reached_p2 = false;
+            let t = (rounded[j] + 0.5 + feastol - p1[j]) / (p2[j] - p1[j]).abs();
+            if t < next_alpha && t > alpha + 1e-2 {
+                next_alpha = t;
+            }
+        }
+        crate::profile::incr(crate::profile::Ctr::CentralRoundingTries);
+        let mut value = |j: usize| rounded[j];
+        if let Ok(found) =
+            fix_and_complete(base, obj_const, ns, is_int, &ints, &mut value, opts, local)
+        {
+            crate::profile::incr(crate::profile::Ctr::CentralRoundingFound);
+            return Some(found);
+        }
+        if reached_p2 {
+            return None;
+        }
+        alpha = next_alpha;
+    }
+    None
+}
+
+/// Why [`fix_and_complete`] produced no point.
+enum FixFail {
+    /// Propagating the fixings proved the box empty.
+    PropInfeasible,
+    /// The completion LP over the remaining columns was not `Optimal`.
+    LpFailed,
+    /// The completed point failed re-verification on the original rows.
+    Rejected,
+    /// The deadline had passed before the completion LP.
+    NoTime,
+}
+
+/// HiGHS's `tryRoundedPoint` step shared by randomized and central rounding: fix
+/// each integer column in `ints` (in order) at `value(j)`, clamped into its current
+/// (propagated) bounds, propagate, solve the LP over the remaining columns on the
+/// BASE problem and re-verify the point on the original rows. `value` is called
+/// once per column, in `ints` order, so a randomized caller's draws are unchanged.
+#[allow(clippy::too_many_arguments)]
+fn fix_and_complete(
+    base: &SubMipBase,
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    ints: &[usize],
+    value: &mut dyn FnMut(usize) -> f64,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+) -> Result<(Vec<f64>, f64), FixFail> {
+    let nnz = base.csc.raw().2.len().max(1);
+    let stride = (ints.len() * nnz).div_ceil(RAND_ROUND_WORK).max(1);
+    let (mut sl, mut su) = (base.l.clone(), base.u.clone());
+    if crate::lp::cmir::root_cmir_mode().on() {
+        let mut prop = IncProp::new(
+            &base.csc,
+            base.m,
+            base.n,
+            &base.b,
+            &base.is_int_full,
+            &sl,
+            &su,
+        );
+        for &j in ints {
+            let v = value(j).min(prop.u[j]).max(prop.l[j]);
+            if !prop.set(j, v, v) {
+                return Err(FixFail::PropInfeasible);
+            }
+        }
+        sl = prop.l;
+        su = prop.u;
+    } else {
+        for (k, &j) in ints.iter().enumerate() {
+            let v = value(j).min(su[j]).max(sl[j]);
+            sl[j] = v;
+            su[j] = v;
+            if (k + 1) % stride == 0 || k + 1 == ints.len() {
+                let pr = fbbt_rows_exact(
+                    &base.csc,
+                    base.m,
+                    base.n,
+                    &sl,
+                    &su,
+                    &base.b,
+                    &base.is_int_full,
+                    opts.simplex.tol,
+                );
+                if pr.infeasible {
+                    return Err(FixFail::PropInfeasible);
+                }
+                sl = pr.l;
+                su = pr.u;
+            }
         }
     }
     let mut simplex = opts.simplex.clone();
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            return None;
+            return Err(FixFail::NoTime);
         }
         simplex.deadline = Some(std::time::Instant::now() + left.mul_f64(0.25));
     }
@@ -2154,8 +3562,7 @@ fn try_randomized_rounding(
         &base.csc, base.m, base.n, &base.c, &sl, &su, &base.b, &simplex,
     );
     if sol.status != LpStatus::Optimal || sol.x.len() < ns {
-        crate::profile::incr(crate::profile::Ctr::RandRoundLpFail);
-        return None;
+        return Err(FixFail::LpFailed);
     }
     match validate_seed_incumbent(
         &sol.x[..ns],
@@ -2169,12 +3576,790 @@ fn try_randomized_rounding(
         base.m,
         base.n,
     ) {
-        Some((x, obj)) => {
-            crate::profile::incr(crate::profile::Ctr::RandRoundFound);
-            Some((x, obj + obj_const))
+        Some((x, obj)) => Ok((x, obj + obj_const)),
+        None => Err(FixFail::Rejected),
+    }
+}
+
+/// `DISCOPT_MILP_DIVE_BACKTRACK`: the RENS/RINS dive of [`try_rens_highs`] branches
+/// and backtracks as HiGHS's does (`HighsPrimalHeuristics::RENS`/`RINS` on a
+/// `HighsSearch`). Each bound change is one decision (`x_j >= v` or `x_j <= v`) with
+/// an undo log. A node proved infeasible, by propagation or by its LP, flips the most
+/// recent untried decision, up to 10 times. Today's dive instead reverts the whole
+/// batch and stops. Measured 2026-11-15 on 10teams: every RENS neighbourhood the
+/// current dive built was proved infeasible by its sub-MIP. Changes which
+/// neighbourhood a heuristic searches, never a bound. Default OFF until its panel;
+/// garbage is refused.
+fn dive_backtrack_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_DIVE_BACKTRACK") {
+        Err(_) => false,
+        Ok(v) => parse_switch("DISCOPT_MILP_DIVE_BACKTRACK", &v),
+    })
+}
+
+/// The dive's propagation: the box after propagating `l`/`u`, or `None` (infeasible).
+type DiveProp<'a> = dyn Fn(&[f64], &[f64]) -> Option<(Vec<f64>, Vec<f64>)> + 'a;
+
+/// The read-only inputs of [`dive_with_backtracking`].
+struct DiveCtx<'a> {
+    cut: &'a SubMipBase,
+    order: &'a [usize],
+    inc: Option<(&'a [f64], f64)>,
+    node_x: &'a [f64],
+    root_x: Option<&'a [f64]>,
+    ns: usize,
+    ft: f64,
+    target: f64,
+    min_rate_rins: f64,
+    simplex: &'a SimplexOptions,
+    dive_deadline: std::time::Instant,
+}
+
+/// One branching decision of the dive: `x_j >= val` (`lower`) or `x_j <= val`, with
+/// the bounds it (and its propagation) changed, to restore on backtracking.
+struct DiveDecision {
+    j: usize,
+    lower: bool,
+    val: f64,
+    flipped: bool,
+    undo: Vec<(usize, f64, f64)>,
+}
+
+/// HiGHS's RENS/RINS dive with backtracking (see [`dive_backtrack_enabled`]). Leaves
+/// `l`/`u` at the dive's last feasible node (never at a node proved infeasible); the
+/// caller solves the sub-MIP over that box.
+#[allow(clippy::too_many_arguments)]
+fn dive_with_backtracking(
+    l: &mut Vec<f64>,
+    u: &mut Vec<f64>,
+    x: &mut [f64],
+    basis: &mut Option<Basis>,
+    prop: &DiveProp<'_>,
+    rate: &dyn Fn(&[f64], &[f64]) -> f64,
+    cx: DiveCtx<'_>,
+) {
+    const MAX_BACKTRACKS: usize = 10;
+    let mut stack: Vec<DiveDecision> = Vec::new();
+    let mut nback = 0usize;
+    // Apply one decision and propagate. `false`: the node is infeasible; the decision
+    // is still recorded (flipped later) and `l`/`u` are as before it.
+    let decide = |l: &mut Vec<f64>,
+                  u: &mut Vec<f64>,
+                  stack: &mut Vec<DiveDecision>,
+                  j: usize,
+                  lower: bool,
+                  val: f64,
+                  flipped: bool|
+     -> bool {
+        let (ol, ou) = (l[j], u[j]);
+        let (before_l, before_u) = (l.clone(), u.clone());
+        if lower {
+            l[j] = val;
+        } else {
+            u[j] = val;
+        }
+        match prop(l, u) {
+            Some((pl, pu)) => {
+                let undo: Vec<(usize, f64, f64)> = (0..pl.len())
+                    .filter(|&c| pl[c] != before_l[c] || pu[c] != before_u[c])
+                    .map(|c| (c, before_l[c], before_u[c]))
+                    .collect();
+                *l = pl;
+                *u = pu;
+                stack.push(DiveDecision {
+                    j,
+                    lower,
+                    val,
+                    flipped,
+                    undo,
+                });
+                true
+            }
+            None => {
+                l[j] = ol;
+                u[j] = ou;
+                stack.push(DiveDecision {
+                    j,
+                    lower,
+                    val,
+                    flipped,
+                    undo: Vec::new(),
+                });
+                false
+            }
+        }
+    };
+    // HiGHS `HighsSearch::backtrack`: undo decisions back to the most recent untried
+    // one and take its other side. `false`: nothing left to try (or the backtrack
+    // budget is spent); `l`/`u` are then at the last ancestor reached.
+    let backtrack = |l: &mut Vec<f64>,
+                     u: &mut Vec<f64>,
+                     stack: &mut Vec<DiveDecision>,
+                     nback: &mut usize|
+     -> bool {
+        while let Some(d) = stack.pop() {
+            for &(c, ol, ou) in d.undo.iter().rev() {
+                l[c] = ol;
+                u[c] = ou;
+            }
+            if d.flipped {
+                continue;
+            }
+            *nback += 1;
+            if *nback > MAX_BACKTRACKS {
+                return false;
+            }
+            let (lower, val) = if d.lower {
+                (false, d.val - 1.0)
+            } else {
+                (true, d.val + 1.0)
+            };
+            if (lower && val > u[d.j]) || (!lower && val < l[d.j]) {
+                continue; // the other side is empty: that node is infeasible too
+            }
+            if decide(l, u, stack, d.j, lower, val, true) {
+                crate::profile::incr(crate::profile::Ctr::SubMipDiveBacktracks);
+                return true;
+            }
+        }
+        false
+    };
+    let ft = cx.ft;
+    let mut fixtolpsol = cx.inc.is_some();
+    let mut need_lp = false;
+    for _ in 0..200 {
+        if std::time::Instant::now() >= cx.dive_deadline {
+            break;
+        }
+        if need_lp {
+            // HiGHS `evaluateNode`: the node LP over the current box.
+            let lp = LpView {
+                a: &[],
+                m: cx.cut.m,
+                n: cx.cut.n,
+                c: &cx.cut.c,
+                l,
+                u,
+            };
+            let warm = basis.is_some();
+            let mut sol = match basis.as_ref() {
+                Some(bs) => solve_lp_warm_scaled_csc(&lp, &cx.cut.b, bs, cx.simplex, &cx.cut.csc),
+                None => solve_lp_root_csc(
+                    &cx.cut.csc,
+                    cx.cut.m,
+                    cx.cut.n,
+                    &cx.cut.c,
+                    l,
+                    u,
+                    &cx.cut.b,
+                    cx.simplex,
+                ),
+            };
+            if warm && !matches!(sol.status, LpStatus::Optimal | LpStatus::Infeasible) {
+                sol = solve_lp_root_csc(
+                    &cx.cut.csc,
+                    cx.cut.m,
+                    cx.cut.n,
+                    &cx.cut.c,
+                    l,
+                    u,
+                    &cx.cut.b,
+                    cx.simplex,
+                );
+            }
+            if sol.status == LpStatus::Infeasible {
+                if !backtrack(l, u, &mut stack, &mut nback) {
+                    break;
+                }
+                continue;
+            }
+            if sol.status != LpStatus::Optimal || sol.x.len() < cx.ns {
+                break; // undecided: stop diving at this node
+            }
+            x.copy_from_slice(&sol.x[..cx.ns]);
+            if sol.basis.basic_vars.len() == cx.cut.m && sol.basis.col_status.len() == cx.cut.n {
+                *basis = Some(sol.basis);
+            }
+        }
+        let fixing = rate(l, u);
+        if fixing >= cx.target || nback >= MAX_BACKTRACKS {
+            break;
+        }
+        let stop_rate = (1.0 - (1.0 - fixing) * 0.9).min(cx.target);
+        let mut branched = 0usize;
+        let mut infeasible = false;
+        if let (Some((ix, _)), true) = (cx.inc, fixtolpsol) {
+            let any_frac_agree = cx.order.iter().any(|&j| {
+                l[j] < u[j]
+                    && (x[j] - x[j].round()).abs() > ft
+                    && (cx.node_x[j] - ix[j]).abs() <= ft
+            });
+            if !any_frac_agree {
+                'fix: for &j in cx.order {
+                    if l[j] >= u[j] || (x[j] - ix[j]).abs() > ft {
+                        continue;
+                    }
+                    let v = x[j].round().min(u[j]).max(l[j]);
+                    for lower in [true, false] {
+                        let needed = if lower { l[j] < v } else { u[j] > v };
+                        if !needed {
+                            continue;
+                        }
+                        branched += 1;
+                        if !decide(l, u, &mut stack, j, lower, v, false) {
+                            infeasible = true;
+                            break 'fix;
+                        }
+                    }
+                    if rate(l, u) >= stop_rate {
+                        break;
+                    }
+                }
+                if !infeasible && branched == 0 {
+                    if rate(l, u) >= cx.min_rate_rins {
+                        break;
+                    }
+                    fixtolpsol = false;
+                }
+            }
+        }
+        if cx.inc.is_none() && !infeasible {
+            'box_: for &j in cx.order {
+                if l[j] >= u[j] {
+                    continue;
+                }
+                let down = (x[j] + ft).floor().min(u[j]);
+                let up = (x[j] - ft).ceil().max(l[j]);
+                if l[j] < down {
+                    branched += 1;
+                    if !decide(l, u, &mut stack, j, true, down, false) {
+                        infeasible = true;
+                        break 'box_;
+                    }
+                }
+                if u[j] > up {
+                    branched += 1;
+                    if !decide(l, u, &mut stack, j, false, up, false) {
+                        infeasible = true;
+                        break 'box_;
+                    }
+                }
+                if rate(l, u) >= stop_rate {
+                    break;
+                }
+            }
+        }
+        if !infeasible && branched == 0 {
+            let rins_lp = fixtolpsol && cx.inc.is_some();
+            let fixval = |j: usize, l: &[f64], u: &[f64]| {
+                if rins_lp {
+                    return (cx.node_x[j] + 0.5).floor().min(u[j]).max(l[j]);
+                }
+                let xv = x[j];
+                let rc = cx.root_x.map_or(0.0, |r| xv - r[j]);
+                let v = if rc >= 0.4 {
+                    xv.ceil()
+                } else if rc <= -0.4 {
+                    xv.floor()
+                } else if cx.cut.c[j] > 0.0 {
+                    xv.ceil()
+                } else if cx.cut.c[j] < 0.0 {
+                    xv.floor()
+                } else {
+                    (xv + 0.5).floor()
+                };
+                v.min(u[j]).max(l[j])
+            };
+            let mut frac: Vec<(f64, usize)> = cx
+                .order
+                .iter()
+                .copied()
+                .filter(|&j| l[j] < u[j] && (x[j] - x[j].round()).abs() > ft)
+                .filter(|&j| {
+                    !rins_lp
+                        || cx
+                            .inc
+                            .is_some_and(|(ix, _)| (cx.node_x[j] - ix[j]).abs() <= ft)
+                })
+                .map(|j| ((fixval(j, l, u) - x[j]).abs(), j))
+                .collect();
+            frac.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let mut change = 0.0;
+            for (_, j) in frac {
+                if l[j] >= u[j] {
+                    continue;
+                }
+                let v = fixval(j, l, u);
+                // HiGHS branches one side: up to `v` when rounding up, else down.
+                let lower = v > x[j];
+                branched += 1;
+                if !decide(l, u, &mut stack, j, lower, v, false) {
+                    infeasible = true;
+                    break;
+                }
+                if rate(l, u) >= cx.target {
+                    break;
+                }
+                change += (v - x[j]).abs();
+                if change >= 0.5 {
+                    break;
+                }
+            }
+        }
+        if infeasible {
+            if !backtrack(l, u, &mut stack, &mut nback) {
+                break;
+            }
+            need_lp = true;
+            continue;
+        }
+        if branched == 0 {
+            break;
+        }
+        need_lp = true;
+    }
+}
+
+/// Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's RENS (`HighsPrimalHeuristics.cpp:394-640`).
+///
+/// 1. Neighbourhood dive (`:430-570`): restrict every integer to `[floor, ceil]` of the
+///    LP point and propagate; when nothing is restricted, fix the fractional integers in
+///    order of `|fixval - x|` (`calcFixVal`, `:377`) until the cumulative change reaches
+///    0.5, propagate, re-solve the LP, repeat until the fixing rate reaches the target
+///    (0.6, `determineTargetFixingRate` with no observations, `:249`).
+/// 2. Sub-MIP (`solveSubMip`, `:77-140`) over the post-root LP **with its tight root cuts**
+///    (`heurlp.removeObsoleteRows`, `:616`; our root cleanup already keeps only those),
+///    with at most 5 root separation rounds (`HighsMipSolverData.cpp:1990-1993`), no
+///    strong branching (`mip_pscost_minreliable = 0`) and the node limit `200 + nodes/20`.
+///
+/// Sound: a returned point is re-verified against the ORIGINAL rows (`orig`) before it
+/// is injected, exactly as the existing sub-MIP's are.
+#[allow(clippy::too_many_arguments)]
+fn try_rens_highs(
+    cut: &SubMipBase,
+    orig: &SubMipBase,
+    order: &[usize],
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    node_x: &[f64],
+    root_x: Option<&[f64]>,
+    inc: Option<(&[f64], f64)>,
+    start_basis: Option<&Basis>,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+    parent_nodes: usize,
+) -> Option<(Vec<f64>, f64)> {
+    if node_x.len() < ns || inc.is_some_and(|(ix, _)| ix.len() < ns) {
+        return None;
+    }
+    let ft = 1e-6;
+    // RINS (`HighsPrimalHeuristics.cpp` RINS): fix towards the incumbent where the LP
+    // agrees with it; stop once the fixing rate reaches 0.25.
+    let mut fixtolpsol = inc.is_some();
+    let min_rate_rins = 0.25;
+    let target = target_fixing_rate_here();
+    let t0 = std::time::Instant::now();
+    let left = deadline.map_or(10.0, |d| d.saturating_duration_since(t0).as_secs_f64());
+    if left <= 0.0 {
+        return None;
+    }
+    let dive_deadline = t0 + std::time::Duration::from_secs_f64((0.1 * left).min(1.0));
+    crate::profile::incr(crate::profile::Ctr::SubMipRensRun);
+    let (mut l, mut u) = (cut.l.clone(), cut.u.clone());
+    let free_ints: Vec<usize> = order.iter().copied().filter(|&j| l[j] < u[j]).collect();
+    let n_total = free_ints.len();
+    if n_total == 0 {
+        return None;
+    }
+    let rate = |l: &[f64], u: &[f64]| {
+        free_ints.iter().filter(|&&j| l[j] >= u[j]).count() as f64 / n_total as f64
+    };
+    let inc_on = crate::lp::cmir::root_cmir_mode().on();
+    let incp = std::cell::RefCell::new(inc_on.then(|| {
+        IncProp::new(
+            &cut.csc,
+            cut.m,
+            cut.n,
+            &cut.b,
+            &cut.is_int_full,
+            &cut.l,
+            &cut.u,
+        )
+    }));
+    let prop = |l: &[f64], u: &[f64]| {
+        if let Some(p) = incp.borrow_mut().as_mut() {
+            // Loosened anywhere (a restored snapshot): restart from this box.
+            if (0..l.len()).any(|j| l[j] < p.l[j] || u[j] > p.u[j]) {
+                *p = IncProp::new(&cut.csc, cut.m, cut.n, &cut.b, &cut.is_int_full, l, u);
+                for j in 0..l.len() {
+                    p.push_col(j);
+                }
+            } else {
+                for j in 0..l.len() {
+                    if l[j] > p.l[j] || u[j] < p.u[j] {
+                        p.l[j] = l[j];
+                        p.u[j] = u[j];
+                        p.push_col(j);
+                    }
+                }
+            }
+            return p.propagate().then(|| (p.l.clone(), p.u.clone()));
+        }
+        let pr = fbbt_rows_exact(
+            &cut.csc,
+            cut.m,
+            cut.n,
+            l,
+            u,
+            &cut.b,
+            &cut.is_int_full,
+            opts.simplex.tol,
+        );
+        (!pr.infeasible).then_some((pr.l, pr.u))
+    };
+    let mut simplex = opts.simplex.clone();
+    simplex.deadline = Some(dive_deadline);
+    let mut x: Vec<f64> = node_x[..ns].to_vec();
+    // Warm-start the dive from the node's optimal basis when it spans this LP (the
+    // node LP and the post-root LP are the same matrix unless rows were added since).
+    let mut basis: Option<Basis> = start_basis
+        .filter(|b| b.basic_vars.len() == cut.m && b.col_status.len() == cut.n)
+        .cloned();
+    let mut fixing: f64;
+    if dive_backtrack_enabled() {
+        dive_with_backtracking(
+            &mut l,
+            &mut u,
+            &mut x,
+            &mut basis,
+            &prop,
+            &rate,
+            DiveCtx {
+                cut,
+                order,
+                inc,
+                node_x,
+                root_x,
+                ns,
+                ft,
+                target,
+                min_rate_rins,
+                simplex: &simplex,
+                dive_deadline,
+            },
+        );
+    } else {
+        for _ in 0..200 {
+            if std::time::Instant::now() >= dive_deadline {
+                break;
+            }
+            fixing = rate(&l, &u);
+            if fixing >= target {
+                break;
+            }
+            let snap = (l.clone(), u.clone());
+            let mut branched = 0usize;
+            let stop_rate = (1.0 - (1.0 - fixing) * 0.9).min(target);
+            let mut infeasible = false;
+            if let (Some((ix, _)), true) = (inc, fixtolpsol) {
+                // RINS phase A: no fractional integer agrees with the incumbent at the node
+                // point -> fix the integers where the current LP equals the incumbent.
+                let any_frac_agree = order.iter().any(|&j| {
+                    l[j] < u[j]
+                        && (x[j] - x[j].round()).abs() > ft
+                        && (node_x[j] - ix[j]).abs() <= ft
+                });
+                if !any_frac_agree {
+                    for &j in order {
+                        if l[j] >= u[j] || (x[j] - ix[j]).abs() > ft {
+                            continue;
+                        }
+                        let v = x[j].round().min(u[j]).max(l[j]);
+                        if l[j] < v || u[j] > v {
+                            l[j] = v;
+                            u[j] = v;
+                            branched += 1;
+                            match prop(&l, &u) {
+                                Some((pl, pu)) => {
+                                    l = pl;
+                                    u = pu;
+                                }
+                                None => {
+                                    infeasible = true;
+                                    break;
+                                }
+                            }
+                            if rate(&l, &u) >= stop_rate {
+                                break;
+                            }
+                        }
+                    }
+                    if !infeasible && branched == 0 {
+                        if rate(&l, &u) >= min_rate_rins {
+                            break;
+                        }
+                        fixtolpsol = false;
+                    }
+                }
+            }
+            for &j in order {
+                if inc.is_some() {
+                    break; // RINS has no RENS box phase
+                }
+                if l[j] >= u[j] {
+                    continue;
+                }
+                let down = (x[j] + ft).floor().min(u[j]);
+                let up = (x[j] - ft).ceil().max(l[j]);
+                let mut changed = false;
+                if l[j] < down {
+                    l[j] = down;
+                    changed = true;
+                }
+                if u[j] > up {
+                    u[j] = up;
+                    changed = true;
+                }
+                if changed {
+                    branched += 1;
+                    match prop(&l, &u) {
+                        Some((pl, pu)) => {
+                            l = pl;
+                            u = pu;
+                        }
+                        None => {
+                            infeasible = true;
+                            break;
+                        }
+                    }
+                    if rate(&l, &u) >= stop_rate {
+                        break;
+                    }
+                }
+            }
+            if !infeasible && branched == 0 {
+                // Fix the fractional integers, least change first (`:500-560`).
+                let rins_lp = fixtolpsol && inc.is_some();
+                let fixval = |j: usize, l: &[f64], u: &[f64]| {
+                    if rins_lp {
+                        return (node_x[j] + 0.5).floor().min(u[j]).max(l[j]);
+                    }
+                    let xv = x[j];
+                    let rc = root_x.map_or(0.0, |r| xv - r[j]);
+                    let v = if rc >= 0.4 {
+                        xv.ceil()
+                    } else if rc <= -0.4 {
+                        xv.floor()
+                    } else if cut.c[j] > 0.0 {
+                        xv.ceil()
+                    } else if cut.c[j] < 0.0 {
+                        xv.floor()
+                    } else {
+                        (xv + 0.5).floor()
+                    };
+                    v.min(u[j]).max(l[j])
+                };
+                let mut frac: Vec<(f64, usize)> = order
+                    .iter()
+                    .copied()
+                    .filter(|&j| l[j] < u[j] && (x[j] - x[j].round()).abs() > ft)
+                    .filter(|&j| {
+                        !rins_lp || inc.is_some_and(|(ix, _)| (node_x[j] - ix[j]).abs() <= ft)
+                    })
+                    .map(|j| ((fixval(j, &l, &u) - x[j]).abs(), j))
+                    .collect();
+                frac.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                let mut change = 0.0;
+                for (_, j) in frac {
+                    if l[j] >= u[j] {
+                        continue;
+                    }
+                    let v = fixval(j, &l, &u);
+                    l[j] = v;
+                    u[j] = v;
+                    branched += 1;
+                    match prop(&l, &u) {
+                        Some((pl, pu)) => {
+                            l = pl;
+                            u = pu;
+                        }
+                        None => {
+                            infeasible = true;
+                            break;
+                        }
+                    }
+                    if rate(&l, &u) >= target {
+                        break;
+                    }
+                    change += (v - x[j]).abs();
+                    if change >= 0.5 {
+                        break;
+                    }
+                }
+            }
+            if infeasible {
+                (l, u) = snap;
+                break;
+            }
+            if branched == 0 {
+                break;
+            }
+            // Re-solve the LP over the restricted box (`heurlp.flushDomain` + evaluateNode).
+            let lp = LpView {
+                a: &[],
+                m: cut.m,
+                n: cut.n,
+                c: &cut.c,
+                l: &l,
+                u: &u,
+            };
+            let warm = basis.is_some();
+            let mut sol = match basis.as_ref() {
+                Some(bs) => solve_lp_warm_scaled_csc(&lp, &cut.b, bs, &simplex, &cut.csc),
+                None => solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex),
+            };
+            if warm && !matches!(sol.status, LpStatus::Optimal | LpStatus::Infeasible) {
+                sol = solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex);
+            }
+            if sol.status != LpStatus::Optimal || sol.x.len() < ns {
+                (l, u) = snap;
+                break;
+            }
+            x.copy_from_slice(&sol.x[..ns]);
+            if sol.basis.basic_vars.len() == cut.m && sol.basis.col_status.len() == cut.n {
+                basis = Some(sol.basis);
+            }
+        }
+    }
+    fixing = rate(&l, &u);
+    let rens_trace = std::env::var_os("DISCOPT_RENS_TRACE").is_some();
+    if rens_trace {
+        eprintln!(
+            "RENS depth={} rins={} free_ints={} fixing={:.3} dive_s={:.3}",
+            MILP_DEPTH.with(|d| d.get()),
+            inc.is_some(),
+            n_total,
+            fixing,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    if fixing < 0.1 {
+        return None;
+    }
+    let left = deadline.map_or(10.0, |d| {
+        d.saturating_duration_since(std::time::Instant::now())
+            .as_secs_f64()
+    });
+    // A sub-MIP launched from inside a heuristic sub-MIP (this call's own nest is
+    // entered later). Not `MILP_DEPTH > 1`: since the MILP presolve the top-level
+    // search itself runs one level down (`solve_presolved`), so that test budgeted
+    // every root sub-MIP of a presolved solve as nested.
+    let nested = in_sub_mip();
+    let share = if nested {
+        // A nested sub-MIP gets half the time left, not a quarter: at a quarter the
+        // depth-2 solve of nexp-50-20-4-2's neighbourhood ran out before its root LP.
+        NESTED_SUB_MIP_SHARE
+    } else {
+        0.25
+    };
+    // The work-bounded budget is for the root RENS only (`parent_nodes == 0`): HiGHS
+    // runs that one unconditionally and gates in-tree heuristics by effort.
+    let budget = sub_mip_budget(left, share, nested || parent_nodes > 0);
+    if budget <= 0.05 && submip_work_budget() == 0 {
+        return None;
+    }
+    let sub_nodes = 200 + parent_nodes / 20;
+    let seed = inc.and_then(|(ix, _)| {
+        (0..ns)
+            .all(|j| ix[j] >= l[j] - 1e-9 && ix[j] <= u[j] + 1e-9)
+            .then(|| ix[..ns].to_vec())
+    });
+    let mut base_sub = sub_solve_options(opts, sub_nodes, seed);
+    base_sub.cut_rounds = base_sub.cut_rounds.min(5);
+    base_sub.strong_branch = false;
+    // Work phase: bounded by its iteration cap, its rounds and the parent's deadline.
+    let mut work = base_sub.clone();
+    if deadline.is_some() {
+        work.time_limit_s = Some(base_sub.time_limit_s.map_or(left, |t| t.min(left)));
+    }
+    let share_sub = (budget > 0.05).then(|| {
+        let mut sub = base_sub.clone();
+        sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
+        sub.root_cut_time_s = Some(budget * 0.3);
+        sub
+    });
+    let n_int_heur = is_int.iter().take(ns).filter(|&&b| b).count();
+    let res = {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
+        let _nest = SubMipNest::enter();
+        run_sub_mip_budgeted(cut.m + cut.n, work, share_sub, |o| {
+            solve_milp_node_hooked(
+                cut.csc.clone(),
+                cut.m,
+                cut.n,
+                &cut.c,
+                &l,
+                &u,
+                &cut.b,
+                obj_const,
+                o,
+                None,
+                None,
+                None,
+            )
+        })
+    };
+    let res = res?;
+    charge_sub_mip(res.lp_iters, fixing, n_int_heur, ns - n_int_heur);
+    if rens_trace {
+        eprintln!(
+            "RENS sub status={:?} obj={:e} bound={:e} nodes={} budget_s={:.2} took_s={:.2} inc={:?} lp_iters={} m={} n={}",
+            res.status,
+            res.obj + obj_const,
+            res.bound + obj_const,
+            res.nodes,
+            budget,
+            t0.elapsed().as_secs_f64(),
+            inc.map(|(_, v)| v),
+            res.lp_iters,
+            cut.m,
+            cut.n
+        );
+    }
+    crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
+    if res.status == MilpStatus::Infeasible {
+        record_fixing_outcome(fixing, true, false);
+    }
+    if !sub_mip_found_point(&res) || res.x.len() < ns {
+        return None;
+    }
+    if inc.is_some_and(|(_, v)| res.obj >= v - 1e-9 * (1.0 + v.abs())) {
+        return None;
+    }
+    match validate_seed_incumbent(
+        &res.x[..ns],
+        ns,
+        is_int,
+        &orig.csc,
+        &orig.b,
+        &orig.c,
+        &orig.l,
+        &orig.u,
+        orig.m,
+        orig.n,
+    ) {
+        Some((sx, sobj)) => {
+            crate::profile::incr(crate::profile::Ctr::SubMipImproved);
+            let better = inc.is_none_or(|(_, v)| sobj + obj_const < v - 1e-9 * (1.0 + v.abs()));
+            if better {
+                record_fixing_outcome(fixing, false, true);
+            }
+            Some((sx, sobj + obj_const))
         }
         None => {
-            crate::profile::incr(crate::profile::Ctr::RandRoundRejected);
+            crate::profile::incr(crate::profile::Ctr::SubMipRejected);
             None
         }
     }
@@ -2187,6 +4372,165 @@ thread_local! {
     /// wipe the parent's measurement mid-run and read as "this path never
     /// executed", the CLAUDE.md §6 failure mode.
     static MILP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Heuristic sub-MIP solves enclosing this point (`mipsolver.submip`).
+    static SUB_MIP_NEST: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// HiGHS's `heuristic_lp_iterations` per driver depth: the sub-MIP iterations a
+    /// solve at that depth has spent on heuristics ([`charge_sub_mip`]).
+    static HEUR_LP_ITERS: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// HiGHS's heuristic fixing-rate observations per driver depth
+    /// ([`target_fixing_rate_here`]).
+    static HEUR_FIX_STATS: std::cell::RefCell<Vec<FixStats>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// HiGHS's `successObservations` / `infeasObservations` (`HighsPrimalHeuristics.cpp:
+/// 229-243`) and its `randgen` for one solve: the fixing rates of sub-MIPs that
+/// improved the incumbent and of those proved infeasible.
+#[derive(Clone)]
+struct FixStats {
+    succ_sum: f64,
+    succ_n: u32,
+    inf_sum: f64,
+    inf_n: u32,
+    rng: crate::lp::highs_cutgen::random::HighsRandom,
+}
+
+impl FixStats {
+    fn new() -> Self {
+        FixStats {
+            succ_sum: 0.0,
+            succ_n: 0,
+            inf_sum: 0.0,
+            inf_n: 0,
+            rng: crate::lp::highs_cutgen::random::HighsRandom::new(0),
+        }
+    }
+}
+
+/// `DISCOPT_MILP_ADAPTIVE_FIXING_RATE`: RENS/RINS draw their target fixing rate as
+/// HiGHS's `determineTargetFixingRate` does (`HighsPrimalHeuristics.cpp:249-274`)
+/// instead of a constant 0.6: after infeasible sub-MIPs, at most 0.9x their mean rate;
+/// after improving ones, around 0.9-1.1x theirs; uniformly between. Measured
+/// 2026-11-15 on 10teams: four RENS sub-MIPs at the constant 0.6 were all proved
+/// infeasible, so the root never got a point. Changes which neighbourhood a heuristic
+/// searches, never a bound. **Default ON** since the 2026-11-15 population panel
+/// (`population_panel_dse.*`, arm `ours_afr`): 0 violations, certified 15 = 15,
+/// incumbents 87 -> 89 (none lost), primal better/worse 5/4, dual 14/8. `=0` opts
+/// out; garbage is refused.
+fn adaptive_fixing_rate_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(
+        || match std::env::var("DISCOPT_MILP_ADAPTIVE_FIXING_RATE") {
+            Err(_) => true,
+            Ok(v) => parse_switch("DISCOPT_MILP_ADAPTIVE_FIXING_RATE", &v),
+        },
+    )
+}
+
+fn with_fix_stats<R>(f: impl FnOnce(&mut FixStats) -> R) -> R {
+    let d = MILP_DEPTH.with(|x| x.get()) as usize;
+    HEUR_FIX_STATS.with(|v| {
+        let mut v = v.borrow_mut();
+        if v.len() <= d {
+            v.resize(d + 1, FixStats::new());
+        }
+        f(&mut v[d])
+    })
+}
+
+/// The target fixing rate for this depth's next RENS/RINS (HiGHS
+/// `determineTargetFixingRate`); the constant 0.6 when the flag is off.
+fn target_fixing_rate_here() -> f64 {
+    if !adaptive_fixing_rate_enabled() {
+        return 0.6;
+    }
+    with_fix_stats(|st| {
+        let (mut lo, mut hi) = (0.6f64, 0.6f64);
+        if st.inf_n != 0 {
+            hi = 0.9 * (st.inf_sum / st.inf_n as f64);
+            lo = lo.min(hi);
+        }
+        if st.succ_n != 0 {
+            let r = st.succ_sum / st.succ_n as f64;
+            lo = lo.min(0.9 * r);
+            hi = hi.max(r * 1.1);
+        }
+        st.rng.real(lo, hi)
+    })
+}
+
+/// Record a sub-MIP's outcome at `rate` (HiGHS records an infeasible one, and an
+/// improving one).
+fn record_fixing_outcome(rate: f64, infeasible: bool, improved: bool) {
+    with_fix_stats(|st| {
+        if infeasible {
+            st.inf_sum += rate;
+            st.inf_n += 1;
+        }
+        if improved {
+            st.succ_sum += rate;
+            st.succ_n += 1;
+        }
+    });
+}
+
+/// RAII marker for [`SUB_MIP_NEST`] around a heuristic sub-MIP solve.
+struct SubMipNest;
+
+impl SubMipNest {
+    fn enter() -> Self {
+        SUB_MIP_NEST.with(|c| c.set(c.get() + 1));
+        SubMipNest
+    }
+}
+
+impl Drop for SubMipNest {
+    fn drop(&mut self) {
+        SUB_MIP_NEST.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// Whether this solve is itself a heuristic sub-MIP.
+fn in_sub_mip() -> bool {
+    SUB_MIP_NEST.with(|c| c.get()) > 0
+}
+
+/// Charge a finished sub-MIP to the calling solve's heuristic LP iterations, as
+/// HiGHS's `solveSubMip` does (scaled by the share of columns left free).
+fn charge_sub_mip(sub_iters: usize, fixing_rate: f64, n_integral: usize, n_cont: usize) {
+    let c = crate::bnb::highs_search::heur_effort::sub_mip_charge(
+        sub_iters as i64,
+        fixing_rate,
+        n_integral,
+        n_cont,
+    );
+    let d = MILP_DEPTH.with(|x| x.get()) as usize;
+    HEUR_LP_ITERS.with(|v| {
+        let mut v = v.borrow_mut();
+        if v.len() <= d {
+            v.resize(d + 1, 0);
+        }
+        v[d] += c;
+    });
+}
+
+/// The heuristic LP iterations charged at this driver depth.
+fn heur_lp_iters_here() -> i64 {
+    let d = MILP_DEPTH.with(|x| x.get()) as usize;
+    HEUR_LP_ITERS.with(|v| v.borrow().get(d).copied().unwrap_or(0))
+}
+
+/// Start this depth's heuristic count from zero (a new solve at this depth), and its
+/// fixing-rate observations with it.
+fn reset_heur_lp_iters_here() {
+    with_fix_stats(|st| *st = FixStats::new());
+    let d = MILP_DEPTH.with(|x| x.get()) as usize;
+    HEUR_LP_ITERS.with(|v| {
+        let mut v = v.borrow_mut();
+        if v.len() <= d {
+            v.resize(d + 1, 0);
+        }
+        v[d] = 0;
+    });
 }
 
 /// RAII depth counter for [`MILP_DEPTH`]. The driver has many early returns; a
@@ -2530,20 +4874,615 @@ pub fn solve_milp_node_hooked(
     lazy: Option<&dyn MilpLazyHook>,
     node: Option<&dyn MilpNodeHook>,
 ) -> MilpResult {
+    // The caller's wall-time budgets run from here: entry preparation and MILP presolve
+    // spend them too (`clock_from`).
+    let t0 = std::time::Instant::now();
     let prep = prepare_entry(csc_w, m, n, c, l, u, b, opts);
     let l = prep.l.as_deref().unwrap_or(l);
     let u = prep.u.as_deref().unwrap_or(u);
     let (n_relaxed, unscalable) = (prep.n_relaxed, prep.unscalable);
+    // Gap plan §12.34: MILP presolve at the top level, no callbacks.
+    // The caller's `presolve: false` covers MILP presolve; a seeded incumbent is in
+    // the original columns and is not carried into the reduced problem, so a seeded
+    // solve skips presolve rather than drop the seed.
+    // A seed file (`DISCOPT_MILP_SEED_POINT`, read by the depth-0 search) is a seed too:
+    // with presolve on, the search runs one level down and would silently ignore it.
+    let seed_file_set =
+        MILP_DEPTH.with(|d| d.get()) == 0 && std::env::var_os("DISCOPT_MILP_SEED_POINT").is_some();
+    if milp_presolve_enabled()
+        && opts.presolve
+        && opts.initial_incumbent.is_none()
+        && !seed_file_set
+        && hook.is_none()
+        && lazy.is_none()
+        && node.is_none()
+        && opts.bound_hook.is_none()
+        && (MILP_DEPTH.with(|d| d.get()) == 0 || (in_sub_mip() && submip_presolve_enabled()))
+    {
+        if let Some(mut res) = solve_presolved(&prep.csc, m, n, c, l, u, b, obj_const, opts, t0) {
+            crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
+            if unscalable {
+                // Counted for the top-level solve only (see below).
+                if MILP_DEPTH.with(|d| d.get()) == 0 {
+                    crate::profile::incr(crate::profile::Ctr::MilpTinyEntryDecert);
+                }
+                withdraw_certificate(&mut res);
+            }
+            return res;
+        }
+    }
+    // Presolve may have run and declined (no reduction, a refused or unverified
+    // reduced solve): the original search gets what is left of the budget, not all of it.
+    let opts = &clock_from(opts, t0);
+    // Kept for the unbounded check below (the search consumes and extends the matrix).
+    let top_level = MILP_DEPTH.with(|d| d.get()) == 0;
+    let csc_orig = (top_level && !opts.integer_cols.is_empty()).then(|| prep.csc.clone());
     let mut res = solve_milp_node_search(
         prep.csc, m, n, c, l, u, b, obj_const, opts, hook, lazy, node,
     );
+    if res.status == MilpStatus::Unbounded && !opts.integer_cols.is_empty() {
+        settle_unbounded(&mut res, csc_orig, m, n, l, u, b, opts, lazy, node, t0);
+    }
     // After the search: its `begin_solve` resets the counters.
     crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
     if unscalable {
-        crate::profile::incr(crate::profile::Ctr::MilpTinyEntryDecert);
+        // The counter describes the top-level solve: a nested sub-MIP (a root
+        // heuristic) on the same rows withdraws its own certificate too, but counting
+        // it reported 2 decertifications for one solve (measured on the #1537
+        // row-scaled witness).
+        if MILP_DEPTH.with(|d| d.get()) == 0 {
+            crate::profile::incr(crate::profile::Ctr::MilpTinyEntryDecert);
+        }
         withdraw_certificate(&mut res);
     }
     res
+}
+
+/// An unbounded LP relaxation is not an unbounded MILP: `2 x0 - 2 x1 = 1` over free
+/// integers has an unbounded relaxation for `min x0` and no integer point at all. For
+/// rational data (every `f64` is rational) an unbounded relaxation together with one
+/// feasible integer point does prove the MILP unbounded (Meyer 1974, "On the existence
+/// of optimal solutions to integer and mixed-integer programming problems"), so the
+/// verdict is settled by a zero-objective solve of the same problem: a point keeps
+/// `Unbounded`, a proof of no point gives `Infeasible`, and anything else is a
+/// `NodeLimit` with no claim. HiGHS stops at `kUnboundedOrInfeasible` when it holds no
+/// point; this resolves the case instead of naming it. A nested solve (`csc` `None`)
+/// is not re-solved and never claims `Unbounded` without that check.
+/// Node budget of the feasibility solve in [`settle_unbounded`]. Branching cannot
+/// prove some unbounded integer sets empty at all (`2 x0 - 2 x1 = 1` needs a gcd
+/// argument), and those exhaust any budget; past it the verdict is an unclaimed
+/// `NodeLimit`, where HiGHS returns `kUnboundedOrInfeasible` at once.
+const UNBOUNDED_SETTLE_MAX_NODES: usize = 2_000;
+
+#[allow(clippy::too_many_arguments)]
+fn settle_unbounded(
+    res: &mut MilpResult,
+    csc: Option<SparseCols>,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &MilpOptions,
+    lazy: Option<&dyn MilpLazyHook>,
+    node: Option<&dyn MilpNodeHook>,
+    t0: std::time::Instant,
+) {
+    crate::profile::incr(crate::profile::Ctr::MilpUnboundedSettle);
+    let verdict = match csc {
+        None => MilpStatus::NodeLimit,
+        Some(csc) => {
+            let zero = vec![0.0; n];
+            let mut o = clock_from(opts, t0);
+            o.initial_incumbent = None;
+            // The caller's node-bound hook bounds the caller's objective, not this
+            // zero-objective feasibility search (review of #2220).
+            o.bound_hook = None;
+            o.max_nodes = o.max_nodes.min(UNBOUNDED_SETTLE_MAX_NODES);
+            let feas = solve_milp_node_search(csc, m, n, &zero, l, u, b, 0.0, &o, None, lazy, node);
+            match feas.status {
+                MilpStatus::Optimal | MilpStatus::Feasible => MilpStatus::Unbounded,
+                MilpStatus::Infeasible => MilpStatus::Infeasible,
+                // A zero objective cannot be unbounded; a limit decides nothing.
+                _ => MilpStatus::NodeLimit,
+            }
+        }
+    };
+    if verdict != MilpStatus::Unbounded {
+        crate::profile::incr(crate::profile::Ctr::MilpUnboundedDemoted);
+        res.status = verdict;
+        res.obj = f64::INFINITY;
+        res.bound = if verdict == MilpStatus::Infeasible {
+            f64::INFINITY
+        } else {
+            // No incumbent and no proof: the relaxation is unbounded below.
+            f64::NEG_INFINITY
+        };
+    }
+}
+
+/// `DISCOPT_MILP_PRESOLVE` (gap plan §12.34): run [`crate::bnb::milp_presolve`] on the
+/// top-level MILP and solve the reduced problem. Default ON since the stage 1d-5 graduation panel (`docs/dev/flag-retirement-audit.md`);
+/// `0` opts out (so does the caller's `presolve: false`). Garbage is refused.
+fn milp_presolve_enabled() -> bool {
+    if crate::lp::cmir::legacy_defaults() {
+        return false;
+    }
+    match std::env::var("DISCOPT_MILP_PRESOLVE") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => panic!("DISCOPT_MILP_PRESOLVE={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// `DISCOPT_MILP_IMPLIED_INT` (default OFF): MILP presolve marks continuous columns
+/// integral by HiGHS's implied-integer rule (`milp_presolve::presolve_opts`). Entry
+/// evidence (`highs-mip-replacement-plan.md`, root strength): on bppc8-02 the one
+/// implied-integer column takes discopt's root bound from 486.5 (the LP bound) to 504
+/// (optimum 507), because the root separators may then round on it; HiGHS's own root
+/// with presolve gets 495. Garbage is refused.
+fn milp_implied_int_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_IMPLIED_INT") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_IMPLIED_INT={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// `DISCOPT_HIGHS_SUBMIP_PRESOLVE`: run the MILP presolve on heuristic sub-MIPs (RENS,
+/// and any other unseeded sub-solve), as HiGHS's `solveSubMip` does
+/// (`submipoptions.presolve = kHighsOnString`, `HighsPrimalHeuristics.cpp:125-128`).
+/// A seeded sub-solve (RINS, stall re-dive) still skips it, as every seeded solve
+/// does, since the seed lives in the original columns. Sound by the same checks as
+/// the top-level presolve: `solve_presolved` re-verifies the postsolved point and its
+/// objective, and the sub-MIP's result is validated again before injection. Member
+/// of `DISCOPT_HIGHS_CONFIG`; garbage refused. Entry (20 s, graduated configuration):
+/// mik-250-20-75-5's root finds the optimum -51,532 (was -39,884) with root sub-MIP
+/// time 3.0 -> 1.7 s, and its 20 s bound -52,146 -> -51,961.
+fn submip_presolve_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SUBMIP_PRESOLVE") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!(
+                "DISCOPT_HIGHS_SUBMIP_PRESOLVE={other:?} is not recognized (expected 1 or 0)"
+            ),
+        },
+    }
+}
+
+/// `DISCOPT_MILP_SPARSIFY`: add HiGHS's sparsify (`milp_presolve::Work::sparsify`,
+/// multiples of equality rows added to other rows to cancel nonzeros) to the MILP
+/// presolve. Default OFF; `1` turns it on. Garbage is refused.
+fn milp_sparsify_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_SPARSIFY") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => panic!("DISCOPT_MILP_SPARSIFY={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// `MilpOptions::implied_int_cols` must name structural columns of `integer_cols`; a
+/// caller that marks a column implied without making it integer has mislabelled its
+/// problem, which is refused rather than silently repaired.
+fn assert_implied_subset(opts: &MilpOptions) {
+    if opts.implied_int_cols.is_empty() {
+        return;
+    }
+    let mut int = vec![false; opts.n_struct];
+    for &j in &opts.integer_cols {
+        if j < opts.n_struct {
+            int[j] = true;
+        }
+    }
+    for &j in &opts.implied_int_cols {
+        assert!(
+            j < opts.n_struct && int[j],
+            "implied_int_cols must be a subset of integer_cols (column {j})"
+        );
+    }
+}
+
+/// Whether the stall guard (`MilpOptions::stall_time_s`) stops a search that has no
+/// incumbent at the slice. Not when the caller offered `extend_no_incumbent_s`: that
+/// asks for the opposite (keep searching without an incumbent), and the guard firing
+/// first made the offer dead -- the Python engine passes both, so every no-incumbent
+/// solve stopped at half its budget (16 of 112 rows of the 2026-11-13 population panel,
+/// 8.6-17.7 s on a 20 s limit) under a route label claiming it had searched the whole
+/// budget. The guard's other role, the stall re-solve with an incumbent, is unchanged.
+fn stall_stops(opts: &MilpOptions) -> bool {
+    opts.extend_no_incumbent_s.is_none()
+}
+
+/// `opts` with its wall-time budgets counted from `t0` rather than from now:
+/// `time_limit_s`, `stall_time_s` and `extend_no_incumbent_s` (each "seconds from the
+/// start") lose the time already spent, floored at zero. `root_cut_time_s` is a budget
+/// of the root's own, measured from the root, and is unchanged.
+fn clock_from(opts: &MilpOptions, t0: std::time::Instant) -> MilpOptions {
+    let spent = t0.elapsed().as_secs_f64();
+    let left = |t: Option<f64>| t.map(|t| (t - spent).max(0.0));
+    let mut o = opts.clone();
+    o.time_limit_s = left(opts.time_limit_s);
+    o.stall_time_s = left(opts.stall_time_s);
+    o.extend_no_incumbent_s = left(opts.extend_no_incumbent_s);
+    o
+}
+
+/// Presolve the standard-form MILP (`A x = b`, structural columns `0..n_struct`, one
+/// singleton slack per inequality row after them), solve the reduced problem, map the
+/// answer back and re-verify it on the original rows. `None` means "solve the original
+/// instead": the slack structure is not clean, presolve reduced nothing, presolve
+/// claimed infeasibility (never trusted as a certificate here), or the postsolved
+/// point failed verification.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn solve_presolved(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+    t0: std::time::Instant,
+) -> Option<MilpResult> {
+    use crate::bnb::milp_presolve::{presolve_until, row_form_feasible, RowForm};
+    assert_implied_subset(opts);
+    let ns = opts.n_struct.min(n);
+    let fin = |v: f64| {
+        if v <= -INF {
+            f64::NEG_INFINITY
+        } else if v >= INF {
+            f64::INFINITY
+        } else {
+            v
+        }
+    };
+    // Row form: structural entries, range from the row's singleton slack.
+    let mut rows: Vec<(Vec<usize>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
+    for j in 0..ns {
+        let (ri, rv) = csc.col(j);
+        for (&i, &v) in ri.iter().zip(rv) {
+            if v != 0.0 {
+                rows[i].0.push(j);
+                rows[i].1.push(v);
+            }
+        }
+    }
+    let mut slack: Vec<Option<(usize, f64)>> = vec![None; m];
+    for j in ns..n {
+        let (ri, rv) = csc.col(j);
+        let nz: Vec<(usize, f64)> = ri
+            .iter()
+            .zip(rv)
+            .filter(|(_, &v)| v != 0.0)
+            .map(|(&i, &v)| (i, v))
+            .collect();
+        if nz.len() != 1 || c[j] != 0.0 || slack[nz[0].0].is_some() {
+            return None;
+        }
+        slack[nz[0].0] = Some((j, nz[0].1));
+    }
+    let (mut lo, mut up) = (vec![0.0; m], vec![0.0; m]);
+    for i in 0..m {
+        match slack[i] {
+            None => {
+                lo[i] = b[i];
+                up[i] = b[i];
+            }
+            Some((j, sigma)) => {
+                let (sl, su) = (fin(l[j]), fin(u[j]));
+                let (e1, e2) = (b[i] - sigma * sl, b[i] - sigma * su);
+                let (a, z) = if sigma > 0.0 { (e2, e1) } else { (e1, e2) };
+                lo[i] = if a.is_nan() { f64::NEG_INFINITY } else { a };
+                up[i] = if z.is_nan() { f64::INFINITY } else { z };
+            }
+        }
+    }
+    let mut is_int = vec![false; ns];
+    for &j in &opts.integer_cols {
+        if j < ns {
+            is_int[j] = true;
+        }
+    }
+    let rf = RowForm {
+        n: ns,
+        rows,
+        lo,
+        up,
+        c: c[..ns].to_vec(),
+        l: l[..ns].iter().map(|&v| fin(v)).collect(),
+        u: u[..ns].iter().map(|&v| fin(v)).collect(),
+        is_int,
+    };
+    let presolve_t0 = std::time::Instant::now();
+    let p = {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::MilpPresolve);
+        presolve_until(
+            &rf,
+            1e-9,
+            20,
+            milp_implied_int_enabled(),
+            milp_sparsify_enabled(),
+            opts.time_limit_s
+                .filter(|t| t.is_finite() && *t >= 0.0)
+                .map(|t| t0 + std::time::Duration::from_secs_f64(t)),
+        )
+    };
+    // Diagnostic: write the reduced problem as free MPS, so another solver's presolve can
+    // show what is left to remove (gap plan §12.36).
+    if let Ok(path) = std::env::var("DISCOPT_MILP_PRESOLVE_DUMP") {
+        if let Err(e) = std::fs::write(&path, crate::bnb::milp_presolve::to_free_mps(&p.form)) {
+            eprintln!("MILP presolve: could not write {path}: {e}");
+        }
+    }
+    if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+        eprintln!(
+            "MILP presolve: {}x{} -> {}x{} (offset {:e}, infeasible {}, {:.3} s) {:?}",
+            m,
+            ns,
+            p.form.rows.len(),
+            p.keep_cols.len(),
+            p.offset,
+            p.infeasible,
+            presolve_t0.elapsed().as_secs_f64(),
+            p.stats
+        );
+    }
+    if p.infeasible {
+        // Never trusted as a certificate: the original is solved instead.
+        return None;
+    }
+    let implied = p.stats.implied_int_primal + p.stats.implied_int_dual;
+    if p.keep_cols.len() == ns && p.form.rows.len() == m && implied == 0 {
+        return None;
+    }
+    // Rebuild in the ORIGINAL layout: each kept row keeps its own slack column (same
+    // orientation, same column order) and its right-hand side shifted by the constants
+    // presolve moved out; the slack's bounds follow from the row's new range. The engine
+    // relies on that layout (aligned slacks): a rebuild with re-oriented slacks alone
+    // cost supportcase14 0.7 -> 4.0 s and beavma 0.9 -> 11 s (gap plan §12.35).
+    let f = &p.form;
+    let k = f.n;
+    let m2 = f.rows.len();
+    let mut red_row = vec![usize::MAX; m];
+    for (r2, &i) in p.keep_rows.iter().enumerate() {
+        red_row[i] = r2;
+    }
+    let b2: Vec<f64> = (0..m2)
+        .map(|r2| b[p.keep_rows[r2]] - p.row_shift[r2])
+        .collect();
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
+    for (r2, (ri, rv)) in f.rows.iter().enumerate() {
+        for (&j, &v) in ri.iter().zip(rv) {
+            cols[j].push((r2, v));
+        }
+    }
+    let mut c2 = f.c.clone();
+    let mut l2: Vec<f64> =
+        f.l.iter()
+            .map(|&v| if v.is_finite() { v } else { -INF })
+            .collect();
+    let mut u2: Vec<f64> =
+        f.u.iter()
+            .map(|&v| if v.is_finite() { v } else { INF })
+            .collect();
+    let mut has_slack = vec![false; m2];
+    for j in ns..n {
+        let (ri, rv) = csc.col(j);
+        let (i, sigma) = ri
+            .iter()
+            .zip(rv)
+            .find(|(_, &v)| v != 0.0)
+            .map(|(&i, &v)| (i, v))?;
+        let r2 = red_row[i];
+        if r2 == usize::MAX {
+            continue;
+        }
+        has_slack[r2] = true;
+        // a x + sigma s = b2, a x in [lo, up]  =>  s in (b2 - [lo, up]) / sigma.
+        let (e_lo, e_hi) = ((b2[r2] - f.up[r2]) / sigma, (b2[r2] - f.lo[r2]) / sigma);
+        let (mut sl, mut su) = if sigma > 0.0 {
+            (e_lo, e_hi)
+        } else {
+            (e_hi, e_lo)
+        };
+        if sl.is_nan() {
+            sl = f64::NEG_INFINITY;
+        }
+        if su.is_nan() {
+            su = f64::INFINITY;
+        }
+        // The range carries the rounding of the shifted right-hand side: widen it by a
+        // relative 1e-9 so the rebuilt row is a relaxation of the reduced one, not a
+        // hair tighter (as `domain_lp_box` does for activity-implied slack ranges).
+        sl -= 1e-9 * (1.0 + sl.abs());
+        su += 1e-9 * (1.0 + su.abs());
+        cols.push(vec![(r2, sigma)]);
+        c2.push(0.0);
+        l2.push(if sl.is_finite() {
+            sl.max(fin(l[j]))
+        } else {
+            l[j]
+        });
+        u2.push(if su.is_finite() {
+            su.min(fin(u[j]))
+        } else {
+            u[j]
+        });
+    }
+    // A slack's box comes from its row's reduced range intersected with the slack's own
+    // bounds. When that range is a point, rounding in the shifted right-hand side can
+    // put it a hair outside the slack's bounds and leave an empty box (measured on the
+    // fac2 OA master: ten slacks at [7.1e-15, 0], [0, -2.2e-15], ...), which the engine
+    // then proves infeasible -- a false verdict on a feasible problem. An empty box
+    // within rounding is widened to its two ends, a relaxation of the row by at most
+    // that much (the postsolved point is re-verified on the original rows). A wider
+    // one means presolve missed an infeasibility: the original is solved instead.
+    for (lo, hi) in l2.iter_mut().zip(u2.iter_mut()) {
+        if *lo > *hi {
+            if *lo - *hi <= 1e-9 * (1.0 + lo.abs() + hi.abs()) {
+                std::mem::swap(lo, hi);
+                crate::profile::incr(crate::profile::Ctr::MilpPresolveEmptyBoxWidened);
+            } else {
+                return None;
+            }
+        }
+    }
+    // A row without a slack is an equality: its reduced range must be a point.
+    for r2 in 0..m2 {
+        if !has_slack[r2] && f.lo[r2] != f.up[r2] {
+            return None;
+        }
+    }
+    let n2 = cols.len();
+    let mut cp = vec![0usize];
+    let (mut ri2, mut rv2) = (Vec::new(), Vec::new());
+    for col in &cols {
+        let mut col = col.clone();
+        col.sort_by_key(|e| e.0);
+        for (i, v) in col {
+            ri2.push(i);
+            rv2.push(v);
+        }
+        cp.push(ri2.len());
+    }
+    let csc2 = SparseCols::from_csc(cp, ri2, rv2);
+    // The reduced search gets what presolve left of the budget.
+    let mut o2 = clock_from(opts, t0);
+    o2.n_struct = k;
+    o2.integer_cols = (0..k).filter(|&q| f.is_int[q]).collect();
+    // HiGHS's `integer_cols` / `integral_cols` split: the presolve-proved columns stay
+    // integral for branching, cuts and propagation, but the heuristics leave them
+    // continuous (they are continuous in `rf`, whose verification below is what
+    // accepts a point). The caller's own marks (none at today's entry points, which
+    // all pass an empty list) are carried through for the columns presolve kept
+    // integer.
+    assert!(
+        p.implied_int_cols.len() == implied
+            && p.implied_int_cols
+                .iter()
+                .all(|&q| f.is_int[q] && !rf.is_int[p.keep_cols[q]]),
+        "MILP presolve: implied-integer columns out of step with the stats"
+    );
+    let mut caller_implied = vec![false; ns];
+    for &j in &opts.implied_int_cols {
+        if j < ns {
+            caller_implied[j] = true;
+        }
+    }
+    o2.implied_int_cols = (0..k)
+        .filter(|&q| {
+            p.implied_int_cols.binary_search(&q).is_ok()
+                || (f.is_int[q] && caller_implied[p.keep_cols[q]])
+        })
+        .collect();
+    o2.initial_incumbent = opts
+        .initial_incumbent
+        .as_ref()
+        .map(|x| p.keep_cols.iter().map(|&j| x[j]).collect());
+    let res2 = solve_milp_node_search(
+        csc2,
+        m2,
+        n2,
+        &c2,
+        &l2,
+        &u2,
+        &b2,
+        obj_const + p.offset,
+        &o2,
+        None,
+        None,
+        None,
+    );
+    // After the search: its `begin_solve` resets the counters.
+    crate::profile::incr(crate::profile::Ctr::MilpPresolveRuns);
+    crate::profile::incr_by(crate::profile::Ctr::PresolveImpliedInt, implied as u64);
+    crate::profile::incr_by(
+        crate::profile::Ctr::MilpPresolveColsRemoved,
+        (ns - p.keep_cols.len()) as u64,
+    );
+    crate::profile::incr_by(
+        crate::profile::Ctr::MilpPresolveRowsRemoved,
+        (m - p.form.rows.len()) as u64,
+    );
+    // The reduced problem's verdict is not a certificate for the original: an
+    // unbounded one may be a relaxation that dropped implied bounds (aggregator), and
+    // an infeasible one rests on a rebuild whose right-hand sides carry the rounding of
+    // presolve's shifts (measured: the fac2 OA master, feasible with a verified
+    // witness, came back infeasible at the root). Presolve's own infeasibility flag is
+    // never trusted either: both are re-decided on the original.
+    if matches!(res2.status, MilpStatus::Unbounded | MilpStatus::Infeasible) {
+        if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+            eprintln!(
+                "MILP presolve: reduced problem {:?}; solving the original",
+                res2.status
+            );
+        }
+        crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+        return None;
+    }
+    // An incumbent is carried by `obj` (finite), not by the status: a search stopped
+    // by a node or time limit returns its incumbent under `IterationLimit`/`TimeLimit`.
+    // Keying on `Optimal | Feasible` returned such an incumbent's objective with the
+    // zero vector as its point (measured: `max_nodes = 0` on a 6-column equality
+    // knapsack, objective 5.0 with x = 0, which violates `sum x = 1`).
+    let has_x = res2.obj.is_finite();
+    let mut res = res2;
+    if has_x {
+        let x = p.postsolve(&res.x, ns);
+        if !row_form_feasible(&rf, &x, 1e-6) {
+            if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+                eprintln!(
+                    "MILP presolve: postsolved point failed verification; solving the original"
+                );
+            }
+            crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+            return None;
+        }
+        // The reported objective is the reduced problem's; it must be the postsolved
+        // point's on the ORIGINAL costs, or the solve would report one value for a
+        // point worth another. Presolve keeps them equal by construction; a reduction
+        // that does not (a noise-coefficient pivot did, `presolve_never_divides_by_a_
+        // noise_coefficient`) sends the solve back to the original.
+        let xv: f64 = (0..ns).map(|j| c[j] * x[j]).sum::<f64>() + obj_const;
+        if !(xv - res.obj).abs().le(&(1e-6 * (1.0 + res.obj.abs()))) {
+            if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+                eprintln!(
+                    "MILP presolve: postsolved objective {xv} != reduced {}; solving the original",
+                    res.obj
+                );
+            }
+            crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+            return None;
+        }
+        // Verified on `rf`, where the implied columns are continuous: a point with one
+        // of them off integral is a feasible point of the caller's problem.
+        if o2
+            .implied_int_cols
+            .iter()
+            .any(|&q| (res.x[q] - res.x[q].round()).abs() > 1e-9)
+        {
+            crate::profile::incr(crate::profile::Ctr::PresolveImpliedFracResult);
+        }
+        res.x = x;
+    } else {
+        res.x = vec![0.0; ns];
+    }
+    Some(res)
 }
 
 /// The box the #1296 gate measures an entry's reach over (#2107): the caller's
@@ -2988,6 +5927,26 @@ fn solve_milp_node_search(
     lazy: Option<&dyn MilpLazyHook>,
     node: Option<&dyn MilpNodeHook>,
 ) -> MilpResult {
+    // The HiGHS configuration's LP-level members (graduated default-ON for the MILP
+    // engine, `highs_config`): set here, on the engine's own LP options, so LPs solved
+    // outside the engine keep `SimplexOptions::default()`'s values.
+    let milp_opts: MilpOptions;
+    let opts = {
+        let mut s = opts.simplex.clone();
+        crate::lp::simplex::dual::milp_lp_members(&mut s);
+        let same = s.dual_noise_rows == opts.simplex.dual_noise_rows
+            && s.dual_perturb_first == opts.simplex.dual_perturb_first
+            && s.subtol_ladder == opts.simplex.subtol_ladder
+            && s.warm_flip_boxed == opts.simplex.warm_flip_boxed;
+        if same {
+            opts
+        } else {
+            let mut o = opts.clone();
+            o.simplex = s;
+            milp_opts = o;
+            &milp_opts
+        }
+    };
     // A hook with a zero round budget can never fire; drop it here so every
     // fire-site downstream is a single `Option` test and the "zero effect when
     // absent" guarantee covers "present but disabled" too.
@@ -3004,6 +5963,7 @@ fn solve_milp_node_search(
     if milp_depth == 0 {
         crate::profile::begin_solve();
     }
+    reset_heur_lp_iters_here();
     let ns = opts.n_struct;
     let is_int = {
         let mut v = vec![false; ns];
@@ -3025,6 +5985,19 @@ fn solve_milp_node_search(
 
     let mut is_int_full = vec![false; n];
     is_int_full[..ns].copy_from_slice(&is_int);
+    // HiGHS's `integer_cols` beside `integral_cols` (`HighsMipSolverData.cpp:1013-1050`):
+    // the columns a primal heuristic rounds, fixes or checks for integrality are the
+    // true integers only; the presolve-implied ones (`opts.implied_int_cols`) are left
+    // continuous there (`HighsPrimalHeuristics.cpp:44`). Branching, node integer
+    // feasibility, cuts, propagation, reduced-cost fixing and the lattice keep `is_int`.
+    let heur_is_int = {
+        let mut v = is_int.clone();
+        assert_implied_subset(opts);
+        for &j in &opts.implied_int_cols {
+            v[j] = false;
+        }
+        v
+    };
 
     // #1287 integer rounding, then root presolve: one helper, shared with
     // `milp_presolve_verdict` (highs-parity P3.1) so a handle's `presolve_only()`
@@ -3070,7 +6043,7 @@ fn solve_milp_node_search(
             // never cuts a feasible point, so a column it fixed is fixed at every
             // point the tree can still reach -- which is all the lattice claim is
             // quantified over, and it resolves strictly more objectives.
-            let subst = crate::bnb::obj_integral::objective_lattice(
+            let subst = crate::bnb::obj_integral::objective_lattice_opts(
                 c,
                 &is_int,
                 &base_l,
@@ -3081,8 +6054,11 @@ fn solve_milp_node_search(
                     m,
                     n,
                 },
+                obj_lattice_interval_enabled().then_some((l, u)),
             );
-            if base.is_none() && subst.is_some() {
+            // Counted for the top-level solve only: a nested sub-MIP (root RENS) on the
+            // same rows resolves the lattice again and reported 2 for one solve.
+            if base.is_none() && subst.is_some() && milp_depth == 0 {
                 crate::profile::incr(crate::profile::Ctr::ObjLatticeSubst);
             }
             subst
@@ -3097,6 +6073,23 @@ fn solve_milp_node_search(
         obj_const + lattice.map_or(0.0, |l| l.shift),
         lattice.map_or(0.0, |l| l.drift),
     );
+    // A lattice built over presolve-implied integer columns (`opts.implied_int_cols`)
+    // holds at the integral points the tree branches to, not at every feasible point:
+    // the heuristics leave those columns continuous (HiGHS's `integer_cols`), so an
+    // incumbent may sit off the lattice. A dual-detected column is integral at some
+    // optimum only, and a primal-detected one is integral at a heuristic's point only
+    // up to its feasibility tolerance. Either way the lattice is an `optimum_only` one:
+    // the optimal value is still a lattice point (some optimum has every implied column
+    // integral), so the bound lift stays sound, and `cutoff_for` cuts below the largest
+    // lattice point under an off-lattice incumbent.
+    let lattice = lattice.map(|mut l| {
+        l.optimum_only |= !opts.implied_int_cols.is_empty();
+        l
+    });
+    tm.set_objective_lattice_optimum_only(lattice.is_some_and(|l| l.optimum_only));
+    if lattice.is_some_and(|l| l.optimum_only) && milp_depth == 0 {
+        crate::profile::incr(crate::profile::Ctr::ObjLatticeInterval);
+    }
     tm.initialize();
 
     // Working LP, possibly augmented with root cuts. Cuts add rows + slack
@@ -3188,10 +6181,68 @@ fn solve_milp_node_search(
     // genuinely feasible seed survives the tightening). A seed that cannot be
     // proven feasible is dropped silently — seeding is an optimization and
     // must never be able to produce a false certificate.
-    if let Some(seed) = opts.initial_incumbent.as_ref() {
-        if let Some((sx, sobj)) =
-            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w)
-        {
+    // Diagnostic instrument (gap plan §12.27): `DISCOPT_MILP_SEED_POINT=<file>` seeds the
+    // top-level solve with a point in the driver's own column space (the format
+    // `DISCOPT_MILP_DUMP_INCUMBENT` writes), for entry experiments that need an
+    // incumbent from the start. It goes through the same validation as any seed, so a
+    // wrong file is dropped, never trusted. Off when unset.
+    let seed_file: Option<Vec<f64>> = if milp_depth == 0 && opts.initial_incumbent.is_none() {
+        std::env::var("DISCOPT_MILP_SEED_POINT").ok().map(|path| {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("DISCOPT_MILP_SEED_POINT {path}: {e}"))
+                .split_ascii_whitespace()
+                .map(|t| t.parse::<f64>().expect("seed point value"))
+                .collect()
+        })
+    } else {
+        None
+    };
+    // HiGHS's pre-root heuristics (`DISCOPT_MILP_TRIVIAL_HEUR`,
+    // `DISCOPT_MILP_FEAS_JUMP`): a top-level solve with no seed and no lazy
+    // separator; the point goes through the same validation and separator as any
+    // seed below.
+    let pre_root_seed: Option<Vec<f64>> = (milp_depth == 0
+        && opts.heuristics
+        && lazy.is_none()
+        && opts.initial_incumbent.is_none()
+        && seed_file.is_none())
+    .then(|| {
+        let deadline = opts
+            .time_limit_s
+            .map(|tl| std::time::Instant::now() + std::time::Duration::from_secs_f64(tl));
+        pre_root_heuristic_seed(
+            &csc_w,
+            m_w,
+            n_w,
+            ns,
+            &b_w,
+            &c_w,
+            &l_w,
+            &u_w,
+            &is_int_full,
+            &heur_is_int,
+            deadline,
+        )
+    })
+    .flatten();
+    if let Some(seed) = opts
+        .initial_incumbent
+        .as_ref()
+        .or(seed_file.as_ref())
+        .or(pre_root_seed.as_ref())
+    {
+        if let Some((sx, sobj)) = validate_seed_incumbent(
+            seed,
+            ns,
+            &heur_is_int,
+            &csc_w,
+            &b_w,
+            &c_w,
+            &l_w,
+            &u_w,
+            m_w,
+            n_w,
+        ) {
             // A seed is an integer-feasible point like any other, so it goes to
             // the separator first: seeding an incumbent the caller's lazy
             // constraints exclude would prune the tree against a point that is
@@ -3216,6 +6267,12 @@ fn solve_milp_node_search(
                 }
             };
             if accept {
+                if seed_file.is_some() {
+                    eprintln!(
+                        "DISCOPT_MILP_SEED_POINT accepted, objective {:e}",
+                        sobj + obj_const
+                    );
+                }
                 tm.inject_incumbent(sx, sobj + obj_const);
             }
         }
@@ -3258,7 +6315,7 @@ fn solve_milp_node_search(
     let mut sub_mip_since: usize = SUB_MIP_BATCH_STRIDE;
     let sub_mip_base: Option<SubMipBase> = (sub_mip_enabled()
         && opts.heuristics
-        && milp_depth == 0
+        && (milp_depth == 0 || (milp_depth == 1 && crate::lp::cmir::root_cmir_mode().on()))
         && lazy.is_none()
         && !opts.integer_cols.is_empty())
     .then(|| SubMipBase {
@@ -3339,6 +6396,10 @@ fn solve_milp_node_search(
     let mut node_simplex = {
         let mut sx = opts.simplex.clone();
         sx.deadline = deadline;
+        // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): full bases from cold solves, so warm starts engage.
+        if crate::lp::cmir::root_cmir_mode().on() {
+            sx.expel_zero_artificials = true;
+        }
         sx
     };
     // `extend_no_incumbent_s`: the effective time limit, and whether it already moved.
@@ -3349,6 +6410,9 @@ fn solve_milp_node_search(
         let mut sx = node_simplex.clone();
         if root_full_basis_enabled() {
             sx.expel_zero_artificials = true;
+        }
+        if crate::lp::cmir::root_cmir_mode().on() {
+            sx.subtol_repair = false;
         }
         sx
     };
@@ -3376,6 +6440,18 @@ fn solve_milp_node_search(
             None
         };
     let mut all_root_cuts: Vec<GomoryCut> = Vec::new();
+    let mut cut_ages: Vec<u32> = Vec::new();
+    // P3: cuts aged out of the root LP stay available (HiGHS keeps them in its cut pool
+    // and re-adds them when violated again, `HighsCutPool::separate`).
+    let mut aged_pool: Vec<GomoryCut> = Vec::new();
+    let (mut root_sel_best, mut root_sel_factor) = (0.0f64, 0.9f64);
+    let hs_stall_on = crate::lp::cmir::root_cmir_mode().on();
+    let mut hs_first: Option<(Vec<f64>, f64)> = None;
+    let mut hs_avg: Vec<f64> = vec![0.0; ns];
+    let (mut hs_smooth, mut hs_prev_obj, mut hs_rounds, mut hs_stall) =
+        (0.0f64, 0.0f64, 0usize, 0usize);
+    let mut cut_epochs: u32 = 0;
+    let mut root_duals: Vec<f64>;
     let mut last_root_x: Option<Vec<f64>> = None;
     // Row-major view of the pre-cut matrix, and the running list of cuts already
     // appended (each already rewritten into structural space). Together these let
@@ -3386,10 +6462,44 @@ fn solve_milp_node_search(
     let base_rows = BaseRows::build(&csc_w, m_base0, n_base0, ns, &b_w);
     let cut_max_len = CUT_LEN_BASE + (CUT_LEN_FRAC * ns as f64) as usize;
     let mut structural_cuts: Vec<GomoryCut> = Vec::new();
+    // Gap plan P3 option A (`DISCOPT_MILP_ROOT_CMIR=highs`): the ported HiGHS
+    // separation subsystem (separators + cut pool) runs the root rounds. `pool_ids`
+    // tracks, per `all_root_cuts` entry, the cut's index in that pool.
+    let mut highs_sep: Option<crate::lp::highs_cutgen::bridge::RootSeparation> =
+        if crate::lp::cmir::root_cmir_mode().highs_sepa() {
+            let nnz: usize = (0..ns)
+                .map(|j| csc_w.col(j).0.iter().filter(|&&r| r < n_orig_rows).count())
+                .sum();
+            Some(crate::lp::highs_cutgen::bridge::RootSeparation::new(
+                ns,
+                n_orig_rows,
+                nnz,
+                milp_depth == 0,
+            ))
+        } else {
+            None
+        };
+    // Bumped whenever the working matrix changes (fold, cut-row deletion): part of the
+    // sequential search domain's rebuild key with the size and every bound (§12.31).
+    let mut lp_version: u64 = 0;
+    let mut pool_ids: Vec<i32> = Vec::new();
+    let mut round_pool_ids: Vec<i32> = Vec::new();
+    // Gap plan §12.27: root RENS between root passes (`highs_root_rens`).
+    let root_rens_on = highs_sep.is_some() && sub_mip_base.is_some() && highs_root_rens();
+    // Central rounding's inputs: the first root LP point, and whether it is still owed.
+    let mut first_root_x: Option<Vec<f64>> = None;
+    let mut central_pending = central_rounding_enabled() && milp_depth == 0 && opts.heuristics;
+    let mut root_rens_ran = false;
     if opts.root_cuts > 0 {
         let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
         let mut total_cuts = 0usize;
         let mut prev_obj = f64::NEG_INFINITY;
+        let mut root_stalled = 0usize;
+        // Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR=1`): rounds separate c-MIR alone until
+        // the bound stalls or c-MIR finds nothing, then GMI joins. Off that arm GMI
+        // runs from the first round, as before (`gmi_phase` starts true).
+        let cmir_first = opts.cmir_cuts && opts.gmi_cuts && crate::lp::cmir::root_cmir_mode().on();
+        let mut gmi_phase = !cmir_first;
         // Wall bound for the separation phase: the earlier of the caller's own
         // deadline and the (optional) root-cut sub-budget. Checked at the top of
         // each round -- a round in flight always finishes, so the loop never
@@ -3412,225 +6522,920 @@ fn solve_milp_node_search(
             (None, Some(rc)) => Some(t_start + std::time::Duration::from_secs_f64(rc.max(0.0))),
             (None, None) => None,
         };
-        for _round in 0..opts.cut_rounds {
-            if total_cuts >= opts.root_cuts {
-                break;
-            }
-            if let Some(dl) = root_cut_deadline {
-                if std::time::Instant::now() >= dl {
+        // HiGHS's root round cap (`HighsMipSolverData.cpp:1990-1993, 1044-1046`):
+        // 2 sqrt(maxTreeSizeLog2), each unfixed integer adding ceil(log2(min(1024,
+        // 1 + u - l))) (under `DISCOPT_MILP_ROOT_CMIR`).
+        for root_pass in 0..if root_rens_on { 2 } else { 1 } {
+            if root_pass > 0 {
+                // Root RENS (HiGHS `evaluateRootNode`): on the root LP point, after the
+                // first pass of rounds. Only an improved incumbent earns a second pass.
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                     break;
                 }
-            }
-            crate::profile::incr(crate::profile::Ctr::RootCutRounds);
-            let root = {
-                let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
-                // Re-optimize from the PREVIOUS round's optimal basis instead of
-                // re-deriving the augmented LP from scratch. Appending a cut adds a
-                // row and its surplus slack; `extend_basis` makes that slack basic,
-                // which leaves the basis nonsingular and still dual-feasible (the
-                // slack's cost is 0), so a warm DUAL re-solve is the textbook
-                // re-optimizer — it pivots in the few violated cut rows rather than
-                // running a fresh primal phase-1 over the whole matrix.
-                //
-                // The loop already kept `root_basis` for the post-loop root node; it
-                // simply never fed it back in, so every round paid a cold solve.
-                // Measured on the rsyn0840m OA master at `root_cuts=500,
-                // cut_rounds=15`: 14 cold root solves = 23.1 s of the 24.2 s cut
-                // loop, 16127 phase-1 pivots, `EntryColsWarm = 0`.
-                //
-                // Bound-safe: the LP optimum does not depend on the starting basis,
-                // and the warm solve falls back to the cold `solve_lp_root_csc` on
-                // IterLimit/Numerical exactly as the node path does. Only which
-                // optimal vertex is reached — hence which Gomory cuts are read off
-                // the basis — can differ, the same latitude the post-loop
-                // `root_warm_basis` path already has.
-                // Borrowed, not taken: a round whose LP comes back non-Optimal
-                // breaks out of the loop *without* refreshing `root_basis`, and the
-                // post-loop root node still wants the last good basis to warm-start
-                // from. Taking it here would silently cold-solve that root.
-                match root_basis.as_ref() {
-                    Some(&(ref b, basis_n)) => {
-                        crate::profile::incr(crate::profile::Ctr::RootCutWarmReopt);
-                        let b = if basis_n < n_w {
-                            extend_basis(b.clone(), n_w)
-                        } else {
-                            b.clone()
-                        };
-                        let lp = LpView {
-                            a: &[],
-                            m: m_w,
-                            n: n_w,
-                            c: &c_w,
-                            l: &l_w,
-                            u: &u_w,
-                        };
-                        let warm = solve_lp_warm_scaled_csc(
-                            &lp,
-                            &b_w,
-                            &b,
-                            &warm_root_opts(&root_simplex, m_w, n_w),
-                            &csc_w,
-                        );
-                        match warm.status {
-                            LpStatus::IterLimit | LpStatus::Numerical => solve_lp_root_csc(
-                                &csc_w,
-                                m_w,
-                                n_w,
-                                &c_w,
-                                &l_w,
-                                &u_w,
-                                &b_w,
-                                &root_simplex,
-                            ),
-                            _ => warm,
-                        }
+                let (Some(base), Some(rx)) = (sub_mip_base.as_ref(), last_root_x.as_ref()) else {
+                    break;
+                };
+                if rx.len() < ns {
+                    break;
+                }
+                let cut = SubMipBase {
+                    csc: csc_w.clone(),
+                    m: m_w,
+                    n: n_w,
+                    c: c_w.clone(),
+                    l: l_w.clone(),
+                    u: u_w.clone(),
+                    b: b_w.clone(),
+                    is_int_full: is_int_full.clone(),
+                };
+                let (up, dn) = rounding_locks(base, ns);
+                let mut order: Vec<usize> = (0..ns).filter(|&j| heur_is_int[j]).collect();
+                let score = |j: usize| (1e-6 + up[j] as f64) * (1e-6 + dn[j] as f64);
+                order.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+                let start: Option<Basis> = root_basis.as_ref().map(|(b, bn)| {
+                    if *bn < n_w {
+                        extend_basis(b.clone(), n_w)
+                    } else {
+                        b.clone()
                     }
-                    None => {
-                        solve_lp_root_csc(&csc_w, m_w, n_w, &c_w, &l_w, &u_w, &b_w, &root_simplex)
+                });
+                let live = |v: f64| v.is_finite() && v < INFEAS_SENTINEL - 1.0;
+                let before = tm.incumbent().map(|(_, v)| v).filter(|&v| live(v));
+                root_rens_ran = true;
+                crate::profile::incr(crate::profile::Ctr::RootRensRuns);
+                if let Some((sx, sobj)) = try_rens_highs(
+                    &cut,
+                    base,
+                    &order,
+                    obj_const,
+                    ns,
+                    &heur_is_int,
+                    &rx[..ns],
+                    Some(&rx[..ns]),
+                    None,
+                    start.as_ref(),
+                    opts,
+                    deadline,
+                    0,
+                ) {
+                    tm.inject_incumbent(sx, sobj);
+                }
+                let after = tm.incumbent().map(|(_, v)| v).filter(|&v| live(v));
+                let improved = match (before, after) {
+                    (_, None) => false,
+                    (None, Some(_)) => true,
+                    (Some(b), Some(a)) => a < b - 1e-9 * (1.0 + b.abs()),
+                };
+                if !improved {
+                    break;
+                }
+                crate::profile::incr(crate::profile::Ctr::RootRensImproved);
+                root_stalled = 0;
+                hs_stall = 0;
+            }
+            for round in 0..opts.cut_rounds {
+                if total_cuts >= opts.root_cuts {
+                    break;
+                }
+                if opts
+                    .max_work
+                    .is_some_and(|k| sub_mip_work(lp_iters, 0, m + n) >= k)
+                {
+                    break;
+                }
+                if let Some(dl) = root_cut_deadline {
+                    if std::time::Instant::now() >= dl {
+                        break;
                     }
                 }
-            };
-            lp_iters += root.iters;
-            if root.status != LpStatus::Optimal {
-                break;
-            }
-            // Keep this round's optimal basis for the root B&B node. If the loop
-            // exits now (tailing off / no cuts) it already spans the final matrix;
-            // if more cuts are appended below it is extended to the new size after
-            // the loop. The clone is cheap next to the solve it came from.
-            root_basis = Some((root.basis.clone(), n_w));
-            if prune_base.is_some() {
-                last_root_x = Some(root.x.clone());
-            }
-            // Tailing off: stop once added cuts barely move the bound.
-            if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY
-            {
-                break;
-            }
-            prev_obj = root.obj;
-
-            // Knapsack cover cuts (sparse, strong on knapsack structure) plus
-            // Gomory mixed-integer cuts off the native basis.
-            let mut cuts = {
-                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
-                separate_cover_csc(
-                    &csc_w,
-                    n_w,
-                    m_w,
-                    &l_w,
-                    &u_w,
-                    &b_w,
-                    &root.x,
-                    ns,
-                    &is_int_full,
-                    n_orig_rows,
-                    opts.simplex.tol,
-                )
-            };
-            if opts.cmir_cuts {
-                // #2107: aggregated c-MIR with variable-bound substitution, from the
-                // original rows only (`n_orig_rows`). Its cuts are over the original
-                // structural and slack columns, rewritten below like every other cut.
-                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
-                let found = separate_cmir_csc(
-                    &csc_w,
-                    n_w,
-                    m_w,
-                    &l_w,
-                    &u_w,
-                    &b_w,
-                    &root.x,
-                    &is_int_full,
-                    n_orig_rows,
-                    CMIR_MAX_AGGR,
-                    CMIR_MAX_CUTS,
-                    opts.simplex.tol,
-                );
-                crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, found.len() as u64);
-                cuts.extend(found);
-            }
-            if opts.gmi_cuts {
-                let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
-                cuts.extend(separate_gomory_cols(
-                    &csc_w,
-                    m_w,
-                    n_w,
-                    &l_w,
-                    &u_w,
-                    &b_w,
-                    &root.basis,
-                    &is_int_full,
-                    opts.simplex.tol,
-                    1e7,
-                ));
-            }
-            // Rewrite every separated cut over structural columns only, before
-            // anything downstream looks at it. Doing it here (rather than at
-            // append time) means selection scores, dedup signatures and the
-            // cleanup's tightness test all see one consistent space, and no cut
-            // row ever references another row's slack.
-            {
-                let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
-                let before = cuts.len();
-                let gmi_repair = crate::lp::gomory::gmi_repair_enabled();
-                cuts = cuts
-                    .iter()
-                    .filter_map(|c| {
-                        substitute_slacks_to_structural(
-                            c,
-                            &base_rows,
-                            &structural_cuts,
-                            ns,
-                            n_base0,
-                            &root.x,
+                crate::profile::incr(crate::profile::Ctr::RootCutRounds);
+                let root = {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
+                    // Re-optimize from the PREVIOUS round's optimal basis instead of
+                    // re-deriving the augmented LP from scratch. Appending a cut adds a
+                    // row and its surplus slack; `extend_basis` makes that slack basic,
+                    // which leaves the basis nonsingular and still dual-feasible (the
+                    // slack's cost is 0), so a warm DUAL re-solve is the textbook
+                    // re-optimizer — it pivots in the few violated cut rows rather than
+                    // running a fresh primal phase-1 over the whole matrix.
+                    //
+                    // The loop already kept `root_basis` for the post-loop root node; it
+                    // simply never fed it back in, so every round paid a cold solve.
+                    // Measured on the rsyn0840m OA master at `root_cuts=500,
+                    // cut_rounds=15`: 14 cold root solves = 23.1 s of the 24.2 s cut
+                    // loop, 16127 phase-1 pivots, `EntryColsWarm = 0`.
+                    //
+                    // Bound-safe: the LP optimum does not depend on the starting basis,
+                    // and the warm solve falls back to the cold `solve_lp_root_csc` on
+                    // IterLimit/Numerical exactly as the node path does. Only which
+                    // optimal vertex is reached — hence which Gomory cuts are read off
+                    // the basis — can differ, the same latitude the post-loop
+                    // `root_warm_basis` path already has.
+                    // Borrowed, not taken: a round whose LP comes back non-Optimal
+                    // breaks out of the loop *without* refreshing `root_basis`, and the
+                    // post-loop root node still wants the last good basis to warm-start
+                    // from. Taking it here would silently cold-solve that root.
+                    match root_basis.as_ref() {
+                        Some(&(ref b, basis_n)) => {
+                            crate::profile::incr(crate::profile::Ctr::RootCutWarmReopt);
+                            let b = if basis_n < n_w {
+                                extend_basis(b.clone(), n_w)
+                            } else {
+                                b.clone()
+                            };
+                            let lp = LpView {
+                                a: &[],
+                                m: m_w,
+                                n: n_w,
+                                c: &c_w,
+                                l: &l_w,
+                                u: &u_w,
+                            };
+                            let warm = solve_lp_warm_scaled_csc(
+                                &lp,
+                                &b_w,
+                                &b,
+                                &warm_root_opts(&root_simplex, m_w, n_w),
+                                &csc_w,
+                            );
+                            // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): a failed warm re-solve ends the
+                            // round loop (HiGHS stops separating on an LP failure) instead of a
+                            // cold solve, which cost ~3 s each on the nexp neighbourhood.
+                            let nocold = crate::lp::cmir::root_cmir_mode().on();
+                            if warm.status == LpStatus::Numerical
+                                && nocold
+                                && warm.basis.basic_vars.len() == m_w
+                                && warm.basis.col_status.len() == n_w
+                                && warm.x.len() == n_w
+                                && warm.obj.is_finite()
+                                && {
+                                    // Only a vertex that satisfies `A x = b` and the box.
+                                    let x = &warm.x;
+                                    let mut r = b_w.clone();
+                                    let (cp, ri, va) = csc_w.raw();
+                                    for j in 0..n_w {
+                                        for k in cp[j]..cp[j + 1] {
+                                            r[ri[k]] -= va[k] * x[j];
+                                        }
+                                    }
+                                    r.iter()
+                                        .zip(&b_w)
+                                        .all(|(ri, bi)| ri.abs() <= 1e-6 * (1.0 + bi.abs()))
+                                        && (0..n_w).all(|j| {
+                                            x[j] >= l_w[j] - 1e-6 * (1.0 + l_w[j].abs().min(1e6))
+                                                && x[j]
+                                                    <= u_w[j] + 1e-6 * (1.0 + u_w[j].abs().min(1e6))
+                                        })
+                                }
+                            {
+                                // `=2`: the dual reached its vertex and only the sub-tolerance
+                                // repair failed; separate from that vertex. A cut is valid
+                                // whatever point it separates, and this loop's LP value is
+                                // never a bound (the root node is re-solved in the tree).
+                                let mut w = warm;
+                                w.status = LpStatus::Optimal;
+                                w
+                            } else if matches!(
+                                warm.status,
+                                LpStatus::IterLimit | LpStatus::Numerical
+                            ) && nocold
+                            {
+                                warm
+                            } else {
+                                match warm.status {
+                                    LpStatus::IterLimit | LpStatus::Numerical => solve_lp_root_csc(
+                                        &csc_w,
+                                        m_w,
+                                        n_w,
+                                        &c_w,
+                                        &l_w,
+                                        &u_w,
+                                        &b_w,
+                                        &root_simplex,
+                                    ),
+                                    _ => warm,
+                                }
+                            }
+                        }
+                        None => solve_lp_root_csc(
+                            &csc_w,
+                            m_w,
+                            n_w,
+                            &c_w,
                             &l_w,
                             &u_w,
-                            cut_max_len,
+                            &b_w,
+                            &root_simplex,
+                        ),
+                    }
+                };
+                lp_iters += root.iters;
+                if root.status != LpStatus::Optimal {
+                    break;
+                }
+                // `DISCOPT_MILP_ROOT_ROUND_BOUND`: a finished round's LP (original rows
+                // plus valid cuts, over the root box) is a relaxation of the MILP, so the
+                // NS bound of its duals floors the root node. HiGHS raises its lower
+                // bound from every separation round's LP the same way. Without it a
+                // deadline that stops the post-loop root re-solve leaves no bound at
+                // all: drayage-25-27 solved its first root LP in 2.3 s and still
+                // reported none at 20 s, its cut rounds having spent the rest.
+                if root_round_bound_enabled() {
+                    let (cp, ri, va) = csc_w.raw();
+                    if let Some(g) =
+                        ns_safe_bound_csc(&root.dual, &c_w, cp, ri, va, m_w, n_w, &b_w, &l_w, &u_w)
+                    {
+                        tm.seed_root_bound(g.min(root.obj) + obj_const);
+                        crate::profile::incr(crate::profile::Ctr::RootRoundBoundSeeded);
+                    } else {
+                        crate::profile::incr(crate::profile::Ctr::RootRoundBoundAbstain);
+                    }
+                }
+                // Keep this round's optimal basis for the root B&B node. If the loop
+                // exits now (tailing off / no cuts) it already spans the final matrix;
+                // if more cuts are appended below it is extended to the new size after
+                // the loop. The clone is cheap next to the solve it came from.
+                root_basis = Some((root.basis.clone(), n_w));
+                root_duals = root.dual.clone();
+                if prune_base.is_some() {
+                    last_root_x = Some(root.x.clone());
+                }
+                if hs_stall_on {
+                    // HiGHS's root stall rule (`HighsMipSolverData.cpp:2215-2245`), ported
+                    // literally: the LP point's movement from the first root LP point,
+                    // smoothed; a round stalls when that progress grows < 1 % and the bound
+                    // gain is <= 1.001 x the previous gain; 3 stalled rounds end the loop.
+                    gmi_phase = true;
+                    if hs_first.is_none() {
+                        hs_first = Some((root.x[..ns].to_vec(), root.obj));
+                        hs_prev_obj = root.obj;
+                    } else if let Some((fx, fobj)) = hs_first.as_ref() {
+                        hs_rounds += 1;
+                        let cur: Vec<f64> = (0..ns).map(|j| fx[j] - root.x[j]).collect();
+                        let sq: f64 = cur.iter().map(|v| v * v).sum();
+                        let progress = if sq > 0.0 {
+                            let scale = 1.0 / sq.sqrt();
+                            let mut an = 0.0;
+                            let mut dot = 0.0;
+                            for j in 0..ns {
+                                hs_avg[j] = (scale * cur[j] - hs_avg[j]) / hs_rounds as f64;
+                                an += hs_avg[j] * hs_avg[j];
+                                dot += hs_avg[j] * cur[j];
+                            }
+                            if an > 0.0 {
+                                dot / an.sqrt()
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            0.0
+                        };
+                        if hs_rounds == 1 {
+                            hs_smooth = progress;
+                        } else {
+                            let next = (2.0 / 3.0) * hs_smooth + progress / 3.0;
+                            if next < hs_smooth * 1.01
+                                && (root.obj - fobj) <= (hs_prev_obj - fobj) * 1.001
+                            {
+                                hs_stall += 1;
+                            } else {
+                                hs_stall = 0;
+                            }
+                            hs_smooth = next;
+                        }
+                        hs_prev_obj = root.obj;
+                        if hs_stall >= 3 {
+                            break;
+                        }
+                    }
+                    prev_obj = prev_obj.max(root.obj);
+                } else
+                // Tailing off: stop once added cuts barely move the bound.
+                if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs())
+                    && prev_obj > f64::NEG_INFINITY
+                {
+                    // Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): with c-MIR on, allow a few
+                    // consecutive stalled rounds. A dual-degenerate root (assignment rows)
+                    // moves to an equal-objective vertex for several rounds before the
+                    // bound rises (`neos-911970`, gap plan §12.2 item 1); SCIP allows
+                    // stalled root rounds too. Off the flag the loop stops at the first
+                    // stalled round, as before.
+                    root_stalled += 1;
+                    // Gap plan P3: c-MIR first, GMI once it stalls. The first stalled
+                    // round of the c-MIR phase hands over to GMI (with a fresh stall
+                    // allowance) instead of counting toward the stop.
+                    if !gmi_phase {
+                        gmi_phase = true;
+                        root_stalled = 0;
+                        crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
+                    }
+                    let allow = if opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on() {
+                        ROOT_CMIR_STALL_ROUNDS
+                    } else {
+                        0
+                    };
+                    if root_stalled > allow {
+                        break;
+                    }
+                } else {
+                    root_stalled = 0;
+                }
+                prev_obj = prev_obj.max(root.obj);
+                // HiGHS runs randomized rounding on the FIRST root LP point whatever
+                // the incumbent (`HighsMipSolverData.cpp:2112`, after the pre-root
+                // trivial / feasibility-jump heuristics may already have found one),
+                // and on every later root round's point while there is no incumbent
+                // (`:1858-1865`). The first-point call is what keeps a weak pre-root
+                // incumbent from switching rounding off (measured: pg5_34's primal gap
+                // 5.1e-2 -> 1.0 with feasibility jump on and only the second rule).
+                // The completion LP is over the uncut base rows, as in HiGHS.
+                if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
+                    if (root_pass == 0 && round == 0)
+                        || tm
+                            .incumbent()
+                            .is_none_or(|(_, v)| v >= INFEAS_SENTINEL - 1.0)
+                    {
+                        if let Some((x, v)) = try_randomized_rounding(
+                            base,
+                            locks,
+                            obj_const,
+                            ns,
+                            &heur_is_int,
+                            &root.x,
+                            0x5EED_0000 + round as u64,
+                            opts,
+                            deadline,
+                        ) {
+                            tm.inject_incumbent(x, v);
+                        }
+                    }
+                }
+                // HiGHS's central rounding (`DISCOPT_MILP_CENTRAL_ROUNDING`): from the
+                // first root LP point towards the analytic centre, once, after
+                // `CENTRAL_ROUNDING_AFTER_ROUNDS` rounds (or at the end of the root).
+                if root_pass == 0 && round == 0 {
+                    first_root_x = Some(root.x.clone());
+                }
+                if central_pending && round + 1 >= CENTRAL_ROUNDING_AFTER_ROUNDS {
+                    central_pending = false;
+                    if let (Some(base), Some(locks), Some(x0)) = (
+                        sub_mip_base.as_ref(),
+                        rr_locks.as_ref(),
+                        first_root_x.as_ref(),
+                    ) {
+                        if let Some((x, v)) = try_central_rounding(
+                            base,
+                            locks,
+                            obj_const,
+                            ns,
+                            &heur_is_int,
+                            x0,
+                            opts,
+                            deadline,
+                        ) {
+                            tm.inject_incumbent(x, v);
+                        }
+                    }
+                }
+
+                if highs_sep.is_some() && (highs_sepa_propagate() || root_rens_on) {
+                    // HiGHS's root rounds propagate the global domain after every LP
+                    // (`HighsSeparation::separationRound` -> `propagateAndResolve`, and
+                    // `evaluateRootLp`), over the model rows AND the cut pool's rows, and
+                    // fix by reduced cost against the incumbent
+                    // (`redcostfixing.addRootRedcost/propagateRootRedcost`). Here: reduced-
+                    // cost fixing at this round's LP, then FBBT over every LP row (cuts
+                    // included), into the root box the next round and the tree start from.
+                    // Both are sound contractions: RC fixing keeps every point at least as
+                    // good as the incumbent (with a margin on the LP value), FBBT keeps
+                    // every point satisfying globally valid rows.
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
+                    let mut changed = false;
+                    if let Some((_, inc)) = tm
+                        .incumbent()
+                        .filter(|(_, v)| v.is_finite() && *v < INFEAS_SENTINEL - 1.0)
+                    {
+                        let margin = 1e-6 * (1.0 + root.obj.abs());
+                        if let Some((rl, ru)) = reduced_cost_fix(
+                            &csc_w,
+                            m_w,
+                            &c_w,
+                            &root.basis,
+                            &root.dual,
+                            root.obj + obj_const - margin,
+                            inc,
+                            &l_w,
+                            &u_w,
+                            ns,
+                            &is_int_full,
+                            opts.simplex.tol,
+                        ) {
+                            for j in 0..ns {
+                                if rl[j] > l_w[j] && rl[j] <= u_w[j] {
+                                    l_w[j] = rl[j];
+                                    changed = true;
+                                }
+                                if ru[j] < u_w[j] && ru[j] >= l_w[j] {
+                                    u_w[j] = ru[j];
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    let pr = fbbt_rows(
+                        &csc_w,
+                        m_w,
+                        n_w,
+                        &l_w,
+                        &u_w,
+                        &b_w,
+                        &is_int_full,
+                        opts.simplex.tol,
+                    );
+                    if !pr.infeasible {
+                        for j in 0..n_w {
+                            if pr.l[j] > l_w[j] {
+                                l_w[j] = pr.l[j];
+                                changed = true;
+                            }
+                            if pr.u[j] < u_w[j] {
+                                u_w[j] = pr.u[j];
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        crate::profile::incr(crate::profile::Ctr::RootHighsPropagated);
+                        tm.tighten_root_box(&l_w[..ns], &u_w[..ns]);
+                    }
+                }
+                let new_cuts = if let Some(hs) = highs_sep.as_mut() {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                    hs.add_lp_iterations(root.iters as i64);
+                    // HiGHS separates over its global domain, which propagates the
+                    // objective cutoff (`highs_sepa_cutoff_box`).
+                    let sep_box = if highs_sepa_cutoff_box() {
+                        sepa_cutoff_box(
+                            &csc_w,
+                            m_w,
+                            n_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &is_int_full,
+                            &c_w,
+                            tm.incumbent().map(|(_, v)| v),
+                            obj_const,
+                            opts.simplex.tol,
+                        )
+                    } else {
+                        None
+                    };
+                    let (sep_l, sep_u) = match sep_box.as_ref() {
+                        Some((gl, gu)) => (&gl[..], &gu[..]),
+                        None => (&l_w[..], &u_w[..]),
+                    };
+                    let rc = hs.round(&crate::lp::highs_cutgen::bridge::StdFormRound {
+                        csc: &csc_w,
+                        m: m_w,
+                        n: n_w,
+                        ns,
+                        b: &b_w,
+                        l: sep_l,
+                        u: sep_u,
+                        is_int: &is_int_full,
+                        x: &root.x,
+                        y: &root.dual,
+                        basic_vars: &root.basis.basic_vars,
+                        deadline,
+                    });
+                    crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, rc.generated as u64);
+                    let remaining = opts.root_cuts - total_cuts;
+                    round_pool_ids.clear();
+                    let mut out = Vec::new();
+                    for (k, (id, cut)) in rc.cuts.into_iter().enumerate() {
+                        if k < remaining {
+                            round_pool_ids.push(id);
+                            out.push(cut);
+                        } else {
+                            // Over the root-cut budget: not in the LP after all.
+                            hs.lp_cut_removed(id);
+                        }
+                    }
+                    out
+                } else {
+                    // Knapsack cover cuts (sparse, strong on knapsack structure) plus
+                    // Gomory mixed-integer cuts off the native basis.
+                    let mut cuts = {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
+                        separate_cover_csc(
+                            &csc_w,
+                            n_w,
+                            m_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root.x,
+                            ns,
+                            &is_int_full,
+                            n_orig_rows,
+                            opts.simplex.tol,
+                        )
+                    };
+                    if opts.cmir_cuts {
+                        // #2107: aggregated c-MIR with variable-bound substitution, from the
+                        // original rows only (`n_orig_rows`). Its cuts are over the original
+                        // structural and slack columns, rewritten below like every other cut.
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                        let found = separate_cmir_csc(
+                            &csc_w,
+                            n_w,
+                            m_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root.x,
+                            &is_int_full,
+                            // P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's path separator walks every LP
+                            // row, the current cuts included (`HighsPathSeparator.cpp:30-50`).
+                            if crate::lp::cmir::root_cmir_mode().on() {
+                                m_w
+                            } else {
+                                n_orig_rows
+                            },
+                            if crate::lp::cmir::root_cmir_mode().on() {
+                                CMIR_MAX_AGGR_DESIGN
+                            } else {
+                                CMIR_MAX_AGGR
+                            },
+                            CMIR_MAX_CUTS,
+                            opts.simplex.tol,
+                        );
+                        crate::profile::incr_by(
+                            crate::profile::Ctr::SepCmirCuts,
+                            found.len() as u64,
+                        );
+                        if found.is_empty() && !gmi_phase {
+                            // c-MIR has nothing left at this point: GMI joins this round.
+                            gmi_phase = true;
+                            crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
+                        }
+                        cuts.extend(found);
+                    }
+                    // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's tableau separator (c-MIR on tableau-row
+                    // aggregations) every round; `1` replaces GMI with it, `2` runs both.
+                    let tableau_on = opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on();
+                    if opts.gmi_cuts && tableau_on {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                        cuts.extend(crate::lp::cmir::separate_tableau_cmir_csc(
+                            &csc_w,
+                            n_w,
+                            m_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root.x,
+                            &root.basis,
+                            &is_int_full,
+                            n_orig_rows,
+                            CMIR_MAX_CUTS,
+                            opts.simplex.tol,
+                        ));
+                    }
+                    if opts.gmi_cuts && gmi_phase && !tableau_on {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
+                        cuts.extend(separate_gomory_cols(
+                            &csc_w,
+                            m_w,
+                            n_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root.basis,
+                            &is_int_full,
                             opts.simplex.tol,
                             1e7,
-                            gmi_repair,
-                        )
-                    })
-                    .collect();
-                crate::profile::incr_by(
-                    crate::profile::Ctr::RootCutsSubstDropped,
-                    (before - cuts.len()) as u64,
+                        ));
+                    }
+                    // Rewrite every separated cut over structural columns only, before
+                    // anything downstream looks at it. Doing it here (rather than at
+                    // append time) means selection scores, dedup signatures and the
+                    // cleanup's tightness test all see one consistent space, and no cut
+                    // row ever references another row's slack.
+                    {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
+                        let before = cuts.len();
+                        let gmi_repair = crate::lp::gomory::gmi_repair_enabled();
+                        cuts = cuts
+                            .iter()
+                            .filter_map(|c| {
+                                substitute_slacks_to_structural(
+                                    c,
+                                    &base_rows,
+                                    &structural_cuts,
+                                    ns,
+                                    n_base0,
+                                    &root.x,
+                                    &l_w,
+                                    &u_w,
+                                    cut_max_len,
+                                    opts.simplex.tol,
+                                    1e7,
+                                    gmi_repair,
+                                )
+                            })
+                            .collect();
+                        crate::profile::incr_by(
+                            crate::profile::Ctr::RootCutsSubstDropped,
+                            (before - cuts.len()) as u64,
+                        );
+                    }
+                    if !aged_pool.is_empty() {
+                        let mut back = 0u64;
+                        aged_pool.retain(|pc| {
+                            let act: f64 = pc.coeffs.iter().zip(&root.x).map(|(a, x)| a * x).sum();
+                            if act < pc.rhs - 1e-6 * (1.0 + pc.rhs.abs()) {
+                                cuts.push(pc.clone());
+                                back += 1;
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        crate::profile::incr_by(crate::profile::Ctr::RootCutsGenerated, back);
+                    }
+                    // Keep the strongest, most diverse few (efficacy + orthogonality)
+                    // up to the remaining root-cut budget; otherwise add first-come.
+                    let remaining = opts.root_cuts - total_cuts;
+                    let selected = if opts.cut_select && crate::lp::cmir::root_cmir_mode().on() {
+                        // HiGHS's root selection (`HighsCutPool::separate`, `:300-418`): score
+                        // viol / (active nnz * sqrt(active row norm)) over columns strictly inside
+                        // their bounds, the adaptive min-score factor, parallelism <= 0.1.
+                        let x = &root.x;
+                        let mut cands: Vec<(f64, usize)> = Vec::new();
+                        for (k, c) in cuts.iter().enumerate() {
+                            let act: f64 = c.coeffs.iter().zip(x).map(|(a, v)| a * v).sum();
+                            let viol = c.rhs - act;
+                            if viol <= 1e-6 * (1.0 + c.rhs.abs()) {
+                                continue;
+                            }
+                            let (mut nrm, mut nact) = (0.0f64, 0usize);
+                            for (j, &a) in c.coeffs.iter().enumerate() {
+                                if a != 0.0
+                                    && j < x.len()
+                                    && x[j] > l_w[j] + 1e-6
+                                    && x[j] < u_w[j] - 1e-6
+                                {
+                                    nrm += a * a;
+                                    nact += 1;
+                                }
+                            }
+                            if nact == 0 || nrm <= 0.0 {
+                                continue;
+                            }
+                            cands.push((viol / (nact as f64 * nrm.sqrt()), k));
+                        }
+                        let sel = cut_lp_select(
+                            cands,
+                            &cuts,
+                            &[],
+                            &mut root_sel_best,
+                            &mut root_sel_factor,
+                        );
+                        let mut keep = vec![false; cuts.len()];
+                        for k in sel.into_iter().take(remaining) {
+                            keep[k] = true;
+                        }
+                        cuts.into_iter()
+                            .zip(keep)
+                            .filter(|(_, k)| *k)
+                            .map(|(c, _)| c)
+                            .collect()
+                    } else if opts.cut_select {
+                        select_cuts(cuts, &root.x, remaining, CUT_MIN_EFFICACY, CUT_MAX_PARALLEL)
+                    } else {
+                        cuts.truncate(remaining);
+                        cuts
+                    };
+                    dedup_new_cuts(selected, &mut pool_sigs, usize::MAX)
+                };
+                if new_cuts.is_empty() {
+                    break;
+                }
+                total_cuts += new_cuts.len();
+                // Cut `i` occupies column `n_base0 + i`; later rounds expand a
+                // reference to that slack through this entry, so the order here must
+                // match the append order below exactly.
+                structural_cuts.extend(new_cuts.iter().cloned());
+                let (nw_csc, nm, nn) = augment_csc_with_cuts(
+                    &csc_w,
+                    &mut b_w,
+                    &mut c_w,
+                    &mut l_w,
+                    &mut u_w,
+                    &mut is_int_full,
+                    m_w,
+                    n_w,
+                    &new_cuts,
                 );
+                csc_w = nw_csc;
+                lp_version += 1;
+                m_w = nm;
+                n_w = nn;
+                if prune_base.is_some() {
+                    all_root_cuts.extend(new_cuts);
+                    if highs_sep.is_some() {
+                        pool_ids.append(&mut round_pool_ids);
+                    }
+                }
+                // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): drop, every round, the cuts whose slack is
+                // BASIC at this round's optimal basis (zero dual: removing the row keeps
+                // this round's optimum), instead of carrying every generated cut to the
+                // post-loop cleanup. HiGHS ages inactive cuts out of the LP the same way.
+                if let (Some((csc_base, m_base, n_base)), Some((rb, rn)), true) = (
+                    prune_base.as_ref(),
+                    root_basis.as_ref(),
+                    crate::lp::cmir::root_cmir_mode().on(),
+                ) {
+                    let (m_base, n_base, rn) = (*m_base, *n_base, *rn);
+                    let total = all_root_cuts.len();
+                    debug_assert_eq!(n_w, n_base + total);
+                    let n_old = rn.saturating_sub(n_base).min(total);
+                    // HiGHS `performAging(true)` (`HighsLpRelaxation.cpp:629-675`): a cut
+                    // whose slack is basic ages by one, one with a nonzero dual resets to 0;
+                    // rows are deleted only every max(agelimit/2, 2) epochs, those with age
+                    // above min(epochs, agelimit), agelimit = `mip_lp_age_limit` = 10.
+                    cut_ages.resize(total, 0);
+                    cut_epochs += 1;
+                    const AGE_LIMIT: u32 = 10;
+                    let delete_now = cut_epochs % (AGE_LIMIT / 2).max(2) == 0;
+                    let limit = AGE_LIMIT.min(cut_epochs);
+                    let mut keep = vec![true; total];
+                    for (i, k) in keep.iter_mut().enumerate().take(n_old) {
+                        if rb.col_status.get(n_base + i) == Some(&BASIC) {
+                            cut_ages[i] += 1;
+                            if delete_now && cut_ages[i] > limit {
+                                *k = false;
+                            }
+                        } else if root_duals.get(m_base + i).is_some_and(|d| d.abs() > 1e-9) {
+                            cut_ages[i] = 0;
+                        }
+                    }
+                    for ci in (0..total).rev() {
+                        if keep[ci] {
+                            for (j, &a) in all_root_cuts[ci].coeffs.iter().enumerate() {
+                                if a != 0.0 && j >= n_base && j - n_base < ci {
+                                    keep[j - n_base] = true;
+                                }
+                            }
+                        }
+                    }
+                    let n_keep = keep.iter().filter(|&&k| k).count();
+                    if n_keep < total {
+                        if let Some(hs) = highs_sep.as_mut() {
+                            // The pool re-offers a dropped cut when it is violated again.
+                            for (c, &k) in keep.iter().enumerate() {
+                                if !k {
+                                    if let Some(&id) = pool_ids.get(c) {
+                                        hs.lp_cut_removed(id);
+                                    }
+                                }
+                            }
+                            pool_ids = pool_ids
+                                .iter()
+                                .enumerate()
+                                .filter(|(c, _)| keep[*c])
+                                .map(|(_, &id)| id)
+                                .collect();
+                        }
+                        for (c, cut) in all_root_cuts.iter().enumerate() {
+                            if highs_sep.is_some() {
+                                break;
+                            }
+                            if !keep[c] && cut.coeffs.iter().skip(n_base).all(|&v| v == 0.0) {
+                                pool_sigs.remove(&cut_signature(cut));
+                                let mut pc = cut.clone();
+                                pc.coeffs.truncate(n_base);
+                                aged_pool.push(pc);
+                            }
+                        }
+                        let mut newidx = vec![usize::MAX; total];
+                        let mut next = 0usize;
+                        for (c, &k) in keep.iter().enumerate() {
+                            if k {
+                                newidx[c] = next;
+                                next += 1;
+                            }
+                        }
+                        let kept: Vec<GomoryCut> = all_root_cuts
+                            .iter()
+                            .enumerate()
+                            .filter(|(c, _)| keep[*c])
+                            .map(|(_, cut)| {
+                                let mut coeffs = vec![0.0; n_base + n_keep];
+                                for (j, &a) in cut.coeffs.iter().enumerate() {
+                                    if a == 0.0 {
+                                        continue;
+                                    }
+                                    if j < n_base {
+                                        coeffs[j] = a;
+                                    } else {
+                                        coeffs[n_base + newidx[j - n_base]] = a;
+                                    }
+                                }
+                                GomoryCut {
+                                    coeffs,
+                                    rhs: cut.rhs,
+                                }
+                            })
+                            .collect();
+                        // The basis over the kept columns: a dropped row's slack is basic,
+                        // so removing row and slack together leaves a square, nonsingular
+                        // basis with the same reduced costs.
+                        let mut col_status: Vec<i8> = rb.col_status[..n_base].to_vec();
+                        #[allow(clippy::needless_range_loop)]
+                        for i in 0..n_old {
+                            if keep[i] {
+                                col_status.push(rb.col_status[n_base + i]);
+                            }
+                        }
+                        let basic_vars: Vec<usize> = rb
+                            .basic_vars
+                            .iter()
+                            .filter_map(|&j| {
+                                if j < n_base {
+                                    Some(j)
+                                } else if keep[j - n_base] {
+                                    Some(n_base + newidx[j - n_base])
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let new_rn = col_status.len();
+                        root_basis = Some((
+                            Basis {
+                                col_status,
+                                basic_vars,
+                            },
+                            new_rn,
+                        ));
+                        b_w.truncate(m_base);
+                        c_w.truncate(n_base);
+                        l_w.truncate(n_base);
+                        u_w.truncate(n_base);
+                        is_int_full.truncate(n_base);
+                        for cut in &kept {
+                            b_w.push(cut.rhs);
+                            c_w.push(0.0);
+                            l_w.push(0.0);
+                            u_w.push(INF);
+                            is_int_full.push(false);
+                        }
+                        csc_w = rebuild_csc_with_cuts(csc_base, m_base, n_base, &kept);
+                        m_w = m_base + kept.len();
+                        n_w = n_base + kept.len();
+                        structural_cuts = kept.clone();
+                        all_root_cuts = kept;
+                        cut_ages = cut_ages
+                            .iter()
+                            .enumerate()
+                            .filter(|(c, _)| keep[*c])
+                            .map(|(_, &a)| a)
+                            .collect();
+                        if let Some(x) = last_root_x.as_ref() {
+                            let mut nx: Vec<f64> = x[..n_base.min(x.len())].to_vec();
+                            #[allow(clippy::needless_range_loop)]
+                            for i in 0..n_old {
+                                if keep[i] {
+                                    nx.push(x.get(n_base + i).copied().unwrap_or(0.0));
+                                }
+                            }
+                            last_root_x = Some(nx);
+                        }
+                        crate::profile::incr_by(
+                            crate::profile::Ctr::RootCutsSubstDropped,
+                            (total - n_keep) as u64,
+                        );
+                    }
+                }
             }
-            // Keep the strongest, most diverse few (efficacy + orthogonality)
-            // up to the remaining root-cut budget; otherwise add first-come.
-            let remaining = opts.root_cuts - total_cuts;
-            let selected = if opts.cut_select {
-                select_cuts(cuts, &root.x, remaining, CUT_MIN_EFFICACY, CUT_MAX_PARALLEL)
-            } else {
-                cuts.truncate(remaining);
-                cuts
-            };
-            let new_cuts = dedup_new_cuts(selected, &mut pool_sigs, usize::MAX);
-            if new_cuts.is_empty() {
-                break;
-            }
-            total_cuts += new_cuts.len();
-            // Cut `i` occupies column `n_base0 + i`; later rounds expand a
-            // reference to that slack through this entry, so the order here must
-            // match the append order below exactly.
-            structural_cuts.extend(new_cuts.iter().cloned());
-            let (nw_csc, nm, nn) = augment_csc_with_cuts(
-                &csc_w,
-                &mut b_w,
-                &mut c_w,
-                &mut l_w,
-                &mut u_w,
-                &mut is_int_full,
-                m_w,
-                n_w,
-                &new_cuts,
-            );
-            csc_w = nw_csc;
-            m_w = nm;
-            n_w = nn;
-            if prune_base.is_some() {
-                all_root_cuts.extend(new_cuts);
+        }
+    }
+
+    // Central rounding not yet run (the root loop stopped before
+    // `CENTRAL_ROUNDING_AFTER_ROUNDS` rounds): at the end of the root, as HiGHS
+    // (`HighsMipSolverData.cpp:2312-2323`).
+    if central_pending {
+        if let (Some(base), Some(locks), Some(x0)) = (
+            sub_mip_base.as_ref(),
+            rr_locks.as_ref(),
+            first_root_x.as_ref(),
+        ) {
+            if let Some((x, v)) =
+                try_central_rounding(base, locks, obj_const, ns, &heur_is_int, x0, opts, deadline)
+            {
+                tm.inject_incumbent(x, v);
             }
         }
     }
@@ -3654,6 +7459,7 @@ fn solve_milp_node_search(
     if let (Some((csc_base, m_base, n_base)), Some(x)) = (prune_base.as_ref(), last_root_x.as_ref())
     {
         let (m_base, n_base) = (*m_base, *n_base);
+        let p3_prune_dual = crate::lp::cmir::root_cmir_mode().on();
         let mut keep = vec![false; all_root_cuts.len()];
         for ci in (0..all_root_cuts.len()).rev() {
             let cut = &all_root_cuts[ci];
@@ -3668,7 +7474,17 @@ fn solve_milp_node_search(
                 .take(x.len())
                 .map(|(j, &a)| a * x[j])
                 .sum();
-            let tight = act - cut.rhs <= 1e-6 * (1.0 + cut.rhs.abs());
+            let mut tight = act - cut.rhs <= 1e-6 * (1.0 + cut.rhs.abs());
+            if tight && p3_prune_dual {
+                // P3 experiment: a tight cut whose slack is BASIC at the final root
+                // basis has a zero dual -- dropping it is root-bound-neutral too.
+                if let Some((rb, rn)) = root_basis.as_ref() {
+                    let col = n_base + ci;
+                    if col < *rn && rb.col_status.get(col) == Some(&BASIC) {
+                        tight = false;
+                    }
+                }
+            }
             if tight || keep[ci] {
                 keep[ci] = true;
                 for (j, &a) in cut.coeffs.iter().enumerate() {
@@ -3696,6 +7512,26 @@ fn solve_milp_node_search(
                 if k {
                     newidx[c] = next;
                     next += 1;
+                }
+            }
+            if node_gmi_on && highs_sep.is_some() && highs_root_pool() {
+                // Dropped cuts over the base columns only (none of a dropped row's
+                // slack): valid globally, so they seed the node pool, fresh.
+                for (c, cut) in all_root_cuts.iter().enumerate() {
+                    if keep[c] || cut.coeffs.iter().skip(n_base).any(|&a| a != 0.0) {
+                        continue;
+                    }
+                    let mut coeffs = cut.coeffs.clone();
+                    coeffs.truncate(n_base);
+                    let pc = GomoryCut {
+                        coeffs,
+                        rhs: cut.rhs,
+                    };
+                    if gmi_pool_sigs.insert(cut_signature(&pc)) {
+                        gmi_pool.push(pc);
+                        gmi_pool_age.push(0);
+                        crate::profile::incr(crate::profile::Ctr::RootPoolSeeded);
+                    }
                 }
             }
             let kept: Vec<GomoryCut> = all_root_cuts
@@ -3742,12 +7578,88 @@ fn solve_milp_node_search(
             // be extended onto the smaller one. The root node cold-solves the
             // reduced LP instead -- cheaper than the solve that produced the
             // basis, and far cheaper than carrying the dropped rows all tree.
-            root_basis = None;
+            //
+            // P3 (under `DISCOPT_MILP_ROOT_CMIR`): unless the basis can be remapped. A dropped
+            // cut whose slack is BASIC leaves with its row as a basic pair, so the
+            // remaining basis is square, nonsingular and keeps its reduced costs;
+            // that is exactly the in-loop ageing remap. On neos-911970 the cold
+            // solve this replaces took 2.4 s of a 20 s budget.
+            let remapped = (crate::lp::cmir::root_cmir_mode().on())
+                .then_some(())
+                .and(root_basis.as_ref())
+                .and_then(|(rb, rn)| {
+                    let n_old = rn.saturating_sub(n_base).min(keep.len());
+                    let all_basic = (0..n_old)
+                        .all(|i| keep[i] || rb.col_status.get(n_base + i) == Some(&BASIC));
+                    if !all_basic || rb.col_status.len() != *rn {
+                        return None;
+                    }
+                    let mut col_status: Vec<i8> = rb.col_status[..n_base].to_vec();
+                    #[allow(clippy::needless_range_loop)]
+                    for i in 0..n_old {
+                        if keep[i] {
+                            col_status.push(rb.col_status[n_base + i]);
+                        }
+                    }
+                    let basic_vars: Vec<usize> = rb
+                        .basic_vars
+                        .iter()
+                        .filter_map(|&j| {
+                            if j < n_base {
+                                Some(j)
+                            } else if j - n_base < n_old && keep[j - n_base] {
+                                Some(n_base + newidx[j - n_base])
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let n_new = col_status.len();
+                    let basic_count = col_status.iter().filter(|&&s| s == BASIC).count();
+                    (basic_count == basic_vars.len()).then_some((
+                        Basis {
+                            col_status,
+                            basic_vars,
+                        },
+                        n_new,
+                    ))
+                });
+            root_basis = remapped;
         }
     }
 
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
+    // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): the post-root LP with its kept (tight) root cuts, for
+    // the HiGHS RENS port ([`try_rens_highs`]).
+    let p3_rens = sub_mip_base.is_some() && crate::lp::cmir::root_cmir_mode().on();
+    let rens_cut_base: Option<SubMipBase> = p3_rens.then(|| SubMipBase {
+        csc: csc_w.clone(),
+        m: m_w,
+        n: n_w,
+        c: c_w.clone(),
+        l: l_w.clone(),
+        u: u_w.clone(),
+        b: b_w.clone(),
+        is_int_full: is_int_full.clone(),
+    });
+    // The tree's first RENS is skipped when the root already ran it (§12.27).
+    let mut rens_root_done = root_rens_ran;
+    let rens_root_x: Option<Vec<f64>> = last_root_x
+        .as_ref()
+        .filter(|x| x.len() >= ns)
+        .map(|x| x[..ns].to_vec());
+    // HiGHS's `intcols` order: lock score descending (`HighsPrimalHeuristics.cpp:43-73`).
+    let rens_order: Vec<usize> = match (p3_rens, sub_mip_base.as_ref()) {
+        (true, Some(b)) => {
+            let (up, dn) = rounding_locks(b, ns);
+            let mut o: Vec<usize> = (0..ns).filter(|&j| heur_is_int[j]).collect();
+            let score = |j: usize| (1e-6 + up[j] as f64) * (1e-6 + dn[j] as f64);
+            o.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+            o
+        }
+        _ => Vec::new(),
+    };
 
     // Extend the kept root basis to the final matrix size: rounds after the last
     // solve appended cut rows/slacks, and `extend_basis` makes those new slacks
@@ -3760,6 +7672,12 @@ fn solve_milp_node_search(
             b
         }
     });
+    // P3: the post-root LP's basis, for the RENS/RINS dive's first LP (same matrix).
+    let rens_root_basis: Option<Basis> = if rens_cut_base.is_some() {
+        root_warm_basis.clone()
+    } else {
+        None
+    };
 
     // `deadline` (computed above, before the root cuts) drives two layers of
     // budget enforcement: the loop-top check below stops *dispatching* new
@@ -3771,6 +7689,56 @@ fn solve_milp_node_search(
     // from inside the simplex loop. Soundness is untouched: those steps only
     // change branching choice / cut tightness / early incumbents, never a
     // bound's validity.
+    // Gap plan §12.23: node separation under the HiGHS port reads the root's
+    // variable bounds (shared, read only) and the model's density limits.
+    let highs_node_vb: Option<crate::lp::highs_cutgen::vbound::VarBoundStore> =
+        match highs_sep.as_mut() {
+            Some(hs) if crate::lp::highs_cutgen::bridge::node_sepa_enabled() => hs.take_vbounds(),
+            _ => None,
+        };
+    let highs_node: Option<HighsNodeCtx<'_>> = (highs_sep.is_some()
+        && crate::lp::highs_cutgen::bridge::node_sepa_enabled())
+    .then(|| HighsNodeCtx {
+        add_gmi: crate::lp::highs_cutgen::bridge::node_sepa_mode()
+            == crate::lp::highs_cutgen::bridge::NodeSepaMode::Add,
+        vbounds: highs_node_vb.as_ref(),
+        model_rows: n_orig_rows,
+        model_nnz: (0..ns)
+            .map(|j| csc_w.col(j).0.iter().filter(|&&r| r < n_orig_rows).count())
+            .sum(),
+        top_level: milp_depth == 0,
+    });
+    // Gap plan §12.28: plunging under the highs arm.
+    let search_on = highs_sep.is_some() && highs_search() && lazy.is_none();
+    let search_domain_on = search_on && highs_search_domain();
+    let dive_on = highs_sep.is_some() && (highs_dive() || search_on);
+    let mut hs_domain: Option<(u64, crate::lp::highs_cutgen::domain::Domain)> = None;
+    let mut hs_slacks: Vec<Option<(usize, f64)>> = Vec::new();
+    let sb_tree_on = highs_sep.is_some() && highs_sb_tree();
+    if dive_on {
+        tm.enable_plunging(
+            last_root_x
+                .as_ref()
+                .map(|x| x[..ns.min(x.len())].to_vec())
+                .unwrap_or_default(),
+        );
+    }
+    // Experiment knob (gap plan §12.29): batch size under dives (HiGHS is sequential).
+    let dive_batch_size: usize = std::env::var("DISCOPT_HIGHS_DIVE_BATCH")
+        .ok()
+        .map(|v| {
+            v.trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("DISCOPT_HIGHS_DIVE_BATCH={v:?} is not a count"))
+        })
+        .unwrap_or(if search_on {
+            HIGHS_SEARCH_PLUNGE_SLOTS
+        } else {
+            64
+        })
+        .max(1);
+    let mut plunge_next: Vec<NodeId> = Vec::new();
+    let mut plunge_len: HashMap<NodeId, usize> = HashMap::new();
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
     let root_cut_rows = m_w.saturating_sub(m_base0);
     let mut strong_probe_lps: usize = 0;
@@ -3825,7 +7793,24 @@ fn solve_milp_node_search(
     let mut batch_index: usize = 0;
     let mut nonroot_dives: usize = 0;
     let mut frontier_capped = false;
+    let mut work_capped = false;
 
+    // Stage 1d-5: the HiGHS-design search runs once, at the first batch, from the
+    // root working LP; its outcome replaces the batched search's.
+    // The route implements HiGHS's branching and node selection; a caller's other
+    // branching rule or selection keeps the batched search, which implements them.
+    // Likewise `node_propagation = false`: the route always propagates its local
+    // domain (HiGHS's design), so a caller who turned propagation off gets the search
+    // that honours it rather than a silently ignored option. And the off-root repair
+    // dive (`DISCOPT_MILP_DIVE_STRIDE`, opt-in), which only the batched search runs.
+    let mut highs_route = highs_mip_search()
+        && lazy.is_none()
+        && node.is_none()
+        && opts.node_propagation
+        && dive_stride() == DIVE_STRIDE_DEFAULT
+        && opts.branch_rule == crate::bnb::branching::BranchRule::Reliability
+        && opts.selection == SelectionStrategy::BestFirst;
+    let mut highs_outcome: Option<highs_env::Outcome> = None;
     'search: loop {
         if fire_dbg!(MilpCheckpoint::IterStart) {
             gap_certified = false;
@@ -3838,6 +7823,14 @@ fn solve_milp_node_search(
         }
         if tm.stats().total_nodes >= opts.max_nodes {
             gap_certified = false;
+            break;
+        }
+        if opts
+            .max_work
+            .is_some_and(|k| sub_mip_work(lp_iters, tm.stats().total_nodes, m + n) >= k)
+        {
+            gap_certified = false;
+            work_capped = true;
             break;
         }
         if opts
@@ -3869,7 +7862,7 @@ fn solve_milp_node_search(
                 }
             }
         }
-        if let Some(st) = opts.stall_time_s {
+        if let Some(st) = opts.stall_time_s.filter(|_| stall_stops(opts)) {
             let has_inc = tm
                 .incumbent()
                 .is_some_and(|(_, v)| v < INFEAS_SENTINEL - 1.0);
@@ -3879,7 +7872,42 @@ fn solve_milp_node_search(
                 break;
             }
         }
-        let batch = tm.export_batch(64);
+        let (batch, n_plunge_cont) = if dive_on {
+            tm.export_batch_preferring(&plunge_next, dive_batch_size)
+        } else {
+            (tm.export_batch(64), 0)
+        };
+        // Per batch slot: plunge length so far (0 = a plunge start).
+        let slot_plunge_len: Vec<usize> = batch
+            .node_ids
+            .iter()
+            .enumerate()
+            .map(|(k, id)| {
+                if k < n_plunge_cont {
+                    plunge_len.get(id).copied().unwrap_or(0)
+                } else {
+                    0
+                }
+            })
+            .collect();
+        // Node separation slots: plunge starts under dives, else the leading
+        // best-bound nodes.
+        let gmi_slots: Vec<bool> = (0..batch.node_ids.len())
+            .map(|k| {
+                if dive_on {
+                    k >= n_plunge_cont
+                } else {
+                    k < NODE_GMI_PER_BATCH
+                }
+            })
+            .collect();
+        if dive_on {
+            crate::profile::incr_by(crate::profile::Ctr::PlungeContinued, n_plunge_cont as u64);
+            crate::profile::incr_by(
+                crate::profile::Ctr::PlungeStarts,
+                (batch.node_ids.len() - n_plunge_cont) as u64,
+            );
+        }
         if batch.node_ids.is_empty() {
             break;
         }
@@ -3955,7 +7983,7 @@ fn solve_milp_node_search(
         // (a probe's hint would override them).
         let sb_active = match opts.branch_rule {
             crate::bnb::branching::BranchRule::Reliability => {
-                opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget
+                opts.strong_branch && (sb_tree_on || tm.stats().total_nodes < opts.sb_node_budget)
             }
             crate::bnb::branching::BranchRule::Strong => true,
             _ => false,
@@ -4002,6 +8030,86 @@ fn solve_milp_node_search(
         );
         let dive_batch = dive_batch || improve_batch;
 
+        // Gap plan §12.31: under the sequential search, bring the persistent domain to
+        // the node's box (incrementally when the box refines the domain) and propagate.
+        let domain_pre: Option<DomainPre> = if search_domain_on && batch.node_ids.len() == 1 {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::Fbbt);
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (m_w as u64) ^ ((n_w as u64) << 20);
+            h = h.wrapping_mul(0x100_0000_01b3) ^ lp_version;
+            for v in l_w.iter().chain(u_w.iter()) {
+                h = (h ^ v.to_bits()).wrapping_mul(0x100_0000_01b3);
+            }
+            if hs_domain.as_ref().is_none_or(|(k, _)| *k != h) {
+                let built = domain_from_lp(csc_rc, m_w, n_w, ns, &b_w, &l_w, &u_w, &is_int_full);
+                crate::profile::incr(crate::profile::Ctr::HsDomainRebuilds);
+                match built {
+                    Some((d, slack_map)) => {
+                        hs_slacks = slack_map;
+                        hs_domain = Some((h, d));
+                    }
+                    // The global rows alone are infeasible over the global box: no
+                    // domain to keep; the node falls back to its own FBBT.
+                    None => hs_domain = None,
+                }
+            }
+            hs_domain.as_mut().map(|(_, d)| {
+                use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
+                let id = batch.node_ids[0];
+                let tl: Vec<f64> = batch.lb[0]
+                    .iter()
+                    .map(|&v| if v <= -INF { f64::NEG_INFINITY } else { v })
+                    .collect();
+                let tu: Vec<f64> = batch.ub[0]
+                    .iter()
+                    .map(|&v| if v >= INF { f64::INFINITY } else { v })
+                    .collect();
+                let refines = !d.infeasible()
+                    && (0..ns).all(|j| tl[j] >= d.col_lower[j] && tu[j] <= d.col_upper[j]);
+                if !refines {
+                    d.backtrack_to_global();
+                    crate::profile::incr(crate::profile::Ctr::HsDomainJumps);
+                }
+                for j in 0..ns {
+                    if d.infeasible() {
+                        break;
+                    }
+                    if tl[j] > d.col_lower[j] {
+                        d.change_bound(
+                            DomainChange {
+                                boundval: tl[j],
+                                column: j,
+                                boundtype: BoundType::Lower,
+                            },
+                            Reason::Branching,
+                        );
+                    }
+                    if tu[j] < d.col_upper[j] && !d.infeasible() {
+                        d.change_bound(
+                            DomainChange {
+                                boundval: tu[j],
+                                column: j,
+                                boundtype: BoundType::Upper,
+                            },
+                            Reason::Branching,
+                        );
+                    }
+                }
+                if !d.infeasible() {
+                    d.propagate();
+                }
+                d.clear_changed_cols();
+                if d.infeasible() {
+                    crate::profile::incr(crate::profile::Ctr::HsDomainInfeasible);
+                    (id, None)
+                } else {
+                    let (fl, fu) =
+                        domain_lp_box(d, &hs_slacks, &b_w[..m_w], &l_w[..n_w], &u_w[..n_w], ns);
+                    (id, Some((fl, fu)))
+                }
+            })
+        } else {
+            None
+        };
         let outputs: Vec<NodeOutput> = {
             let ctx = NodeCtx {
                 b_w: &b_w,
@@ -4018,6 +8126,7 @@ fn solve_milp_node_search(
                 slack_l: &slack_l,
                 slack_u: &slack_u,
                 is_int: &is_int,
+                heur_is_int: &heur_is_int,
                 is_int_full: &is_int_full,
                 ns,
                 m_w,
@@ -4043,32 +8152,68 @@ fn solve_milp_node_search(
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
                 deadline,
-                tm: &tm,
-            };
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                // Small batches don't amortize task-spawn overhead; solve those
-                // serially. PAR_MIN_BATCH is conservative — the bench tunes it.
-                const PAR_MIN_BATCH: usize = 4;
-                // And only where rayon can actually build its pool: that build
-                // panics rather than erroring on a threadless platform, which
-                // no caller can catch (see `crate::parallel`).
-                if batch.node_ids.len() >= PAR_MIN_BATCH && crate::parallel::threads_available() {
-                    (0..batch.node_ids.len())
-                        .into_par_iter()
-                        .map(|k| {
-                            solve_node(
-                                batch.node_ids[k],
-                                &batch.lb[k],
-                                &batch.ub[k],
-                                &ctx,
-                                dive_batch && k == 0,
-                                k < NODE_GMI_PER_BATCH,
-                            )
-                        })
-                        .collect()
+                dive_deadline: if crate::lp::cmir::root_cmir_mode().on() {
+                    let left = deadline.map_or(ROOT_DIVE_MAX_S, |d| {
+                        d.saturating_duration_since(std::time::Instant::now())
+                            .as_secs_f64()
+                    });
+                    Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_secs_f64(
+                                (left * ROOT_DIVE_SHARE).min(ROOT_DIVE_MAX_S),
+                            ),
+                    )
                 } else {
+                    None
+                },
+                tm: &tm,
+                highs_node,
+                domain_pre: domain_pre.as_ref(),
+            };
+            let outs: Vec<NodeOutput> = {
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+                    // Small batches don't amortize task-spawn overhead; solve those
+                    // serially. PAR_MIN_BATCH is conservative — the bench tunes it.
+                    const PAR_MIN_BATCH: usize = 4;
+                    // And only where rayon can actually build its pool: that build
+                    // panics rather than erroring on a threadless platform, which
+                    // no caller can catch (see `crate::parallel`).
+                    if batch.node_ids.len() >= PAR_MIN_BATCH && crate::parallel::threads_available()
+                    {
+                        let sink = crate::work::current();
+                        (0..batch.node_ids.len())
+                            .into_par_iter()
+                            .map(|k| {
+                                let _w = crate::work::Scope::enter(sink.clone());
+                                solve_node(
+                                    batch.node_ids[k],
+                                    &batch.lb[k],
+                                    &batch.ub[k],
+                                    &ctx,
+                                    dive_batch && k == 0,
+                                    gmi_slots[k],
+                                )
+                            })
+                            .collect()
+                    } else {
+                        (0..batch.node_ids.len())
+                            .map(|k| {
+                                solve_node(
+                                    batch.node_ids[k],
+                                    &batch.lb[k],
+                                    &batch.ub[k],
+                                    &ctx,
+                                    dive_batch && k == 0,
+                                    gmi_slots[k],
+                                )
+                            })
+                            .collect()
+                    }
+                }
+                #[cfg(not(feature = "parallel"))]
+                {
                     (0..batch.node_ids.len())
                         .map(|k| {
                             solve_node(
@@ -4077,29 +8222,216 @@ fn solve_milp_node_search(
                                 &batch.ub[k],
                                 &ctx,
                                 dive_batch && k == 0,
-                                k < NODE_GMI_PER_BATCH,
+                                gmi_slots[k],
                             )
                         })
                         .collect()
                 }
+            };
+            // Stage 1d-2 gate: the HiGHS-search evaluation on the same nodes (tests only).
+            #[cfg(test)]
+            highs_eval::diff::batch(&ctx, &batch.node_ids, &batch.lb, &batch.ub, &outs);
+            #[cfg(test)]
+            highs_branch::e2e::maybe_run(&ctx);
+            // An unbounded relaxation is decided by the batched reduce below
+            // (`hit_unbounded` -> `Unbounded`), never handed to the HiGHS search: with
+            // an incumbent in hand, that search could close the gap against the
+            // bound carried from this unbounded evaluation and report `Optimal`
+            // (measured: `min -x0, x0 >= 0` integer, seeded by the pre-root
+            // heuristics with x0 = 0, came back Optimal 0 instead of Unbounded).
+            if highs_route && outs.iter().any(|o| o.unbounded) {
+                highs_route = false;
             }
-            #[cfg(not(feature = "parallel"))]
-            {
-                (0..batch.node_ids.len())
-                    .map(|k| {
-                        solve_node(
-                            batch.node_ids[k],
-                            &batch.lb[k],
-                            &batch.ub[k],
-                            &ctx,
-                            dive_batch && k == 0,
-                            k < NODE_GMI_PER_BATCH,
+            if highs_route && batch.node_ids.len() == 1 {
+                highs_route = false;
+                let lim = highs_env::Limits {
+                    max_nodes: opts.max_nodes.saturating_sub(tm.stats().total_nodes),
+                    max_open_nodes: opts.max_open_nodes,
+                    deadline,
+                    gap_tol: opts.gap_tol,
+                    rel_gap_max_abs: opts.rel_gap_max_abs,
+                    abs_gap_tol: opts.abs_gap_tol,
+                    heuristics: opts.heuristics,
+                    strong_branch: opts.strong_branch,
+                    stall_at: opts
+                        .stall_time_s
+                        .map(|st| t_start + std::time::Duration::from_secs_f64(st)),
+                    stall_keeps_searching: !stall_stops(opts),
+                    heur_effort: highs_env::heur_effort_enabled(),
+                    max_stall_nodes: opts.max_stall_nodes,
+                    max_leaves: opts.max_leaves,
+                    max_work: opts.max_work,
+                    work_size: m + n,
+                    nodes_before: tm.stats().total_nodes,
+                    submip: in_sub_mip(),
+                    iters_before: lp_iters as i64,
+                };
+                // The best verified point so far: the tree's, or the root
+                // evaluation's heuristic candidate.
+                let mut initial: Option<(Vec<f64>, f64)> = tm
+                    .incumbent()
+                    .filter(|(_, v)| *v < INFEAS_SENTINEL - 1.0)
+                    .map(|(x, v)| (x.to_vec(), v));
+                if let Some((x, v)) = &outs[0].incumbent {
+                    if initial.as_ref().is_none_or(|(_, w)| v < w) {
+                        initial = Some((x.clone(), *v));
+                    }
+                }
+                // The root evaluation's bound (node-local cuts included), when
+                // trusted; HiGHS does not separate the root node again either.
+                let r0 = &outs[0].result;
+                let root_bound =
+                    if r0.lower_bound.is_finite() && r0.lower_bound < INFEAS_SENTINEL - 1.0 {
+                        r0.lower_bound
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                // The batched search's sub-MIP heuristics (RENS without an incumbent,
+                // RINS with one; the HiGHS RENS variant when its base exists), on the
+                // same schedule: due every SUB_MIP_BATCH_STRIDE * 64 nodes, backing
+                // off on failures, within the node budget. Called from the search's
+                // `runHeuristics` slot with the installed node's LP point.
+                let mut since_nodes = SUB_MIP_BATCH_STRIDE * 64;
+                let mut last_nodes = 0usize;
+                let mut sub_mip = |call: highs_env::HeurCall<'_>| {
+                    let base = sub_mip_base.as_ref()?;
+                    let (x, inc, nodes) = match call {
+                        highs_env::HeurCall::StallRedive { inc: (ix, iv) } => {
+                            return try_stall_redive(
+                                base,
+                                obj_const,
+                                ns,
+                                &heur_is_int,
+                                ix,
+                                iv,
+                                opts,
+                                deadline,
+                                &mut sub_mip_spent,
+                            );
+                        }
+                        highs_env::HeurCall::SubMip { x, inc, nodes } => (x, inc, nodes),
+                    };
+                    since_nodes += nodes.saturating_sub(last_nodes);
+                    last_nodes = nodes;
+                    let budget = sub_mip_node_budget(nodes, sub_mip_spent);
+                    let stride =
+                        sub_mip_backoff_stride(SUB_MIP_BATCH_STRIDE * 64, sub_mip_fail_streak);
+                    if since_nodes < stride || budget == 0 || x.len() < ns {
+                        return None;
+                    }
+                    since_nodes = 0;
+                    let kind = if inc.is_some() {
+                        SubMipKind::Rins
+                    } else {
+                        SubMipKind::Rens
+                    };
+                    let rens_now = kind == SubMipKind::Rens || !rens_root_done;
+                    rens_root_done = true;
+                    let rens_highs = rens_cut_base.as_ref().map(|cb| {
+                        try_rens_highs(
+                            cb,
+                            base,
+                            &rens_order,
+                            obj_const,
+                            ns,
+                            &heur_is_int,
+                            x,
+                            rens_root_x.as_deref(),
+                            if rens_now { None } else { inc },
+                            rens_root_basis.as_ref(),
+                            opts,
+                            deadline,
+                            nodes,
                         )
-                    })
-                    .collect()
+                    });
+                    let found = rens_highs.unwrap_or_else(|| {
+                        try_sub_mip(
+                            kind,
+                            base,
+                            obj_const,
+                            ns,
+                            &heur_is_int,
+                            x,
+                            inc,
+                            opts,
+                            deadline,
+                            budget,
+                            &mut sub_mip_spent,
+                        )
+                    });
+                    if found.is_some() {
+                        sub_mip_fail_streak = 0;
+                    } else {
+                        sub_mip_fail_streak = sub_mip_fail_streak.saturating_add(1);
+                    }
+                    found
+                };
+                // The debugger continues on the search: the root batch's `IterStart` and
+                // `AfterSelect` have fired above; the search reports from the root's
+                // `AfterProcess` on, and fires `Terminated`.
+                let dbg = hook.map(|h| {
+                    highs_env::Debugger::new(
+                        h,
+                        t_start,
+                        dbg_iter,
+                        batch.node_ids[0].0 as u64,
+                        (batch.lb[0].clone(), batch.ub[0].clone()),
+                        (root_bound.is_finite() && r0.solution.len() >= ns)
+                            .then(|| (root_bound, r0.solution[..ns].to_vec())),
+                        dbg_last_inc,
+                    )
+                });
+                let seed_pool = if highs_env::search_cut_lp_enabled() {
+                    highs_sep
+                        .as_ref()
+                        .map(|h| h.export_cuts())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                highs_outcome = highs_env::run(
+                    &ctx,
+                    &lim,
+                    initial,
+                    root_bound,
+                    Some(&mut sub_mip),
+                    dbg,
+                    seed_pool,
+                    milp_depth == 0,
+                );
+                if let Some(o) = &highs_outcome {
+                    use crate::profile::{incr, incr_by, Ctr};
+                    incr(Ctr::HighsMipSearchRuns);
+                    incr_by(Ctr::HighsMipSearchNodes, o.nodes as u64);
+                    incr_by(Ctr::HighsMipSearchBranched, o.branched as u64);
+                    incr_by(Ctr::HighsMipSearchSbIters, o.sb_iters as u64);
+                    incr_by(Ctr::HighsMipSearchCommits, o.commits as u64);
+                    incr_by(Ctr::HighsMipSearchHeuristicHits, o.heuristic_hits as u64);
+                    incr_by(Ctr::HighsMipSearchSepCalls, o.sep_calls as u64);
+                    incr_by(Ctr::HighsMipSearchSepLifts, o.sep_lifts as u64);
+                    incr_by(Ctr::HighsMipSearchSubMipHits, o.sub_mip_hits as u64);
+                    incr_by(Ctr::HighsSearchCutRowsAdded, o.cut_rows_added as u64);
+                    incr_by(Ctr::HighsSearchCutRowsDeleted, o.cut_rows_deleted as u64);
+                    incr_by(Ctr::HighsSearchCutEpochs, o.cut_epochs as u64);
+                    incr_by(Ctr::HighsSearchPoolSeeded, o.seeded_pool as u64);
+                }
             }
+            outs
         };
 
+        if let Some(o) = highs_outcome.take() {
+            return highs_search_result(
+                o,
+                c,
+                ns,
+                obj_const,
+                opts,
+                gap_certified,
+                search_incomplete,
+                lp_iters,
+                root_cut_rows,
+            );
+        }
         // --- sequential reduce: apply tree mutations in batch order ---
         let mut hit_unbounded = false;
         // D2 B1': global GMI cuts separated this batch, and pool cuts the batch used.
@@ -4513,10 +8845,35 @@ fn solve_milp_node_search(
         tm.import_results_with_point_values(&results, &point_values)
             .expect("one point value per node result");
         tm.process_evaluated();
+        if dive_on {
+            // Continue each plunge into its node's preferred child, in batch order.
+            let len_of: HashMap<NodeId, usize> = batch
+                .node_ids
+                .iter()
+                .copied()
+                .zip(slot_plunge_len.iter().copied())
+                .collect();
+            plunge_next.clear();
+            plunge_len.clear();
+            for (parent, child) in tm.take_plunge_children() {
+                let Some(&l) = len_of.get(&parent) else {
+                    continue;
+                };
+                if l + 1 < PLUNGE_LIMIT {
+                    plunge_next.push(child);
+                    plunge_len.insert(child, l + 1);
+                }
+            }
+        }
         // D2 B1': update the global GMI pool, in batch order (deterministic): reset the
         // age of every cut a node used, age the rest, admit the new cuts (deduplicated),
         // then drop cuts past the age limit and the oldest beyond the cap.
-        if node_gmi_on {
+        // Gap plan §12.31-12.32: under the sequential search the pool, its ageing and
+        // the fold into the shared LP are maintained only after a batch in which some
+        // slot started a plunge (node separation runs only there), so the LP stays fixed
+        // while every slot is mid-dive, as in HiGHS (pool cuts enter its LP only in
+        // `separate` at the node from the queue).
+        if node_gmi_on && (!search_on || n_plunge_cont < batch.node_ids.len()) {
             for a in gmi_pool_age.iter_mut() {
                 *a = a.saturating_add(1);
             }
@@ -4665,7 +9022,7 @@ fn solve_milp_node_search(
                         locks,
                         obj_const,
                         ns,
-                        &is_int,
+                        &heur_is_int,
                         &r.solution,
                         batch_index as u64,
                         opts,
@@ -4690,7 +9047,7 @@ fn solve_milp_node_search(
                         base,
                         obj_const,
                         ns,
-                        &is_int,
+                        &heur_is_int,
                         &ix,
                         iv,
                         opts,
@@ -4704,9 +9061,15 @@ fn solve_milp_node_search(
         }
         if let Some(base) = sub_mip_base.as_ref() {
             let budget = sub_mip_node_budget(tm.stats().total_nodes, sub_mip_spent);
-            sub_mip_since += 1;
-            let due =
-                sub_mip_since >= sub_mip_backoff_stride(SUB_MIP_BATCH_STRIDE, sub_mip_fail_streak);
+            // Under dives the stride counts nodes (16 batches of 64), so the sub-MIP
+            // effort does not grow as the dive batch shrinks (gap plan §12.29).
+            let (step, base_stride) = if dive_on {
+                (results.len(), SUB_MIP_BATCH_STRIDE * 64)
+            } else {
+                (1, SUB_MIP_BATCH_STRIDE)
+            };
+            sub_mip_since += step;
+            let due = sub_mip_since >= sub_mip_backoff_stride(base_stride, sub_mip_fail_streak);
             if due && budget > 0 {
                 let inc = tm.incumbent().and_then(|(x, v)| {
                     (v < INFEAS_SENTINEL - 1.0 && x.len() >= ns).then(|| (x.to_vec(), v))
@@ -4726,19 +9089,46 @@ fn solve_milp_node_search(
                     } else {
                         SubMipKind::Rens
                     };
-                    match try_sub_mip(
-                        kind,
-                        base,
-                        obj_const,
-                        ns,
-                        &is_int,
-                        &r.solution,
-                        inc.as_ref().map(|(x, v)| (x.as_slice(), *v)),
-                        opts,
-                        deadline,
-                        budget,
-                        &mut sub_mip_spent,
-                    ) {
+                    // HiGHS runs RENS once at the end of the root whatever the incumbent
+                    // (`HighsMipSolverData.cpp:2398`), RENS in the tree only without one.
+                    let rens_now = kind == SubMipKind::Rens || !rens_root_done;
+                    rens_root_done = true;
+                    let rens_highs = rens_cut_base.as_ref().map(|cb| {
+                        try_rens_highs(
+                            cb,
+                            base,
+                            &rens_order,
+                            obj_const,
+                            ns,
+                            &heur_is_int,
+                            &r.solution,
+                            rens_root_x.as_deref(),
+                            if rens_now {
+                                None
+                            } else {
+                                inc.as_ref().map(|(x, v)| (x.as_slice(), *v))
+                            },
+                            rens_root_basis.as_ref(),
+                            opts,
+                            deadline,
+                            tm.stats().total_nodes,
+                        )
+                    });
+                    match rens_highs.unwrap_or_else(|| {
+                        try_sub_mip(
+                            kind,
+                            base,
+                            obj_const,
+                            ns,
+                            &heur_is_int,
+                            &r.solution,
+                            inc.as_ref().map(|(x, v)| (x.as_slice(), *v)),
+                            opts,
+                            deadline,
+                            budget,
+                            &mut sub_mip_spent,
+                        )
+                    }) {
                         Some((sx, sobj)) => {
                             tm.inject_incumbent(sx, sobj);
                             sub_mip_fail_streak = 0;
@@ -4845,6 +9235,7 @@ fn solve_milp_node_search(
                 &pending_cuts,
             );
             csc_w = nw_csc;
+            lp_version += 1;
             m_w = nm;
             n_w = nn;
             slack_l = l_w[ns..].to_vec();
@@ -4857,7 +9248,12 @@ fn solve_milp_node_search(
         // used by a matrix row that is not a folded cut is kept (that row could not be
         // rewritten); folded rows that use it are rewritten by substitution.
         cut_lp_epoch += 1;
-        if cut_lp_on && cut_lp_epoch % CUT_LP_DELETE_EVERY == 0 && !cut_lp_rows.is_empty() {
+        let delete_due = if search_on {
+            n_plunge_cont < batch.node_ids.len()
+        } else {
+            cut_lp_epoch % CUT_LP_DELETE_EVERY == 0
+        };
+        if cut_lp_on && delete_due && !cut_lp_rows.is_empty() {
             let managed: HashSet<usize> = cut_lp_rows.iter().map(|r| r.row).collect();
             let mut del: Vec<usize> = Vec::new();
             let mut relaxed_any = false;
@@ -4908,6 +9304,7 @@ fn solve_milp_node_search(
                 }
                 let d = delete_cut_rows(&csc_w, m_w, n_w, &b_w, &mut gone, &mut kept);
                 csc_w = d.csc;
+                lp_version += 1;
                 b_w = d.b;
                 let keep_col = |j: usize| d.col_map[j] != usize::MAX;
                 c_w = c_w
@@ -4974,8 +9371,11 @@ fn solve_milp_node_search(
     // An all-integer placeholder at an infeasible node can be fathomed by the
     // tree as a sentinel-valued "incumbent"; it never blocks a real (finite)
     // incumbent, so treat obj ≥ the sentinel threshold as "no real solution".
+    // An unbounded relaxation reports no point and `obj = INFINITY` whether or not
+    // a heuristic found a feasible one first (the pre-root heuristics can seed one
+    // on an unbounded MILP): the contract an `Unbounded` result always had.
     let (x, obj, has_inc) = match tm.incumbent() {
-        Some((xi, oi)) if oi < INFEAS_SENTINEL - 1.0 => (xi.to_vec(), oi, true),
+        Some((xi, oi)) if oi < INFEAS_SENTINEL - 1.0 && !unbounded => (xi.to_vec(), oi, true),
         _ => (vec![0.0; ns], f64::INFINITY, false),
     };
     // #1296: report the value of the point returned, recomputed. The tree's
@@ -4999,9 +9399,26 @@ fn solve_milp_node_search(
         stats.bound_unresolved || stats.unresolved_floor.is_finite(),
         gap_closed(&tm, opts),
         gap_certified,
-        stats.total_nodes >= opts.max_nodes || frontier_capped,
+        stats.total_nodes >= opts.max_nodes || frontier_capped || work_capped,
     );
 
+    // Diagnostic instrument (`DISCOPT_MILP_DUMP_INCUMBENT=<file>`): the top-level
+    // solve's final incumbent in this function's column space (the root LP's
+    // structural columns), one value per line. It is the reference point for
+    // `DISCOPT_HIGHS_SEPA_CHECK_POINT`, which judges root cuts on the same LP.
+    // A process can make several top-level engine calls (an LP-only one included),
+    // so each call with integer columns and an incumbent writes `<path>.<k>`.
+    if milp_depth == 0 && has_inc && !opts.integer_cols.is_empty() {
+        if let Ok(path) = std::env::var("DISCOPT_MILP_DUMP_INCUMBENT") {
+            static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let k = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let take = ns.min(x.len());
+            let text: Vec<String> = x[..take].iter().map(|v| format!("{v:?}")).collect();
+            let path = format!("{path}.{k}");
+            std::fs::write(&path, text.join("\n"))
+                .unwrap_or_else(|e| panic!("incumbent dump {path}: {e}"));
+        }
+    }
     let mut res = MilpResult {
         status,
         x,
@@ -5042,6 +9459,83 @@ fn solve_milp_node_search(
     res
 }
 
+/// The driver's result from a finished HiGHS-design search (`DISCOPT_HIGHS_MIP_SEARCH`):
+/// the same status decision, objective recomputation (#1296) and misvaluation guard
+/// (#2136) as the batched search's tail.
+#[allow(clippy::too_many_arguments)]
+fn highs_search_result(
+    o: highs_env::Outcome,
+    c: &[f64],
+    ns: usize,
+    obj_const: f64,
+    opts: &MilpOptions,
+    gap_certified: bool,
+    search_incomplete: bool,
+    lp_iters: usize,
+    root_cut_rows: usize,
+) -> MilpResult {
+    let has_inc = o.best.is_some();
+    let (x, tree_v) = match &o.best {
+        Some((x, v)) => (x.clone(), *v),
+        None => (vec![0.0; ns], f64::INFINITY),
+    };
+    let obj = if has_inc && c[ns..].iter().all(|&v| v == 0.0) {
+        x.iter().zip(&c[..ns]).map(|(xj, cj)| xj * cj).sum::<f64>() + obj_const
+    } else {
+        tree_v
+    };
+    let gap_ok = has_inc && {
+        let raw = tree_v - o.bound;
+        let denom = if opts.rel_gap_max_abs {
+            tree_v.abs().max(o.bound.abs()).max(1e-10)
+        } else {
+            tree_v.abs().max(1.0)
+        };
+        (raw / denom).max(0.0) <= opts.gap_tol
+            || opts.abs_gap_tol.is_some_and(|t| raw.max(0.0) <= t)
+    };
+    let status = decide_status(
+        false,
+        has_inc,
+        o.complete,
+        search_incomplete || !o.complete,
+        o.unresolved,
+        gap_ok,
+        gap_certified && o.complete,
+        matches!(
+            o.stop,
+            Some(
+                highs_env::Stop::Nodes
+                    | highs_env::Stop::OpenNodes
+                    | highs_env::Stop::StallNodes
+                    | highs_env::Stop::Leaves
+                    | highs_env::Stop::Work
+            )
+        ),
+    );
+    let mut res = MilpResult {
+        status,
+        x,
+        obj,
+        bound: o.bound,
+        nodes: o.nodes as usize,
+        lp_iters: lp_iters + o.lp_iters as usize,
+        lazy_calls: 0,
+        lazy_requeues: 0,
+        node_calls: 0,
+        node_cuts_added: 0,
+        root_cut_rows,
+        strong_probe_lps: 0,
+        bound_hook_calls: o.bound_hook_calls,
+        bound_hook_raised: o.bound_hook_raised,
+    };
+    if has_inc && incumbent_misvalued(res.obj, tree_v) {
+        crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
+        withdraw_certificate(&mut res);
+    }
+    res
+}
+
 /// Whether the returned point's recomputed objective `obj` disagrees with the
 /// tree's incumbent value `tree_inc` by more than LP noise (#2136).
 ///
@@ -5063,6 +9557,7 @@ fn incumbent_misvalued(obj: f64, tree_inc: f64) -> bool {
 /// working LP (constant within a batch), the options, and a snapshot of the
 /// tree's read-only state. All fields are `Sync`, so `solve_node` runs under
 /// `rayon`'s `into_par_iter` over the batch.
+#[derive(Clone, Copy)]
 struct NodeCtx<'a> {
     b_w: &'a [f64],
     c_w: &'a [f64],
@@ -5098,7 +9593,13 @@ struct NodeCtx<'a> {
     n_orig_cols: usize,
     slack_l: &'a [f64],
     slack_u: &'a [f64],
+    /// Integer structural columns, presolve-implied ones included (branching, node
+    /// integer feasibility, cuts, propagation, reduced-cost fixing).
     is_int: &'a [bool],
+    /// The true integer structurals only (`MilpOptions::implied_int_cols` excluded):
+    /// the columns a primal heuristic rounds or fixes and a heuristic point's
+    /// realisation snaps (HiGHS `integer_cols`).
+    heur_is_int: &'a [bool],
     is_int_full: &'a [bool],
     ns: usize,
     m_w: usize,
@@ -5144,7 +9645,27 @@ struct NodeCtx<'a> {
     /// separation, and strong branching — none of which affect bound validity
     /// or feasibility — so the in-flight batch drains quickly. `None` = no limit.
     deadline: Option<std::time::Instant>,
+    /// Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): wall-clock cap on one dive, or `None`
+    /// (unbounded, the default path). See [`ROOT_DIVE_SHARE`].
+    dive_deadline: Option<std::time::Instant>,
     tm: &'a TreeManager,
+    /// Gap plan §12.23 (`DISCOPT_HIGHS_SEPA_NODE` under `DISCOPT_MILP_ROOT_CMIR=highs`):
+    /// node rounds run the ported HiGHS separators instead of discopt's node GMI.
+    highs_node: Option<HighsNodeCtx<'a>>,
+    /// Gap plan §12.31: the persistent domain's propagated box for this node (`None`
+    /// inside: proven infeasible), replacing the node's own FBBT.
+    domain_pre: Option<&'a DomainPre>,
+}
+
+/// What node separation under the HiGHS port reads beyond the node LP.
+#[derive(Clone, Copy)]
+struct HighsNodeCtx<'a> {
+    /// Also run node GMI and keep its selection alongside the ported cuts.
+    add_gmi: bool,
+    vbounds: Option<&'a crate::lp::highs_cutgen::vbound::VarBoundStore>,
+    model_rows: usize,
+    model_nnz: usize,
+    top_level: bool,
 }
 
 /// One strong-branch pseudocost sample harvested from a probe:
@@ -5158,6 +9679,10 @@ type SbObservation = (usize, f64, f64, bool);
 /// *when* a node's LP is solved, never the order results fold into the tree.
 struct NodeOutput {
     result: NodeResult,
+    /// The node LP's safe bound (with `obj_const`) before any node-local lift (node
+    /// GMI); NaN when the LP gave no bound. Read by the stage 1d-2 gate.
+    #[cfg_attr(not(test), allow(dead_code))]
+    lp_bound: f64,
     /// Optimal basis to store on the node (for children to warm-start from).
     basis: Option<Basis>,
     /// Incumbent candidate from the rounding heuristic.
@@ -5325,6 +9850,7 @@ fn solve_node(
             cut_lp_active: Vec::new(),
             relaxed_used: Vec::new(),
             relaxed_scores: Vec::new(),
+            lp_bound: f64::NAN,
         };
     }
     let mut full_l = vec![0.0; ctx.n_w];
@@ -5341,8 +9867,24 @@ fn solve_node(
     // tightened structural bounds via the reduce). Runs on the working matrix
     // (including cut rows) with the node's local bounds.
     let mut tightened: Option<(Vec<f64>, Vec<f64>)> = None;
-    if ctx.opts.node_propagation {
-        let pr = {
+    let dpre = ctx.domain_pre.filter(|(pid, _)| *pid == id);
+    if ctx.opts.node_propagation || dpre.is_some() {
+        let pr = if let Some((_, pre)) = dpre {
+            let mut l = full_l.clone();
+            let mut u = full_u.clone();
+            if let Some((dl, du)) = pre {
+                let k = dl.len().min(l.len());
+                l[..k].copy_from_slice(&dl[..k]);
+                u[..k].copy_from_slice(&du[..k]);
+            }
+            {
+                crate::lp::simplex::presolve::PresolveResult {
+                    l,
+                    u,
+                    infeasible: pre.is_none(),
+                }
+            }
+        } else {
             // cert:T0.3 — time per-node FBBT/constraint propagation. T3b5: FBBT on
             // the UNSCALED working CSC (`ctx.csc_rc`; the dense `prop_lp.a` was
             // `ctx.a_w`, unscaled), bit-identical to the dense `tighten_bounds`.
@@ -5388,6 +9930,7 @@ fn solve_node(
                 cut_lp_active: Vec::new(),
                 relaxed_used: Vec::new(),
                 relaxed_scores: Vec::new(),
+                lp_bound: f64::NAN,
             };
         }
         // Record tightened structural bounds for the children to inherit, only
@@ -5398,18 +9941,6 @@ fn solve_node(
         full_l = pr.l;
         full_u = pr.u;
     }
-    // Solve on the batch's shared (pre-scaled, when ill-conditioned) matrix. Only
-    // the per-node bounds are scaled here; the matrix/objective/rhs were scaled
-    // once for the whole batch. The basis is scaling-invariant, so a warm start
-    // and the returned basis transfer across the original/scaled spaces; the
-    // objective is invariant too. We unscale the primal `x` back to the original
-    // space so everything downstream (separation, rounding, branching) is unchanged.
-    // Lazily extend a basis stored before later cuts grew the matrix: the
-    // appended cut slacks become basic (a valid, dual-repairable starting basis).
-    let (sl, su) = match ctx.scaling {
-        Some(s) => (s.scale_lower(&full_l), s.scale_upper(&full_u)),
-        None => (full_l.clone(), full_u.clone()),
-    };
     // The root is the only node solved cold (no inherited basis); the diving
     // heuristic runs there once so its cost (up to n_int warm re-solves) is paid
     // a single time for the whole search.
@@ -5417,126 +9948,21 @@ fn solve_node(
     // when the parent's LP returned no basis (counted: `NodeNoBasisOffRoot` measured 0 in
     // every default arm; the retired DISCOPT_MILP_CUT_LP_DROP_RELAXED path, which
     // dropped stored bases, was the case that needed a depth-based test).
-    let no_basis = ctx.tm.node_basis(id).is_none();
+    let start = ctx.tm.node_basis(id);
+    let no_basis = start.is_none();
     if no_basis && ctx.tm.node_depth(id).is_some_and(|d| d > 0) {
         crate::profile::incr(crate::profile::Ctr::NodeNoBasisOffRoot);
     }
     let is_root = no_basis;
-    let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
-    let mut sol = match ctx.tm.node_basis(id) {
-        Some(basis) => {
-            let basis = extend_basis(basis, ctx.n_w);
-            ctx.problem
-                .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
-        }
-        // The only node solved cold is the root. Prefer the root-cut loop's own
-        // optimal basis (extended over any cuts added after its last solve): the
-        // augmented LP is already solved there, so the root node just pivots in the
-        // few trailing cut rows instead of re-deriving it. Failing that, try the
-        // dual simplex from the slack basis (built from the unscaled working matrix
-        // — scaling-invariant, dual feasibility preserved) before the cold primal,
-        // the same covering-LP speedup the root-cut loop gets. The warm solve
-        // re-verifies the start basis and cold-solves on any difficulty, so the
-        // optimal objective — hence the node's bound — is identical either way; only
-        // which optimal vertex is reached (and thus branching) can differ, exactly
-        // as the existing slack-basis path already does. The batch CSC (`ctx.csc`)
-        // is reused so this cold-root warm solve also skips the per-solve rebuild.
-        None => {
-            if let Some(rb) = ctx.root_warm_basis {
-                let basis = extend_basis(rb.clone(), ctx.n_w);
-                ctx.problem
-                    .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
-            } else {
-                match dual_slack_basis(
-                    // The unscaled CSC of the working matrix (== `from_dense(a_w)`);
-                    // dual_slack_basis reads only singleton structure + `c`, both
-                    // scale-invariant, so this is bit-identical to the old dense arg.
-                    ctx.csc_rc,
-                    ctx.m_w,
-                    ctx.n_w,
-                    ctx.c_w,
-                    &full_l,
-                    &full_u,
-                    ctx.simplex.tol,
-                ) {
-                    // Same pivot-bounded guard as `solve_lp_root` (#350): a qualifying
-                    // slack basis whose dual solve then stalls on an ill-conditioned
-                    // relaxation must fall back to the cold primal, not grind to the
-                    // deadline.
-                    Some(basis) => {
-                        let warm = ctx.problem.solve_warm(
-                            &full_l,
-                            &full_u,
-                            &basis,
-                            &warm_root_opts(ctx.simplex, ctx.m_w, ctx.n_w),
-                        );
-                        match warm.status {
-                            LpStatus::IterLimit | LpStatus::Numerical => {
-                                ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex)
-                            }
-                            _ => warm,
-                        }
-                    }
-                    None => ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex),
-                }
-            }
-        }
+    let nl = node_lp(ctx, start, &full_l, &full_u);
+    let untrusted = |id| NodeResult {
+        node_id: id,
+        lower_bound: f64::NEG_INFINITY,
+        solution: midpoint(lb_k, ub_k),
+        is_feasible: false,
+        certified_infeasible: false,
+        sentinel_is_exclusion: false,
     };
-    // The box the node's NS bound is taken over: the node box, or (below) its full
-    // tolerance relaxation when the LP had to be re-solved there.
-    let mut bound_box: Option<(Vec<f64>, Vec<f64>)> = None;
-    // DISCOPT_MILP_TOL_ROBUST: an LP that is infeasible, but not robustly so, holds
-    // no exact point yet may hold an acceptable one. Re-solve it over the rows
-    // relaxed by their acceptance tolerance (each row's slack widened); that LP is a
-    // relaxation of the node over the accepted set, so whatever it returns (an
-    // optimum whose bound is valid there, or a ray tested below) replaces the exact
-    // verdict.
-    if tol_robust_enabled()
-        && sol.status == LpStatus::Infeasible
-        && !robust_infeasible(ctx, &sol.dual, &full_l, &full_u)
-    {
-        crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedSolves);
-        let solve = |l: &[f64], u: &[f64]| match ctx.tm.node_basis(id) {
-            Some(basis) => {
-                let basis = extend_basis(basis, ctx.n_w);
-                ctx.problem.solve_warm(l, u, &basis, ctx.simplex)
-            }
-            None => ctx.problem.solve_cold(l, u, ctx.simplex),
-        };
-        // The candidate LP (half the slack tolerance) first; if it is empty too, the
-        // full relaxation decides (its ray, if robust, fathoms; its optimum bounds
-        // the node). The node keeps its ORIGINAL box for everything else, the
-        // incumbent check above all; only the NS bound is taken over the full
-        // relaxation (`bound_box`), so it holds for every acceptable point.
-        if let Some((cl, cu)) = relax_row_slacks(ctx, &full_l, &full_u, false) {
-            let mut alt = solve(&cl, &cu);
-            let full_box = relax_row_slacks(ctx, &full_l, &full_u, true);
-            if alt.status == LpStatus::Infeasible {
-                if let Some((rl, ru)) = &full_box {
-                    alt = solve(rl, ru);
-                }
-            }
-            if alt.status == LpStatus::Optimal && full_box.is_some() {
-                crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedOptimal);
-                sol = alt;
-                bound_box = full_box;
-            } else if alt.status == LpStatus::Infeasible {
-                sol = alt;
-            }
-        }
-    }
-    if let Some(s) = ctx.scaling {
-        s.unscale_x(&mut sol.x);
-        // NOTE (#1066): `sol.dual` deliberately stays in the SCALED space here. The
-        // `LpStatus::Infeasible` arm below verifies the Farkas ray against the scaled
-        // working CSC (`ctx.csc`, `ctx.sb`, `sl`/`su`) and unscaling it there would
-        // mix coordinate systems, fail every verification, and stop the driver from
-        // fathoming provably empty nodes. Reduced-cost fixing wants the unscaled
-        // duals instead, so it unscales its own copy at the call site.
-    }
-    drop(_t_node);
-    let sol = sol;
-
     let mut out = NodeOutput {
         result: NodeResult {
             node_id: id,
@@ -5553,7 +9979,7 @@ fn solve_node(
         sb_observations: Vec::new(),
         sb_probes: 0,
         tightened,
-        iters: sol.iters,
+        iters: nl.sol.iters,
         unbounded: false,
         point_value: f64::NAN,
         deferred: false,
@@ -5564,159 +9990,101 @@ fn solve_node(
         cut_lp_active: Vec::new(),
         relaxed_used: Vec::new(),
         relaxed_scores: Vec::new(),
+        lp_bound: f64::NAN,
     };
-
-    match sol.status {
-        LpStatus::Optimal => {
-            out.basis = Some(sol.basis.clone());
-            let xs = &sol.x[..ctx.ns];
-            // #1066: the solve exports the row duals in the scaled space (`ŷ`);
-            // the NS bound and `reduced_cost_fix` read them against the UNSCALED
-            // working matrix `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back
-            // with the same exact power-of-two factors `unscale_x` uses. `sol.dual`
-            // itself is left scaled for the Farkas arm (see the note after the
-            // node solve).
-            let rc_dual: std::borrow::Cow<'_, [f64]> = match ctx.scaling {
-                Some(s) => {
-                    let mut d = sol.dual.clone();
-                    s.unscale_dual(&mut d);
-                    std::borrow::Cow::Owned(d)
-                }
-                None => std::borrow::Cow::Borrowed(&sol.dual),
-            };
-            // D2 W1: which folded cut rows are active at this optimum -- slack
-            // nonbasic AND |dual| above the dual tolerance, HiGHS's age-reset test
-            // (`HighsLpRelaxation.cpp:660-673`). A degenerate row (nonbasic at a zero
-            // dual) ages like a basic one.
-            if !ctx.cut_lp_rows.is_empty() {
-                out.cut_lp_active = ctx
-                    .cut_lp_rows
-                    .iter()
-                    .map(|&(r, c)| {
-                        sol.basis.col_status.get(c).is_some_and(|&st| st != BASIC)
-                            && rc_dual.get(r).is_some_and(|y| y.abs() > CUT_LP_DUAL_TOL)
-                    })
-                    .collect();
-            }
-            // #1953: the node's bound. With the gate on, the NS safe bound from the
-            // node's own dual over its box (capped at the vertex value); the vertex
-            // value alone is only as good as the simplex's optimality test, and a
-            // vertex the test passed early sits ABOVE the node's LP minimum.
-            // A relaxed re-solve's LP value is not a bound over the acceptable
-            // points, only its NS bound over `bound_box` is: require it.
-            let node_lp_bound = if ns_node_bound_enabled() || bound_box.is_some() {
-                match &bound_box {
-                    Some((bl, bu)) => node_ns_bound(ctx, &rc_dual, bl, bu),
-                    None => node_ns_bound(ctx, &rc_dual, &full_l, &full_u),
-                }
-                .map(|g| g.min(sol.obj))
-            } else {
-                Some(sol.obj)
-            };
-            let Some(node_lp_bound) = node_lp_bound else {
-                // No safe bound: hand the node back exactly as an `IterLimit` one
-                // (parent-floored -inf bound, untrusted midpoint; see that arm). A
-                // verified integral vertex is still a feasible point, so it is
-                // offered to the reduce as an incumbent candidate, which
-                // re-validates it -- it just does not fathom the node.
-                crate::profile::incr(crate::profile::Ctr::NodeNsAbstain);
-                out.basis = None;
-                if feasible_integral(ctx, xs) && incumbent_verified(ctx, &full_l, &full_u, &sol.x) {
-                    out.incumbent = Some((xs.to_vec(), sol.obj + ctx.obj_const));
-                }
-                out.result = NodeResult {
-                    node_id: id,
-                    lower_bound: f64::NEG_INFINITY,
-                    solution: midpoint(lb_k, ub_k),
-                    is_feasible: false,
-                    certified_infeasible: false,
-                    sentinel_is_exclusion: false,
-                };
-                return out;
-            };
-            if ns_node_bound_enabled() {
-                crate::profile::incr(crate::profile::Ctr::NodeNsBound);
-            }
-            crate::profile::incr(crate::profile::Ctr::NodeLpOptimal);
-            crate::profile::incr_by(crate::profile::Ctr::NodeLpIters, sol.iters as u64);
-            if ctx
-                .inc_snapshot
-                .is_some_and(|inc| node_lp_bound + ctx.obj_const >= inc)
-            {
-                crate::profile::incr(crate::profile::Ctr::NodeLpOverInc);
-                crate::profile::incr_by(crate::profile::Ctr::NodeLpItersOverInc, sol.iters as u64);
-            }
-            let feasible = ctx
-                .is_int
+    if nl.sol.status == LpStatus::Optimal {
+        // D2 W1: which folded cut rows are active at this optimum -- slack
+        // nonbasic AND |dual| above the dual tolerance, HiGHS's age-reset test
+        // (`HighsLpRelaxation.cpp:660-673`). A degenerate row (nonbasic at a zero
+        // dual) ages like a basic one.
+        if !ctx.cut_lp_rows.is_empty() {
+            let rc_dual = nl.rc_dual();
+            out.cut_lp_active = ctx
+                .cut_lp_rows
                 .iter()
-                .enumerate()
-                .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
-            // #1287/#1945: an integral vertex is promoted to the incumbent by the tree,
-            // so its original rows AND bounds must hold verifiably. One that fails is
-            // handled like a failed LP: its bound and point are both untrusted.
-            if feasible && !point_verified(ctx, &full_l, &full_u, &sol.x) {
-                out.basis = None;
-                out.result = NodeResult {
-                    node_id: id,
-                    lower_bound: f64::NEG_INFINITY,
-                    solution: midpoint(lb_k, ub_k),
-                    is_feasible: false,
-                    certified_infeasible: false,
-                    sentinel_is_exclusion: false,
-                };
-                return out;
-            }
-            // #2163 (the driver side of #1414): the vertex verifies as computed,
-            // but the point it CLAIMS is its integral realisation, and that one
-            // may miss a row -- a binary at `1 - 5.3e-6` on a big-M row with
-            // `M ~ 30` buys ~3e-6 of slack. Fathoming here certified the slack:
-            // on a CMIR-augmented knapsack the driver reported `Optimal` at
-            // 36.929960309 against a true optimum of 36.929960372, and on a trained
-            // ReLU big-M MILP the adopted vertex was refused by `verify_point` and
-            // the solve came back `feasible`. Do what the Python tree does for the
-            // same class: offer the fixed-integer polish of the vertex as an
-            // incumbent (verified, exact integers), and hand the node back with a
-            // branch hint on the column whose rounding moved furthest. The node
-            // keeps its OWN LP bound: that bound is a valid bound over the box
-            // whether or not the vertex is integral (an untrusted `-inf` handback
-            // left the root with no dual bound at all -- #2165 review). The tree
-            // never fathoms a node whose hinted column is not exactly integral
-            // (`process_evaluated`, #2163), so it branches; the child that fixes
-            // the column settles it with its own LP. Branching is always a valid
-            // cover; the domain strictly shrinks, so the search terminates.
-            if feasible {
-                if let Some(zs) = snap_integral(ctx, &sol.x) {
-                    if !point_verified(ctx, &full_l, &full_u, &zs) {
-                        crate::profile::incr(crate::profile::Ctr::DriverIncumbentSnapRefused);
-                        let mut col = None;
-                        let mut moved = 0.0f64;
-                        for (j, (&is_int, (&zj, &xj))) in
-                            ctx.is_int.iter().zip(zs.iter().zip(&sol.x)).enumerate()
-                        {
-                            let d = (zj - xj).abs();
-                            if is_int && d > moved {
-                                moved = d;
-                                col = Some(j);
-                            }
-                        }
-                        if let Some(j) = col {
-                            out.incumbent =
-                                polish_integral_vertex(ctx, &full_l, &full_u, &sol.x, &sol.basis)
-                                    .map(|(xp, vp)| (xp[..ctx.ns].to_vec(), vp));
-                            out.branch_hint = Some(j);
-                            out.result = NodeResult {
-                                node_id: id,
-                                lower_bound: node_lp_bound + ctx.obj_const,
-                                solution: xs.to_vec(),
-                                is_feasible: false,
-                                certified_infeasible: false,
-                                sentinel_is_exclusion: false,
-                            };
-                            return out;
-                        }
-                    }
-                }
-            }
+                .map(|&(r, c)| {
+                    nl.sol
+                        .basis
+                        .col_status
+                        .get(c)
+                        .is_some_and(|&st| st != BASIC)
+                        && rc_dual.get(r).is_some_and(|y| y.abs() > CUT_LP_DUAL_TOL)
+                })
+                .collect();
+        }
+    }
+    let (node_lp_bound, feasible) = match nl.verdict {
+        NodeLpVerdict::Bound { bound, integral } => (bound, integral),
+        NodeLpVerdict::Abstain { ref incumbent } => {
+            out.incumbent = incumbent.clone();
+            out.result = untrusted(id);
+            return out;
+        }
+        NodeLpVerdict::UnverifiedPoint => {
+            out.result = untrusted(id);
+            return out;
+        }
+        NodeLpVerdict::SnapRefused {
+            bound,
+            col,
+            ref incumbent,
+        } => {
+            out.basis = Some(nl.sol.basis.clone());
+            out.incumbent = incumbent.clone();
+            out.branch_hint = Some(col);
+            out.lp_bound = bound + ctx.obj_const;
+            out.result = NodeResult {
+                node_id: id,
+                lower_bound: bound + ctx.obj_const,
+                solution: nl.sol.x[..ctx.ns].to_vec(),
+                is_feasible: false,
+                certified_infeasible: false,
+                sentinel_is_exclusion: false,
+            };
+            return out;
+        }
+        NodeLpVerdict::InfeasibleProved => {
+            out.result = NodeResult {
+                node_id: id,
+                lower_bound: INFEAS_SENTINEL, // pruned
+                solution: vec![0.0; ctx.ns],
+                is_feasible: false,
+                certified_infeasible: false,
+                sentinel_is_exclusion: true,
+            };
+            return out;
+        }
+        // Cannot trust this LP's bound: never prune off it (could drop the
+        // optimum). Hand the node back with a raw -inf (non-pruning) bound
+        // and the box midpoint. This stays fully SOUND without decertifying
+        // the whole search (#598): `import_results` floors the -inf at the
+        // node's parent-inherited bound — a valid bound over this child box,
+        // proved at the ancestor's LP solve — and `process_evaluated` then
+        // only prunes it against the incumbent on that valid bound, branches
+        // it (children re-solve fresh LPs, so the subtree stays searched), or
+        // — when nothing is left to branch — folds the valid bound into the
+        // tree's permanent `unresolved_floor`. The untrusted midpoint can
+        // never fathom the node as integer-feasible or become the incumbent
+        // (`PendingResult::bound_trusted` gates both), so a closed gap
+        // remains a rigorous optimality certificate.
+        NodeLpVerdict::Untrusted => {
+            out.result = untrusted(id);
+            return out;
+        }
+        NodeLpVerdict::Unbounded => {
+            out.unbounded = true;
+            return out;
+        }
+    };
+    #[allow(unused_mut)]
+    let mut node_lp_bound = node_lp_bound;
+    out.basis = Some(nl.sol.basis.clone());
+    out.lp_bound = node_lp_bound + ctx.obj_const;
+    let rc_dual = nl.rc_dual().to_vec();
+    let sol = nl.sol;
+    let xs = &sol.x[..ctx.ns];
+    {
+        {
             // Past the deadline, skip every optional per-node effort below. The
             // LP bound (above) is already computed and valid; the heuristic,
             // cover separation, and strong branching only sharpen branching /
@@ -5731,6 +10099,7 @@ fn solve_node(
             // contraction — never touches the node's own valid LP bound.
             if ctx.opts.reduced_cost_fixing && !feasible {
                 let _t_rcf = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
+                crate::profile::incr(crate::profile::Ctr::RcFixCalls);
                 // #1953: the node's bound, not the vertex value: fixing argues
                 // `cᵀx >= z + |r_j| (x_j - bound_j)`, true for the safe bound `z`.
                 if let Some((rl, ru)) = reduced_cost_fix(
@@ -5747,6 +10116,11 @@ fn solve_node(
                     ctx.is_int_full,
                     ctx.opts.simplex.tol,
                 ) {
+                    let k = (0..ctx.ns)
+                        .filter(|&j| rl[j] > full_l[j] || ru[j] < full_u[j])
+                        .count();
+                    crate::profile::incr(crate::profile::Ctr::RcFixNodesHit);
+                    crate::profile::incr_by(crate::profile::Ctr::RcFixCols, k as u64);
                     out.tightened = Some(match out.tightened.take() {
                         Some((mut tl, mut tu)) => {
                             for j in 0..ctx.ns {
@@ -5765,7 +10139,7 @@ fn solve_node(
                 out.incumbent = try_rounding_csc(
                     &sol.x,
                     ctx.ns,
-                    ctx.is_int,
+                    ctx.heur_is_int,
                     ctx.csc_rc, // T3b5: unscaled working CSC (was ctx.a_w)
                     ctx.b_w,
                     ctx.c_w,
@@ -5973,9 +10347,12 @@ fn solve_node(
                     &full_l,
                     &full_u,
                     &sol.x,
+                    &sol.dual,
                     &sol.basis,
                     &rows,
                     if gmi_slot { NODE_GMI_ROUNDS } else { 0 },
+                    id.0 as i64,
+                    ctx.inc_snapshot,
                 );
                 out.iters += lg.pivots;
                 if let Some(g) = lg.bound {
@@ -5995,6 +10372,269 @@ fn solve_node(
                 sentinel_is_exclusion: false,
             };
         }
+    }
+    out
+}
+
+/// A node LP's verdict through the safety layer (#1953 NS bound, #1287/#1945 point
+/// verification, #2163 snap check, C-14 Farkas verification). Shared by
+/// [`solve_node`] and the HiGHS-search node evaluation, so both trust exactly the
+/// same LP outcomes.
+enum NodeLpVerdict {
+    /// A safe bound over the box (solve space, without `obj_const`); `integral`: the
+    /// vertex is integral and verified on the original rows and bounds.
+    Bound { bound: f64, integral: bool },
+    /// Optimal, but no safe bound could be taken: a verified integral vertex is
+    /// offered as an incumbent candidate; the node is otherwise untrusted.
+    Abstain { incumbent: Option<(Vec<f64>, f64)> },
+    /// An integral vertex that fails verification: bound and point untrusted.
+    UnverifiedPoint,
+    /// An integral vertex whose integral realisation misses a row: the polished
+    /// incumbent candidate and the column to branch on; the node keeps `bound`.
+    SnapRefused {
+        bound: f64,
+        col: usize,
+        incumbent: Option<(Vec<f64>, f64)>,
+    },
+    /// The Farkas ray verified: the box is empty.
+    InfeasibleProved,
+    /// An infeasibility that does not verify, an iteration limit or numerical
+    /// trouble: no bound, never a fathom.
+    Untrusted,
+    /// The LP is unbounded.
+    Unbounded,
+}
+
+/// [`node_lp`]'s result: the solve (`x` unscaled, `dual` in the solve space), the
+/// unscaled row duals when the LP was optimal on a scaled matrix (else empty: use
+/// `sol.dual`), and the verdict.
+struct NodeLp {
+    sol: crate::lp::simplex::LpSolve,
+    rc_dual: Vec<f64>,
+    verdict: NodeLpVerdict,
+}
+
+impl NodeLp {
+    /// The unscaled row duals.
+    fn rc_dual(&self) -> &[f64] {
+        if self.rc_dual.is_empty() {
+            &self.sol.dual
+        } else {
+            &self.rc_dual
+        }
+    }
+}
+
+/// Solve a node's LP over the box `full_l..full_u` (all working columns), warm from
+/// `start` or, with no basis, as the root (root-cut basis, dual slack basis, cold),
+/// and pass the outcome through the safety layer.
+fn node_lp(ctx: &NodeCtx<'_>, start: Option<Basis>, full_l: &[f64], full_u: &[f64]) -> NodeLp {
+    let full_l = full_l.to_vec();
+    let full_u = full_u.to_vec();
+    // Solve on the batch's shared (pre-scaled, when ill-conditioned) matrix. Only
+    // the per-node bounds are scaled here; the matrix/objective/rhs were scaled
+    // once for the whole batch. The basis is scaling-invariant, so a warm start
+    // and the returned basis transfer across the original/scaled spaces; the
+    // objective is invariant too. We unscale the primal `x` back to the original
+    // space so everything downstream (separation, rounding, branching) is unchanged.
+    // Lazily extend a basis stored before later cuts grew the matrix: the
+    // appended cut slacks become basic (a valid, dual-repairable starting basis).
+    let (sl, su) = match ctx.scaling {
+        Some(s) => (s.scale_lower(&full_l), s.scale_upper(&full_u)),
+        None => (full_l.clone(), full_u.clone()),
+    };
+    let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
+    let mut sol = match &start {
+        Some(basis) => {
+            let basis = extend_basis(basis.clone(), ctx.n_w);
+            ctx.problem
+                .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
+        }
+        // The only node solved cold is the root. Prefer the root-cut loop's own
+        // optimal basis (extended over any cuts added after its last solve): the
+        // augmented LP is already solved there, so the root node just pivots in the
+        // few trailing cut rows instead of re-deriving it. Failing that, try the
+        // dual simplex from the slack basis (built from the unscaled working matrix
+        // — scaling-invariant, dual feasibility preserved) before the cold primal,
+        // the same covering-LP speedup the root-cut loop gets. The warm solve
+        // re-verifies the start basis and cold-solves on any difficulty, so the
+        // optimal objective — hence the node's bound — is identical either way; only
+        // which optimal vertex is reached (and thus branching) can differ, exactly
+        // as the existing slack-basis path already does. The batch CSC (`ctx.csc`)
+        // is reused so this cold-root warm solve also skips the per-solve rebuild.
+        None => {
+            if let Some(rb) = ctx.root_warm_basis {
+                let basis = extend_basis(rb.clone(), ctx.n_w);
+                ctx.problem
+                    .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
+            } else {
+                match dual_slack_basis(
+                    // The unscaled CSC of the working matrix (== `from_dense(a_w)`);
+                    // dual_slack_basis reads only singleton structure + `c`, both
+                    // scale-invariant, so this is bit-identical to the old dense arg.
+                    ctx.csc_rc,
+                    ctx.m_w,
+                    ctx.n_w,
+                    ctx.c_w,
+                    &full_l,
+                    &full_u,
+                    ctx.simplex.tol,
+                ) {
+                    // Same pivot-bounded guard as `solve_lp_root` (#350): a qualifying
+                    // slack basis whose dual solve then stalls on an ill-conditioned
+                    // relaxation must fall back to the cold primal, not grind to the
+                    // deadline.
+                    Some(basis) => {
+                        let warm = ctx.problem.solve_warm(
+                            &full_l,
+                            &full_u,
+                            &basis,
+                            &warm_root_opts(ctx.simplex, ctx.m_w, ctx.n_w),
+                        );
+                        match warm.status {
+                            LpStatus::IterLimit | LpStatus::Numerical => {
+                                ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex)
+                            }
+                            _ => warm,
+                        }
+                    }
+                    None => ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex),
+                }
+            }
+        }
+    };
+    // The box the node's NS bound is taken over: the node box, or (below) its full
+    // tolerance relaxation when the LP had to be re-solved there.
+    let mut bound_box: Option<(Vec<f64>, Vec<f64>)> = None;
+    // DISCOPT_MILP_TOL_ROBUST: an LP that is infeasible, but not robustly so, holds
+    // no exact point yet may hold an acceptable one. Re-solve it over the rows
+    // relaxed by their acceptance tolerance (each row's slack widened); that LP is a
+    // relaxation of the node over the accepted set, so whatever it returns (an
+    // optimum whose bound is valid there, or a ray tested below) replaces the exact
+    // verdict.
+    if tol_robust_enabled()
+        && sol.status == LpStatus::Infeasible
+        && !robust_infeasible(ctx, &sol.dual, &full_l, &full_u)
+    {
+        crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedSolves);
+        let solve = |l: &[f64], u: &[f64]| match &start {
+            Some(basis) => {
+                let basis = extend_basis(basis.clone(), ctx.n_w);
+                ctx.problem.solve_warm(l, u, &basis, ctx.simplex)
+            }
+            None => ctx.problem.solve_cold(l, u, ctx.simplex),
+        };
+        // The candidate LP (half the slack tolerance) first; if it is empty too, the
+        // full relaxation decides (its ray, if robust, fathoms; its optimum bounds
+        // the node). The node keeps its ORIGINAL box for everything else, the
+        // incumbent check above all; only the NS bound is taken over the full
+        // relaxation (`bound_box`), so it holds for every acceptable point.
+        if let Some((cl, cu)) = relax_row_slacks(ctx, &full_l, &full_u, false) {
+            let mut alt = solve(&cl, &cu);
+            let full_box = relax_row_slacks(ctx, &full_l, &full_u, true);
+            if alt.status == LpStatus::Infeasible {
+                if let Some((rl, ru)) = &full_box {
+                    alt = solve(rl, ru);
+                }
+            }
+            if alt.status == LpStatus::Optimal && full_box.is_some() {
+                crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedOptimal);
+                sol = alt;
+                bound_box = full_box;
+            } else if alt.status == LpStatus::Infeasible {
+                sol = alt;
+            }
+        }
+    }
+    if let Some(s) = ctx.scaling {
+        s.unscale_x(&mut sol.x);
+        // NOTE (#1066): `sol.dual` deliberately stays in the SCALED space here. The
+        // `LpStatus::Infeasible` arm below verifies the Farkas ray against the scaled
+        // working CSC (`ctx.csc`, `ctx.sb`, `sl`/`su`) and unscaling it there would
+        // mix coordinate systems, fail every verification, and stop the driver from
+        // fathoming provably empty nodes. Reduced-cost fixing wants the unscaled
+        // duals instead, so it unscales its own copy at the call site.
+    }
+    drop(_t_node);
+    let sol = sol;
+    let mut rc_dual: Vec<f64> = Vec::new();
+    let full_l = &full_l[..];
+    let full_u = &full_u[..];
+    let verdict = match sol.status {
+        LpStatus::Optimal => {
+            let xs = &sol.x[..ctx.ns];
+            // #1066: the solve exports the row duals in the scaled space (`ŷ`);
+            // the NS bound and `reduced_cost_fix` read them against the UNSCALED
+            // working matrix `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back
+            // with the same exact power-of-two factors `unscale_x` uses. `sol.dual`
+            // itself is left scaled for the Farkas arm (see the note after the
+            // node solve).
+            if let Some(s) = ctx.scaling {
+                rc_dual = sol.dual.clone();
+                s.unscale_dual(&mut rc_dual);
+            }
+            let rc: &[f64] = if ctx.scaling.is_some() {
+                &rc_dual
+            } else {
+                &sol.dual
+            };
+            // #1953: the node's bound. With the gate on, the NS safe bound from the
+            // node's own dual over its box (capped at the vertex value); the vertex
+            // value alone is only as good as the simplex's optimality test, and a
+            // vertex the test passed early sits ABOVE the node's LP minimum.
+            // A relaxed re-solve's LP value is not a bound over the acceptable
+            // points, only its NS bound over `bound_box` is: require it.
+            let node_lp_bound = if ns_node_bound_enabled() || bound_box.is_some() {
+                match &bound_box {
+                    Some((bl, bu)) => node_ns_bound(ctx, rc, bl, bu),
+                    None => node_ns_bound(ctx, rc, full_l, full_u),
+                }
+                .map(|g| g.min(sol.obj))
+            } else {
+                Some(sol.obj)
+            };
+            match node_lp_bound {
+                None => {
+                    // No safe bound: the node goes back exactly as an `IterLimit` one
+                    // (parent-floored -inf bound, untrusted point). A verified
+                    // integral vertex is still a feasible point, so it is offered as
+                    // an incumbent candidate, which the tree re-validates -- it just
+                    // does not fathom the node.
+                    crate::profile::incr(crate::profile::Ctr::NodeNsAbstain);
+                    let incumbent = (feasible_integral(ctx, xs)
+                        && incumbent_verified(ctx, full_l, full_u, &sol.x))
+                    .then(|| (xs.to_vec(), sol.obj + ctx.obj_const));
+                    NodeLpVerdict::Abstain { incumbent }
+                }
+                Some(node_lp_bound) => {
+                    if ns_node_bound_enabled() {
+                        crate::profile::incr(crate::profile::Ctr::NodeNsBound);
+                    }
+                    crate::profile::incr(crate::profile::Ctr::NodeLpOptimal);
+                    crate::profile::incr_by(crate::profile::Ctr::NodeLpIters, sol.iters as u64);
+                    if ctx
+                        .inc_snapshot
+                        .is_some_and(|inc| node_lp_bound + ctx.obj_const >= inc)
+                    {
+                        crate::profile::incr(crate::profile::Ctr::NodeLpOverInc);
+                        crate::profile::incr_by(
+                            crate::profile::Ctr::NodeLpItersOverInc,
+                            sol.iters as u64,
+                        );
+                    }
+                    // Fractionality of the value clamped to the node box, as HiGHS's
+                    // `resolveLp` tests it (see `HighsEval::fractional_integers`): a
+                    // vertex within the LP's tolerance outside an integral bound sits
+                    // on that bound. The point still passes `point_verified` and the
+                    // snap check below before it is offered or fathoms the node.
+                    let integral = ctx.is_int.iter().enumerate().all(|(j, &it)| {
+                        !it || frac(highs_branch::clamp_to_box(xs[j], full_l[j], full_u[j]))
+                            <= INT_TOL
+                    });
+                    node_lp_optimal_verdict(ctx, &sol, full_l, full_u, node_lp_bound, integral)
+                }
+            }
+        }
         LpStatus::Infeasible => {
             // C-14: the simplex reports `Infeasible` with a Farkas *dual ray
             // candidate* in `sol.dual` (contract: `lp/simplex/mod.rs`), sound only
@@ -6006,18 +10646,17 @@ fn solve_node(
             // before pruning. The safe-bound identity is invariant under
             // equilibration (`scaling.rs`), so the scaled-space verdict equals the
             // original-space one. On verification failure the box is NOT provably
-            // empty: never fathom — hand the node back with a raw -inf (non-pruning)
-            // bound and midpoint so it is branched/re-solved and the optimum can
+            // empty: never fathom -- the node goes back untrusted (a raw -inf,
+            // non-pruning bound) so it is branched/re-solved and the optimum can
             // never be silently cut (same sound handling as the IterLimit /
-            // Numerical arm below). A sound infeasible LP always exports a
-            // verifiable ray, so this costs one mat-vec and never changes a
-            // correct fathom.
+            // Numerical arm). A sound infeasible LP always exports a verifiable
+            // ray, so this costs one mat-vec and never changes a correct fathom.
             // T3b5: farkas check on the SCALED working CSC (`ctx.csc`; the dual/ray
             // and `sl`/`su`/`ctx.sb` are all in scaled space, as `ctx.sa` was).
             // DISCOPT_MILP_TOL_ROBUST: only a ray that survives every row's acceptance
             // tolerance fathoms (an exact-only one left the node above re-solved).
             let proved = if tol_robust_enabled() {
-                let r = robust_infeasible(ctx, &sol.dual, &full_l, &full_u);
+                let r = robust_infeasible(ctx, &sol.dual, full_l, full_u);
                 if !r {
                     crate::profile::incr(crate::profile::Ctr::TolRobustFarkasRefused);
                 }
@@ -6051,53 +10690,86 @@ fn solve_node(
                         crate::profile::incr(crate::profile::Ctr::ConflictSmall);
                     }
                 }
-                out.result = NodeResult {
-                    node_id: id,
-                    lower_bound: INFEAS_SENTINEL, // pruned
-                    solution: vec![0.0; ctx.ns],
-                    is_feasible: false,
-                    certified_infeasible: false,
-                    sentinel_is_exclusion: true,
-                };
+                NodeLpVerdict::InfeasibleProved
             } else {
-                out.result = NodeResult {
-                    node_id: id,
-                    lower_bound: f64::NEG_INFINITY,
-                    solution: midpoint(lb_k, ub_k),
-                    is_feasible: false,
-                    certified_infeasible: false,
-                    sentinel_is_exclusion: false,
-                };
+                NodeLpVerdict::Untrusted
             }
         }
-        LpStatus::Unbounded => {
-            out.unbounded = true;
-        }
-        LpStatus::IterLimit | LpStatus::Numerical => {
-            // Cannot trust this LP's bound: never prune off it (could drop the
-            // optimum). Hand the node back with a raw -inf (non-pruning) bound
-            // and the box midpoint. This stays fully SOUND without decertifying
-            // the whole search (#598): `import_results` floors the -inf at the
-            // node's parent-inherited bound — a valid bound over this child box,
-            // proved at the ancestor's LP solve — and `process_evaluated` then
-            // only prunes it against the incumbent on that valid bound, branches
-            // it (children re-solve fresh LPs, so the subtree stays searched), or
-            // — when nothing is left to branch — folds the valid bound into the
-            // tree's permanent `unresolved_floor`. The untrusted midpoint can
-            // never fathom the node as integer-feasible or become the incumbent
-            // (`PendingResult::bound_trusted` gates both), so a closed gap
-            // remains a rigorous optimality certificate.
-            out.result = NodeResult {
-                node_id: id,
-                lower_bound: f64::NEG_INFINITY,
-                solution: midpoint(lb_k, ub_k),
-                is_feasible: false,
-                certified_infeasible: false,
-                sentinel_is_exclusion: false,
-            };
+        LpStatus::Unbounded => NodeLpVerdict::Unbounded,
+        // Cannot trust this LP's bound: never prune off it (could drop the optimum).
+        LpStatus::IterLimit | LpStatus::Numerical => NodeLpVerdict::Untrusted,
+    };
+    NodeLp {
+        sol,
+        rc_dual,
+        verdict,
+    }
+}
+
+/// The verdict on an optimal node LP with a safe bound: the integral-vertex checks.
+fn node_lp_optimal_verdict(
+    ctx: &NodeCtx<'_>,
+    sol: &crate::lp::simplex::LpSolve,
+    full_l: &[f64],
+    full_u: &[f64],
+    bound: f64,
+    integral: bool,
+) -> NodeLpVerdict {
+    // #1287/#1945: an integral vertex is promoted to the incumbent by the tree,
+    // so its original rows AND bounds must hold verifiably. One that fails is
+    // handled like a failed LP: its bound and point are both untrusted.
+    if integral && !point_verified(ctx, full_l, full_u, &sol.x) {
+        return NodeLpVerdict::UnverifiedPoint;
+    }
+    // #2163 (the driver side of #1414): the vertex verifies as computed,
+    // but the point it CLAIMS is its integral realisation, and that one
+    // may miss a row -- a binary at `1 - 5.3e-6` on a big-M row with
+    // `M ~ 30` buys ~3e-6 of slack. Fathoming here certified the slack:
+    // on a CMIR-augmented knapsack the driver reported `Optimal` at
+    // 36.929960309 against a true optimum of 36.929960372, and on a trained
+    // ReLU big-M MILP the adopted vertex was refused by `verify_point` and
+    // the solve came back `feasible`. Do what the Python tree does for the
+    // same class: offer the fixed-integer polish of the vertex as an
+    // incumbent (verified, exact integers), and hand the node back with a
+    // branch hint on the column whose rounding moved furthest. The node
+    // keeps its OWN LP bound: that bound is a valid bound over the box
+    // whether or not the vertex is integral (an untrusted `-inf` handback
+    // left the root with no dual bound at all -- #2165 review). The tree
+    // never fathoms a node whose hinted column is not exactly integral
+    // (`process_evaluated`, #2163), so it branches; the child that fixes
+    // the column settles it with its own LP. Branching is always a valid
+    // cover; the domain strictly shrinks, so the search terminates.
+    if integral {
+        if let Some(zs) = snap_integral(ctx, &sol.x) {
+            if !point_verified(ctx, full_l, full_u, &zs) {
+                crate::profile::incr(crate::profile::Ctr::DriverIncumbentSnapRefused);
+                let mut col = None;
+                let mut moved = 0.0f64;
+                for (j, (&is_int, (&zj, &xj))) in ctx
+                    .heur_is_int
+                    .iter()
+                    .zip(zs.iter().zip(&sol.x))
+                    .enumerate()
+                {
+                    let d = (zj - xj).abs();
+                    if is_int && d > moved {
+                        moved = d;
+                        col = Some(j);
+                    }
+                }
+                if let Some(col) = col {
+                    let incumbent = polish_integral_vertex(ctx, full_l, full_u, &sol.x, &sol.basis)
+                        .map(|(xp, vp)| (xp[..ctx.ns].to_vec(), vp));
+                    return NodeLpVerdict::SnapRefused {
+                        bound,
+                        col,
+                        incumbent,
+                    };
+                }
+            }
         }
     }
-    out
+    NodeLpVerdict::Bound { bound, integral }
 }
 
 /// Verify a Farkas infeasibility certificate for the LP `{ A x = b, l ≤ x ≤ u }`.
@@ -6375,6 +11047,15 @@ fn strong_branch(
     // a finite degradation sample, and feeding it would corrupt the average.
     let mut obs: Vec<SbObservation> = Vec::new();
     for (idx, _f) in cand {
+        // Past the solve's deadline, stop probing and branch on the best candidate so
+        // far: only the branching variable can change, never a bound. Measured (gap
+        // plan §12.7): with `DISCOPT_MILP_ROOT_CMIR`'s dense root rows, 8 strong-branch
+        // calls took 33.7 s and a 20 s solve returned at 39.5 s, because the deadline
+        // was only checked once per node, before probing began.
+        if ctx.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            crate::profile::incr(crate::profile::Ctr::StrongBranchDeadlineStop);
+            break;
+        }
         let xi = x[idx];
         let (lo0, hi0) = (orig_l[idx], orig_u[idx]);
         let frac = xi - xi.floor();
@@ -6463,6 +11144,27 @@ fn obj_integrality_enabled() -> bool {
 /// An unrecognized value is a hard **refusal**, for the same reason: a panel that
 /// exports `DISCOPT_OBJ_LATTICE_SUBST=on` and is quietly handed the OFF arm
 /// measures nothing and reads as a result.
+/// `DISCOPT_MILP_OBJ_LATTICE_INTERVAL` (default ON since its 2026-11-12 panel;
+/// `=0` opts out): the objective lattice may resolve a costed continuous column
+/// bounded by inequalities against lattice columns (`obj_integral::interval_lattice`;
+/// b-ball, and 7 of the 240 MIPLIB 2017 benchmark instances by a static census).
+/// Such a lattice holds at some optimum only, and the fathoming cutoff accounts for
+/// an off-lattice incumbent (`TreeManager::cutoff_for`). Panel (62 rows, 20 s): 51 ->
+/// 52 certified (+b-ball, 20.1 -> 0.3 s), 0 violations. Garbage is refused.
+fn obj_lattice_interval_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_OBJ_LATTICE_INTERVAL") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            "" => true,
+            other => panic!(
+                "DISCOPT_MILP_OBJ_LATTICE_INTERVAL={other:?} is not recognized (expected 1 or 0)"
+            ),
+        },
+    }
+}
+
 fn obj_lattice_subst_enabled() -> bool {
     match std::env::var("DISCOPT_OBJ_LATTICE_SUBST") {
         Err(_) => true,
@@ -7550,14 +12252,41 @@ fn try_dive_repair(
     // incumbent; `inject_incumbent` still enforces strict improvement and the
     // Python feasibility gate re-checks the point.
     let mut cur_basis = start_basis.clone();
-    let max_steps = ctx.is_int.iter().filter(|&&it| it).count() + 1;
+    let max_steps = ctx.heur_is_int.iter().filter(|&&it| it).count() + 1;
     crate::profile::incr(crate::profile::Ctr::DiveRuns);
+    // Gap plan P3: the dive's own LP solves stop at the dive cap too; a cold
+    // fallback from a refused warm start otherwise ran 9.7 s against a 2 s cap.
+    // The cap is measured from the dive's own start: the batch-time deadline in
+    // `ctx.dive_deadline` was already spent by the root node's solve on neos-911970.
+    let dive_deadline: Option<std::time::Instant> = ctx.dive_deadline.map(|_| {
+        let now = std::time::Instant::now();
+        let left = ctx.deadline.map_or(ROOT_DIVE_MAX_S, |d| {
+            d.saturating_duration_since(now).as_secs_f64()
+        });
+        let share = ROOT_DIVE_SHARE;
+        let cap = ROOT_DIVE_MAX_S;
+        now + std::time::Duration::from_secs_f64((left * share).min(cap))
+    });
+    let dive_simplex = match dive_deadline {
+        Some(d) => {
+            let mut o = ctx.simplex.clone();
+            o.deadline = Some(o.deadline.map_or(d, |e| e.min(d)));
+            o
+        }
+        None => ctx.simplex.clone(),
+    };
     for _ in 0..max_steps {
+        // Gap plan P3: the dive is a heuristic; past its wall cap it gives up (no
+        // point, never a wrong one).
+        if dive_deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            crate::profile::incr(crate::profile::Ctr::DiveCapped);
+            return None;
+        }
         // Most-fractional unfixed integer column.
         let mut pick: Option<usize> = None;
         let mut best = INT_TOL;
         for j in 0..ns {
-            if ctx.is_int[j] && l[j] != u[j] {
+            if ctx.heur_is_int[j] && l[j] != u[j] {
                 let f = frac(x[j]);
                 if f > best {
                     best = f;
@@ -7582,7 +12311,7 @@ fn try_dive_repair(
                 }
                 let mut xc = x[..ns].to_vec();
                 for (k, xk) in xc.iter_mut().enumerate() {
-                    if ctx.is_int[k] {
+                    if ctx.heur_is_int[k] {
                         *xk = xk.round();
                     }
                 }
@@ -7655,7 +12384,7 @@ fn try_dive_repair(
             // #1945: verified against the ORIGINAL data, like every node solve.
             let mut sol = ctx
                 .problem
-                .solve_warm(&full_l, &full_u, &cur_basis, ctx.simplex);
+                .solve_warm(&full_l, &full_u, &cur_basis, &dive_simplex);
             *pivots += sol.iters;
             if sol.status == LpStatus::Optimal {
                 if let Some(c) = cutoff {
@@ -7673,8 +12402,15 @@ fn try_dive_repair(
                 }
                 l[j] = v;
                 u[j] = v;
-                // Carry this step's optimal basis into the next fix's warm start.
-                cur_basis = sol.basis;
+                // Carry this step's optimal basis into the next fix's warm start --
+                // only a well-formed one (`m` basic columns). A short basis came back
+                // from some solves (sp150x300d: 523 basic of 565 rows) and refused
+                // every later warm start, so each step paid a cold solve; the previous
+                // step's basis differs from this LP only in bounds, so it stays a valid,
+                // dual-feasible start.
+                if sol.basis.basic_vars.len() == ctx.m_w && sol.basis.col_status.len() == ctx.n_w {
+                    cur_basis = sol.basis;
+                }
                 next_x = Some(sol.x);
                 break;
             }
@@ -7803,15 +12539,18 @@ fn incumbent_verified(ctx: &NodeCtx<'_>, l: &[f64], u: &[f64], z: &[f64]) -> boo
     }
 }
 
-/// `z` with every structural integer column rounded to its nearest integer, or
-/// `None` when that moves nothing (the point is already its own realisation).
+/// `z` with every true-integer structural column (`NodeCtx::heur_is_int`) rounded to
+/// its nearest integer, or `None` when that moves nothing (the point is already its own
+/// realisation). A presolve-implied column keeps its value: it is continuous in the
+/// caller's problem, so the realisation needs no integrality there, and rounding it
+/// would only perturb the rows (HiGHS's `checkSolution` tests `integer_cols` alone).
 fn snap_integral(ctx: &NodeCtx<'_>, z: &[f64]) -> Option<Vec<f64>> {
-    let k = ctx.is_int.len().min(z.len());
-    if (0..k).all(|j| !ctx.is_int[j] || z[j] == z[j].round()) {
+    let k = ctx.heur_is_int.len().min(z.len());
+    if (0..k).all(|j| !ctx.heur_is_int[j] || z[j] == z[j].round()) {
         return None;
     }
     let mut zs = z.to_vec();
-    for (zj, &is_int) in zs.iter_mut().zip(ctx.is_int) {
+    for (zj, &is_int) in zs.iter_mut().zip(ctx.heur_is_int) {
         if is_int {
             *zj = zj.round();
         }
@@ -7855,7 +12594,7 @@ fn polish_integral_vertex(
     let mut fl = full_l.to_vec();
     let mut fu = full_u.to_vec();
     for j in 0..ctx.ns {
-        if ctx.is_int[j] {
+        if ctx.heur_is_int[j] {
             let r = x[j].round();
             if r < full_l[j] || r > full_u[j] {
                 return None;
@@ -7873,7 +12612,7 @@ fn polish_integral_vertex(
     }
     // Exact integers: the solve's own value for a fixed column is its bound, but
     // write it explicitly so no rounding of the unscale can leave a residue.
-    for ((xj, &fj), &is_int) in sol.x.iter_mut().zip(&fl).zip(ctx.is_int) {
+    for ((xj, &fj), &is_int) in sol.x.iter_mut().zip(&fl).zip(ctx.heur_is_int) {
         if is_int {
             *xj = fj;
         }
@@ -8273,6 +13012,10 @@ mod tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: (0..ns).collect(),
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -8366,6 +13109,108 @@ mod tests {
             "dual bound {} exceeds the true optimum -- false certificate",
             res.bound
         );
+    }
+
+    /// HiGHS's `integer_cols` / `integral_cols` split (`MilpOptions::implied_int_cols`).
+    ///
+    /// `min 2 x0 + x1 + 2 x2` s.t. `2 x0 + 2 x2 >= 3`, `x0 + x1 + x2 >= 2`; `x0, x2` in
+    /// `[0, 5]` integer, `x1` in `[0, 10]` continuous in the caller's problem but
+    /// integral at some optimum (HiGHS's dual implied-integer rule: its one row has
+    /// every other column integer with unit ratio and an integral side, and its bounds
+    /// are integral), so it is passed as `integer_cols` and marked implied. The LP
+    /// optimum is 3.5 (`x0 + x2 = 1.5`, `x1 = 0.5`), the integer optimum 4
+    /// (`x0 + x2 = 2`, `x1 = 0`), and the lattice over `integer_cols` has spacing 1.
+    ///
+    /// 1. A heuristic point with `x1` fractional (the seed `(2, 0.5, 0)`, objective 4.5)
+    ///    is accepted when `x1` is implied, and refused when it is a true integer.
+    /// 2. The lattice cutoff stays sound with that off-lattice incumbent: `4.5 - 1`
+    ///    would fathom the root (bound 3.5, lifted to 4) and certify 4.5; the
+    ///    `optimum_only` cutoff (largest lattice point below 4.5, i.e. 4) keeps it.
+    #[test]
+    fn implied_integer_columns_are_continuous_for_heuristics_only() {
+        let (ns, m) = (3usize, 2usize);
+        let n = ns + m;
+        #[rustfmt::skip]
+        let dense = vec![
+            2.0, 0.0, 2.0, -1.0, 0.0,
+            1.0, 1.0, 1.0, 0.0, -1.0,
+        ];
+        let sp = SparseCols::from_dense(&dense, m, n);
+        let c = vec![2.0, 1.0, 2.0, 0.0, 0.0];
+        let b = vec![3.0, 2.0];
+        let l = vec![0.0; n];
+        let u = vec![5.0, 10.0, 5.0, INF, INF];
+        let seed = vec![2.0, 0.5, 0.0];
+        let mut checks = 0usize;
+        let run = |implied: Vec<usize>, max_nodes: usize| {
+            let mut o = cover_opts(ns);
+            o.implied_int_cols = implied;
+            o.max_nodes = max_nodes;
+            o.heuristics = false;
+            o.strong_branch = false;
+            o.initial_incumbent = Some(seed.clone());
+            solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &o)
+        };
+        // Anti-vacuity: the relaxation is fractional and the lattice fires, or the
+        // cutoff arm below proves nothing.
+        let lp = crate::lp::simplex::solve_lp_cols(
+            sp.clone(),
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            &SimplexOptions::default(),
+        );
+        assert_eq!(lp.status, LpStatus::Optimal);
+        assert!((lp.obj - 3.5).abs() < 1e-9, "LP bound {}", lp.obj);
+        checks += 1;
+        // 1. The seed alone (no node solved): accepted only with `x1` implied.
+        let with = run(vec![1], 0);
+        assert!(
+            (with.obj - 4.5).abs() < 1e-9 && (with.x[1] - 0.5).abs() < 1e-12,
+            "seed with a fractional implied column must be the incumbent: obj {} x {:?}",
+            with.obj,
+            with.x
+        );
+        checks += 1;
+        let without = run(Vec::new(), 0);
+        assert!(
+            !without.obj.is_finite(),
+            "the same seed must be refused when x1 is a true integer: obj {}",
+            without.obj
+        );
+        checks += 1;
+        // 2. The full solve from the off-lattice incumbent certifies the optimum.
+        let full = run(vec![1], 100_000);
+        assert_eq!(full.status, MilpStatus::Optimal, "must certify");
+        assert!(
+            (full.obj - 4.0).abs() < 1e-6,
+            "optimum is 4, got {} -- 4.5 means the lattice cutoff fathomed the optimum \
+             from an off-lattice incumbent (CLAUDE.md §1)",
+            full.obj
+        );
+        assert!(
+            full.bound <= 4.0 + 1e-6,
+            "bound {} above the optimum",
+            full.bound
+        );
+        checks += 1;
+        // An implied column outside `integer_cols` is refused loudly.
+        let bad = std::panic::catch_unwind(|| {
+            let mut o = cover_opts(ns);
+            o.integer_cols = vec![0, 2];
+            o.implied_int_cols = vec![1];
+            solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &o)
+        });
+        assert!(
+            bad.is_err(),
+            "implied_int_cols outside integer_cols must panic"
+        );
+        checks += 1;
+        eprintln!("implied-int heuristic mask: {checks} checks");
+        assert_eq!(checks, 5);
     }
 
     /// Same cover, but one unit of continuous cost. The objective can now take any
@@ -8837,9 +13682,11 @@ mod tests {
 
     #[test]
     fn rand_round_parse_and_locks() {
-        for off in ["", "0", "no"] {
+        // Default ON since the stage 1d-5 graduation: unset/empty arms it.
+        for off in ["0", "no", "false"] {
             assert!(!parse_rand_round(off).unwrap());
         }
+        assert!(parse_rand_round("").unwrap());
         assert!(parse_rand_round(" 1 ").unwrap());
         assert!(parse_rand_round("on").is_err());
         // Rows over x0, x1 (both integer) with aligned slacks (cols 2, 3, 4):
@@ -9176,6 +14023,10 @@ mod tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: int_cols,
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -9211,6 +14062,957 @@ mod tests {
         }
     }
 
+    /// Stage 1d-5 gate: through the driver's entry point with `DISCOPT_HIGHS_MIP_SEARCH`
+    /// on, the HiGHS-design search returns the batched search's status and optimum
+    /// with a closed, valid gap; proves infeasible problems infeasible; and under a
+    /// node limit returns a bound no higher than the optimum.
+    #[test]
+    fn highs_mip_search_route_matches_the_batched_search() {
+        let mut seed = 77u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut optimal, mut infeasible, mut limited) = (0usize, 0usize, 0usize);
+        let runs0 = super::highs_env::RUNS.with(|r| r.get());
+        for it in 0..150 {
+            let mixed = it % 2 == 1;
+            let ns = rnd(8, 18) as usize;
+            let m = rnd(5, 11) as usize;
+            let contradict = it % 7 == 3;
+            let is_int: Vec<bool> = (0..ns)
+                .map(|j| (contradict && j < 4) || !mixed || rnd(0, 2) != 0)
+                .collect();
+            let mut l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let mut u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 10) as f64).collect();
+            if contradict {
+                for j in 0..4 {
+                    l[j] = 0.0;
+                    u[j] = 1.0;
+                }
+            }
+            let c: Vec<f64> = (0..ns)
+                .map(|_| rnd(-9, 9) as f64 + 0.5 * rnd(0, 1) as f64)
+                .collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            // Every 7th problem gets `3 x0 + 5 x1 + 7 x2 + 11 x3 = 13` over binaries:
+            // no subset sums to 13, nothing propagates, the LP is feasible -- only the
+            // search proves it infeasible.
+            for i in 0..m {
+                for col in cols.iter_mut() {
+                    if rnd(0, 2) != 0 {
+                        let v = rnd(-5, 7);
+                        if v != 0 {
+                            col.push((i, v as f64));
+                        }
+                    }
+                }
+                b.push(rnd(5, 30) as f64);
+            }
+            let mut m = m;
+            if contradict {
+                for (j, a) in [3.0, 5.0, 7.0, 11.0].into_iter().enumerate() {
+                    cols[j].push((m, a));
+                }
+                b.push(13.0);
+                m += 1;
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                // The knapsack row is an equality (its slack fixed at 0).
+                uf.push(if contradict && i == m - 1 { 0.0 } else { INF });
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let o = opts(ns, ints);
+            let solve = |o: &MilpOptions, on: bool| {
+                FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(Some(on)));
+                let r = solve_milp_node_search(
+                    csc.clone(),
+                    m,
+                    n,
+                    &cf,
+                    &lf,
+                    &uf,
+                    &b,
+                    0.0,
+                    o,
+                    None,
+                    None,
+                    None,
+                );
+                FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(None));
+                r
+            };
+            let base = solve(&o, false);
+            let h = solve(&o, true);
+            let tol = 1e-6 * (1.0 + base.obj.abs());
+            match base.status {
+                MilpStatus::Optimal => {
+                    optimal += 1;
+                    assert_eq!(h.status, MilpStatus::Optimal, "route lost the certificate");
+                    assert!(
+                        (h.obj - base.obj).abs() <= tol,
+                        "optimum {} vs {}",
+                        h.obj,
+                        base.obj
+                    );
+                    assert!(
+                        h.bound <= base.obj + tol,
+                        "bound {} above the optimum {}",
+                        h.bound,
+                        base.obj
+                    );
+                    // A node limit: still a valid bound, never a false certificate.
+                    let mut ol = o.clone();
+                    ol.max_nodes = 3;
+                    let hl = solve(&ol, true);
+                    assert!(
+                        hl.bound <= base.obj + tol,
+                        "limited bound {} above {}",
+                        hl.bound,
+                        base.obj
+                    );
+                    if hl.status != MilpStatus::Optimal {
+                        limited += 1;
+                    } else {
+                        assert!((hl.obj - base.obj).abs() <= tol);
+                    }
+                }
+                MilpStatus::Infeasible => {
+                    infeasible += 1;
+                    assert_eq!(
+                        h.status,
+                        MilpStatus::Infeasible,
+                        "route on an infeasible problem: {:?}",
+                        h.status
+                    );
+                }
+                other => panic!("batched search ended {other:?}"),
+            }
+        }
+        let runs = super::highs_env::RUNS.with(|r| r.get()) - runs0;
+        eprintln!("optimal {optimal} infeasible {infeasible} limited {limited} runs {runs}");
+        assert!(
+            // Measured: 128 optimal, 22 infeasible (21 reaching the search; one is
+            // proved before it), 46 node-limited, 277 searches. Runs beyond the two per
+            // optimal problem are infeasible problems the search itself refuted.
+            optimal > 100 && infeasible > 10 && limited > 20 && runs >= 2 * optimal + 10,
+            "probe fired too little: optimal {optimal} infeasible {infeasible} limited {limited} runs {runs}"
+        );
+    }
+
+    /// Stage 1d-3 gate: the HiGHS-design search (translated control, node queue, local
+    /// domain, `highs_eval` evaluation, `highs_branch` reliability strong branching) run
+    /// on the working LP the batched search has at its root reaches the batched
+    /// search's certified optimum on random pure-integer and mixed MILPs, closes its own
+    /// gap, and returns a point feasible on the original rows, bounds and integrality.
+    #[test]
+    fn highs_search_reaches_the_certified_optimum() {
+        // Pinned to the pre-graduation defaults (batched search, no HiGHS root): this
+        // test's subject and measured counts belong to that configuration.
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
+        use super::highs_branch::e2e::{E2eResult, E2E};
+        let mut seed = 31u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut problems, mut optimal, mut infeasible) = (0usize, 0usize, 0usize);
+        let mut tot = E2eResult::default();
+        for it in 0..120 {
+            let mixed = it % 2 == 1;
+            let ns = rnd(10, 20) as usize;
+            let m = rnd(6, 12) as usize;
+            let is_int: Vec<bool> = (0..ns).map(|_| !mixed || rnd(0, 2) != 0).collect();
+            let l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 10) as f64).collect();
+            let c: Vec<f64> = (0..ns)
+                .map(|_| rnd(-9, 9) as f64 + 0.5 * rnd(0, 1) as f64)
+                .collect();
+            let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+            let mut b = Vec::new();
+            for row in rows.iter_mut() {
+                for j in 0..ns {
+                    if rnd(0, 2) != 0 {
+                        let v = rnd(-5, 7);
+                        if v != 0 {
+                            row.push((j, v as f64));
+                        }
+                    }
+                }
+                b.push(rnd(5, 30) as f64);
+            }
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            for (i, row) in rows.iter().enumerate() {
+                for &(j, v) in row {
+                    cols[j].push((i, v));
+                }
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let o = opts(ns, ints);
+            E2E.with(|e| *e.borrow_mut() = Some(E2eResult::default()));
+            let r = solve_milp_node_search(csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, None, None, None);
+            let h = E2E.with(|e| e.borrow_mut().take().unwrap());
+            if !h.ran {
+                continue;
+            }
+            problems += 1;
+            assert!(
+                !h.stopped_by_limit,
+                "the HiGHS-design search hit its node limit"
+            );
+            match r.status {
+                MilpStatus::Optimal => {
+                    optimal += 1;
+                    let tol = 1e-6 * (1.0 + r.obj.abs());
+                    let (x, v) = h.best.clone().expect("HiGHS-design search found no point");
+                    assert!((v - r.obj).abs() <= tol, "optimum {v} vs batched {}", r.obj);
+                    assert!(
+                        h.bound >= r.obj - tol && h.bound <= v + tol,
+                        "gap not closed: bound {} obj {v}",
+                        h.bound
+                    );
+                    for (i, row) in rows.iter().enumerate() {
+                        let a: f64 = row.iter().map(|&(j, w)| w * x[j]).sum();
+                        assert!(a <= b[i] + 1e-6 * (1.0 + b[i].abs()), "row {i} violated");
+                    }
+                    for j in 0..ns {
+                        assert!(x[j] >= l[j] - 1e-6 && x[j] <= u[j] + 1e-6, "bound violated");
+                        if is_int[j] {
+                            assert!((x[j] - x[j].round()).abs() <= 1e-6, "integrality violated");
+                        }
+                    }
+                }
+                MilpStatus::Infeasible => {
+                    infeasible += 1;
+                    assert!(h.best.is_none(), "point found in an infeasible problem");
+                }
+                other => panic!("batched search ended {other:?}"),
+            }
+            tot.nodes += h.nodes;
+            tot.commits += h.commits;
+            tot.branched += h.branched;
+            tot.sb_iters += h.sb_iters;
+        }
+        eprintln!("problems {problems} optimal {optimal} infeasible {infeasible} {tot:?}");
+        assert!(
+            // Measured (with the `HighsPseudocost` translation): 120 problems, all
+            // optimal; 3875 nodes, 2039 branchings, 89 strong-branching commitments,
+            // 1888 strong-branching LP iterations, 1600 re-evaluations.
+            problems > 100
+                && optimal > 100
+                && tot.branched > 1000
+                && tot.commits > 40
+                && tot.sb_iters > 900,
+            "probe fired too little: problems {problems} optimal {optimal} {tot:?}"
+        );
+    }
+
+    /// The HiGHS-design search's dual bound counts the queue's suboptimal nodes.
+    ///
+    /// A node whose bound is above the optimality limit (the incumbent less the gap
+    /// allowance) but below the cutoff leaves the active queue for the suboptimal set:
+    /// it is not searched, but it still bounds the optimum from below. The search ends
+    /// when no active node is left, and its bound was `min(incumbent, best queued
+    /// bound)` only while an *active* node remained (`NodeQueue::is_empty` counts
+    /// active nodes only), so a search that ended with suboptimal nodes reported the
+    /// incumbent itself as the bound: above the optimum whenever the incumbent was not
+    /// optimal. Found on neos17 (`DISCOPT_HIGHS_SEARCH_CUT_LP=1
+    /// DISCOPT_HIGHS_SEPA_NODE=1`, MIPLIB optimum 0.1500025774): `optimal`,
+    /// objective 0.150069, bound 0.150069; reproduced deterministically from a seeded
+    /// incumbent at 0.15005, where the node holding the optimum was queued as
+    /// suboptimal at bound 0.149966 (optimality limit 0.14995) and the search reported
+    /// 0.15005. Here, a 1 % gap on random MILPs: every reported bound must stay at or
+    /// below the optimum the exact search certifies on the same problem.
+    #[test]
+    fn highs_search_bound_counts_suboptimal_nodes() {
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
+        use super::highs_branch::e2e::{E2eResult, E2E};
+        let mut seed = 97u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut checked, mut above) = (0usize, 0usize);
+        for it in 0..80 {
+            let mixed = it % 2 == 1;
+            let ns = rnd(10, 18) as usize;
+            let m = rnd(6, 10) as usize;
+            let is_int: Vec<bool> = (0..ns).map(|_| !mixed || rnd(0, 2) != 0).collect();
+            let l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 10) as f64).collect();
+            let c: Vec<f64> = (0..ns)
+                .map(|_| rnd(-9, 9) as f64 + 0.5 * rnd(0, 1) as f64)
+                .collect();
+            let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+            let mut b = Vec::new();
+            for row in rows.iter_mut() {
+                for j in 0..ns {
+                    if rnd(0, 2) != 0 {
+                        let v = rnd(-5, 7);
+                        if v != 0 {
+                            row.push((j, v as f64));
+                        }
+                    }
+                }
+                b.push(rnd(5, 30) as f64);
+            }
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            for (i, row) in rows.iter().enumerate() {
+                for &(j, v) in row {
+                    cols[j].push((i, v));
+                }
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            // The exact optimum (the batched search, gap 1e-9).
+            let exact = solve_milp_node_search(
+                csc.clone(),
+                m,
+                n,
+                &cf,
+                &lf,
+                &uf,
+                &b,
+                0.0,
+                &opts(ns, ints.clone()),
+                None,
+                None,
+                None,
+            );
+            if exact.status != MilpStatus::Optimal {
+                continue;
+            }
+            // The HiGHS-design search at a loose gap, from no incumbent, so its first
+            // incumbents are rarely optimal and nodes within the gap of them become
+            // suboptimal.
+            let mut o = opts(ns, ints);
+            o.heuristics = false;
+            E2E.with(|e| {
+                *e.borrow_mut() = Some(E2eResult {
+                    cfg_gap_tol: Some(0.01),
+                    cfg_no_initial: true,
+                    ..Default::default()
+                })
+            });
+            let _ = solve_milp_node_search(csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, None, None, None);
+            let h = E2E.with(|e| e.borrow_mut().take().unwrap());
+            if !h.ran || h.stopped_by_limit || !h.complete {
+                continue;
+            }
+            let Some((_, inc)) = h.best.clone() else {
+                continue;
+            };
+            checked += 1;
+            let tol = 1e-6 * (1.0 + exact.obj.abs());
+            if inc > exact.obj + tol {
+                above += 1;
+            }
+            assert!(
+                h.bound <= exact.obj + tol,
+                "problem {it}: the search's bound {} is above the optimum {} (incumbent {inc})",
+                h.bound,
+                exact.obj
+            );
+        }
+        // The probe must have met searches that ended on a suboptimal incumbent, the
+        // only case where the bound and the incumbent differ. Measured (seed 97, gap
+        // 0.01): 80 searches checked, 6 ended on a suboptimal incumbent; before the
+        // fix problem 15 (optimum -231, incumbent -229) reported -229 as its bound.
+        eprintln!("checked {checked} incumbent above the optimum {above}");
+        assert!(
+            checked >= 60 && above >= 3,
+            "probe fired too little: {checked} {above}"
+        );
+    }
+
+    /// Stage 1d-2 gate (`docs/dev/highs-mip-replacement-plan.md`): the HiGHS-search node
+    /// evaluation (`highs_eval`) against `solve_node` on every node of real searches over
+    /// random pure-integer and mixed MILPs. Same box: verdicts and bounds agree bit for
+    /// bit. Full evaluation (local-domain propagation, LP, reduced-cost fixing against a
+    /// cutoff just above the optimum, re-evaluation): never prunes a box holding the
+    /// reference optimum, never bounds above it, never removes it from the domain.
+    #[test]
+    fn highs_eval_agrees_with_solve_node_and_never_cuts_the_optimum() {
+        // Pinned to the pre-graduation defaults (batched search, no HiGHS root): this
+        // test's subject and measured counts belong to that configuration.
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
+        use super::highs_eval::diff::{EvalDiff, DIFF};
+        let mut seed = 7u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let mut total = super::highs_eval::diff::DiffStats::default();
+        let mut problems = 0usize;
+        for it in 0..160 {
+            let mixed = it % 2 == 1;
+            let ns = rnd(10, 20) as usize;
+            let m = rnd(6, 12) as usize;
+            let is_int: Vec<bool> = (0..ns).map(|_| !mixed || rnd(0, 2) != 0).collect();
+            let l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 10) as f64).collect();
+            let c: Vec<f64> = (0..ns)
+                .map(|_| rnd(-9, 9) as f64 + 0.5 * rnd(0, 1) as f64)
+                .collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            for i in 0..m {
+                for col in cols.iter_mut().take(ns) {
+                    if rnd(0, 2) != 0 {
+                        let v = rnd(-5, 7);
+                        if v != 0 {
+                            col.push((i, v as f64));
+                        }
+                    }
+                }
+                b.push(rnd(5, 30) as f64);
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let base = opts(ns, ints);
+            let r0 = solve_milp_node_search(
+                csc.clone(),
+                m,
+                n,
+                &cf,
+                &lf,
+                &uf,
+                &b,
+                0.0,
+                &base,
+                None,
+                None,
+                None,
+            );
+            if r0.status != MilpStatus::Optimal {
+                continue;
+            }
+            problems += 1;
+            // Same-box arm: no node propagation or fixing in `solve_node`, so its box is
+            // the node's; the full arm runs the default search.
+            for same in [true, false] {
+                let mut o = base.clone();
+                if same {
+                    o.node_propagation = false;
+                    o.reduced_cost_fixing = false;
+                }
+                DIFF.with(|d| {
+                    *d.borrow_mut() = Some(EvalDiff {
+                        reference: (!same).then(|| (r0.x.clone(), r0.obj)),
+                        stats: Default::default(),
+                    })
+                });
+                let r = solve_milp_node_search(
+                    csc.clone(),
+                    m,
+                    n,
+                    &cf,
+                    &lf,
+                    &uf,
+                    &b,
+                    0.0,
+                    &o,
+                    None,
+                    None,
+                    None,
+                );
+                assert_eq!(r.status, MilpStatus::Optimal);
+                let st = DIFF.with(|d| d.borrow_mut().take().unwrap()).stats;
+                assert!(
+                    st.same_box_mismatch.is_empty(),
+                    "same-box mismatch: {:?}",
+                    st.same_box_mismatch
+                );
+                assert!(st.unsound.is_empty(), "unsound: {:?}", st.unsound);
+                total.nodes += st.nodes;
+                total.same_box += st.same_box;
+                total.full += st.full;
+                total.ref_in_box += st.ref_in_box;
+                total.stronger_prunes += st.stronger_prunes;
+                let (a, e) = (&mut total.eval, &st.eval);
+                a.evaluations += e.evaluations;
+                a.domain_infeasible += e.domain_infeasible;
+                a.lp_infeasible += e.lp_infeasible;
+                a.bound_exceeding += e.bound_exceeding;
+                a.integral += e.integral;
+                a.untrusted += e.untrusted;
+                a.open += e.open;
+                a.redcost_fixings += e.redcost_fixings;
+                a.reevaluations += e.reevaluations;
+            }
+        }
+        eprintln!("problems {problems} {total:?}");
+        let e = &total.eval;
+        assert!(
+            // Measured (top-level solves only; sub-MIP batches excluded): 160 problems,
+            // 3108 same-box, 446 with x* in the box, 13 domain- and 113 LP-infeasible,
+            // 933 bound-exceeding, 4053 fixings, 982 re-evaluations.
+            problems > 100
+                && total.same_box > 1500
+                && total.ref_in_box > 220
+                && e.domain_infeasible > 6
+                && e.lp_infeasible > 55
+                && e.bound_exceeding > 450
+                && e.redcost_fixings > 2000
+                && e.reevaluations > 450,
+            "probe fired too little: problems {problems} {total:?}"
+        );
+    }
+
+    /// Gap plan §12.35: the MILP presolve path (`solve_presolved`) must reach the same
+    /// certified optimum as the unpresolved search on random mixed-integer problems, with a
+    /// postsolved point feasible on the original rows. Covers the continuous columns the
+    /// enumeration test in `milp_presolve` cannot (aggregator, doubleton substitutions).
+    /// `MilpOptions::max_stall_nodes` (HiGHS `mip_max_stall_nodes`, set for heuristic
+    /// sub-MIPs by `DISCOPT_HIGHS_SUBMIP_LIMITS`): a search stopped by the stall rule is
+    /// a limit stop, never a certificate -- its bound stays at or below the optimum and
+    /// an `Optimal` it reports is the true optimum. Random knapsack-like integer
+    /// programs; the rule must actually fire (CLAUDE.md §6).
+    #[test]
+    fn stall_node_limit_stops_without_a_false_certificate() {
+        let _guard = crate::profile::test_guard();
+        let mut seed = 0x51a1_u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut compared, mut stopped) = (0usize, 0u64);
+        for _ in 0..30 {
+            let ns = rnd(10, 16) as usize;
+            let m = 3usize;
+            let n = ns + m;
+            let mut a = vec![0.0; m * n];
+            for i in 0..m {
+                for j in 0..ns {
+                    a[i * n + j] = rnd(1, 9) as f64;
+                }
+                a[i * n + ns + i] = 1.0;
+            }
+            let b: Vec<f64> = (0..m).map(|_| rnd(15, 30) as f64).collect();
+            let mut c: Vec<f64> = (0..ns).map(|_| -(rnd(3, 11) as f64)).collect();
+            c.extend(std::iter::repeat_n(0.0, m));
+            let l = vec![0.0; n];
+            let mut u = vec![1.0; ns];
+            u.extend(std::iter::repeat_n(INF, m));
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let o = opts(ns, (0..ns).collect());
+            let plain = solve_milp(&lp, &b, 0.0, &o);
+            if plain.status != MilpStatus::Optimal {
+                continue;
+            }
+            let mut os = o.clone();
+            os.max_stall_nodes = 1;
+            crate::profile::set_enabled(true);
+            crate::profile::reset();
+            let r = solve_milp(&lp, &b, 0.0, &os);
+            stopped += crate::profile::counter(crate::profile::Ctr::SearchStallNodeStops);
+            crate::profile::set_enabled(false);
+            assert!(
+                r.bound <= plain.obj + 1e-6 * (1.0 + plain.obj.abs()),
+                "stall-stopped bound {} above the optimum {}",
+                r.bound,
+                plain.obj
+            );
+            if r.status == MilpStatus::Optimal {
+                assert!((r.obj - plain.obj).abs() <= 1e-6 * (1.0 + plain.obj.abs()));
+            }
+            compared += 1;
+        }
+        assert!(compared >= 20, "only {compared} compared");
+        assert!(stopped >= 1, "the stall rule never fired");
+    }
+
+    /// `DISCOPT_HIGHS_SUBMIP_PRESOLVE` (HiGHS `solveSubMip` presolves every sub-MIP): a
+    /// solve inside a heuristic sub-MIP (`SubMipNest`) runs the MILP presolve, a merely
+    /// nested solve does not, and the optimum is the plain solve's. Random integer
+    /// programs `A x + s = b` with a fixed column and a singleton row each, so presolve
+    /// always has something to remove. Counts what it checked (CLAUDE.md §6).
+    #[test]
+    fn heuristic_sub_mips_are_presolved_and_keep_the_optimum() {
+        let _guard = crate::profile::test_guard();
+        let mut seed = 0x5ab_u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut compared, mut presolved_in_sub, mut presolved_nested) = (0usize, 0usize, 0usize);
+        for _ in 0..40 {
+            let ns = rnd(4, 7) as usize;
+            let m = rnd(2, 4) as usize + 1;
+            let n = ns + m;
+            let mut a = vec![0.0; m * n];
+            for i in 0..m - 1 {
+                for j in 0..ns {
+                    a[i * n + j] = rnd(-2, 4) as f64;
+                }
+            }
+            // A singleton row x_0 <= 2.
+            a[(m - 1) * n] = 1.0;
+            for i in 0..m {
+                a[i * n + ns + i] = 1.0;
+            }
+            let mut b: Vec<f64> = (0..m - 1).map(|_| rnd(3, 12) as f64).collect();
+            b.push(2.0);
+            let c: Vec<f64> = (0..ns)
+                .map(|_| -(rnd(1, 5) as f64))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .chain(std::iter::repeat_n(0.0, m))
+                .collect();
+            let mut l = vec![0.0; n];
+            let mut u: Vec<f64> = (0..ns).map(|_| rnd(1, 4) as f64).collect();
+            u.extend(std::iter::repeat_n(INF, m));
+            // A fixed column.
+            l[ns - 1] = 1.0;
+            u[ns - 1] = 1.0;
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            // Heuristics off: no sub-MIPs of its own, so the counter sees this solve's
+            // presolve only.
+            let mut o = opts(ns, (0..ns).collect());
+            o.heuristics = false;
+            let plain = solve_milp(&lp, &b, 0.0, &o);
+            let runs = |f: &dyn Fn() -> MilpResult| {
+                crate::profile::set_enabled(true);
+                crate::profile::reset();
+                let r = f();
+                let k = crate::profile::counter(crate::profile::Ctr::MilpPresolveRuns);
+                crate::profile::set_enabled(false);
+                (r, k)
+            };
+            let (sub, k_sub) = runs(&|| {
+                let (_d, _) = MilpDepthGuard::enter();
+                let _n = SubMipNest::enter();
+                solve_milp(&lp, &b, 0.0, &o)
+            });
+            let (nested, k_nested) = runs(&|| {
+                let (_d, _) = MilpDepthGuard::enter();
+                solve_milp(&lp, &b, 0.0, &o)
+            });
+            if plain.status != MilpStatus::Optimal {
+                continue;
+            }
+            for (r, name) in [(&sub, "sub-MIP"), (&nested, "nested")] {
+                assert_eq!(r.status, MilpStatus::Optimal, "{name}: {r:?}");
+                assert!(
+                    (r.obj - plain.obj).abs() <= 1e-6 * (1.0 + plain.obj.abs()),
+                    "{name}: obj {} vs plain {}",
+                    r.obj,
+                    plain.obj
+                );
+            }
+            if submip_presolve_enabled() {
+                assert!(k_sub >= 1, "the sub-MIP solve was not presolved");
+            }
+            presolved_in_sub += (k_sub >= 1) as usize;
+            presolved_nested += (k_nested >= 1) as usize;
+            compared += 1;
+        }
+        assert!(compared >= 20, "only {compared} problems compared");
+        assert_eq!(
+            presolved_nested, 0,
+            "a nested non-heuristic solve was presolved"
+        );
+        if submip_presolve_enabled() {
+            assert_eq!(presolved_in_sub, compared);
+        } else {
+            assert_eq!(presolved_in_sub, 0);
+        }
+    }
+
+    #[test]
+    fn milp_presolve_keeps_the_certified_optimum_on_mixed_problems() {
+        use crate::bnb::milp_presolve::{presolve, RowForm};
+        let mut seed = 99u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut compared, mut optimal, mut aggregations) = (0usize, 0usize, 0usize);
+        let mut dominated = 0usize;
+        let mut fallbacks = 0usize;
+        let mut presolve_infeasible = 0usize;
+        let mut red_implied = 0usize;
+        for _ in 0..300 {
+            let ns = rnd(3, 7) as usize;
+            let m = rnd(2, 6) as usize;
+            let is_int: Vec<bool> = (0..ns).map(|_| rnd(0, 1) == 0).collect();
+            let mut l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let mut u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 5) as f64).collect();
+            let mut c: Vec<f64> = (0..ns).map(|_| rnd(-4, 4) as f64).collect();
+            let mut rows: Vec<(Vec<usize>, Vec<f64>, bool, f64)> = Vec::new(); // (cols, vals, eq, b)
+            for _ in 0..m {
+                let mut ri = Vec::new();
+                let mut rv = Vec::new();
+                for j in 0..ns {
+                    if rnd(0, 1) == 0 {
+                        let v = rnd(-3, 3);
+                        if v != 0 {
+                            ri.push(j);
+                            rv.push(v as f64);
+                        }
+                    }
+                }
+                if ri.is_empty() {
+                    continue;
+                }
+                rows.push((ri, rv, rnd(0, 3) == 0, rnd(-4, 6) as f64));
+            }
+            // An aggregation row on a wide continuous column.
+            if let Some(sj) = (0..ns).find(|&j| !is_int[j]) {
+                l[sj] = -50.0;
+                u[sj] = 50.0;
+                let others: Vec<usize> = (0..ns).filter(|&j| j != sj).take(3).collect();
+                let mut ri = others.clone();
+                let mut rv: Vec<f64> = others.iter().map(|_| rnd(1, 2) as f64).collect();
+                ri.push(sj);
+                rv.push(1.0);
+                rows.push((ri, rv, true, rnd(-2, 2) as f64));
+                c[sj] = rnd(-2, 2) as f64;
+            }
+            // Half-unbounded continuous columns with nonnegative cost: their dual
+            // constraints bound row duals, which the dominated-column rule uses.
+            for j in 0..ns {
+                if !is_int[j] && Some(j) != (0..ns).find(|&k| !is_int[k]) && rnd(0, 1) == 0 {
+                    u[j] = INF;
+                    c[j] = rnd(0, 3) as f64;
+                }
+            }
+            let m = rows.len();
+            // Standard form: inequality rows get a slack `a x + s = b`, s >= 0.
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            for (i, (ri, rv, _, _)) in rows.iter().enumerate() {
+                for (&j, &v) in ri.iter().zip(rv) {
+                    cols[j].push((i, v));
+                }
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for (i, (_, _, eq, _)) in rows.iter().enumerate() {
+                if !eq {
+                    cols.push(vec![(i, 1.0)]);
+                    cf.push(0.0);
+                    lf.push(0.0);
+                    uf.push(INF);
+                }
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let b: Vec<f64> = rows.iter().map(|r| r.3).collect();
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let o = opts(ns, ints);
+            // Count aggregations on the same problem in row form.
+            let rf = RowForm {
+                n: ns,
+                rows: rows.iter().map(|r| (r.0.clone(), r.1.clone())).collect(),
+                lo: rows
+                    .iter()
+                    .map(|r| if r.2 { r.3 } else { f64::NEG_INFINITY })
+                    .collect(),
+                up: rows.iter().map(|r| r.3).collect(),
+                c: c.clone(),
+                l: l.clone(),
+                // The engine's INF sentinel is 1e20; the row form uses true infinities.
+                u: u.iter()
+                    .map(|&v| if v >= INF { f64::INFINITY } else { v })
+                    .collect(),
+                is_int: is_int.clone(),
+            };
+            let pr = presolve(&rf, 1e-9, 20);
+            let pre_infeasible = pr.infeasible;
+            let st = pr.stats;
+            aggregations += st.aggregated;
+            dominated += st.dominated_by_derived;
+            red_implied += st.redundant_rows_implied;
+            let base = solve_milp_node_search(
+                csc.clone(),
+                m,
+                n,
+                &cf,
+                &lf,
+                &uf,
+                &b,
+                0.0,
+                &o,
+                None,
+                None,
+                None,
+            );
+            if pre_infeasible {
+                assert_ne!(
+                    base.status,
+                    MilpStatus::Optimal,
+                    "presolve claimed infeasible on a problem with a certified optimum"
+                );
+                presolve_infeasible += 1;
+            }
+            let t0 = std::time::Instant::now();
+            let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, t0) else {
+                fallbacks += 1;
+                continue;
+            };
+            compared += 1;
+            match base.status {
+                MilpStatus::Optimal => {
+                    optimal += 1;
+                    assert_eq!(
+                        pre.status,
+                        MilpStatus::Optimal,
+                        "presolve lost the certificate"
+                    );
+                    assert!(
+                        (pre.obj - base.obj).abs() <= 1e-6 * (1.0 + base.obj.abs()),
+                        "optimum changed: {} vs {}",
+                        pre.obj,
+                        base.obj
+                    );
+                    // The postsolved point satisfies the original rows and integrality.
+                    for (ri, rv, eq, bi) in &rows {
+                        let act: f64 = ri.iter().zip(rv).map(|(&j, &v)| v * pre.x[j]).sum();
+                        let t = 1e-6 * (1.0 + bi.abs());
+                        assert!(
+                            if *eq {
+                                (act - bi).abs() <= t
+                            } else {
+                                act <= bi + t
+                            },
+                            "row violated"
+                        );
+                    }
+                    for j in 0..ns {
+                        assert!(
+                            pre.x[j] >= l[j] - 1e-6 && pre.x[j] <= u[j] + 1e-6,
+                            "bound violated"
+                        );
+                        if is_int[j] {
+                            assert!(
+                                (pre.x[j] - pre.x[j].round()).abs() <= 1e-6,
+                                "integrality violated"
+                            );
+                        }
+                    }
+                }
+                MilpStatus::Infeasible => {
+                    assert_ne!(
+                        pre.status,
+                        MilpStatus::Optimal,
+                        "presolve found a point in an infeasible problem"
+                    );
+                }
+                _ => {}
+            }
+        }
+        eprintln!("compared {compared} optimal {optimal} aggregations {aggregations} dominated(derived) {dominated} fallbacks {fallbacks} presolve_infeasible {presolve_infeasible} redundant-by-implied {red_implied}");
+        assert!(compared > 50 && optimal > 30 && aggregations > 20 && dominated > 10 && red_implied > 10,
+            "probe fired too little: compared {compared} optimal {optimal} aggregations {aggregations} dominated by derived dual bounds {dominated}");
+    }
+
     /// #2163 / #2165 review: #1380's witness `min -x + 3z, x <= M z, x in [0, 10]`,
     /// `z` binary, at `M = 1e6`. The root vertex is `z = 1e-5` (inside `INT_TOL`)
     /// with `x = 10`; its integral realisation `z = 0` misses the row by 10, so the
@@ -9221,9 +15023,10 @@ mod tests {
     /// binary is exactly 1.
     #[test]
     fn snap_refused_root_keeps_its_lp_bound_2163() {
+        // The refusal this test was written around is the pre-graduation engine's (the
+        // HiGHS configuration rounds the root differently); its probe is asserted there.
+        // The bound property holds under both: checked for each.
         let _guard = crate::profile::test_guard();
-        crate::profile::set_enabled(true);
-        crate::profile::reset();
         let a = [1.0, -1e6, 1.0];
         let c = [-1.0, 3.0, 0.0];
         let l = [0.0, 0.0, 0.0];
@@ -9236,32 +15039,47 @@ mod tests {
             l: &l,
             u: &u,
         };
-        let mut root_only = opts(2, vec![1]);
-        // The loop stops once the tree holds this many nodes: 2 lets the root run
-        // and stops as soon as it branches.
-        root_only.max_nodes = 2;
-        let r1 = solve_milp(&lp, &[0.0], 0.0, &root_only);
-        let refused = crate::profile::counter(crate::profile::Ctr::DriverIncumbentSnapRefused);
-        crate::profile::set_enabled(false);
-        assert!(
-            refused >= 1,
-            "the root vertex must be refused at its realisation"
-        );
-        assert!(
-            r1.bound.is_finite(),
-            "root-capped bound {} must be finite",
-            r1.bound
-        );
-        assert!(
-            r1.bound <= -7.0 + 1e-9,
-            "bound {} crosses the optimum -7",
-            r1.bound
-        );
+        let mut checked = 0usize;
+        for legacy in [true, false] {
+            crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(legacy));
+            crate::profile::set_enabled(true);
+            crate::profile::reset();
+            let mut root_only = opts(2, vec![1]);
+            // The loop stops once the tree holds this many nodes: 2 lets the root run
+            // and stops as soon as it branches.
+            root_only.max_nodes = 2;
+            let r1 = solve_milp(&lp, &[0.0], 0.0, &root_only);
+            let refused = crate::profile::counter(crate::profile::Ctr::DriverIncumbentSnapRefused);
+            crate::profile::set_enabled(false);
+            if legacy {
+                assert!(
+                    refused >= 1,
+                    "the root vertex must be refused at its realisation"
+                );
+            }
+            assert!(
+                r1.bound.is_finite(),
+                "legacy={legacy}: root-capped bound {} must be finite",
+                r1.bound
+            );
+            assert!(
+                r1.bound <= -7.0 + 1e-9,
+                "legacy={legacy}: bound {} crosses the optimum -7",
+                r1.bound
+            );
 
-        let r = solve_milp(&lp, &[0.0], 0.0, &opts(2, vec![1]));
-        assert_eq!(r.status, MilpStatus::Optimal, "{r:?}");
-        assert!((r.obj + 7.0).abs() <= 1e-6, "obj {}", r.obj);
-        assert!(r.bound <= -7.0 + 1e-6, "bound {}", r.bound);
+            let r = solve_milp(&lp, &[0.0], 0.0, &opts(2, vec![1]));
+            assert_eq!(r.status, MilpStatus::Optimal, "legacy={legacy}: {r:?}");
+            assert!(
+                (r.obj + 7.0).abs() <= 1e-6,
+                "legacy={legacy}: obj {}",
+                r.obj
+            );
+            assert!(r.bound <= -7.0 + 1e-6, "legacy={legacy}: bound {}", r.bound);
+            checked += 1;
+        }
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(false));
+        assert_eq!(checked, 2);
     }
 
     #[test]
@@ -9291,6 +15109,10 @@ mod tests {
     /// never changes the certified answer.
     #[test]
     fn bound_hook_is_neutral_when_silent_and_only_tightens() {
+        // Pinned to the pre-graduation defaults (batched search, no HiGHS root): this
+        // test's subject and measured counts belong to that configuration.
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         struct Fixed(Option<f64>, AtomicUsize);
@@ -9341,6 +15163,83 @@ mod tests {
             "instance too easy to show anything: {}",
             base.nodes
         );
+        let silent = Arc::new(Fixed(None, AtomicUsize::new(0)));
+        let r0 = run(Some(silent.clone()));
+        assert!(silent.1.load(Ordering::Relaxed) > 0, "the hook never ran");
+        assert_eq!(r0.bound_hook_calls, silent.1.load(Ordering::Relaxed));
+        assert_eq!(r0.bound_hook_raised, 0);
+        assert_eq!((r0.nodes, r0.status), (base.nodes, base.status));
+        assert_eq!(r0.obj, base.obj);
+        let tight = Arc::new(Fixed(Some(base.obj), AtomicUsize::new(0)));
+        let r1 = run(Some(tight.clone()));
+        assert_eq!(r1.status, MilpStatus::Optimal);
+        assert!(
+            (r1.obj - base.obj).abs() <= 1e-9,
+            "{} vs {}",
+            r1.obj,
+            base.obj
+        );
+        assert!(r1.bound_hook_raised > 0, "no node bound was raised");
+        assert!(r1.nodes <= base.nodes, "{} > {}", r1.nodes, base.nodes);
+    }
+
+    /// The bound hook on the HiGHS-design search (stage 1d-6): the route runs with a
+    /// hook attached; a hook that returns `None` is called and changes nothing (same
+    /// nodes, same answer); a valid hook (the true optimum, valid at every node) raises
+    /// node bounds, keeps the certified answer and does not explore more.
+    #[test]
+    fn bound_hook_runs_on_the_highs_search() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        struct Fixed(Option<f64>, AtomicUsize);
+        impl MilpBoundHook for Fixed {
+            fn node_bound(&self, lb: &[f64], ub: &[f64]) -> Option<f64> {
+                assert_eq!((lb.len(), ub.len()), (8, 8));
+                self.1.fetch_add(1, Ordering::Relaxed);
+                self.0
+            }
+        }
+        let w = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut a = w.to_vec();
+        a.push(1.0);
+        let mut c: Vec<f64> = w
+            .iter()
+            .enumerate()
+            .map(|(i, v)| -(v + 0.3 * i as f64 + 0.5))
+            .collect();
+        c.push(0.0);
+        let l = [0.0; 9];
+        let mut u = vec![1.0; 8];
+        u.push(INF);
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 9,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let run = |hook: Option<Arc<dyn MilpBoundHook>>| {
+            let mut o = opts(8, (0..8).collect());
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.heuristics = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.bound_hook = hook;
+            let runs0 = highs_env::RUNS.with(|r| r.get());
+            let r = solve_milp(&lp, &[20.5], 0.0, &o);
+            assert!(
+                highs_env::RUNS.with(|r| r.get()) > runs0,
+                "the solve did not run the HiGHS-design search"
+            );
+            r
+        };
+        let base = run(None);
+        assert_eq!(base.status, MilpStatus::Optimal);
+        assert!(base.nodes > 3, "instance too easy: {} nodes", base.nodes);
         let silent = Arc::new(Fixed(None, AtomicUsize::new(0)));
         let r0 = run(Some(silent.clone()));
         assert!(silent.1.load(Ordering::Relaxed) > 0, "the hook never ran");
@@ -9439,6 +15338,109 @@ mod tests {
             least.nodes,
             least.lp_iters
         );
+    }
+
+    /// The caller's budgets run from the entry of `solve_milp_node_hooked`: what
+    /// presolve (or anything before the search) spent comes off each "seconds from the
+    /// start" budget. Without it a 50 s MILP presolve was followed by a full 20 s
+    /// search (neos-4971100-bodrog: 118 s on a 20 s limit).
+    #[test]
+    fn clock_from_counts_the_time_already_spent() {
+        let mut o = opts(2, vec![0]);
+        o.time_limit_s = Some(10.0);
+        o.stall_time_s = Some(1.0);
+        o.extend_no_incumbent_s = None;
+        o.root_cut_time_s = Some(5.0);
+        let t0 = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        let c = clock_from(&o, t0);
+        let tl = c.time_limit_s.unwrap();
+        assert!((7.0..=8.0).contains(&tl), "{tl}");
+        assert_eq!(c.stall_time_s, Some(0.0), "floored at zero");
+        assert_eq!(c.extend_no_incumbent_s, None);
+        assert_eq!(
+            c.root_cut_time_s,
+            Some(5.0),
+            "the root's own budget is unchanged"
+        );
+        o.time_limit_s = None;
+        o.extend_no_incumbent_s = Some(30.0);
+        let c = clock_from(&o, t0);
+        assert_eq!(c.time_limit_s, None);
+        let ext = c.extend_no_incumbent_s.unwrap();
+        assert!((27.0..=28.0).contains(&ext), "{ext}");
+    }
+
+    /// The stall guard stops a search with no incumbent at its slice only when the
+    /// caller did not offer `extend_no_incumbent_s`; with the offer (the Python engine
+    /// passes both) the search keeps going. On a problem whose only feasible points are
+    /// found by branching (heuristics off), a slice of 0 s stops the search without an
+    /// incumbent, while the same slice with the offer certifies the optimum.
+    #[test]
+    fn stall_guard_yields_to_the_no_incumbent_extension() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        // max sum (v_j) x_j  s.t.  sum w_j x_j = 20 (an equality: x = 0 is infeasible).
+        let w = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let c: Vec<f64> = w.iter().map(|v| -(v + 0.5)).collect();
+        let l = [0.0; 8];
+        let u = [1.0; 8];
+        let lp = LpView {
+            a: &w,
+            m: 1,
+            n: 8,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let run = |extend: Option<f64>| {
+            crate::profile::reset();
+            let mut o = opts(8, (0..8).collect());
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.heuristics = false;
+            o.stall_time_s = Some(0.0);
+            o.time_limit_s = Some(60.0);
+            o.extend_no_incumbent_s = extend;
+            let r = solve_milp(&lp, &[20.0], 0.0, &o);
+            (
+                r,
+                crate::profile::counter(crate::profile::Ctr::MilpStallGuardStop),
+            )
+        };
+        let (stopped, stops) = run(None);
+        let (kept, kept_stops) = run(Some(60.0));
+        crate::profile::set_enabled(false);
+        assert_eq!(
+            stops, 1,
+            "no offer: the guard must stop the search ({stopped:?})"
+        );
+        assert_ne!(stopped.status, MilpStatus::Optimal);
+        assert_eq!(kept_stops, 0, "with the offer the guard must not stop it");
+        assert_eq!(kept.status, MilpStatus::Optimal, "{kept:?}");
+        // Optimum: weights summing to 20 with the largest value: 3+7+10 / 4+6+10 /
+        // 5+7+8 / ... all give value 20 + 0.5 * count; 3+4+5+8 = 20 has four items.
+        assert!((kept.obj - (-22.0)).abs() <= 1e-9, "{}", kept.obj);
+    }
+
+    /// A heuristic sub-solve never inherits the parent's deadline policies: with
+    /// `extend_no_incumbent_s` it ran to the parent's whole budget (gap plan §12.7).
+    #[test]
+    fn sub_solve_options_drop_the_parents_deadline_policies() {
+        let mut o = opts(4, vec![0, 1]);
+        o.extend_no_incumbent_s = Some(60.0);
+        o.stall_time_s = Some(10.0);
+        o.time_limit_s = Some(60.0);
+        let sub = sub_solve_options(&o, 17, Some(vec![1.0, 0.0]));
+        assert_eq!(sub.extend_no_incumbent_s, None);
+        assert_eq!(sub.stall_time_s, None);
+        assert_eq!(sub.max_nodes, 17);
+        assert_eq!(sub.initial_incumbent, Some(vec![1.0, 0.0]));
+        // The caller caps the time limit; the parent's is the starting point.
+        assert_eq!(sub.time_limit_s, Some(60.0));
     }
 
     /// Gap plan P1: with `stall_time_s` set and an incumbent in hand, the stall-point
@@ -9616,10 +15618,159 @@ mod tests {
         assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
     }
 
+    /// The debugger on the HiGHS-design search (the default since stage 1d-5): the
+    /// route runs with a hook attached, the tree it reports is consistent (a node's
+    /// parent was selected before it, its creation was reported before its selection,
+    /// depths nest, every selected node is processed with a final status,
+    /// `Terminated` fires once and last), and the hook changes nothing: nodes and
+    /// objective equal the unhooked solve. MILP presolve does not run with a hook (the
+    /// debugger's boxes are in the model's columns), so that solve has it off too.
+    #[test]
+    fn debug_hook_runs_on_the_highs_search_with_a_consistent_tree() {
+        use crate::bnb::node::NodeStatus;
+        use std::sync::Mutex;
+        #[derive(Clone, Debug)]
+        enum Ev {
+            Select(Vec<NodeLineage>),
+            Process(Vec<NodeLineage>, Vec<NodeLineage>),
+            Terminated,
+            Other,
+        }
+        struct Rec(Mutex<Vec<Ev>>);
+        impl MilpDebugHook for Rec {
+            fn checkpoint(&self, s: &MilpDebugState<'_>) -> MilpDebugControl {
+                let ev = match s.checkpoint {
+                    MilpCheckpoint::AfterSelect => Ev::Select(s.batch_lineage.unwrap().to_vec()),
+                    MilpCheckpoint::AfterProcess => Ev::Process(
+                        s.batch_lineage.unwrap().to_vec(),
+                        s.created.unwrap().to_vec(),
+                    ),
+                    MilpCheckpoint::Terminated => Ev::Terminated,
+                    _ => Ev::Other,
+                };
+                self.0.lock().unwrap().push(ev);
+                MilpDebugControl::Continue
+            }
+        }
+        // A 2x8 market split (equality rows, slack pairs): no cut closes it, so the
+        // search branches.
+        let w = [
+            [12.0, 47.0, 33.0, 18.0, 29.0, 41.0, 7.0, 25.0],
+            [38.0, 9.0, 21.0, 44.0, 16.0, 30.0, 27.0, 13.0],
+        ];
+        let rhs = [106.0, 99.0];
+        let (m, n) = (2, 12);
+        let mut a = vec![0.0; m * n];
+        let mut c = vec![0.0; n];
+        for i in 0..m {
+            for j in 0..8 {
+                a[i * n + j] = w[i][j];
+            }
+            a[i * n + 8 + 2 * i] = 1.0;
+            a[i * n + 9 + 2 * i] = -1.0;
+            c[8 + 2 * i] = 1.0;
+            c[9 + 2 * i] = 1.0;
+        }
+        let l = vec![0.0; n];
+        let mut u = vec![1.0; n];
+        for v in u.iter_mut().skip(8) {
+            *v = 1000.0;
+        }
+        let mut o = opts(n, (0..8).collect());
+        o.presolve = false;
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let base = solve_milp(&lp, &rhs, 0.0, &o);
+        let runs0 = highs_env::RUNS.with(|r| r.get());
+        let rec = Rec(Mutex::new(Vec::new()));
+        let hooked = solve_milp_hooked(
+            SparseCols::from_dense(&a, m, n),
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &rhs,
+            0.0,
+            &o,
+            Some(&rec),
+        );
+        assert!(
+            highs_env::RUNS.with(|r| r.get()) > runs0,
+            "the debugged solve did not run the HiGHS-design search"
+        );
+        assert_eq!(base.status, hooked.status);
+        assert_eq!(
+            base.nodes, hooked.nodes,
+            "node count drifted with the debugger"
+        );
+        assert!((base.obj - hooked.obj).abs() < 1e-12);
+
+        let evs = rec.0.into_inner().unwrap();
+        assert!(matches!(evs.last(), Some(Ev::Terminated)));
+        assert_eq!(
+            evs.iter().filter(|e| matches!(e, Ev::Terminated)).count(),
+            1
+        );
+        let mut selected: HashMap<usize, usize> = HashMap::new(); // id -> depth
+        let mut created: HashSet<usize> = HashSet::new();
+        let mut closed: HashMap<usize, NodeStatus> = HashMap::new();
+        let mut children = 0;
+        for e in &evs {
+            match e {
+                Ev::Select(lin) => {
+                    for l in lin {
+                        if let Some(p) = l.parent {
+                            let pd = *selected.get(&p.0).expect("parent selected earlier");
+                            assert_eq!(l.depth, pd + 1);
+                            assert!(created.contains(&l.id.0), "selected before created");
+                            assert!(l.branch.is_some());
+                            children += 1;
+                        }
+                        selected.insert(l.id.0, l.depth);
+                    }
+                }
+                Ev::Process(lin, cr) => {
+                    for l in cr {
+                        created.insert(l.id.0);
+                    }
+                    for l in lin {
+                        closed.insert(l.id.0, l.status);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            children > 5,
+            "the search barely branched ({children} children)"
+        );
+        for id in selected.keys() {
+            assert!(
+                matches!(
+                    closed.get(id),
+                    Some(NodeStatus::Branched | NodeStatus::Pruned | NodeStatus::Fathomed)
+                ),
+                "node {id} selected but never processed: {:?}",
+                closed.get(id)
+            );
+        }
+    }
+
     /// A no-op debug hook must be bound-neutral: identical status / obj / nodes
     /// vs. no hook (CLAUDE.md §5), while still firing at least one checkpoint.
     #[test]
     fn debug_hook_is_bound_neutral() {
+        // Pinned to the pre-graduation defaults (batched search, no HiGHS root): this
+        // test's subject and measured counts belong to that configuration.
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct Counter(AtomicUsize);
@@ -10016,6 +16167,10 @@ mod tests {
 
     #[test]
     fn presolve_matches_no_presolve() {
+        // Pinned to the pre-graduation defaults (batched search, no HiGHS root): this
+        // test's subject and measured counts belong to that configuration.
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
         // Equality-constrained MILP where FBBT actually fires:
         //   min -x0 - 2x1 - x2  s.t.  x0 + x1 + x2 = 3,  2x1 + x2 + s = 4,
         //   x∈[0,3] integer, s≥0. Presolve must not change the optimum.
@@ -10183,6 +16338,10 @@ mod tests {
         let o = MilpOptions {
             n_struct: 3,
             integer_cols: vec![0, 1, 2],
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
             max_nodes: 5_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -10325,6 +16484,10 @@ pub(crate) mod sparse_milp_diff {
             MilpOptions {
                 n_struct: self.ns,
                 integer_cols: self.int_cols.clone(),
+                implied_int_cols: Vec::new(),
+                max_stall_nodes: 0,
+                max_leaves: 0,
+                max_work: None,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -10360,7 +16523,7 @@ pub(crate) mod sparse_milp_diff {
             }
         }
 
-        fn dense_view(&self) -> LpView<'_> {
+        pub(crate) fn dense_view(&self) -> LpView<'_> {
             LpView {
                 a: &self.a,
                 m: self.m,
@@ -10507,6 +16670,31 @@ pub(crate) mod sparse_milp_diff {
         }
     }
 
+    /// An unbounded MILP holding a feasible point must still be `Unbounded`, with
+    /// no point and `obj = inf`: seeded through the caller's `initial_incumbent`
+    /// (independent of the pre-root heuristics) and through the heuristics. Before
+    /// the fix the HiGHS search took over the root's unbounded evaluation, closed
+    /// the gap against the seed and returned `Optimal 0`.
+    #[test]
+    fn unbounded_milp_with_a_feasible_seed_is_still_unbounded() {
+        let mut checked = 0;
+        for case in panel() {
+            if case.name != "unbounded" {
+                continue;
+            }
+            let mut o = case.opts();
+            o.initial_incumbent = Some(vec![0.0]);
+            let seeded = solve_milp(&case.dense_view(), &case.b, 0.0, &o);
+            let plain = case.solve_dense();
+            for (label, r) in [("seeded", &seeded), ("heuristics", &plain)] {
+                assert_eq!(r.status, MilpStatus::Unbounded, "{label}");
+                assert_eq!(r.obj, f64::INFINITY, "{label}: obj");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 2);
+    }
+
     #[test]
     fn dense_panel_reference_values() {
         for case in panel() {
@@ -10561,6 +16749,10 @@ pub(crate) mod sparse_milp_diff {
     /// engine; the old ones were an under-report of a slower path.
     #[test]
     fn driver_matches_golden() {
+        // Pinned to the pre-graduation defaults (batched search, no HiGHS root): this
+        // test's subject and measured counts belong to that configuration.
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
         for case in panel() {
             let r = case.solve_dense();
             let (status, obj, bound, nodes, iters): (MilpStatus, f64, f64, usize, usize) =
@@ -10614,6 +16806,10 @@ pub(crate) mod sparse_milp_diff {
     /// unchanged; any drift is a per-node-engine regression the panel would miss.
     #[test]
     fn branching_golden() {
+        // Pinned to the pre-graduation defaults (batched search, no HiGHS root): this
+        // test's subject and measured counts belong to that configuration.
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
         let a = [
             3.0, 4.0, 5.0, 2.0, 6.0, 1.0, 1.0, 0.0, //
             2.0, 3.0, 1.0, 5.0, 2.0, 4.0, 0.0, 1.0,
@@ -10632,6 +16828,10 @@ pub(crate) mod sparse_milp_diff {
         let o = MilpOptions {
             n_struct: 6,
             integer_cols: vec![0, 1, 2, 3, 4, 5],
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -10947,6 +17147,10 @@ mod lazy_separation {
             MilpOptions {
                 n_struct: 4,
                 integer_cols: vec![0, 1, 2, 3],
+                implied_int_cols: Vec::new(),
+                max_stall_nodes: 0,
+                max_leaves: 0,
+                max_work: None,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -11252,6 +17456,10 @@ mod node_separation {
             MilpOptions {
                 n_struct: 3,
                 integer_cols: vec![0, 1, 2],
+                implied_int_cols: Vec::new(),
+                max_stall_nodes: 0,
+                max_leaves: 0,
+                max_work: None,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -11540,6 +17748,10 @@ mod lazy_infeasible_node {
         MilpOptions {
             n_struct: 2,
             integer_cols: vec![0, 1],
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -11684,6 +17896,10 @@ mod root_cut_budget_tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: (0..ns).collect(),
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
             max_nodes: 200_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -12472,6 +18688,10 @@ mod tiny_entry_tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: int_cols,
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
             max_nodes: 10_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -12685,5 +18905,710 @@ mod tiny_entry_tests {
         let (gl, gu) = tiny_entry_gate_box(&csc, 2, 5, &l, &u, &b, &o);
         let c = [-1.0, 0.0, 0.1, 0.0, 0.0];
         assert!(relax_noise_entries(&csc, 2, 5, &c, &l, &u, &b, &gl, &gu, &o).is_none());
+    }
+}
+
+#[cfg(test)]
+mod p3_incprop_tests {
+    //! Gap plan P3: `IncProp` (incremental propagation for the primal heuristics) is a
+    //! restriction, never a cut: after any sequence of fixings, every integer point of
+    //! the original box that satisfies the rows and the fixings stays inside the
+    //! propagated box, and an "empty" verdict means there is no such point.
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn incprop_keeps_every_feasible_integer_point() {
+        let mut r = Lcg(0x1c9);
+        let (mut checked_points, mut empty_verdicts, mut tightenings) = (0usize, 0usize, 0usize);
+        for _case in 0..800 {
+            // Rows a.x + s = b over 4 integer columns in [0, 3] and one slack per row in
+            // [0, S] (S finite or INF), so each row is a ranged inequality.
+            let (nx, m) = (4usize, 3usize);
+            let n = nx + m;
+            let mut a = vec![0.0; m * n];
+            let mut b = vec![0.0; m];
+            for i in 0..m {
+                for j in 0..nx {
+                    if r.next() < 0.7 {
+                        a[i * n + j] = (r.next() * 7.0).floor() - 3.0;
+                    }
+                }
+                a[i * n + nx + i] = 1.0;
+                b[i] = (r.next() * 10.0).floor() - 2.0;
+            }
+            let mut l = vec![0.0; n];
+            let mut u = vec![3.0; n];
+            for i in 0..m {
+                l[nx + i] = 0.0;
+                u[nx + i] = if r.next() < 0.5 {
+                    INF
+                } else {
+                    (r.next() * 8.0).floor()
+                };
+            }
+            let is_int: Vec<bool> = (0..n).map(|j| j < nx).collect();
+            let csc = SparseCols::from_dense(&a, m, n);
+            // Enumerate the feasible integer points (slack determined by the row).
+            let mut feas: Vec<Vec<f64>> = Vec::new();
+            for code in 0..(4u32.pow(nx as u32)) {
+                let x: Vec<f64> = (0..nx)
+                    .map(|j| ((code / 4u32.pow(j as u32)) % 4) as f64)
+                    .collect();
+                let ok = (0..m).all(|i| {
+                    let act: f64 = (0..nx).map(|j| a[i * n + j] * x[j]).sum();
+                    let s = b[i] - act;
+                    s >= l[nx + i] - 1e-9 && s <= u[nx + i] + 1e-9
+                });
+                if ok {
+                    feas.push(x);
+                }
+            }
+            let mut p = IncProp::new(&csc, m, n, &b, &is_int, &l, &u);
+            let mut ok = true;
+            let mut fixed: Vec<(usize, f64)> = Vec::new();
+            for _ in 0..2 {
+                let j = (r.next() * nx as f64) as usize % nx;
+                let v = (r.next() * 4.0).floor();
+                fixed.push((j, v));
+                ok = p.set(j, v, v);
+                if !ok {
+                    break;
+                }
+            }
+            let consistent: Vec<&Vec<f64>> = feas
+                .iter()
+                .filter(|x| fixed.iter().all(|&(j, v)| x[j] == v))
+                .collect();
+            if !ok {
+                empty_verdicts += 1;
+                assert!(
+                    consistent.is_empty(),
+                    "empty verdict, but {} feasible points remain",
+                    consistent.len()
+                );
+                continue;
+            }
+            for j in 0..nx {
+                if p.l[j] > 0.0 || p.u[j] < 3.0 {
+                    tightenings += 1;
+                }
+            }
+            for x in consistent {
+                checked_points += 1;
+                for j in 0..nx {
+                    assert!(
+                        x[j] >= p.l[j] - 1e-9 && x[j] <= p.u[j] + 1e-9,
+                        "feasible point {x:?} cut by propagated box [{:?}, {:?}]",
+                        &p.l[..nx],
+                        &p.u[..nx]
+                    );
+                }
+            }
+        }
+        eprintln!("IncProp: {checked_points} points, {empty_verdicts} empty verdicts, {tightenings} tightenings");
+        assert!(checked_points > 500, "only {checked_points} points checked");
+        assert!(
+            empty_verdicts > 5 && tightenings > 50,
+            "propagation never fired"
+        );
+    }
+}
+
+/// The ported HiGHS separators over a box with a column bounded only through the
+/// objective (`DISCOPT_HIGHS_SEPA_CUTOFF_BOX`; measured on `gsvm2rl3`, where 61 such
+/// columns made every `transform` refuse and every root and node round return 0 cuts).
+#[cfg(test)]
+mod sepa_cutoff_box_tests {
+    use super::*;
+    use crate::lp::highs_cutgen::bridge::{separate_node, NodeSepa, RootSeparation, StdFormRound};
+
+    /// `min s + 0.6 z` s.t. `u + 100 z >= 1` (a big-M row, as in `gsvm2rl3`), `s >= u`,
+    /// `s >= -u`, `z` binary, `u` free, `s >= 0`, in discopt's standard form (columns
+    /// `z, u, s` then one slack per row). The LP optimum is `z = 0.01, u = s = 0`. Only an
+    /// objective cutoff bounds `u`: with the incumbent [`INC`] = 1.5, `|u| <= s <= 1.5`,
+    /// over which `u >= 1 - 2.5 z` is valid and cuts the LP point off.
+    struct Toy {
+        csc: SparseCols,
+        b: Vec<f64>,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        is_int: Vec<bool>,
+        sol: crate::lp::simplex::LpSolve,
+    }
+
+    const M: usize = 3;
+    const N: usize = 6;
+    const NS: usize = 3;
+
+    fn toy() -> Toy {
+        #[rustfmt::skip]
+        let a = vec![
+            // z     u     s    sl0   sl1   sl2
+          100.0,  1.0,  0.0, -1.0,  0.0,  0.0, // u + 100z - sl0 = 1
+            0.0, -1.0,  1.0,  0.0, -1.0,  0.0, // s - u - sl1 = 0
+            0.0,  1.0,  1.0,  0.0,  0.0, -1.0, // s + u - sl2 = 0
+        ];
+        let csc = SparseCols::from_dense(&a, M, N);
+        let b = vec![1.0, 0.0, 0.0];
+        let c = vec![0.6, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let l = vec![0.0, -INF, 0.0, 0.0, 0.0, 0.0];
+        let u = vec![1.0, INF, INF, INF, INF, INF];
+        let is_int = vec![true, false, false, false, false, false];
+        let sol = solve_lp_root_csc(&csc, M, N, &c, &l, &u, &b, &SimplexOptions::default());
+        assert_eq!(sol.status, LpStatus::Optimal);
+        assert!((sol.obj - 0.006).abs() < 1e-9, "LP optimum {}", sol.obj);
+        assert!((sol.x[0] - 0.01).abs() < 1e-9, "z = {}", sol.x[0]);
+        Toy {
+            csc,
+            b,
+            c,
+            l,
+            u,
+            is_int,
+            sol,
+        }
+    }
+
+    fn round<'a>(t: &'a Toy, l: &'a [f64], u: &'a [f64]) -> StdFormRound<'a> {
+        StdFormRound {
+            csc: &t.csc,
+            m: M,
+            n: N,
+            ns: NS,
+            b: &t.b,
+            l,
+            u,
+            is_int: &t.is_int,
+            x: &t.sol.x,
+            y: &t.sol.dual,
+            basic_vars: &t.sol.basis.basic_vars,
+            deadline: None,
+        }
+    }
+
+    fn cutoff_box(t: &Toy, inc: Option<f64>, obj_const: f64) -> Option<(Vec<f64>, Vec<f64>)> {
+        sepa_cutoff_box(
+            &t.csc, M, N, &t.l, &t.u, &t.b, &t.is_int, &t.c, inc, obj_const, 1e-9,
+        )
+    }
+
+    /// The incumbent value the tests separate against.
+    const INC: f64 = 1.5;
+
+    /// Integer-feasible points no worse than [`INC`], which every cut must keep:
+    /// `z = 1` with `u` across `[-0.9, 0.9]`, and `z = 0, u = 1`; `s = |u|`.
+    const KEEP: [[f64; NS]; 5] = [
+        [1.0, 0.0, 0.0],
+        [1.0, -0.9, 0.9],
+        [1.0, 0.9, 0.9],
+        [0.0, 1.0, 1.0],
+        [0.0, 1.5, 1.5],
+    ];
+
+    /// Every cut `coeffs . x >= rhs` holds at each [`KEEP`] point and the LP point
+    /// violates it. Returns the executed comparisons (CLAUDE.md §6).
+    fn assert_cuts(cuts: &[GomoryCut], x_lp: &[f64]) -> usize {
+        let mut checks = 0;
+        for k in cuts {
+            let act = |x: &[f64]| -> f64 { (0..NS).map(|j| k.coeffs[j] * x[j]).sum() };
+            for p in &KEEP {
+                assert!(
+                    act(p) >= k.rhs - 1e-9,
+                    "cut {:?} >= {} cuts off {p:?}",
+                    k.coeffs,
+                    k.rhs
+                );
+                checks += 1;
+            }
+            assert!(
+                act(x_lp) < k.rhs - 1e-6,
+                "cut {:?} >= {} does not separate the LP point",
+                k.coeffs,
+                k.rhs
+            );
+            checks += 1;
+        }
+        checks
+    }
+
+    #[test]
+    fn cutoff_box_bounds_the_objective_bounded_column() {
+        let t = toy();
+        assert!(
+            cutoff_box(&t, None, 0.0).is_none(),
+            "no incumbent, no cutoff box"
+        );
+        let (gl, gu) = cutoff_box(&t, Some(INC), 0.0).expect("the incumbent stays in the box");
+        assert!(
+            gl[1] >= -INC - 1e-9 && gu[1] <= INC + 1e-9,
+            "u in [{}, {}]",
+            gl[1],
+            gu[1]
+        );
+        assert!(gu[2] <= INC + 1e-9, "s <= {}", gu[2]);
+        assert!(
+            gl[0] == 0.0 && gu[0] == 1.0,
+            "z must stay free: [{}, {}]",
+            gl[0],
+            gu[0]
+        );
+        for j in 0..N {
+            assert!(gl[j] >= t.l[j] && gu[j] <= t.u[j], "column {j} loosened");
+        }
+        // The cutoff is `incumbent - obj_const`.
+        let (_, gu2) = cutoff_box(&t, Some(INC + 1.0), 1.0).unwrap();
+        assert!(gu2[2] <= INC + 1e-9, "s <= {}", gu2[2]);
+        // A cutoff below every integer point empties the box: nothing to separate for.
+        assert!(cutoff_box(&t, Some(0.5), 0.0).is_none());
+    }
+
+    #[test]
+    fn root_round_separates_only_over_the_cutoff_box() {
+        let t = toy();
+        // The global box: `u` is free, so every aggregation holding it is refused.
+        let mut raw = RootSeparation::new(NS, M, 7, false);
+        assert_eq!(raw.round(&round(&t, &t.l, &t.u)).generated, 0);
+        let (gl, gu) = cutoff_box(&t, Some(INC), 0.0).unwrap();
+        let mut hs = RootSeparation::new(NS, M, 7, false);
+        let rc = hs.round(&round(&t, &gl, &gu));
+        assert!(rc.generated > 0, "no cut over the cutoff box");
+        let cuts: Vec<GomoryCut> = rc.cuts.into_iter().map(|(_, k)| k).collect();
+        assert!(assert_cuts(&cuts, &t.sol.x) > 0, "no cut selected");
+    }
+
+    #[test]
+    fn node_round_separates_only_over_the_cutoff_box() {
+        let t = toy();
+        let p = NodeSepa {
+            node_l: &t.l[..NS],
+            node_u: &t.u[..NS],
+            model_rows: M,
+            model_nnz: 7,
+            vbounds: None,
+            seed: 0,
+            top_level: false,
+            max_cuts: 10,
+        };
+        assert!(separate_node(&round(&t, &t.l, &t.u), &p).is_empty());
+        let (gl, gu) = cutoff_box(&t, Some(INC), 0.0).unwrap();
+        let cuts = separate_node(&round(&t, &gl, &gu), &p);
+        assert!(
+            assert_cuts(&cuts, &t.sol.x) > 0,
+            "no node cut over the cutoff box"
+        );
+    }
+}
+
+/// Status edge-case matrix (S1 of the 2026-11-14 review): small MILPs with answers
+/// known by enumeration, each solved plain, without heuristics, and seeded with the
+/// optimum, a worse feasible point and an infeasible point, through the production
+/// entry (`solve_milp`, presolve included). Every new heuristic or incumbent path
+/// must keep these green; the `Optimal 0` on a seeded unbounded MILP (`7207bbb6`) is
+/// the class this guards.
+#[cfg(test)]
+mod status_matrix {
+    use super::sparse_milp_diff::Case;
+    use super::*;
+
+    const BIG: f64 = 1e20;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % ((hi - lo + 1) as u64)) as i64
+        }
+    }
+
+    /// A random pure-integer instance: `k` integers in small boxes, `rows` rows of
+    /// sense `<=`, `>=` or `=`, slacks after the structurals.
+    struct Inst {
+        case: Case,
+        rows: Vec<(Vec<f64>, char, f64)>,
+        lo: Vec<i64>,
+        hi: Vec<i64>,
+        c: Vec<f64>,
+    }
+
+    fn gen(rng: &mut Lcg) -> Inst {
+        let k = rng.int(2, 4) as usize;
+        let m = rng.int(1, 3) as usize;
+        let lo: Vec<i64> = (0..k).map(|_| rng.int(-2, 0)).collect();
+        let hi: Vec<i64> = lo.iter().map(|&l| l + rng.int(1, 4)).collect();
+        let target: Vec<i64> = (0..k).map(|j| rng.int(lo[j], hi[j])).collect();
+        let zero_obj = rng.int(0, 9) == 0;
+        let c: Vec<f64> = (0..k)
+            .map(|_| if zero_obj { 0.0 } else { rng.int(-3, 3) as f64 })
+            .collect();
+        let mut rows = Vec::new();
+        for _ in 0..m {
+            let a: Vec<f64> = (0..k).map(|_| rng.int(-3, 3) as f64).collect();
+            let act: f64 = a.iter().zip(&target).map(|(x, &t)| x * t as f64).sum();
+            let sense = ['<', '>', '='][rng.int(0, 2) as usize];
+            // Sometimes push the right-hand side past the box: an infeasible row.
+            let shift = if rng.int(0, 7) == 0 { 40.0 } else { 0.0 };
+            let rhs = match sense {
+                '<' => act + rng.int(0, 2) as f64 - shift,
+                '>' => act - rng.int(0, 2) as f64 + shift,
+                _ => act + if shift > 0.0 { 0.5 } else { 0.0 },
+            };
+            rows.push((a, sense, rhs));
+        }
+        let ns = k;
+        let slacks: Vec<usize> = (0..m).filter(|&i| rows[i].1 != '=').collect();
+        let n = ns + slacks.len();
+        let mut a = vec![0.0; m * n];
+        let (mut l, mut u) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for j in 0..k {
+            l.push(lo[j] as f64);
+            u.push(hi[j] as f64);
+        }
+        for (i, (row, sense, _)) in rows.iter().enumerate() {
+            for j in 0..k {
+                a[i * n + j] = row[j];
+            }
+            if let Some(p) = slacks.iter().position(|&s| s == i) {
+                a[i * n + ns + p] = 1.0;
+                // a x + s = rhs: `<=` means s >= 0, `>=` means s <= 0.
+                if *sense == '<' {
+                    l.push(0.0);
+                    u.push(BIG);
+                } else {
+                    l.push(-BIG);
+                    u.push(0.0);
+                }
+            }
+        }
+        let mut cfull = c.clone();
+        cfull.resize(n, 0.0);
+        let case = Case {
+            name: "random",
+            a,
+            m,
+            n,
+            c: cfull,
+            l,
+            u,
+            b: rows.iter().map(|r| r.2).collect(),
+            ns,
+            int_cols: (0..k).collect(),
+        };
+        Inst {
+            case,
+            rows,
+            lo,
+            hi,
+            c,
+        }
+    }
+
+    fn feasible(inst: &Inst, x: &[f64]) -> bool {
+        inst.rows.iter().all(|(a, sense, rhs)| {
+            let act: f64 = a.iter().zip(x).map(|(p, q)| p * q).sum();
+            match sense {
+                '<' => act <= rhs + 1e-9,
+                '>' => act >= rhs - 1e-9,
+                _ => (act - rhs).abs() <= 1e-9,
+            }
+        })
+    }
+
+    /// Every integer point of the box, feasible ones with their objective.
+    fn enumerate(inst: &Inst) -> (Vec<(Vec<f64>, f64)>, Vec<Vec<f64>>) {
+        let k = inst.lo.len();
+        let (mut feas, mut infeas) = (Vec::new(), Vec::new());
+        let mut x: Vec<i64> = inst.lo.clone();
+        loop {
+            let xf: Vec<f64> = x.iter().map(|&v| v as f64).collect();
+            if feasible(inst, &xf) {
+                let obj = xf.iter().zip(&inst.c).map(|(p, q)| p * q).sum();
+                feas.push((xf, obj));
+            } else {
+                infeas.push(xf);
+            }
+            let mut j = 0;
+            loop {
+                if j == k {
+                    return (feas, infeas);
+                }
+                if x[j] < inst.hi[j] {
+                    x[j] += 1;
+                    break;
+                }
+                x[j] = inst.lo[j];
+                j += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn random_milps_match_enumeration_seeded_and_unseeded() {
+        let mut rng = Lcg(2026_11_14);
+        let (mut checked, mut infeasible_seen, mut seeded_bad) = (0usize, 0usize, 0usize);
+        for t in 0..250 {
+            let inst = gen(&mut rng);
+            let (feas, infeas) = enumerate(&inst);
+            let best = feas.iter().min_by(|p, q| p.1.total_cmp(&q.1)).cloned();
+            let worst = feas.iter().max_by(|p, q| p.1.total_cmp(&q.1)).cloned();
+            let mut variants: Vec<(&str, MilpOptions)> = Vec::new();
+            variants.push(("plain", inst.case.opts()));
+            let mut o = inst.case.opts();
+            o.heuristics = false;
+            variants.push(("no-heuristics", o));
+            if let Some((x, _)) = &best {
+                let mut o = inst.case.opts();
+                o.initial_incumbent = Some(x.clone());
+                variants.push(("seed-optimum", o));
+            }
+            if let Some((x, _)) = &worst {
+                let mut o = inst.case.opts();
+                o.initial_incumbent = Some(x.clone());
+                variants.push(("seed-worse", o));
+            }
+            if let Some(x) = infeas.first() {
+                let mut o = inst.case.opts();
+                o.initial_incumbent = Some(x.clone());
+                variants.push(("seed-infeasible", o));
+                seeded_bad += 1;
+            }
+            for (label, opts) in variants {
+                let r = solve_milp(&inst.case.dense_view(), &inst.case.b, 0.0, &opts);
+                match &best {
+                    None => {
+                        assert_eq!(r.status, MilpStatus::Infeasible, "#{t} {label}");
+                        infeasible_seen += 1;
+                    }
+                    Some((_, opt)) => {
+                        assert_eq!(r.status, MilpStatus::Optimal, "#{t} {label}");
+                        let tol = 1e-6 * (1.0 + opt.abs());
+                        assert!(
+                            (r.obj - opt).abs() <= tol,
+                            "#{t} {label}: obj {} vs {opt}",
+                            r.obj
+                        );
+                        assert!(
+                            r.bound <= opt + tol,
+                            "#{t} {label}: bound {} past {opt}",
+                            r.bound
+                        );
+                        let x = &r.x[..inst.lo.len()];
+                        assert!(
+                            x.iter().all(|v| (v - v.round()).abs() <= 1e-6),
+                            "#{t} {label}"
+                        );
+                        let xr: Vec<f64> = x.iter().map(|v| v.round()).collect();
+                        assert!(feasible(&inst, &xr), "#{t} {label}: point infeasible");
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 1000, "only {checked} solves checked");
+        assert!(
+            infeasible_seen > 0 && seeded_bad > 0,
+            "{infeasible_seen} / {seeded_bad}"
+        );
+    }
+
+    fn case(
+        a: Vec<f64>,
+        m: usize,
+        n: usize,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        b: Vec<f64>,
+        ns: usize,
+        ints: Vec<usize>,
+    ) -> Case {
+        Case {
+            name: "hand",
+            a,
+            m,
+            n,
+            c,
+            l,
+            u,
+            b,
+            ns,
+            int_cols: ints,
+        }
+    }
+
+    /// Hand-built statuses, plain and seeded.
+    #[test]
+    fn hand_built_statuses_hold_with_and_without_a_seed() {
+        let mut checked = 0;
+        // All columns fixed by their bounds: x0 = 2, x1 = -1; min x0 + x1 = 1.
+        let fixed = case(
+            vec![1.0, 1.0, 1.0],
+            1,
+            3,
+            vec![1.0, 1.0, 0.0],
+            vec![2.0, -1.0, 0.0],
+            vec![2.0, -1.0, BIG],
+            vec![5.0],
+            2,
+            vec![0, 1],
+        );
+        // Zero objective on a feasible box: any feasible point, value 0.
+        let zero = case(
+            vec![1.0, 1.0, 1.0],
+            1,
+            3,
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+            vec![3.0, 3.0, BIG],
+            vec![4.0],
+            2,
+            vec![0, 1],
+        );
+        // Integer-infeasible with an LP-feasible bounded relaxation: 2 x0 = 1.
+        let parity = case(
+            vec![2.0],
+            1,
+            1,
+            vec![1.0],
+            vec![-5.0],
+            vec![5.0],
+            vec![1.0],
+            1,
+            vec![0],
+        );
+        // A row presolve removes entirely (0 x0 + s = 1, s >= 0) and min x0 on [1, 4].
+        let empty_row = case(
+            vec![0.0, 1.0],
+            1,
+            2,
+            vec![1.0, 0.0],
+            vec![1.0, 0.0],
+            vec![4.0, BIG],
+            vec![1.0],
+            1,
+            vec![0],
+        );
+        let cases: [(&Case, Option<f64>, Vec<Vec<f64>>); 4] = [
+            (&fixed, Some(1.0), vec![vec![2.0, -1.0]]),
+            (&zero, Some(0.0), vec![vec![1.0, 1.0], vec![9.0, 9.0]]),
+            (&parity, None, vec![vec![0.0], vec![1.0]]),
+            (&empty_row, Some(1.0), vec![vec![3.0], vec![0.0]]),
+        ];
+        for (cs, want, seeds) in cases.iter() {
+            let mut variants = vec![cs.opts()];
+            for sd in seeds {
+                let mut o = cs.opts();
+                o.initial_incumbent = Some(sd.clone());
+                variants.push(o);
+            }
+            for o in variants {
+                let r = solve_milp(&cs.dense_view(), &cs.b, 0.0, &o);
+                match want {
+                    Some(v) => {
+                        assert_eq!(r.status, MilpStatus::Optimal);
+                        assert!((r.obj - v).abs() <= 1e-9, "obj {} vs {v}", r.obj);
+                    }
+                    None => assert_eq!(r.status, MilpStatus::Infeasible),
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 4 + 1 + 2 + 2 + 2);
+    }
+
+    /// LP relaxation unbounded but no integer point at all: `2 x0 - 2 x1 = 1`, both
+    /// integer and free, `min x0`. `Unbounded` claims a feasible point exists; before
+    /// `settle_unbounded` the engine returned it here.
+    #[test]
+    fn lp_unbounded_integer_infeasible_is_not_reported_as_unbounded() {
+        let cs = case(
+            vec![2.0, -2.0],
+            1,
+            2,
+            vec![1.0, 0.0],
+            vec![-BIG, -BIG],
+            vec![BIG, BIG],
+            vec![1.0],
+            2,
+            vec![0, 1],
+        );
+        let r = solve_milp(&cs.dense_view(), &cs.b, 0.0, &cs.opts());
+        // Branching alone cannot prove `2 x0 - 2 x1 = 1` empty over free integers
+        // (that takes a gcd argument), so either verdict short of a claim is right.
+        assert!(
+            matches!(r.status, MilpStatus::Infeasible | MilpStatus::NodeLimit),
+            "{:?}",
+            r.status
+        );
+        assert_eq!(r.obj, f64::INFINITY);
+        // An even right-hand side: `2 x0 - 2 x1 = 2` has integer points, so the
+        // unbounded relaxation does make the MILP unbounded, seeded or not.
+        let ok = case(
+            vec![2.0, -2.0],
+            1,
+            2,
+            vec![1.0, 0.0],
+            vec![-BIG, -BIG],
+            vec![BIG, BIG],
+            vec![2.0],
+            2,
+            vec![0, 1],
+        );
+        let mut seeded = ok.opts();
+        seeded.initial_incumbent = Some(vec![1.0, 0.0]);
+        for o in [ok.opts(), seeded] {
+            let r = solve_milp(&ok.dense_view(), &ok.b, 0.0, &o);
+            assert_eq!(r.status, MilpStatus::Unbounded);
+            assert_eq!(r.obj, f64::INFINITY);
+        }
+    }
+}
+
+#[cfg(test)]
+mod submip_work_tests {
+    use super::*;
+
+    #[test]
+    fn a_capped_sub_mip_keeps_the_point_it_found() {
+        // trento1 / tinui (#2220): a sub-MIP that found a point and then hit its cap.
+        assert!(found_point(MilpStatus::NodeLimit, 610.29));
+        assert!(!found_point(MilpStatus::NodeLimit, f64::INFINITY));
+        assert!(found_point(MilpStatus::Feasible, 1.0));
+        assert!(found_point(MilpStatus::Optimal, 1.0));
+        assert!(!found_point(MilpStatus::Infeasible, 1.0));
+        assert!(!found_point(MilpStatus::Unbounded, f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn a_nested_sub_mip_gets_a_quarter_of_what_is_left() {
+        // air04 (#2220): the nested sub-MIP took its parent's whole budget.
+        assert_eq!(nested_work_budget(1000), 1000); // top level: the full budget
+        let (_s, _o) = crate::work::Scope::new_solve(Some(crate::work::Limit {
+            units: 1000,
+            weight: [0, 1, 0],
+        }));
+        assert_eq!(nested_work_budget(1000), 250);
+        crate::work::add(crate::work::Kind::Lu, 600);
+        assert_eq!(nested_work_budget(1000), 100);
+        assert_eq!(nested_work_budget(50), 50);
+        crate::work::add(crate::work::Kind::Lu, 400);
+        assert_eq!(nested_work_budget(1000), 0);
     }
 }

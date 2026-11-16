@@ -19,6 +19,10 @@ fn options() -> MilpOptions {
     MilpOptions {
         n_struct: 2,
         integer_cols: vec![1],
+        implied_int_cols: Vec::new(),
+        max_stall_nodes: 0,
+        max_leaves: 0,
+        max_work: None,
         max_nodes: 10_000,
         max_open_nodes: None,
         time_limit_s: Some(30.0),

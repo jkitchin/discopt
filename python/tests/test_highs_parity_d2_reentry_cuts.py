@@ -1,7 +1,8 @@
 """highs-parity D2: the #698 re-entry run of the Rust MILP engine and the root cut budget.
 
 ``_solve_milp_simplex`` calls the Rust driver twice. Run 1 gets the graduated root cut
-budget (``_milp_root_cut_budget``: 500 cuts over 50 rounds). Run 2 rebuilds the tree from
+budget (``_milp_root_cut_budget``: 500 cuts over 50 rounds, 1,500 over 150 under the
+default ``DISCOPT_MILP_ROOT_CMIR=highs`` root). Run 2 rebuilds the tree from
 the root, but it was called without it, so it separated with the binding's single
 16-cut pass. ``DISCOPT_MILP_REENTRY_CUTS=1`` passes the budget to run 2 as well. The
 flag is default-OFF until its §5 panel passes, so the OFF arm must keep the legacy call.
@@ -12,7 +13,7 @@ deterministically, as in ``test_1323_abs_gap_routes``.
 
 import numpy as np
 import pytest
-from discopt.solver import solve_model
+from discopt.solver import _milp_root_cut_budget, solve_model
 from test_1323_abs_gap_routes import _knapsackish
 
 
@@ -44,14 +45,18 @@ def _bb_calls(monkeypatch, flag: str | None) -> list[dict]:
 @pytest.mark.smoke
 def test_reentry_gets_the_root_cut_budget_when_flagged(monkeypatch):
     run1, run2 = _bb_calls(monkeypatch, "1")[:2]
-    assert run1.get("root_cuts") == 500 and run1.get("cut_rounds") == 50
-    assert run2.get("root_cuts") == 500, f"run 2 got {run2.get('root_cuts')!r}"
-    assert run2.get("cut_rounds") == 50 and run2.get("cut_select") is True
+    budget = _milp_root_cut_budget(20.0)
+    assert budget is not None
+    assert run1.get("root_cuts") == budget["root_cuts"]
+    assert run1.get("cut_rounds") == budget["cut_rounds"]
+    assert run2.get("root_cuts") == budget["root_cuts"], f"run 2 got {run2.get('root_cuts')!r}"
+    assert run2.get("cut_rounds") == budget["cut_rounds"] and run2.get("cut_select") is True
     assert run2.get("root_cut_time_s", 0.0) >= 0.5
 
 
 @pytest.mark.smoke
 def test_reentry_keeps_the_legacy_call_by_default(monkeypatch):
     run1, run2 = _bb_calls(monkeypatch, None)[:2]
-    assert run1.get("root_cuts") == 500
+    budget = _milp_root_cut_budget(20.0)
+    assert budget is not None and run1.get("root_cuts") == budget["root_cuts"]
     assert "root_cuts" not in run2 and "cut_rounds" not in run2

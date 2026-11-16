@@ -485,6 +485,7 @@ pub fn solve_convex_tree_py<'py>(
     };
     let opts = SimplexOptions {
         expel_zero_artificials: true,
+        subtol_repair: true,
         // #911: the tree's deadline also bounds a SINGLE LP solve. Without this the
         // kernel could only stop BETWEEN re-solves, so its overshoot was one whole
         // LP -- measured on `clay0304hfsg`, +7.8 s against a 30 s limit even after
@@ -622,6 +623,7 @@ pub fn convex_warmlp_probe_py<'py>(
     };
     let opts = SimplexOptions {
         expel_zero_artificials: true,
+        subtol_repair: true,
         ..Default::default()
     };
     let stats = spec.warmlp_w0_probe(&config, &opts, max_stats, gc_pool_cap, gc_max_age);

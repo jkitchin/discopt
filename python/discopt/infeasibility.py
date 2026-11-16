@@ -357,12 +357,31 @@ def compute_iis(
         non-algebraic constraint.
     TimeoutError
         ``total_time_limit`` ran out before any subsystem was proven infeasible.
+
+    Notes
+    -----
+    Rows added through the fast API (``add_linear_constraints``, and every row of a
+    linear model read by ``from_nl`` / ``from_mps`` / ``from_lp``) are first rewritten
+    as expression constraints **on the model passed in** (``Model._materialize_builder_
+    linear_rows``): the model is mathematically unchanged, but its rows move from the
+    matrix representation to ``model._constraints``, which is where the returned
+    constraints live. The returned constraints of such a model carry no file row
+    names.
     """
-    iis_engine = _resolve_iis_engine(iis_engine)
     from discopt._iis_milp import _normalize_portfolio
+
+    # Fast-API rows (``add_linear_constraints``, and every row of a linear model read
+    # by ``from_nl``/``from_mps``/``from_lp``) live only in the builder, not in
+    # ``model._constraints``, which is what both IIS engines below enumerate. Without
+    # this they saw no rows and called an infeasible model "feasible". Materialising is
+    # model-preserving (the solver's nonlinear path does the same, #681); the IIS's
+    # constraint indices then refer to the materialised rows, in order.
+    model._materialize_builder_linear_rows()
 
     portfolio = _normalize_portfolio(portfolio)
     if include_integrality:
+        # The engine matters only to the matrix engine, so a bad DISCOPT_IIS_ENGINE is
+        # refused there (``_compute_iis_with_integrality`` resolves it), not here.
         return _compute_iis_with_integrality(
             model,
             include_bounds=include_bounds,
