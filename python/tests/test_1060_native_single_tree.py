@@ -233,7 +233,7 @@ def test_unsupported_callbacks_are_refused_loudly():
 
 
 @pytest.mark.smoke
-def test_a_terminate_callback_is_honoured_and_counted():
+def test_a_terminate_callback_is_honoured_and_counted(monkeypatch):
     """#1141: this used to be refused; the driver's checkpoint now serves it.
 
     The old refusal said "the driver enforces time_limit itself and has no
@@ -246,6 +246,9 @@ def test_a_terminate_callback_is_honoured_and_counted():
     counted but not obeyed, and one that is obeyed but never counted, would each
     pass half of this.
     """
+    # Pinned to the single-tree default: #2223's opt-in restarts
+    # (``DISCOPT_MILP_LAZY_RESTARTS``) make ``restarts`` count rebuilt trees.
+    monkeypatch.delenv("DISCOPT_MILP_LAZY_RESTARTS", raising=False)
     c, A_ub, b_ub, bounds, integrality = _knapsack()
     kw = dict(
         c=c, A_ub=A_ub, b_ub=b_ub, A_eq=None, b_eq=None, bounds=bounds, integrality=integrality

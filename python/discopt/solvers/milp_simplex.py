@@ -1593,7 +1593,7 @@ def _merge_escalation(probe: MILPResult, second: MILPResult) -> MILPResult:
     )
 
 
-def solve_milp_with_lazy_cuts(
+def _solve_lazy_tree(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
     b_ub: Optional[np.ndarray] = None,
@@ -1611,71 +1611,13 @@ def solve_milp_with_lazy_cuts(
     terminate_callback: Optional[Callable[[dict[str, object]], bool]] = None,
     mip_start: Optional[np.ndarray] = None,
     relaxable_ub_rows: Optional[np.ndarray] = None,
+    _restarts_so_far: int = 0,
+    _root_cut_time_cap: Optional[float] = None,
 ) -> MILPResult:
-    """Single-tree MILP solve with a lazy-constraint separator, on the Rust simplex.
-
-    The in-house counterpart of :func:`discopt.solvers.gurobi.solve_milp_with_lazy_cuts`
-    (issue #1060): ``lazy_callback`` is called with every integer-feasible point the
-    search finds, before that point can become the incumbent, and returns an iterable
-    of ``(coefficients, rhs)`` rows in ``coefficients @ x <= rhs`` form. An empty
-    return (or ``None``) accepts the point; a non-empty return rejects it, adds the
-    rows to the shared relaxation, and puts the node **back in the search** — a veto
-    is not a proof that the box is empty, so the node is re-queued rather than
-    fathomed.
-
-    ``node_callback`` (#1141) is the *fractional*-node counterpart, the in-house
-    equivalent of Gurobi's MIPNODE user cuts: it is called with each fractional node
-    relaxation solution and returns rows in the same ``coefficients @ x <= rhs``
-    form, which must be **globally valid** (for a convex MINLP, the first-order
-    linearization ``g(x̄) + ∇g(x̄)·(x − x̄) ≤ 0`` of a violated constraint is a
-    supporting hyperplane and therefore is). The rows fold into the shared
-    relaxation and the node re-solves against them, so a node costs one LP plus one
-    gradient evaluation instead of a full NLP. ``node_hook_rounds`` caps the
-    separation rounds one node may run (``0`` disables the hook) and
-    ``node_hook_cut_cap`` caps the rows it may add over the whole solve. Unlike a
-    lazy veto -- which is mandatory, since it is the only thing keeping a point out
-    of the incumbent -- a fractional separation only tightens a relaxation, so
-    exhausting either budget is benign and never touches certification.
-
-    ``terminate_callback`` (#1141) is consulted at the driver's per-iteration
-    checkpoint -- the in-house analogue of the HiGHS master's per-restart
-    check-in. It is handed the snapshot shape the other backends pass
-    (``dual_bound``, ``restarts``, ``lazy_cuts``), and returning true stops the
-    search, keeping the incumbent and the bound and reporting the result
-    **uncertified**, exactly as the driver's own time limit does. ``restarts`` is
-    always ``0``, and that is a fact rather than a placeholder: this is a true
-    single tree, so there is nothing to restart.
-
-    This used to be refused, on the grounds that "the driver enforces
-    ``time_limit`` itself and has no callback-termination hook". The first half is
-    true and irrelevant; the second was stale. The driver has had a per-iteration
-    checkpoint carrying ``incumbent``/``bound``/``gap``/``elapsed`` with a ``Stop``
-    control since the interactive debugger landed, already exposed to Python as
-    ``debug_hook``, so this is a composition rather than a new capability. The
-    refusal was what stopped #1141's convex-MINLP route from targeting a
-    discopt-native master: the #1066 route progress guard installs a
-    ``termination_hook``, the refusal raised, and the whole route fell back to the
-    spatial path.
-
-    ``relaxable_ub_rows`` (#2223) is an optional boolean mask over the rows of
-    ``A_ub``: a marked row's noise-floor entries (below the equilibration floor of
-    their line) may be relaxed into its slack up to ``1e-6 * max(|b_i|, 1)`` in
-    total, instead of the 1e-7 absolute cap that otherwise leaves them to withdraw
-    the certificate (``MilpOptions::relaxable_rows``). It exists for the OA master's
-    cut rows, whose incumbents ``lazy_callback`` re-validates against the
-    constraint each row linearizes; any relaxation keeps every dual bound valid.
-    ``None`` or an all-false mask is the unmasked solve, bit for bit.
-
-    ``callback_stats`` reports ``mipsol_calls`` (separator invocations),
-    ``lazy_cuts`` (rows the separator returned), ``driver_lazy_calls`` (the same
-    count as the driver saw it) and ``lazy_requeues`` (vetoed nodes put back in
-    the search). ``mipsol_calls == 0`` means the separator never saw a point — NOT
-    that it accepted everything (CLAUDE.md §6). With a ``node_callback`` attached it
-    also reports ``mipnode_calls`` (fractional separator invocations, counted on
-    this side), ``node_cuts`` (rows it returned) and ``driver_node_cuts`` (rows the
-    driver actually folded in, after dedup and the cap). ``mipnode_calls == 0`` is
-    the same kind of signal: the fractional separator never ran, which is NOT the
-    same as it having found nothing to cut.
+    """One tree of :func:`solve_milp_with_lazy_cuts` (the whole call when
+    ``DISCOPT_MILP_LAZY_RESTARTS`` is 0). ``_restarts_so_far`` is reported in the
+    ``terminate_callback`` snapshot; ``_root_cut_time_cap`` caps the root cut carve
+    of a restarted tree (#2223).
     """
     try:
         from discopt._rust import solve_milp_lazy_csc_py
@@ -1795,7 +1737,7 @@ def solve_milp_with_lazy_cuts(
                 terminate_callback(
                     {
                         "dual_bound": state.get("bound"),
-                        "restarts": 0,
+                        "restarts": int(_restarts_so_far),
                         "lazy_cuts": stats["lazy_cuts"],
                     }
                 )
@@ -1866,7 +1808,9 @@ def solve_milp_with_lazy_cuts(
         node_callback=_node_hook,
         node_hook_rounds=int(node_hook_rounds) if _node_hook is not None else 0,
         node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
-        **_lazy_root_cut_kwargs(std.lp_kwargs, time_limit),
+        **_capped_root_cut_time(
+            _lazy_root_cut_kwargs(std.lp_kwargs, time_limit), _root_cut_time_cap
+        ),
         **_lazy_gap_kwargs(),
         **({} if relaxable_std is None else {"relaxable_rows": relaxable_std}),
     )
@@ -1930,6 +1874,405 @@ def solve_milp_with_lazy_cuts(
         wall_time=wall_time,
         callback_stats=stats,
     )
+
+
+def _lazy_restarts() -> int:
+    """``DISCOPT_MILP_LAZY_RESTARTS``: how many times the in-house lazy master may
+    rebuild its tree (#2223, default ``0`` = one true single tree). Read at call time.
+
+    **Why.** The Rust lazy master builds its root, its root cuts and its whole tree
+    before any OA row exists, and folds every later row into that tree; it never
+    restarts. The HiGHS master restarts after each lazy veto, so its later trees
+    start from a root LP that already holds the rows. Static replay on
+    ``cvxnonsep_psig40r`` (the planning probe for #2223): given the same rows as
+    static rows the Rust MILP needs 31-37 nodes, against 2,321 when they arrive
+    lazily; a restart emulation took the master from 2,321 nodes / 32 s to 11-64
+    nodes / 0.7-1.6 s. Unlimited restarts hurt (``flay03m`` 1.07 s -> 6.87 s,
+    ``clay`` lost its certificate); a cap of 3 kept the win with no regression on
+    the 22-instance in-repo route population (single runs on a loaded machine).
+
+    **What a restart carries.** Every row ``lazy_callback`` returned and the rows
+    ``node_callback`` returned (exact duplicates dropped; node rows count against
+    ``node_hook_cut_cap`` over the WHOLE call, so a restarted tree gets what is
+    left of it and no ``node_callback`` once it is spent). The rows are appended
+    to the caller's ``A_ub`` in the caller's units and go through the same
+    ``_equilibrate_rows`` as the original rows. When the caller passed
+    ``relaxable_ub_rows``, carried rows are marked relaxable too: they are rows of
+    the same separator, which re-validates every accepted point. The best incumbent
+    so far is offered as ``mip_start`` (the driver re-validates it against the
+    extended rows and the separator before seeding). Each tree gets the wall time
+    left; a restarted tree's root cut carve is halved per restart, so the carve
+    over the whole call is at most twice the first tree's.
+
+    **What is reported.** The bound is the largest finite bound any tree proved:
+    every row is globally valid, so each tree's master is a relaxation of the next
+    and every tree's bound is a lower bound on the final master's optimum. Status,
+    point and certified bound come from the final tree only; a tree stopped for a
+    restart never supplies a status. A caller stop ends the whole call
+    (``terminated``); restart stops are not caller stops and are counted under
+    ``restarts``. Counters are summed over the trees.
+
+    Bound-changing (CLAUDE.md section 5 regime 2): default OFF pending the #2223
+    route panel recorded in ``docs/dev/flag-retirement-audit.md``.
+    """
+    raw = os.environ.get("DISCOPT_MILP_LAZY_RESTARTS", "0").strip()
+    try:
+        k = int(raw)
+    except ValueError as err:
+        raise ValueError(f"DISCOPT_MILP_LAZY_RESTARTS={raw!r}: expected an integer >= 0") from err
+    if k < 0:
+        raise ValueError(f"DISCOPT_MILP_LAZY_RESTARTS={raw!r}: expected an integer >= 0")
+    return k
+
+
+def _capped_root_cut_time(kwargs: dict, cap: Optional[float]) -> dict:
+    """Cap ``root_cut_time_s`` at ``cap`` (a restarted tree's carve, #2223)."""
+    if cap is None or "root_cut_time_s" not in kwargs:
+        return kwargs
+    out = dict(kwargs)
+    out["root_cut_time_s"] = max(0.0, min(float(out["root_cut_time_s"]), float(cap)))
+    return out
+
+
+def solve_milp_with_lazy_cuts(
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_ub: Optional[np.ndarray] = None,
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_eq: Optional[np.ndarray] = None,
+    bounds: Optional[BoundList] = None,
+    integrality: Optional[np.ndarray] = None,
+    time_limit: Optional[float] = None,
+    gap_tolerance: float = 1e-4,
+    max_nodes: int = 1_000_000,
+    lazy_callback: Optional[Callable[[np.ndarray], object]] = None,
+    node_callback: Optional[Callable[[np.ndarray], object]] = None,
+    node_hook_rounds: int = _NODE_HOOK_ROUNDS_DEFAULT,
+    node_hook_cut_cap: int = _NODE_HOOK_CUT_CAP_DEFAULT,
+    terminate_callback: Optional[Callable[[dict[str, object]], bool]] = None,
+    mip_start: Optional[np.ndarray] = None,
+    relaxable_ub_rows: Optional[np.ndarray] = None,
+) -> MILPResult:
+    """Single-tree MILP solve with a lazy-constraint separator, on the Rust simplex.
+
+    The in-house counterpart of :func:`discopt.solvers.gurobi.solve_milp_with_lazy_cuts`
+    (issue #1060): ``lazy_callback`` is called with every integer-feasible point the
+    search finds, before that point can become the incumbent, and returns an iterable
+    of ``(coefficients, rhs)`` rows in ``coefficients @ x <= rhs`` form. An empty
+    return (or ``None``) accepts the point; a non-empty return rejects it, adds the
+    rows to the shared relaxation, and puts the node **back in the search** — a veto
+    is not a proof that the box is empty, so the node is re-queued rather than
+    fathomed.
+
+    ``node_callback`` (#1141) is the *fractional*-node counterpart, the in-house
+    equivalent of Gurobi's MIPNODE user cuts: it is called with each fractional node
+    relaxation solution and returns rows in the same ``coefficients @ x <= rhs``
+    form, which must be **globally valid** (for a convex MINLP, the first-order
+    linearization ``g(x̄) + ∇g(x̄)·(x − x̄) ≤ 0`` of a violated constraint is a
+    supporting hyperplane and therefore is). The rows fold into the shared
+    relaxation and the node re-solves against them, so a node costs one LP plus one
+    gradient evaluation instead of a full NLP. ``node_hook_rounds`` caps the
+    separation rounds one node may run (``0`` disables the hook) and
+    ``node_hook_cut_cap`` caps the rows it may add over the whole solve. Unlike a
+    lazy veto -- which is mandatory, since it is the only thing keeping a point out
+    of the incumbent -- a fractional separation only tightens a relaxation, so
+    exhausting either budget is benign and never touches certification.
+
+    ``terminate_callback`` (#1141) is consulted at the driver's per-iteration
+    checkpoint -- the in-house analogue of the HiGHS master's per-restart
+    check-in. It is handed the snapshot shape the other backends pass
+    (``dual_bound``, ``restarts``, ``lazy_cuts``), and returning true stops the
+    search, keeping the incumbent and the bound and reporting the result
+    **uncertified**, exactly as the driver's own time limit does. ``restarts`` is
+    the number of restarts so far (see below); with restarts off (the default) it
+    is always ``0``, because the call is then one true single tree.
+
+    ``DISCOPT_MILP_LAZY_RESTARTS=<K>`` (#2223, default ``0``) lets the call rebuild
+    its tree up to ``K`` times, the way the HiGHS master does: once a lazy veto
+    returns a row, the tree stops at its next check-in, every row either separator
+    returned is appended to ``A_ub`` and a fresh tree (fresh root cuts, re-derived
+    from the extended matrix) starts from there. See
+    :func:`_lazy_restarts` for the measurement and what the restart carries.
+
+    This used to be refused, on the grounds that "the driver enforces
+    ``time_limit`` itself and has no callback-termination hook". The first half is
+    true and irrelevant; the second was stale. The driver has had a per-iteration
+    checkpoint carrying ``incumbent``/``bound``/``gap``/``elapsed`` with a ``Stop``
+    control since the interactive debugger landed, already exposed to Python as
+    ``debug_hook``, so this is a composition rather than a new capability. The
+    refusal was what stopped #1141's convex-MINLP route from targeting a
+    discopt-native master: the #1066 route progress guard installs a
+    ``termination_hook``, the refusal raised, and the whole route fell back to the
+    spatial path.
+
+    ``relaxable_ub_rows`` (#2223) is an optional boolean mask over the rows of
+    ``A_ub``: a marked row's noise-floor entries (below the equilibration floor of
+    their line) may be relaxed into its slack up to ``1e-6 * max(|b_i|, 1)`` in
+    total, instead of the 1e-7 absolute cap that otherwise leaves them to withdraw
+    the certificate (``MilpOptions::relaxable_rows``). It exists for the OA master's
+    cut rows, whose incumbents ``lazy_callback`` re-validates against the
+    constraint each row linearizes; any relaxation keeps every dual bound valid.
+    ``None`` or an all-false mask is the unmasked solve, bit for bit.
+
+    ``callback_stats`` reports ``mipsol_calls`` (separator invocations),
+    ``lazy_cuts`` (rows the separator returned), ``driver_lazy_calls`` (the same
+    count as the driver saw it) and ``lazy_requeues`` (vetoed nodes put back in
+    the search). ``mipsol_calls == 0`` means the separator never saw a point — NOT
+    that it accepted everything (CLAUDE.md §6). With a ``node_callback`` attached it
+    also reports ``mipnode_calls`` (fractional separator invocations, counted on
+    this side), ``node_cuts`` (rows it returned) and ``driver_node_cuts`` (rows the
+    driver actually folded in, after dedup and the cap). ``mipnode_calls == 0`` is
+    the same kind of signal: the fractional separator never ran, which is NOT the
+    same as it having found nothing to cut.
+    """
+    max_restarts = _lazy_restarts()
+    common = dict(
+        c=c,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        integrality=integrality,
+        gap_tolerance=gap_tolerance,
+        max_nodes=max_nodes,
+        node_hook_rounds=node_hook_rounds,
+    )
+    if max_restarts == 0:
+        # One true single tree: exactly the pre-#2223 call.
+        return _solve_lazy_tree(
+            **common,  # type: ignore[arg-type]
+            A_ub=A_ub,
+            b_ub=b_ub,
+            time_limit=time_limit,
+            lazy_callback=lazy_callback,
+            node_callback=node_callback,
+            node_hook_cut_cap=node_hook_cut_cap,
+            terminate_callback=terminate_callback,
+            mip_start=mip_start,
+            relaxable_ub_rows=relaxable_ub_rows,
+        )
+    return _solve_lazy_restarting(
+        common,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        time_limit=time_limit,
+        lazy_callback=lazy_callback,
+        node_callback=node_callback,
+        node_hook_cut_cap=node_hook_cut_cap,
+        terminate_callback=terminate_callback,
+        mip_start=mip_start,
+        relaxable_ub_rows=relaxable_ub_rows,
+        max_restarts=max_restarts,
+    )
+
+
+#: ``callback_stats`` counters summed over the trees of a restarting call.
+_SUMMED_LAZY_STATS = (
+    "mipsol_calls",
+    "mipnode_calls",
+    "lazy_cuts",
+    "node_cuts",
+    "driver_lazy_calls",
+    "lazy_requeues",
+    "driver_node_calls",
+    "driver_node_cuts",
+)
+
+
+def _solve_lazy_restarting(
+    common: dict,
+    *,
+    A_ub,
+    b_ub,
+    time_limit: Optional[float],
+    lazy_callback,
+    node_callback,
+    node_hook_cut_cap: int,
+    terminate_callback,
+    mip_start,
+    relaxable_ub_rows,
+    max_restarts: int,
+) -> MILPResult:
+    """The ``DISCOPT_MILP_LAZY_RESTARTS > 0`` arm of :func:`solve_milp_with_lazy_cuts`;
+    the contract is in :func:`_lazy_restarts`."""
+    if lazy_callback is None:
+        raise ValueError(
+            "solve_milp_with_lazy_cuts requires lazy_callback; use solve_milp for a "
+            "plain MILP solve"
+        )
+    node_hook_rounds = int(common["node_hook_rounds"])
+    if node_callback is not None and (node_hook_rounds <= 0 or node_hook_cut_cap <= 0):
+        # The same refusal as the single tree: a zero budget is indistinguishable
+        # from a separator that found nothing (CLAUDE.md section 6).
+        raise ValueError(
+            "node_callback was supplied with node_hook_rounds="
+            f"{node_hook_rounds}/node_hook_cut_cap={node_hook_cut_cap}: a zero budget "
+            "means the separator can never fire, which is indistinguishable from one "
+            "that found nothing. Pass positive budgets, or omit node_callback."
+        )
+    n = int(np.asarray(common["c"]).ravel().shape[0])
+    if A_ub is not None and b_ub is not None and np.size(b_ub) > 0:
+        A_cur = (
+            sp.csr_matrix(A_ub, dtype=np.float64)
+            if sp.issparse(A_ub)
+            else sp.csr_matrix(np.asarray(A_ub, dtype=np.float64).reshape(-1, n))
+        )
+        b_cur = np.asarray(b_ub, dtype=np.float64).ravel().copy()
+    else:
+        A_cur = sp.csr_matrix((0, n), dtype=np.float64)
+        b_cur = np.zeros(0, dtype=np.float64)
+    mask_cur = None if relaxable_ub_rows is None else np.asarray(relaxable_ub_rows, bool).ravel()
+    if mask_cur is not None and mask_cur.shape[0] != A_cur.shape[0]:
+        raise ValueError(
+            f"relaxable_ub_rows has {mask_cur.shape[0]} flags for {A_cur.shape[0]} A_ub rows"
+        )
+    # Carried rows are deduplicated among themselves (a separator re-deriving a row
+    # it already returned); a carried row equal to an original one is harmless.
+    seen: set[bytes] = set()
+    t_start = time.perf_counter()
+    first_carve = _lazy_root_cut_kwargs({"root_cuts": 1}, time_limit).get("root_cut_time_s")
+    totals: dict[str, int] = {k: 0 for k in _SUMMED_LAZY_STATS}
+    caller_calls = [0]
+    restarts = 0
+    node_rows_carried = 0
+    lazy_rows_carried = 0
+    running_bound: Optional[float] = None
+    nodes_total = 0
+    seed = mip_start
+    while True:
+        new_lazy: list[tuple[np.ndarray, float]] = []
+        new_node: list[tuple[np.ndarray, float]] = []
+        want_restart = [False]
+        restart_stop = [False]
+        caller_stop = [False]
+        may_restart = restarts < max_restarts
+
+        def _lazy(x, _sink=new_lazy, _want=want_restart, _may=may_restart):
+            rows = lazy_callback(x)
+            if rows is None:
+                return None
+            rows = list(rows)
+            if rows:
+                _sink.extend(rows)
+                if _may:
+                    _want[0] = True
+            return rows
+
+        def _node(x, _sink=new_node):
+            rows = node_callback(x)
+            if rows is None:
+                return None
+            rows = list(rows)
+            _sink.extend(rows)
+            return rows
+
+        def _term(snap, _want=want_restart, _rs=restart_stop, _cs=caller_stop):
+            if terminate_callback is not None:
+                caller_calls[0] += 1
+                if bool(terminate_callback(snap)):
+                    _cs[0] = True
+                    return True
+            if _want[0]:
+                _rs[0] = True
+                return True
+            return False
+
+        node_cap_left = max(0, int(node_hook_cut_cap) - node_rows_carried)
+        use_node = node_callback is not None and node_cap_left > 0
+        remaining = None
+        if time_limit is not None:
+            remaining = max(0.0, float(time_limit) - (time.perf_counter() - t_start))
+        carve_cap = None
+        if restarts > 0 and first_carve is not None:
+            carve_cap = float(first_carve) * 0.5**restarts
+        res = _solve_lazy_tree(
+            **common,
+            A_ub=A_cur if A_cur.shape[0] > 0 else None,
+            b_ub=b_cur if A_cur.shape[0] > 0 else None,
+            time_limit=remaining,
+            lazy_callback=_lazy,
+            node_callback=_node if use_node else None,
+            node_hook_cut_cap=node_cap_left if use_node else node_hook_cut_cap,
+            terminate_callback=_term,
+            mip_start=seed,
+            relaxable_ub_rows=mask_cur,
+            _restarts_so_far=restarts,
+            _root_cut_time_cap=carve_cap,
+        )
+        stats = dict(res.callback_stats or {})
+        for k in _SUMMED_LAZY_STATS:
+            totals[k] += int(cast(int, stats.get(k, 0) or 0))
+        nodes_total += int(res.node_count or 0)
+        if res.bound is not None and np.isfinite(res.bound):
+            running_bound = (
+                float(res.bound) if running_bound is None else max(running_bound, float(res.bound))
+            )
+        out_of_time = time_limit is not None and (time.perf_counter() - t_start) >= float(
+            time_limit
+        )
+        if restart_stop[0] and not caller_stop[0]:
+            # Carry the rows this tree's separators returned.
+            add_rows: list[tuple[np.ndarray, float]] = []
+            for coeffs, rhs in new_lazy:
+                key = _row_key(coeffs, rhs)
+                if key not in seen:
+                    seen.add(key)
+                    add_rows.append((np.asarray(coeffs, dtype=np.float64).ravel(), float(rhs)))
+                    lazy_rows_carried += 1
+            node_budget = max(0, int(node_hook_cut_cap) - node_rows_carried)
+            for coeffs, rhs in new_node:
+                if node_budget <= 0:
+                    break
+                key = _row_key(coeffs, rhs)
+                if key not in seen:
+                    seen.add(key)
+                    add_rows.append((np.asarray(coeffs, dtype=np.float64).ravel(), float(rhs)))
+                    node_rows_carried += 1
+                    node_budget -= 1
+            if add_rows:
+                A_cur = sp.vstack(
+                    [A_cur, sp.csr_matrix(np.vstack([a for a, _ in add_rows]))], format="csr"
+                )
+                b_cur = np.concatenate([b_cur, [r for _, r in add_rows]])
+                if mask_cur is not None:
+                    mask_cur = np.concatenate([mask_cur, np.ones(len(add_rows), dtype=bool)])
+            restarts += 1
+            if res.x is not None and res.objective is not None:
+                seed = np.asarray(res.x, dtype=np.float64)
+            if not out_of_time:
+                continue
+            # Out of wall after a restart stop: a limit, never a certificate.
+            final = MILPResult(
+                status=SolveStatus.ITERATION_LIMIT,
+                x=res.x,
+                objective=res.objective,
+                bound=running_bound,
+                node_count=nodes_total,
+                wall_time=time.perf_counter() - t_start,
+                callback_stats=stats,
+            )
+        else:
+            # The final tree supplies status, point and (when OPTIMAL) its own
+            # certified bound. A limit exit publishes the best bound any tree proved.
+            final = res
+            if res.status == SolveStatus.ITERATION_LIMIT and running_bound is not None:
+                final.bound = running_bound
+            final.node_count = nodes_total
+            final.wall_time = time.perf_counter() - t_start
+        out_stats = dict(final.callback_stats or {})
+        out_stats.update(totals)
+        out_stats["restarts"] = restarts
+        out_stats["restart_rows_lazy"] = lazy_rows_carried
+        out_stats["restart_rows_node"] = node_rows_carried
+        out_stats["terminate_calls"] = caller_calls[0]
+        out_stats["terminated"] = bool(caller_stop[0])
+        final.callback_stats = out_stats
+        return final
+
+
+def _row_key(coeffs, rhs: float) -> bytes:
+    """Exact identity of a row ``coeffs @ x <= rhs`` (dedup of carried rows)."""
+    arr = np.ascontiguousarray(np.asarray(coeffs, dtype=np.float64).ravel())
+    return arr.tobytes() + np.float64(rhs).tobytes()
 
 
 def solve_lp_warm_std(
