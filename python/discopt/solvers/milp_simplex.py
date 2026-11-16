@@ -1878,7 +1878,8 @@ def _solve_lazy_tree(
 
 def _lazy_restarts() -> int:
     """``DISCOPT_MILP_LAZY_RESTARTS``: how many times the in-house lazy master may
-    rebuild its tree (#2223, default ``0`` = one true single tree). Read at call time.
+    rebuild its tree (#2223). **Default 3** (graduated 2026-11-16); ``0`` is the
+    opt-out and restores the one true single tree exactly. Read at call time.
 
     **Why.** The Rust lazy master builds its root, its root cuts and its whole tree
     before any OA row exists, and folds every later row into that tree; it never
@@ -1912,10 +1913,19 @@ def _lazy_restarts() -> int:
     (``terminated``); restart stops are not caller stops and are counted under
     ``restarts``. Counters are summed over the trees.
 
-    Bound-changing (CLAUDE.md section 5 regime 2): default OFF pending the #2223
-    route panel recorded in ``docs/dev/flag-retirement-audit.md``.
+    Bound-changing (CLAUDE.md section 5 regime 2). **Graduated to default 3 on the
+    #2223 panels** (commit ``0d77640``, 30 s, interleaved, both arms on the in-house
+    master, ``DISCOPT_OA_MASTER_RELAX_CUT_NOISE`` as stated): 94-model in-repo route
+    population, K=3 alone 90 -> 92 certified (+``flay03m@6``, +``portfol_roundlot@6``),
+    0 lost, wall 391.6 -> 294.1 s, 0 violations over 167 bound checks; with the noise
+    flag 92, 0 lost, 268.2 s, no bound looser; a repeated OFF arm (the spread) 90,
+    388.9 s. 47 routed MINLPLib syn/rsyn masters: 30 = 30 certified, 0 lost, wall
+    637.5 -> 613.7 s (621.7 with the noise flag), 16 uncertified bounds tighter, 1
+    looser, 0 violations over 94 checks. K=1 lost ``clay0303hfsg@0`` (a 30 s edge) in
+    one run; K=5 and K=10 lost it in the aborted first run (0d77640, 1 model), so 3 it
+    is. ``0`` opts out.
     """
-    raw = os.environ.get("DISCOPT_MILP_LAZY_RESTARTS", "0").strip()
+    raw = os.environ.get("DISCOPT_MILP_LAZY_RESTARTS", "3").strip()
     try:
         k = int(raw)
     except ValueError as err:
@@ -1984,10 +1994,11 @@ def solve_milp_with_lazy_cuts(
     (``dual_bound``, ``restarts``, ``lazy_cuts``), and returning true stops the
     search, keeping the incumbent and the bound and reporting the result
     **uncertified**, exactly as the driver's own time limit does. ``restarts`` is
-    the number of restarts so far (see below); with restarts off (the default) it
-    is always ``0``, because the call is then one true single tree.
+    the number of restarts so far (see below); with restarts off
+    (``DISCOPT_MILP_LAZY_RESTARTS=0``) it is always ``0``, because the call is then
+    one true single tree.
 
-    ``DISCOPT_MILP_LAZY_RESTARTS=<K>`` (#2223, default ``0``) lets the call rebuild
+    ``DISCOPT_MILP_LAZY_RESTARTS=<K>`` (#2223, default ``3``; ``0`` opts out) lets the call rebuild
     its tree up to ``K`` times, the way the HiGHS master does: once a lazy veto
     returns a row, the tree stops at its next check-in, every row either separator
     returned is appended to ``A_ub`` and a fresh tree (fresh root cuts, re-derived

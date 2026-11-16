@@ -7,7 +7,8 @@ absolute 1e-7; these sum to ~2e-7, so three stay, the #1296 gate withdraws the
 certificate (``MilpTinyEntryDecert=1``, bound ``-inf``) and the route falls back to
 the spatial path (measured: ~35 s, four master calls, every one ``bound=None``).
 
-``DISCOPT_OA_MASTER_RELAX_CUT_NOISE=1`` marks the cut rows ``relaxable_ub_rows``:
+``DISCOPT_OA_MASTER_RELAX_CUT_NOISE`` (default ON since its #2223 panel; ``=0`` opts
+out) marks the cut rows ``relaxable_ub_rows``:
 their cap becomes ``1e-6 * max(|b_i|, 1)``. Measured with it: one master call,
 ``MilpNoiseEntriesRelaxedMasked=3``, no decertification, certified in ~4 s.
 """
@@ -62,6 +63,15 @@ def test_relaxable_rows_length_is_checked_by_the_binding():
             lambda x: None,
             relaxable_rows=[True],
         )
+
+
+def test_noise_flag_defaults_on_and_opts_out(monkeypatch):
+    from discopt.solvers.oa import _oa_master_relax_cut_noise_enabled
+
+    monkeypatch.delenv("DISCOPT_OA_MASTER_RELAX_CUT_NOISE", raising=False)
+    assert _oa_master_relax_cut_noise_enabled()
+    monkeypatch.setenv("DISCOPT_OA_MASTER_RELAX_CUT_NOISE", "0")
+    assert not _oa_master_relax_cut_noise_enabled()
 
 
 def test_oa_cut_row_mask_marks_exactly_the_cut_block():

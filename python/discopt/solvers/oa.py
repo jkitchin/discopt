@@ -6106,14 +6106,23 @@ def _oa_master_relax_cut_noise_enabled() -> bool:
     what the absolute cap protected is the master's *incumbent*, and every point the
     master accepts is re-validated by ``lazy_callback`` against the constraints the
     rows linearize. Only applied while ``master_bound_valid``. Bound-changing
-    (CLAUDE.md §5 regime 2): **default OFF** pending the corpus panel recorded in
-    ``docs/dev/flag-retirement-audit.md``. Read at call time.
+    (CLAUDE.md §5 regime 2). **Graduated to default ON on the #2223 panels** (commit
+    ``0d77640``, 30 s, interleaved): 94-model in-repo route population 90 = 90
+    certified, 0 lost, wall 391.6 -> 364.4 s, 1 uncertified bound tighter, 0 looser,
+    0 violations over 167 bound checks (``clay0303hfsg@0`` 29.5 s -> 4.2 s); 47 routed
+    MINLPLib syn/rsyn masters 30 = 30, wall 637.5 -> 638.1 s, 6 tighter, 1 looser, 0
+    violations over 94 checks. Cert-clean and not harmful; it graduates as measurably
+    helpful on its class AND as a prerequisite of ``DISCOPT_MILP_LAZY_RESTARTS``,
+    whose restarted trees meet the OA rows at the entry gate: restarts alone left
+    ``clay0303hfsg@3``'s bound looser, restarts with this flag did not.
+    ``=0`` opts out. Read at call time.
     """
-    return os.environ.get("DISCOPT_OA_MASTER_RELAX_CUT_NOISE", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_OA_MASTER_RELAX_CUT_NOISE", "1").strip().lower() not in (
+        "0",
+        "",
+        "false",
+        "no",
+        "off",
     )
 
 

@@ -91,6 +91,8 @@ def test_restart_flag_parsing(monkeypatch):
     monkeypatch.setenv("DISCOPT_MILP_LAZY_RESTARTS", "3")
     assert ms._lazy_restarts() == 3
     monkeypatch.delenv("DISCOPT_MILP_LAZY_RESTARTS")
+    assert ms._lazy_restarts() == 3  # graduated default
+    monkeypatch.setenv("DISCOPT_MILP_LAZY_RESTARTS", "0")
     assert ms._lazy_restarts() == 0
     for bad in ("-1", "x"):
         monkeypatch.setenv("DISCOPT_MILP_LAZY_RESTARTS", bad)
@@ -129,10 +131,10 @@ def test_restart_carries_rows_and_keeps_the_optimum(monkeypatch):
     assert np.all(H @ res.x <= h + 1e-6)
 
 
-def test_restarts_off_is_one_tree(monkeypatch):
+def test_restarts_opt_out_is_one_tree(monkeypatch):
     c, A, b, H, h, bounds, integ = _instance()
     opt = _reference(c, A, b, H, h, bounds, integ)
-    monkeypatch.delenv("DISCOPT_MILP_LAZY_RESTARTS", raising=False)
+    monkeypatch.setenv("DISCOPT_MILP_LAZY_RESTARTS", "0")
     trees = _Trees(monkeypatch)
     log = {"calls": 0, "reoffered": 0}
     res = ms.solve_milp_with_lazy_cuts(

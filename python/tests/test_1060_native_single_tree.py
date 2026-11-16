@@ -246,9 +246,9 @@ def test_a_terminate_callback_is_honoured_and_counted(monkeypatch):
     counted but not obeyed, and one that is obeyed but never counted, would each
     pass half of this.
     """
-    # Pinned to the single-tree default: #2223's opt-in restarts
-    # (``DISCOPT_MILP_LAZY_RESTARTS``) make ``restarts`` count rebuilt trees.
-    monkeypatch.delenv("DISCOPT_MILP_LAZY_RESTARTS", raising=False)
+    # Pinned to the single tree: #2223's restarts (``DISCOPT_MILP_LAZY_RESTARTS``,
+    # default 3) make ``restarts`` count rebuilt trees; ``0`` is the single tree.
+    monkeypatch.setenv("DISCOPT_MILP_LAZY_RESTARTS", "0")
     c, A_ub, b_ub, bounds, integrality = _knapsack()
     kw = dict(
         c=c, A_ub=A_ub, b_ub=b_ub, A_eq=None, b_eq=None, bounds=bounds, integrality=integrality
