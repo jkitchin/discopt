@@ -197,12 +197,16 @@ was believed.
 - **Re-derive any order-of-magnitude figure before stating it.** A dense `A_eq` was
   reported as 91.5 **TB**; it is 91.5 **GB**. Numbers in a PR or issue are read as
   measurements.
-- **`docs/dev/data` holds evidence, not raw traces.** Commit the `.jsonl` rows,
-  summaries, the scripts that regenerate them, and at most a tail of the lines a
-  document cites (`*_tail.log`, `*.summary.log`). Full per-run solver logs stay in the
-  scratchpad. #2169 landed 174 MB of them (single files of ~255k lines, 18x the rest of
-  the directory); they were removed afterwards, but stay in history for good.
-  `test_docs_dev_data_size.py` fails on a tracked log over 100 kB or any file over 2 MB.
+- **Do not add run data to the repo** (owner, 2026-11-15). Panel `.json`/`.jsonl`,
+  summaries, logs and probe output stay in the scratchpad; the measurement a change rests
+  on goes into the PR description, the issue, or the plan doc's prose (numbers, the
+  command that produced them, the commit measured). The script that regenerates it may be
+  committed. A file a *test* reads is a fixture and belongs in `python/tests/data/`, kept
+  minimal. The existing `docs/dev/data/` files stay for now (25 test modules read from
+  it); add nothing new there. History: #2169 landed 174 MB of raw logs there, and #2220's
+  branch carried ~6 MB of panel output that was deleted before merge but stays in
+  history. `test_docs_dev_data_size.py` still fails on a tracked log over 100 kB or any
+  file over 2 MB.
 
 ### Working on an issue
 
