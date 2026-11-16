@@ -14298,11 +14298,11 @@ mod tests {
                 }
             }
             let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
-            for i in 0..m {
+            for (i, &is_eq) in eq.iter().enumerate() {
                 cols.push(vec![(i, 1.0)]);
                 cf.push(0.0);
                 lf.push(0.0);
-                uf.push(if eq[i] { 0.0 } else { INF });
+                uf.push(if is_eq { 0.0 } else { INF });
             }
             let n = cols.len();
             let mut cp = vec![0usize];
