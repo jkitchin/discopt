@@ -196,11 +196,22 @@ def _knapsack_and_none(n=32, seed=3):
 def test_a_huge_bdd_row_cannot_run_the_stage_past_its_budget():
     """Review of #2112: the clock and the clause cap were checked only between
     rows, and this one row ran a 2 s budget to 46 s and TimeoutError. The
-    encoding now checks both per BDD layer."""
+    encoding now checks both per BDD layer.
+
+    The budget is a backstop, not the quality bar (CLAUDE.md): this call takes
+    0.36 s on a dev machine (100 Rust MILP probes in ``phase_bounds``), and a 2 s
+    budget failed ``res.complete`` on two consecutive CI runs of #2220. 10 s still
+    separates the fix from the 46 s pre-fix run, and the wall check pins it."""
+    import time as _time
+
     m = _knapsack_and_none()
-    res = milp_iis(m, total_time_limit=2.0)
+    limit = 10.0
+    t0 = _time.perf_counter()
+    res = milp_iis(m, total_time_limit=limit)
+    wall = _time.perf_counter() - t0
     assert sorted(m._constraints[i].name for i in res.constraints) == ["knap", "none"]
     assert res.complete
+    assert wall < limit, f"IIS ran {wall:.1f} s past its {limit} s budget"
 
 
 def test_encode_geq_aborts_before_creating_anything():
