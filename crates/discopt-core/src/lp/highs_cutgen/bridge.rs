@@ -20,10 +20,13 @@
 //! no cut leans on a range this module could not read. The tableau separator is
 //! skipped in a round whose basis holds such a column.
 //!
-//! Not ported (measured deferrals, §12.16-§12.19): the implied-bound and clique
-//! separators. Variable bounds (§12.21), root propagation (§12.20), node separation
-//! (§12.23) and mod-k (§12.24) are ported behind their levers.
+//! Not ported (measured deferrals, §12.16-§12.19): the implied-bound separator.
+//! Variable bounds (§12.21), root propagation (§12.20), node separation (§12.23),
+//! mod-k (§12.24) and the clique separator (#2225, `separateCliques` over the ported
+//! clique table, root rounds only) are ported behind their levers.
 
+use super::clique::{CliqueDomain, CliqueReason, CliqueRows, CliqueTable};
+use super::domain::BoundType;
 use super::pool::{CutPool, NoObserver};
 use super::separators::{
     CutSink, LpAggregator, PathSeparator, SepContext, TableauContext, TableauSeparator,
@@ -507,6 +510,91 @@ impl CutSink for PoolSink<'_> {
     }
 }
 
+/// The global box the root's clique table reads and fixes (#2225).
+///
+/// HiGHS's table works on `mipdata_->domain`, whose fixings reach the LP. Here the
+/// table gets a private copy of the root box: a fixing it derives (an infeasible
+/// literal, a clique cover) stays in this copy and is not applied to the LP, so the
+/// table may imply fewer reductions than HiGHS's -- never a wrong one, because every
+/// clique and fixing it records is implied by the model rows over the root box. A
+/// copy that turns infeasible means the rows have no binary point in that box; the
+/// separator then stops (it makes no claim) and the search proves it.
+struct CliqueBox {
+    lb: Vec<f64>,
+    ub: Vec<f64>,
+    is_int: Vec<bool>,
+    infeasible: bool,
+    stack: Vec<usize>,
+    nnz: usize,
+}
+
+impl CliqueDomain for CliqueBox {
+    fn col_lower(&self) -> &[f64] {
+        &self.lb
+    }
+    fn col_upper(&self) -> &[f64] {
+        &self.ub
+    }
+    fn integrality(&self) -> &[bool] {
+        &self.is_int
+    }
+    fn infeasible(&self) -> bool {
+        self.infeasible
+    }
+    fn feastol(&self) -> f64 {
+        FEASTOL
+    }
+    fn change_bound(&mut self, bt: BoundType, col: usize, val: f64, _reason: CliqueReason) {
+        match bt {
+            BoundType::Lower => {
+                if val <= self.lb[col] {
+                    return;
+                }
+                self.lb[col] = val;
+            }
+            BoundType::Upper => {
+                if val >= self.ub[col] {
+                    return;
+                }
+                self.ub[col] = val;
+            }
+        }
+        if self.lb[col] > self.ub[col] + FEASTOL {
+            self.infeasible = true;
+        }
+        self.stack.push(col);
+    }
+    fn propagate(&mut self) {}
+    fn domain_change_stack_len(&self) -> usize {
+        self.stack.len()
+    }
+    fn domain_change_col(&self, pos: usize) -> usize {
+        self.stack[pos]
+    }
+    fn num_model_nonzeros(&self) -> usize {
+        self.nnz
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether each root round runs HiGHS's clique
+/// separator (`HighsCliqueTable::separateCliques`, called by `HighsSeparation::
+/// separationRound` before the LP separators) over a clique table extracted once from
+/// the model rows (`extractCliques`). HiGHS runs it by default. **ON** with the
+/// `highs` arm (#2225); `DISCOPT_HIGHS_SEPA_CLIQUE=0` opts out. Read per call,
+/// refusing garbage.
+pub fn clique_sepa_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_CLIQUE") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEPA_CLIQUE={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
 /// The persistent separation state of one root (HiGHS's `HighsSeparation` with
 /// its separators and the global cut pool).
 pub struct RootSeparation {
@@ -523,6 +611,13 @@ pub struct RootSeparation {
     /// cuts); `None` until the first round, or always under
     /// `DISCOPT_HIGHS_SEPA_VBOUNDS=0`.
     vbounds: Option<VarBoundStore>,
+    /// The clique table and the box it reads (#2225); `None` until the first round,
+    /// or always under `DISCOPT_HIGHS_SEPA_CLIQUE=0`.
+    cliques: Option<(CliqueTable, CliqueBox)>,
+    /// `localNumNeighbourhoodQueries` of `HighsSeparation`'s clique calls.
+    clique_queries: i64,
+    /// Nonzeros of the model rows (`numNonzeros`, which bounds the neighbourhood work).
+    model_nnz: usize,
     /// Cuts added to the pool across rounds.
     pub cuts_generated: usize,
     /// Structural columns (the pool's cuts are over them).
@@ -593,6 +688,9 @@ impl RootSeparation {
             model_rows,
             top_level,
             vbounds: None,
+            cliques: None,
+            clique_queries: 0,
+            model_nnz,
             cuts_generated: 0,
             ns,
         }
@@ -734,6 +832,76 @@ impl RootSeparation {
         );
         let mut agg = LpAggregator::new(&view);
         let before = self.pool.num_cuts();
+        if self.cliques.is_none() && clique_sepa_enabled() {
+            let (table, cbox, merged) = self.build_cliques(&view);
+            // The extended set-packing rows enter the pool as cuts: HiGHS's presolve
+            // writes the extensions into the rows themselves (`getCliqueExtensions`).
+            let mut sink = PoolSink {
+                pool: &mut self.pool,
+                source: "clique-merge",
+                probe,
+                checked: 0,
+                violated: 0,
+                vb: vstore.as_mut().map(|v| (v, &cl[..], &cu[..], &vint[..])),
+            };
+            let mut added = 0u64;
+            for (inds, vals, rhs) in &merged {
+                if sink.add_cut(inds, vals, *rhs, true) >= 0 {
+                    added += 1;
+                }
+            }
+            crate::profile::incr_by(crate::profile::Ctr::HighsSepaCliqueMerged, added);
+            if probe.is_some() {
+                eprintln!(
+                    "HIGHS_SEPA_CHECK clique-merge checked={} violated={}",
+                    sink.checked, sink.violated
+                );
+            }
+            self.cliques = Some((table, cbox));
+        }
+        if let Some((table, cbox)) = self.cliques.as_mut() {
+            if !cbox.infeasible {
+                // `HighsSeparation::separationRound`: the clique separator runs before
+                // the LP separators, into the same pool (`addCut(..., integral=true)`).
+                let intcols: Vec<usize> = (0..r.ns).filter(|&j| r.is_int[j]).collect();
+                let found = table.separate_cliques(
+                    cbox,
+                    &view.colval,
+                    &intcols,
+                    FEASTOL,
+                    self.model_nnz as i64,
+                    self.lp_iterations,
+                    None,
+                    &mut self.clique_queries,
+                );
+                let mut sink = PoolSink {
+                    pool: &mut self.pool,
+                    source: "clique",
+                    probe,
+                    checked: 0,
+                    violated: 0,
+                    vb: vstore.as_mut().map(|v| (v, &cl[..], &cu[..], &vint[..])),
+                };
+                let mut added = 0u64;
+                for c in &found {
+                    let inds: Vec<i32> = c.inds.iter().map(|&j| j as i32).collect();
+                    if sink.add_cut(&inds, &c.vals, c.rhs, true) >= 0 {
+                        added += 1;
+                    }
+                }
+                crate::profile::incr_by(crate::profile::Ctr::HighsSepaCliqueCuts, added);
+                crate::profile::record_max(
+                    crate::profile::Ctr::HighsSepaCliques,
+                    table.num_cliques() as u64,
+                );
+                if probe.is_some() {
+                    eprintln!(
+                        "HIGHS_SEPA_CHECK clique checked={} violated={}",
+                        sink.checked, sink.violated
+                    );
+                }
+            }
+        }
         {
             self.tableau.num_calls += 1;
             let seed = self.random_seed as i64 + self.lp_iterations + self.pool.num_cuts();
@@ -829,6 +997,107 @@ impl RootSeparation {
 }
 
 impl RootSeparation {
+    /// `extractCliques(mipsolver, transformRows = true)` over the model rows and the
+    /// round's global box, then `runCliqueMerging` (#2225). Rows are read as the view
+    /// reads them (a range from the row's singleton slack, or an equality).
+    ///
+    /// Also returns, as `sum vals x[inds] <= rhs`, every clique merging extended from a
+    /// model row: HiGHS's presolve adds those literals to the row itself
+    /// (`HPresolve` over `getCliqueExtensions`), which on pairwise-conflict models (the
+    /// pigeonhole `hole9`) turns the LP infeasible at once. discopt's presolve verdict of
+    /// infeasibility is re-decided on the original rows (`solve_presolved`), so the
+    /// strengthening has to reach the original root: as cuts in the pool.
+    #[allow(clippy::type_complexity)]
+    fn build_cliques(
+        &self,
+        view: &View<'_>,
+    ) -> (CliqueTable, CliqueBox, Vec<(Vec<i32>, Vec<f64>, f64)>) {
+        let ns = view.ns;
+        // Each side of a ranged model row becomes its own `a x <= up` row (the lower
+        // side negated), so `extractCliques`' set-packing test (`row_upper == 1`, every
+        // coefficient 1) sees a packing row however it is written: `-x - y >= -1` is
+        // one, and root presolve leaves it ranged (`[-1, 1.8e-15]` on `hole9`). Each
+        // emitted row is one side of a model row, the same set, so every clique it
+        // gives is implied by the model; the clique's origin indexes the emitted rows.
+        // An equality row stays one row (its equality cliques need both sides).
+        let mut ar_start = vec![0usize];
+        let (mut ar_index, mut ar_value) = (Vec::new(), Vec::new());
+        let (mut row_lower, mut row_upper) = (Vec::new(), Vec::new());
+        for i in 0..self.model_rows.min(view.m) {
+            let (ri, rv) = &view.rows[i];
+            let (lo, up) = (view.rowlo[i], view.rowup[i]);
+            let mut emit = |sg: f64, rl: f64, ru: f64| {
+                ar_index.extend(ri.iter().map(|&j| j as usize));
+                ar_value.extend(rv.iter().map(|&v| sg * v));
+                ar_start.push(ar_index.len());
+                row_lower.push(rl);
+                row_upper.push(ru);
+            };
+            if lo == up {
+                emit(1.0, lo, up);
+                continue;
+            }
+            if up < INF {
+                emit(1.0, -INF, up);
+            }
+            if lo > -INF {
+                emit(-1.0, -INF, -lo);
+            }
+        }
+        let nrows = row_lower.len();
+        let mut cbox = CliqueBox {
+            lb: view.cl.clone(),
+            ub: view.cu.clone(),
+            is_int: view.isint[..ns].to_vec(),
+            infeasible: false,
+            stack: Vec::new(),
+            nnz: self.model_nnz,
+        };
+        let mut table = CliqueTable::new(ns);
+        table.set_max_entries(self.model_nnz.min(i32::MAX as usize / 20) as i32);
+        let rows = CliqueRows {
+            ar_start: &ar_start,
+            ar_index: &ar_index,
+            ar_value: &ar_value,
+            row_lower: &row_lower,
+            row_upper: &row_upper,
+            num_orig_rows: nrows,
+            feastol: FEASTOL,
+            epsilon: EPSILON,
+        };
+        table.extract_cliques(&mut cbox, &rows, None, true);
+        let mut merged = Vec::new();
+        if !cbox.infeasible {
+            table.run_clique_merging(&mut cbox);
+        }
+        if !cbox.infeasible {
+            let mut extended = vec![false; nrows];
+            for &(row, _) in table.clique_extensions() {
+                if row >= 0 && (row as usize) < nrows {
+                    extended[row as usize] = true;
+                }
+            }
+            for (_, vars, _, origin) in table.cliques() {
+                if origin < 0 || origin as usize >= nrows || !extended[origin as usize] {
+                    continue;
+                }
+                let mut rhs = 1.0;
+                let (mut inds, mut vals) = (Vec::with_capacity(vars.len()), Vec::new());
+                for v in vars {
+                    inds.push(v.c() as i32);
+                    if v.val == 0 {
+                        vals.push(-1.0);
+                        rhs -= 1.0;
+                    } else {
+                        vals.push(1.0);
+                    }
+                }
+                merged.push((inds, vals, rhs));
+            }
+        }
+        (table, cbox, merged)
+    }
+
     /// Hand over the variable-bound store after the root (for node separation, which
     /// reads it shared and never adds to it).
     pub fn take_vbounds(&mut self) -> Option<VarBoundStore> {

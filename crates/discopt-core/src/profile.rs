@@ -246,6 +246,11 @@ counters!(
     // Gap plan P3 option A: variable bounds held by the ported separation (model rows
     // + pool cuts), recorded per round (max).
     HighsSepaVarBounds,
+    // #2225: clique cuts the ported `separateCliques` added to the root pool, and the
+    // cliques its table holds (max over rounds).
+    HighsSepaCliqueCuts,
+    HighsSepaCliques,
+    HighsSepaCliqueMerged,
     // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global
     // box tightened by the incumbent's objective cutoff.
     HighsSepaCutoffBox,
