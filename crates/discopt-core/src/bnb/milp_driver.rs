@@ -10622,11 +10622,15 @@ fn node_lp(ctx: &NodeCtx<'_>, start: Option<Basis>, full_l: &[f64], full_u: &[f6
                             sol.iters as u64,
                         );
                     }
-                    let integral = ctx
-                        .is_int
-                        .iter()
-                        .enumerate()
-                        .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+                    // Fractionality of the value clamped to the node box, as HiGHS's
+                    // `resolveLp` tests it (see `HighsEval::fractional_integers`): a
+                    // vertex within the LP's tolerance outside an integral bound sits
+                    // on that bound. The point still passes `point_verified` and the
+                    // snap check below before it is offered or fathoms the node.
+                    let integral = ctx.is_int.iter().enumerate().all(|(j, &it)| {
+                        !it || frac(highs_branch::clamp_to_box(xs[j], full_l[j], full_u[j]))
+                            <= INT_TOL
+                    });
                     node_lp_optimal_verdict(ctx, &sol, full_l, full_u, node_lp_bound, integral)
                 }
             }

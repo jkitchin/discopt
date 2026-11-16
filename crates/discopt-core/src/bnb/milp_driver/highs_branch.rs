@@ -226,15 +226,36 @@ fn frac(v: f64) -> f64 {
     (v - v.round()).abs()
 }
 
+/// `max(min(v, hi), lo)`, HiGHS's order (no panic on a crossed box, unlike `clamp`).
+pub(super) fn clamp_to_box(v: f64, lo: f64, hi: f64) -> f64 {
+    v.min(hi).max(lo)
+}
+
 impl HighsEval {
     /// `lp->getFractionalIntegers()` of the last trusted LP point.
+    ///
+    /// As `HighsLpRelaxation::resolveLp` does, each value is first clamped to the
+    /// column's local bounds ("for the fractionality we assume that LP bounds are not
+    /// violated"). An LP vertex may sit just outside an integral bound within the LP's
+    /// relative feasibility tolerance: on a #2220 OA master `x1 = 88252.000176` against
+    /// `x1 <= 88252` (2e-9 relative). Unclamped, that column is "fractional" forever:
+    /// the down branch `x1 <= 88252` leaves the domain unchanged, the child LP returns
+    /// the same vertex, and the dive repeated the decision to depth 976,896 (1M-node
+    /// cap, against 2-9 nodes in HiGHS). Clamped, a candidate's value lies strictly
+    /// inside its integral bounds, so every branching decision shrinks the domain.
     fn fractional_integers(&self, ctx: &NodeCtx<'_>, feastol: f64) -> Vec<(usize, f64)> {
         let Some(x) = &self.point else {
             return Vec::new();
         };
         (0..ctx.ns)
-            .filter(|&j| ctx.is_int[j] && frac(x[j]) > feastol)
-            .map(|j| (j, x[j]))
+            .filter(|&j| ctx.is_int[j])
+            .map(|j| {
+                (
+                    j,
+                    clamp_to_box(x[j], self.dom.col_lower[j], self.dom.col_upper[j]),
+                )
+            })
+            .filter(|&(_, v)| frac(v) > feastol)
             .collect()
     }
 
