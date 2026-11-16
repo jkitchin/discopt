@@ -111,6 +111,11 @@ NOT_A_GATE = {
     "DISCOPT_HIGHS_SEPA_CHECK_POINT": "a path to a reference point checked against cuts",
     "DISCOPT_LP_DUMP_UNCERTIFIED": "a path uncertified LPs are dumped to",
     "DISCOPT_MILP_SEED_POINT": "a path to a seed incumbent (entry experiments; validated)",
+    "DISCOPT_MILP_SUBMIP_WORK": (
+        "a heuristic sub-MIP's work budget in units (default 2.5e9); `0` selects the "
+        "legacy wall-share budget, a selector value. Never a bound. Audit row in "
+        "flag-retirement-audit.md (#2220)"
+    ),
     "DISCOPT_MILP_PRESOLVE_DUMP": "a path the reduced MILP is written to",
     "DISCOPT_MILP_DUMP_INCUMBENT": "a path the final incumbent is written to",
     "DISCOPT_MILP_ROOT_CMIR": (

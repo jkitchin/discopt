@@ -360,8 +360,15 @@ pub trait SearchEnv {
 /// `HighsSearch`'s control state.
 #[derive(Debug, Default)]
 pub struct Search {
-    /// `nodestack`.
+    /// `nodestack`. Push and pop through `push_node` / `pop_node`
+    /// so `open_below` stays exact.
     pub nodestack: Vec<NodeData>,
+    /// How many nodes *below the top two* of `nodestack` have an open subtree.
+    /// The search only ever writes `opensubtrees` on the top two nodes (the top, and
+    /// a branching parent right after its child is pushed), so a node's status is
+    /// fixed while it sits below them and the count changes only as nodes cross that
+    /// line on a push or pop. [`Search::open_on_stack`] is then O(1).
+    pub open_below: usize,
     /// `depthoffset`.
     pub depthoffset: i32,
     /// `nnodes`.
@@ -381,8 +388,43 @@ pub struct Search {
 
 impl Search {
     /// Nodes on the stack with an open subtree (each will yield another node).
+    ///
+    /// O(1). It runs once per node of a dive, and it used to count the whole stack:
+    /// O(depth) per node, O(depth^2) per dive. On `portfol_roundlot`'s OA masters
+    /// (#2220) a dive reached depth 131,072 (a no-op branching, fixed in
+    /// `HighsEval::fractional_integers`) and spent 55 s of a 60 s solve in this
+    /// count. Deep dives remain legitimate on wide integer domains.
     pub fn open_on_stack(&self) -> usize {
-        self.nodestack.iter().filter(|n| n.opensubtrees > 0).count()
+        let n = self.nodestack.len();
+        let top = self.nodestack[n.saturating_sub(2)..]
+            .iter()
+            .filter(|x| x.opensubtrees > 0)
+            .count();
+        debug_assert_eq!(
+            self.open_below,
+            self.nodestack[..n.saturating_sub(2)]
+                .iter()
+                .filter(|x| x.opensubtrees > 0)
+                .count(),
+            "open_below out of step with the node stack"
+        );
+        self.open_below + top
+    }
+
+    /// Push onto `nodestack`; the node that drops below the top two is counted.
+    fn push_node(&mut self, node: NodeData) {
+        if let Some(n) = self.nodestack.len().checked_sub(2) {
+            self.open_below += usize::from(self.nodestack[n].opensubtrees > 0);
+        }
+        self.nodestack.push(node);
+    }
+
+    /// Pop `nodestack`; the node that rises into the top two leaves the count.
+    fn pop_node(&mut self) {
+        self.nodestack.pop();
+        if let Some(n) = self.nodestack.len().checked_sub(2) {
+            self.open_below -= usize::from(self.nodestack[n].opensubtrees > 0);
+        }
     }
 
     /// A fresh identity for a child of `parent` created by `decision`.
@@ -444,7 +486,7 @@ impl Search {
         env.domain_install(&node);
         let mut nd = NodeData::new(node.lower_bound, node.estimate);
         nd.ident = node.ident;
-        self.nodestack.push(nd);
+        self.push_node(nd);
         self.depthoffset = node.depth - 1;
         let d = self.current_depth();
         env.note_installed(d, &node);
@@ -491,7 +533,7 @@ impl Search {
         let mut child = NodeData::new(top.lower_bound, top.estimate);
         child.domchg_stack_pos = pos;
         child.ident = ident;
-        self.nodestack.push(child);
+        self.push_node(child);
     }
 
     /// `branch` (the control around branch selection).
@@ -570,7 +612,7 @@ impl Search {
             let mut child = NodeData::new(child_lb.max(lb), est);
             child.domchg_stack_pos = pos;
             child.ident = ident;
-            self.nodestack.push(child);
+            self.push_node(child);
             let n = self.nodestack.len();
             let sib = self.settle_sibling(n - 2);
             env.node_created(ident);
@@ -621,11 +663,11 @@ impl Search {
             self.count_tree_weight = true;
             self.depthoffset += self.nodestack.last().unwrap().skip_depth_count as i32;
             if self.nodestack.len() == 1 {
-                self.nodestack.pop();
+                self.pop_node();
                 env.domain_backtrack_to_global();
                 return false;
             }
-            self.nodestack.pop();
+            self.pop_node();
             env.domain_backtrack();
             if self.nodestack.last().unwrap().opensubtrees != 0 {
                 self.count_tree_weight = self.nodestack.last().unwrap().skip_depth_count == 0;
@@ -694,7 +736,7 @@ impl Search {
             let mut child = NodeData::new(nodelb, est);
             child.domchg_stack_pos = pos;
             child.ident = ident;
-            self.nodestack.push(child);
+            self.push_node(child);
             return true;
         }
     }
@@ -799,7 +841,7 @@ impl Search {
             let mut child = NodeData::new(nodelb, est);
             child.domchg_stack_pos = pos;
             child.ident = ident;
-            self.nodestack.push(child);
+            self.push_node(child);
             return true;
         }
     }

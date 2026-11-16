@@ -1898,7 +1898,7 @@ pub fn solve_milp_relu_csc_py<'py>(
                     root_cut_prune=true,
                     debug_hook=None,
                     node_callback=None, node_hook_rounds=0, node_hook_cut_cap=0,
-                    abs_gap_tol=None))]
+                    abs_gap_tol=None, rel_gap_max_abs=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_lazy_csc_py<'py>(
     py: Python<'py>,
@@ -1941,6 +1941,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
     node_hook_rounds: usize,
     node_hook_cut_cap: usize,
     abs_gap_tol: Option<f64>,
+    rel_gap_max_abs: bool,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -2030,7 +2031,10 @@ pub fn solve_milp_lazy_csc_py<'py>(
         abs_gap_tol,
         None,
         None,
-        MilpExtra::default(),
+        MilpExtra {
+            rel_gap_max_abs,
+            ..MilpExtra::default()
+        },
     )
 }
 
@@ -2146,6 +2150,7 @@ pub(crate) fn milp_options(
         implied_int_cols: Vec::new(),
         max_stall_nodes: 0,
         max_leaves: 0,
+        max_work: None,
         max_nodes,
         max_open_nodes,
         time_limit_s: parse_budget_secs(time_limit_s)?,

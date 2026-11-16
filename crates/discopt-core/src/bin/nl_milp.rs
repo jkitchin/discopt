@@ -329,6 +329,7 @@ fn run() -> Result<(), String> {
         implied_int_cols: Vec::new(),
         max_stall_nodes: 0,
         max_leaves: 0,
+        max_work: None,
         max_nodes: args.max_nodes,
         max_open_nodes: None,
         time_limit_s: Some(args.time_limit),

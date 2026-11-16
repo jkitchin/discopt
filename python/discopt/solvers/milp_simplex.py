@@ -114,6 +114,39 @@ def _equilibrate_rows(A_ub, b_ub, A_eq, b_eq):
 LAZY_ROOT_CUT_TIME_CAP_S = 15.0
 
 
+def _lazy_gap_kwargs() -> dict:
+    """Stop the lazy master on the decomposition loop's own gap criterion (#1352 class).
+
+    The LP/NLP-BB loop converges when ``ub - lb <= max(GAP_ABS_TOL, gap_tolerance *
+    |ub|)`` (:func:`discopt.solvers._gap.optimality_gap`, ``1e-10`` floor). The
+    engine's default stopping test normalises by ``max(|incumbent|, 1)``
+    (``TreeManager::gap``), so below unit objective scale ``gap_tolerance`` became
+    an ABSOLUTE window: on the n=20 perspective portfolio of
+    ``test_1658_pounce_tol_and_oa_master`` (optimum 0.010442) the master exited
+    ``optimal`` 1.6e-5 short, a 0.155% relative gap, and the route reported
+    ``feasible`` while this master's own verdict said ``optimal``. Whether that
+    happened depended on which degenerate vertex the warm dual reached
+    (``DISCOPT_LP_DUAL_PERTURB_FIRST`` flipped it), which is the sign of a
+    criterion defect, not an LP one. Unlike the OA master
+    (:func:`~discopt.solvers._gap.master_gap_tolerance`) there is no incumbent at
+    launch to rescale by, so the engine's ``max(|incumbent|, |bound|, 1e-10)``
+    denominator is selected plus the loop's absolute arm, which is the loop's
+    criterion exactly. Only the stopping test changes; no node bound does.
+    ``DISCOPT_OA_MASTER_GAP_SCALED=0`` restores the legacy test, the same opt-out
+    as the OA master's.
+    """
+    from discopt.solvers._gap import GAP_ABS_TOL
+
+    if os.environ.get("DISCOPT_OA_MASTER_GAP_SCALED", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return {}
+    return {"rel_gap_max_abs": True, "abs_gap_tol": GAP_ABS_TOL}
+
+
 def _lazy_root_cut_kwargs(base: dict, time_limit) -> dict:
     """Root cut options for the lazy (OA / LP-NLP-BB) master (highs-parity D3).
 
@@ -1800,6 +1833,7 @@ def solve_milp_with_lazy_cuts(
         node_hook_rounds=int(node_hook_rounds) if _node_hook is not None else 0,
         node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
         **_lazy_root_cut_kwargs(std.lp_kwargs, time_limit),
+        **_lazy_gap_kwargs(),
     )
     wall_time = time.perf_counter() - t0
     # The binding counts calls the driver actually made; this side counts calls it

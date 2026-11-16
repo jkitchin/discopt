@@ -2230,6 +2230,11 @@ pub struct MilpOptions {
     /// Stop after this many leaves (HiGHS `mip_max_leaves`; 0 = no limit). Honoured by
     /// the HiGHS search; set for heuristic sub-MIPs.
     pub max_leaves: usize,
+    /// Stop, uncertified, once the search has spent this much deterministic work
+    /// ([`sub_mip_work`]: LP iterations, nodes and exact arithmetic). `None` = no
+    /// limit. Set for heuristic sub-MIPs ([`submip_work_budget`]), where a wall-clock
+    /// share would make what a certifying parent finds depend on machine load.
+    pub max_work: Option<u64>,
     /// Node-creation cap.
     pub max_nodes: usize,
     /// Open-frontier cap (#1874). `Some(k)`: the search stops, uncertified, once
@@ -2473,6 +2478,165 @@ fn submip_budget_highs_enabled() -> bool {
     })
 }
 
+/// `DISCOPT_MILP_SUBMIP_WORK=<W>`: every heuristic sub-MIP runs under a budget of `W`
+/// deterministic work units ([`sub_mip_work`]) and the parent's deadline, instead of a
+/// share of the wall clock left ([`sub_mip_budget`]). The share is a #1116 role-2
+/// clock: it decided what a certifying solve found, so `test_1236`'s nvs02 tree changed
+/// with machine load (`[2, 4, 2]` nodes in #2220's CI).
+///
+/// Default [`SUBMIP_WORK_DEFAULT`] (about 2 s on the calibration machine, the share's
+/// own cap). Measured on #2220's 112-row MIPLIB population at 30 s against the share
+/// (both arms with nested budgets and [`sub_mip_found_point`]): 0 violations,
+/// certified 13 -> 13, incumbents 90 -> 91, dual bound better/worse 13/9, primal
+/// 14/6 (noise floor of an arm against itself: 8/2 and 3/4). Half of it (1.25e9) was
+/// primal 8/11 with incumbents 90 -> 89. `0` is the opt-out to the wall share,
+/// kept so the two can be A/B'd. Garbage is refused.
+fn submip_work_budget() -> u64 {
+    static F: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match std::env::var("DISCOPT_MILP_SUBMIP_WORK") {
+        Err(_) => SUBMIP_WORK_DEFAULT,
+        Ok(v) => v
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|w| w.is_finite() && *w >= 0.0)
+            .map(|w| w as u64)
+            .unwrap_or_else(|| panic!("DISCOPT_MILP_SUBMIP_WORK={v:?} is not a work budget")),
+    })
+}
+
+/// The default [`submip_work_budget`].
+const SUBMIP_WORK_DEFAULT: u64 = 2_500_000_000;
+
+/// Work units (about 0.8 ns each on the calibration machine) of one LP iteration
+/// per row-plus-column (pricing and ratio test).
+const WORK_ITER_PER_DIM: u64 = 3;
+/// Work units of one LP iteration, flat.
+const WORK_ITER: u64 = 7086;
+/// Work units of one search node, per row-plus-column (propagation, bookkeeping).
+const WORK_NODE_PER_DIM: u64 = 58;
+/// Work units of one 64-bit limb operation of exact arithmetic ([`crate::work`]).
+const WORK_EXACT_LIMB: u64 = 1125;
+/// Work units of one LU entry touched ([`crate::work::Kind::Lu`]).
+const WORK_LU: u64 = 8;
+/// Work units of one mod-k splay step ([`crate::work::Kind::Sepa`]).
+const WORK_SEPA: u64 = 2;
+
+/// A sub-MIP's deterministic work so far, in units of roughly 0.8 ns on the machine
+/// it was calibrated on: `iters * (3 (m + n) + 7086) + nodes * (m + n) * 58 +
+/// limb_ops * 1125 + lu_entries * 8 + modk_splay_steps * 2`.
+///
+/// LP iterations are not the work. Measured on #2220's population (114 sub-MIPs
+/// over 30 ms, 16 instances, `DISCOPT_RENS_TRACE` traces with the budget out of
+/// reach): a `gen-ip054` RENS sub-MIP spent 3.44 s on 1,036 iterations, nearly all of
+/// it in the exact rational Farkas check (`lp::simplex::farkas_exact`, 4.5e6 limb
+/// operations), and a `reblock166` one spent 6.3 s at its root with no iterations
+/// counted, in its basis factorizations (4.1e8 LU entries) and the mod-k
+/// separator (1.8e9 splay steps). Without those terms the best fit of this form
+/// predicted it at about 0 s; with them this fit (non-negative least squares on
+/// relative error) predicts every one of the 114 within a factor of 0.22-2.2
+/// (5th-95th percentile 0.56-1.39). The limb, LU and splay counts come from the solve's [`crate::work`] scope, which the
+/// parallel node loop carries into its tasks, so the total does not depend on
+/// scheduling.
+pub(super) fn sub_mip_work(lp_iters: usize, nodes: usize, size: usize) -> u64 {
+    use crate::work::{current_total, Kind};
+    work_units(
+        lp_iters,
+        nodes,
+        size,
+        current_total(Kind::ExactLimb),
+        current_total(Kind::Lu),
+        current_total(Kind::Sepa),
+    )
+}
+
+/// [`sub_mip_work`] from explicit totals.
+fn work_units(lp_iters: usize, nodes: usize, size: usize, limbs: u64, lu: u64, sepa: u64) -> u64 {
+    let size = size as u64;
+    lp_iters as u64 * (size * WORK_ITER_PER_DIM + WORK_ITER)
+        + nodes as u64 * size * WORK_NODE_PER_DIM
+        + limbs * WORK_EXACT_LIMB
+        + lu * WORK_LU
+        + sepa * WORK_SEPA
+}
+
+/// Whether a heuristic sub-MIP's result carries a point to try as an incumbent.
+///
+/// `NodeLimit` with a finite objective is a sub-MIP that found a point and then
+/// stopped on its node or work cap ([`decide_status`] reports the cap before
+/// `Feasible`). Accepting only `Optimal | Feasible` threw those points away: under
+/// the work budget a sub-MIP stops on its cap, not the clock, and `trento1` and
+/// `neos-4393408-tinui` (#2220) lost their only incumbent that way. The point is
+/// still checked against the original rows ([`validate_seed_incumbent`]) before
+/// it is used.
+fn sub_mip_found_point(res: &MilpResult) -> bool {
+    found_point(res.status, res.obj)
+}
+
+fn found_point(status: MilpStatus, obj: f64) -> bool {
+    match status {
+        MilpStatus::Optimal | MilpStatus::Feasible => true,
+        MilpStatus::NodeLimit => obj.is_finite(),
+        _ => false,
+    }
+}
+
+/// The work budget of a sub-MIP started now: `w`, or a quarter of what the
+/// enclosing sub-MIP has left when there is one (see [`run_sub_mip_budgeted`]).
+fn nested_work_budget(w: u64) -> u64 {
+    crate::work::remaining().map_or(w, |left| w.min(left / 4))
+}
+
+/// Runs a heuristic sub-MIP of size `m + n` = `size` under [`submip_work_budget`].
+/// `work` is the work-budget options (its time limit the parent's remaining time);
+/// `share` the legacy wall-share options, `None` when the legacy rule would skip the
+/// sub-MIP. With the budget off, runs `share` (the legacy behaviour).
+fn run_sub_mip_budgeted(
+    size: usize,
+    mut work: MilpOptions,
+    share: Option<MilpOptions>,
+    solve: impl Fn(&MilpOptions) -> MilpResult,
+) -> Option<MilpResult> {
+    let w = submip_work_budget();
+    if w == 0 {
+        return share.map(|o| solve(&o));
+    }
+    // A sub-MIP nested inside another (the root RENS of a RENS sub-MIP) gets a
+    // quarter of what its enclosing sub-MIP has left, as the wall-share rule gives
+    // it a quarter of the time left. With the full `w` instead, the nested solve
+    // spent 1.44 s of its parent's 1.95 s on `air04` (#2220) and left the parent
+    // one node where the wall share explored 62 and found the incumbent; the
+    // panel lost three incumbents that way.
+    let w = nested_work_budget(w);
+    if w == 0 {
+        return None;
+    }
+    work.max_work = Some(w);
+    // The limit covers the LU and exact-arithmetic part of [`work_units`], so the
+    // simplex can stop inside a single long LP (`reblock166`: one root LP of a
+    // 35,712-dimensional sub-MIP ran 11 s against a 2 s budget when the budget was
+    // checked only between nodes). That part alone reaching `w` implies the total
+    // has, so this never stops a sub-MIP the full count would let run.
+    let (scope, sink) = crate::work::Scope::new_solve(Some(crate::work::Limit {
+        units: w,
+        weight: [WORK_EXACT_LIMB, WORK_LU, WORK_SEPA],
+    }));
+    let t0 = std::time::Instant::now();
+    let a = solve(&work);
+    let took = t0.elapsed().as_secs_f64();
+    drop(scope);
+    let limbs = sink.get(crate::work::Kind::ExactLimb);
+    let lu = sink.get(crate::work::Kind::Lu);
+    let sepa = sink.get(crate::work::Kind::Sepa);
+    if std::env::var_os("DISCOPT_RENS_TRACE").is_some() {
+        eprintln!(
+            "SUBWORK lp_iters={} extra={} lu={} sepa={} size={} took={:.4} nodes={} status={:?}",
+            a.lp_iters, limbs, lu, sepa, size, took, a.nodes, a.status
+        );
+    }
+    Some(a)
+}
+
 /// A heuristic sub-MIP's wall budget from the time `left` (s); see
 /// [`submip_budget_highs_enabled`].
 fn sub_mip_budget(left: f64, share: f64, capped: bool) -> f64 {
@@ -2681,14 +2845,22 @@ fn try_sub_mip(
     // The RINS seed lies in the sub-box by construction (every fixed column is fixed
     // to its own value). FBBT only removes points violating a row, so it keeps it.
     let mut sub = sub_solve_options(opts, node_budget, seed);
+    let mut work = None;
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
             return None;
         }
+        let mut w = sub.clone();
+        w.time_limit_s = Some(
+            sub.time_limit_s
+                .map_or(left.as_secs_f64(), |t| t.min(left.as_secs_f64())),
+        );
+        work = Some(w);
         let budget = sub_mip_budget(left.as_secs_f64(), 0.25, true);
         sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
     }
+    let work = work.unwrap_or_else(|| sub.clone());
     crate::profile::incr(match kind {
         SubMipKind::Rens => crate::profile::Ctr::SubMipRensRun,
         SubMipKind::Rins => crate::profile::Ctr::SubMipRinsRun,
@@ -2696,21 +2868,25 @@ fn try_sub_mip(
     let res = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
         let _nest = SubMipNest::enter();
-        solve_milp_node_hooked(
-            base.csc.clone(),
-            base.m,
-            base.n,
-            &base.c,
-            &sub_l,
-            &sub_u,
-            &base.b,
-            obj_const,
-            &sub,
-            None,
-            None,
-            None,
-        )
+        run_sub_mip_budgeted(base.m + base.n, work, Some(sub), |o| {
+            solve_milp_node_hooked(
+                base.csc.clone(),
+                base.m,
+                base.n,
+                &base.c,
+                &sub_l,
+                &sub_u,
+                &base.b,
+                obj_const,
+                o,
+                None,
+                None,
+                None,
+            )
+        })
     };
+    // `None`: a nested sub-MIP whose enclosing one has no work left to give it.
+    let res = res?;
     charge_sub_mip(
         res.lp_iters,
         fixed as f64 / n_int.max(1) as f64,
@@ -2719,7 +2895,7 @@ fn try_sub_mip(
     );
     *spent += res.nodes;
     crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
-    if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) {
+    if !sub_mip_found_point(&res) {
         return None;
     }
     let good = match cutoff {
@@ -4091,7 +4267,7 @@ fn try_rens_highs(
     // The work-bounded budget is for the root RENS only (`parent_nodes == 0`): HiGHS
     // runs that one unconditionally and gates in-tree heuristics by effort.
     let budget = sub_mip_budget(left, share, nested || parent_nodes > 0);
-    if budget <= 0.05 {
+    if budget <= 0.05 && submip_work_budget() == 0 {
         return None;
     }
     let sub_nodes = 200 + parent_nodes / 20;
@@ -4100,48 +4276,63 @@ fn try_rens_highs(
             .all(|j| ix[j] >= l[j] - 1e-9 && ix[j] <= u[j] + 1e-9)
             .then(|| ix[..ns].to_vec())
     });
-    let mut sub = sub_solve_options(opts, sub_nodes, seed);
-    sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
-    sub.cut_rounds = sub.cut_rounds.min(5);
-    sub.root_cut_time_s = Some(budget * 0.3);
-    sub.strong_branch = false;
+    let mut base_sub = sub_solve_options(opts, sub_nodes, seed);
+    base_sub.cut_rounds = base_sub.cut_rounds.min(5);
+    base_sub.strong_branch = false;
+    // Work phase: bounded by its iteration cap, its rounds and the parent's deadline.
+    let mut work = base_sub.clone();
+    if deadline.is_some() {
+        work.time_limit_s = Some(base_sub.time_limit_s.map_or(left, |t| t.min(left)));
+    }
+    let share_sub = (budget > 0.05).then(|| {
+        let mut sub = base_sub.clone();
+        sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
+        sub.root_cut_time_s = Some(budget * 0.3);
+        sub
+    });
     let n_int_heur = is_int.iter().take(ns).filter(|&&b| b).count();
     let res = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
         let _nest = SubMipNest::enter();
-        solve_milp_node_hooked(
-            cut.csc.clone(),
-            cut.m,
-            cut.n,
-            &cut.c,
-            &l,
-            &u,
-            &cut.b,
-            obj_const,
-            &sub,
-            None,
-            None,
-            None,
-        )
+        run_sub_mip_budgeted(cut.m + cut.n, work, share_sub, |o| {
+            solve_milp_node_hooked(
+                cut.csc.clone(),
+                cut.m,
+                cut.n,
+                &cut.c,
+                &l,
+                &u,
+                &cut.b,
+                obj_const,
+                o,
+                None,
+                None,
+                None,
+            )
+        })
     };
+    let res = res?;
     charge_sub_mip(res.lp_iters, fixing, n_int_heur, ns - n_int_heur);
     if rens_trace {
         eprintln!(
-            "RENS sub status={:?} obj={:e} bound={:e} nodes={} budget_s={:.2} took_s={:.2} inc={:?}",
+            "RENS sub status={:?} obj={:e} bound={:e} nodes={} budget_s={:.2} took_s={:.2} inc={:?} lp_iters={} m={} n={}",
             res.status,
             res.obj + obj_const,
             res.bound + obj_const,
             res.nodes,
             budget,
             t0.elapsed().as_secs_f64(),
-            inc.map(|(_, v)| v)
+            inc.map(|(_, v)| v),
+            res.lp_iters,
+            cut.m,
+            cut.n
         );
     }
     crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
     if res.status == MilpStatus::Infeasible {
         record_fixing_outcome(fixing, true, false);
     }
-    if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) || res.x.len() < ns {
+    if !sub_mip_found_point(&res) || res.x.len() < ns {
         return None;
     }
     if inc.is_some_and(|(_, v)| res.obj >= v - 1e-9 * (1.0 + v.abs())) {
@@ -6406,6 +6597,12 @@ fn solve_milp_node_search(
                 if total_cuts >= opts.root_cuts {
                     break;
                 }
+                if opts
+                    .max_work
+                    .is_some_and(|k| sub_mip_work(lp_iters, 0, m + n) >= k)
+                {
+                    break;
+                }
                 if let Some(dl) = root_cut_deadline {
                     if std::time::Instant::now() >= dl {
                         break;
@@ -7596,6 +7793,7 @@ fn solve_milp_node_search(
     let mut batch_index: usize = 0;
     let mut nonroot_dives: usize = 0;
     let mut frontier_capped = false;
+    let mut work_capped = false;
 
     // Stage 1d-5: the HiGHS-design search runs once, at the first batch, from the
     // root working LP; its outcome replaces the batched search's.
@@ -7625,6 +7823,14 @@ fn solve_milp_node_search(
         }
         if tm.stats().total_nodes >= opts.max_nodes {
             gap_certified = false;
+            break;
+        }
+        if opts
+            .max_work
+            .is_some_and(|k| sub_mip_work(lp_iters, tm.stats().total_nodes, m + n) >= k)
+        {
+            gap_certified = false;
+            work_capped = true;
             break;
         }
         if opts
@@ -7976,9 +8182,11 @@ fn solve_milp_node_search(
                     // no caller can catch (see `crate::parallel`).
                     if batch.node_ids.len() >= PAR_MIN_BATCH && crate::parallel::threads_available()
                     {
+                        let sink = crate::work::current();
                         (0..batch.node_ids.len())
                             .into_par_iter()
                             .map(|k| {
+                                let _w = crate::work::Scope::enter(sink.clone());
                                 solve_node(
                                     batch.node_ids[k],
                                     &batch.lb[k],
@@ -8052,6 +8260,9 @@ fn solve_milp_node_search(
                     heur_effort: highs_env::heur_effort_enabled(),
                     max_stall_nodes: opts.max_stall_nodes,
                     max_leaves: opts.max_leaves,
+                    max_work: opts.max_work,
+                    work_size: m + n,
+                    nodes_before: tm.stats().total_nodes,
                     submip: in_sub_mip(),
                     iters_before: lp_iters as i64,
                 };
@@ -9188,7 +9399,7 @@ fn solve_milp_node_search(
         stats.bound_unresolved || stats.unresolved_floor.is_finite(),
         gap_closed(&tm, opts),
         gap_certified,
-        stats.total_nodes >= opts.max_nodes || frontier_capped,
+        stats.total_nodes >= opts.max_nodes || frontier_capped || work_capped,
     );
 
     // Diagnostic instrument (`DISCOPT_MILP_DUMP_INCUMBENT=<file>`): the top-level
@@ -9298,6 +9509,7 @@ fn highs_search_result(
                     | highs_env::Stop::OpenNodes
                     | highs_env::Stop::StallNodes
                     | highs_env::Stop::Leaves
+                    | highs_env::Stop::Work
             )
         ),
     );
@@ -10410,11 +10622,15 @@ fn node_lp(ctx: &NodeCtx<'_>, start: Option<Basis>, full_l: &[f64], full_u: &[f6
                             sol.iters as u64,
                         );
                     }
-                    let integral = ctx
-                        .is_int
-                        .iter()
-                        .enumerate()
-                        .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+                    // Fractionality of the value clamped to the node box, as HiGHS's
+                    // `resolveLp` tests it (see `HighsEval::fractional_integers`): a
+                    // vertex within the LP's tolerance outside an integral bound sits
+                    // on that bound. The point still passes `point_verified` and the
+                    // snap check below before it is offered or fathoms the node.
+                    let integral = ctx.is_int.iter().enumerate().all(|(j, &it)| {
+                        !it || frac(highs_branch::clamp_to_box(xs[j], full_l[j], full_u[j]))
+                            <= INT_TOL
+                    });
                     node_lp_optimal_verdict(ctx, &sol, full_l, full_u, node_lp_bound, integral)
                 }
             }
@@ -12799,6 +13015,7 @@ mod tests {
             implied_int_cols: Vec::new(),
             max_stall_nodes: 0,
             max_leaves: 0,
+            max_work: None,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -13809,6 +14026,7 @@ mod tests {
             implied_int_cols: Vec::new(),
             max_stall_nodes: 0,
             max_leaves: 0,
+            max_work: None,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -16123,6 +16341,7 @@ mod tests {
             implied_int_cols: Vec::new(),
             max_stall_nodes: 0,
             max_leaves: 0,
+            max_work: None,
             max_nodes: 5_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -16268,6 +16487,7 @@ pub(crate) mod sparse_milp_diff {
                 implied_int_cols: Vec::new(),
                 max_stall_nodes: 0,
                 max_leaves: 0,
+                max_work: None,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -16611,6 +16831,7 @@ pub(crate) mod sparse_milp_diff {
             implied_int_cols: Vec::new(),
             max_stall_nodes: 0,
             max_leaves: 0,
+            max_work: None,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -16929,6 +17150,7 @@ mod lazy_separation {
                 implied_int_cols: Vec::new(),
                 max_stall_nodes: 0,
                 max_leaves: 0,
+                max_work: None,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -17237,6 +17459,7 @@ mod node_separation {
                 implied_int_cols: Vec::new(),
                 max_stall_nodes: 0,
                 max_leaves: 0,
+                max_work: None,
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -17528,6 +17751,7 @@ mod lazy_infeasible_node {
             implied_int_cols: Vec::new(),
             max_stall_nodes: 0,
             max_leaves: 0,
+            max_work: None,
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -17675,6 +17899,7 @@ mod root_cut_budget_tests {
             implied_int_cols: Vec::new(),
             max_stall_nodes: 0,
             max_leaves: 0,
+            max_work: None,
             max_nodes: 200_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -18466,6 +18691,7 @@ mod tiny_entry_tests {
             implied_int_cols: Vec::new(),
             max_stall_nodes: 0,
             max_leaves: 0,
+            max_work: None,
             max_nodes: 10_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -19352,5 +19578,37 @@ mod status_matrix {
             assert_eq!(r.status, MilpStatus::Unbounded);
             assert_eq!(r.obj, f64::INFINITY);
         }
+    }
+}
+
+#[cfg(test)]
+mod submip_work_tests {
+    use super::*;
+
+    #[test]
+    fn a_capped_sub_mip_keeps_the_point_it_found() {
+        // trento1 / tinui (#2220): a sub-MIP that found a point and then hit its cap.
+        assert!(found_point(MilpStatus::NodeLimit, 610.29));
+        assert!(!found_point(MilpStatus::NodeLimit, f64::INFINITY));
+        assert!(found_point(MilpStatus::Feasible, 1.0));
+        assert!(found_point(MilpStatus::Optimal, 1.0));
+        assert!(!found_point(MilpStatus::Infeasible, 1.0));
+        assert!(!found_point(MilpStatus::Unbounded, f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn a_nested_sub_mip_gets_a_quarter_of_what_is_left() {
+        // air04 (#2220): the nested sub-MIP took its parent's whole budget.
+        assert_eq!(nested_work_budget(1000), 1000); // top level: the full budget
+        let (_s, _o) = crate::work::Scope::new_solve(Some(crate::work::Limit {
+            units: 1000,
+            weight: [0, 1, 0],
+        }));
+        assert_eq!(nested_work_budget(1000), 250);
+        crate::work::add(crate::work::Kind::Lu, 600);
+        assert_eq!(nested_work_budget(1000), 100);
+        assert_eq!(nested_work_budget(50), 50);
+        crate::work::add(crate::work::Kind::Lu, 400);
+        assert_eq!(nested_work_budget(1000), 0);
     }
 }

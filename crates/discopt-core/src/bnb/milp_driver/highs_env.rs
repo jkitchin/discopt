@@ -91,6 +91,13 @@ pub(super) struct Limits {
     pub max_stall_nodes: usize,
     /// `MilpOptions::max_leaves` (0 = none).
     pub max_leaves: usize,
+    /// `MilpOptions::max_work` (`super::sub_mip_work`), counted with
+    /// `iters_before` and `nodes_before`.
+    pub max_work: Option<u64>,
+    /// `m + n` of the solve, for `super::sub_mip_work`.
+    pub work_size: usize,
+    /// Nodes the driver created before the search.
+    pub nodes_before: usize,
 }
 
 /// `DISCOPT_HIGHS_HEUR_EFFORT`: gate the search's node heuristics (rounding, RENS,
@@ -128,6 +135,8 @@ pub(super) enum Stop {
     StallNodes,
     /// `mip_max_leaves` leaves.
     Leaves,
+    /// `MilpOptions::max_work` work units.
+    Work,
 }
 
 /// The outcome of [`run`].
@@ -971,6 +980,12 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         }
         if self.nodes as usize >= self.lim.max_nodes {
             self.stop = Some(Stop::Nodes);
+        } else if self.lim.max_work.is_some_and(|k| {
+            let it = self.lim.iters_before + self.eval.lp_iters + self.eval.sb_iters;
+            let nodes = self.lim.nodes_before + self.nodes.max(0) as usize;
+            super::sub_mip_work(it.max(0) as usize, nodes, self.lim.work_size) >= k
+        }) {
+            self.stop = Some(Stop::Work);
         } else if self
             .lim
             .max_open_nodes

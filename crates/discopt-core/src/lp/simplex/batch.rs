@@ -156,7 +156,14 @@ where
         // `crate::parallel`). Nothing downstream can catch it, so the question
         // is asked before entering the branch.
         if instances.len() >= PAR_MIN_BATCH && crate::parallel::threads_available() {
-            return instances.par_iter().map(&solve_one).collect();
+            let sink = crate::work::current();
+            return instances
+                .par_iter()
+                .map(|i| {
+                    let _w = crate::work::Scope::enter(sink.clone());
+                    solve_one(i)
+                })
+                .collect();
         }
     }
     instances.iter().map(&solve_one).collect()

@@ -110,6 +110,7 @@ fn opts(inst: &Instance) -> MilpOptions {
         implied_int_cols: Vec::new(),
         max_stall_nodes: 0,
         max_leaves: 0,
+        max_work: None,
         max_nodes: 2_000_000,
         max_open_nodes: None,
         time_limit_s: None,
