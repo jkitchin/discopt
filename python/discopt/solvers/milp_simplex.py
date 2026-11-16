@@ -1140,6 +1140,28 @@ def _open_default_box(lb: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.nd
     return lb, ub
 
 
+def _relaxable_std_rows(relaxable_ub_rows, A_ub, b_ub, m: int) -> Optional[list[bool]]:
+    """Map an ``A_ub`` row mask onto the standard-form rows (#2223).
+
+    :func:`_marshal_std_form` stacks the ``A_ub`` rows first, in order, then the
+    equality rows (one or two per equality, depending on
+    ``DISCOPT_LP_ROW_LOGICALS``); row equilibration only rescales. So ``A_ub`` row
+    ``r`` is standard-form row ``r`` and every equality row is unmarked. ``None`` or
+    an all-false mask returns ``None``: the driver then runs its unmasked path.
+    """
+    if relaxable_ub_rows is None:
+        return None
+    mask = np.asarray(relaxable_ub_rows, dtype=bool).ravel()
+    m_ub = 0 if A_ub is None or b_ub is None else int(np.size(b_ub))
+    if mask.shape[0] != m_ub:
+        raise ValueError(f"relaxable_ub_rows has {mask.shape[0]} flags for {m_ub} A_ub rows")
+    if not mask.any():
+        return None
+    out = [False] * m
+    out[:m_ub] = mask.tolist()
+    return out
+
+
 def _marshal_std_form(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
@@ -1588,6 +1610,7 @@ def solve_milp_with_lazy_cuts(
     node_hook_cut_cap: int = _NODE_HOOK_CUT_CAP_DEFAULT,
     terminate_callback: Optional[Callable[[dict[str, object]], bool]] = None,
     mip_start: Optional[np.ndarray] = None,
+    relaxable_ub_rows: Optional[np.ndarray] = None,
 ) -> MILPResult:
     """Single-tree MILP solve with a lazy-constraint separator, on the Rust simplex.
 
@@ -1634,6 +1657,15 @@ def solve_milp_with_lazy_cuts(
     ``termination_hook``, the refusal raised, and the whole route fell back to the
     spatial path.
 
+    ``relaxable_ub_rows`` (#2223) is an optional boolean mask over the rows of
+    ``A_ub``: a marked row's noise-floor entries (below the equilibration floor of
+    their line) may be relaxed into its slack up to ``1e-6 * max(|b_i|, 1)`` in
+    total, instead of the 1e-7 absolute cap that otherwise leaves them to withdraw
+    the certificate (``MilpOptions::relaxable_rows``). It exists for the OA master's
+    cut rows, whose incumbents ``lazy_callback`` re-validates against the
+    constraint each row linearizes; any relaxation keeps every dual bound valid.
+    ``None`` or an all-false mask is the unmasked solve, bit for bit.
+
     ``callback_stats`` reports ``mipsol_calls`` (separator invocations),
     ``lazy_cuts`` (rows the separator returned), ``driver_lazy_calls`` (the same
     count as the driver saw it) and ``lazy_requeues`` (vetoed nodes put back in
@@ -1675,6 +1707,7 @@ def solve_milp_with_lazy_cuts(
         A_ub, b_ub, A_eq, b_eq = _equilibrate_rows(A_ub, b_ub, A_eq, b_eq)
     std = _marshal_std_form(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)
     m = std.m
+    relaxable_std = _relaxable_std_rows(relaxable_ub_rows, A_ub, b_ub, m)
 
     # Separator invocations and vetoes, counted on this side too so the caller's
     # anti-vacuity check does not depend on the binding's bookkeeping alone.
@@ -1685,6 +1718,7 @@ def solve_milp_with_lazy_cuts(
         "node_cuts": 0,
         "terminated": False,
         "terminate_context": None,
+        "relaxable_rows": 0 if relaxable_std is None else int(sum(relaxable_std)),
     }
 
     def _separate(x_full: np.ndarray) -> list[tuple[np.ndarray, float]]:
@@ -1834,6 +1868,7 @@ def solve_milp_with_lazy_cuts(
         node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
         **_lazy_root_cut_kwargs(std.lp_kwargs, time_limit),
         **_lazy_gap_kwargs(),
+        **({} if relaxable_std is None else {"relaxable_rows": relaxable_std}),
     )
     wall_time = time.perf_counter() - t0
     # The binding counts calls the driver actually made; this side counts calls it

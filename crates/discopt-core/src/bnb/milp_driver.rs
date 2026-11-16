@@ -2423,6 +2423,24 @@ pub struct MilpOptions {
     /// Inert unless `cut_rounds > 1`: with a single round every cut was separated
     /// off the one root solve and is violated there, so nothing is ever slack.
     pub root_cut_prune: bool,
+    /// #2223: one flag per row of the caller's matrix marking rows whose noise-floor
+    /// entries may be relaxed past [`NOISE_RELAX_ABS_TOL`] (the per-entry
+    /// [`NOISE_RELAX_ROW_TOL`] test, the finite implied box, outward rounding and the
+    /// slack substitution all still apply; the row's total relaxed effect is capped at
+    /// `max(NOISE_RELAX_ABS_TOL, NOISE_RELAX_ROW_TOL * max(|b_i|, 1))` instead).
+    ///
+    /// Any relaxation is a superset of the feasible set, so dual bounds stay valid
+    /// with or without the mask. What the absolute cap protects is the *incumbent*:
+    /// the search accepts points on the relaxed rows, so a point may violate an
+    /// original masked row by up to its relaxed effect. That is only acceptable when
+    /// something downstream re-validates every accepted point against the constraint
+    /// the row stands for -- the lazy separator of an outer-approximation master,
+    /// whose cut rows are linearizations of constraints the separator checks
+    /// directly. The driver therefore refuses a mask without a lazy hook, and drops
+    /// it before the search so nested sub-MIPs never see it. `None` (every entry
+    /// point but the OA lazy master, behind `DISCOPT_OA_MASTER_RELAX_CUT_NOISE`) is
+    /// bit-for-bit the unmasked behaviour.
+    pub relaxable_rows: Option<Vec<bool>>,
     /// LP solver options.
     pub simplex: SimplexOptions,
 }
@@ -4877,10 +4895,27 @@ pub fn solve_milp_node_hooked(
     // The caller's wall-time budgets run from here: entry preparation and MILP presolve
     // spend them too (`clock_from`).
     let t0 = std::time::Instant::now();
+    if let Some(mask) = opts.relaxable_rows.as_ref() {
+        // #2223: the mask trades incumbent feasibility on the marked rows for a
+        // certificate; only a lazy separator that re-validates every accepted point
+        // makes that trade sound. Refuse loudly rather than run without one.
+        assert!(
+            lazy.is_some(),
+            "MilpOptions::relaxable_rows requires a lazy-constraint hook to \
+             re-validate accepted points"
+        );
+        assert_eq!(
+            mask.len(),
+            m,
+            "MilpOptions::relaxable_rows has {} flags for {m} rows",
+            mask.len()
+        );
+    }
     let prep = prepare_entry(csc_w, m, n, c, l, u, b, opts);
     let l = prep.l.as_deref().unwrap_or(l);
     let u = prep.u.as_deref().unwrap_or(u);
     let (n_relaxed, unscalable) = (prep.n_relaxed, prep.unscalable);
+    let n_relaxed_masked = prep.n_relaxed_masked;
     // Gap plan §12.34: MILP presolve at the top level, no callbacks.
     // The caller's `presolve: false` covers MILP presolve; a seeded incumbent is in
     // the original columns and is not carried into the reduced problem, so a seeded
@@ -4913,7 +4948,11 @@ pub fn solve_milp_node_hooked(
     }
     // Presolve may have run and declined (no reduction, a refused or unverified
     // reduced solve): the original search gets what is left of the budget, not all of it.
-    let opts = &clock_from(opts, t0);
+    let mut opts_run = clock_from(opts, t0);
+    // #2223: the mask is an entry-stage decision on the caller's rows; nested
+    // sub-MIPs (their rows differ) must never inherit it.
+    opts_run.relaxable_rows = None;
+    let opts = &opts_run;
     // Kept for the unbounded check below (the search consumes and extends the matrix).
     let top_level = MILP_DEPTH.with(|d| d.get()) == 0;
     let csc_orig = (top_level && !opts.integer_cols.is_empty()).then(|| prep.csc.clone());
@@ -4925,6 +4964,10 @@ pub fn solve_milp_node_hooked(
     }
     // After the search: its `begin_solve` resets the counters.
     crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
+    crate::profile::incr_by(
+        crate::profile::Ctr::MilpNoiseEntriesRelaxedMasked,
+        n_relaxed_masked,
+    );
     if unscalable {
         // The counter describes the top-level solve: a nested sub-MIP (a root
         // heuristic) on the same rows withdraws its own certificate too, but counting
@@ -5621,6 +5664,8 @@ struct NoiseRelaxation {
     l: Vec<f64>,
     u: Vec<f64>,
     relaxed: usize,
+    /// Of `relaxed`, entries admitted only through `MilpOptions::relaxable_rows`.
+    relaxed_by_mask: usize,
 }
 
 /// Remove every noise-floor entry the #1296 gate would withdraw on, when its
@@ -5687,6 +5732,7 @@ fn relax_noise_entries(
     let mut l_new = l.to_vec();
     let mut u_new = u.to_vec();
     let mut relaxed = 0usize;
+    let mut relaxed_by_mask = 0usize;
     let mut row_effect = vec![0.0f64; m];
     for j in 0..n {
         let (gl, gu) = (gate_l[j], gate_u[j]);
@@ -5705,11 +5751,30 @@ fn relax_noise_entries(
             }
             let Some((k, s)) = slack[i] else { continue };
             let effect = a.abs() * reach;
+            let row_scale = b[i].abs().max(row_max[i]);
+            // #2223: a caller-marked row (see `MilpOptions::relaxable_rows`) caps
+            // its total at the relative feasibility tolerance on its right-hand side
+            // (unit floor) instead of the absolute cap; never tighter than the
+            // unmasked cap. Measured against `|b_i|`, not the row's largest entry,
+            // so a big-M row (`x - 1e12 z <= 0`, #1537) still cannot relax away an
+            // O(1) term: its cap is 1e-6.
+            let masked = opts
+                .relaxable_rows
+                .as_ref()
+                .is_some_and(|r| r.get(i).copied().unwrap_or(false));
+            let row_cap = if masked {
+                NOISE_RELAX_ABS_TOL.max(NOISE_RELAX_ROW_TOL * b[i].abs().max(1.0))
+            } else {
+                NOISE_RELAX_ABS_TOL
+            };
             if k == j
-                || effect > NOISE_RELAX_ROW_TOL * b[i].abs().max(row_max[i])
-                || row_effect[i] + effect > NOISE_RELAX_ABS_TOL
+                || effect > NOISE_RELAX_ROW_TOL * row_scale
+                || row_effect[i] + effect > row_cap
             {
                 continue;
+            }
+            if row_effect[i] + effect > NOISE_RELAX_ABS_TOL {
+                relaxed_by_mask += 1;
             }
             row_effect[i] += effect;
             // a * z_j over [gl, gu], rounded outward, then divided by the slack's s.
@@ -5751,6 +5816,7 @@ fn relax_noise_entries(
         l: l_new,
         u: u_new,
         relaxed,
+        relaxed_by_mask,
     })
 }
 
@@ -5866,6 +5932,7 @@ struct PreparedEntry {
     l: Option<Vec<f64>>,
     u: Option<Vec<f64>>,
     n_relaxed: u64,
+    n_relaxed_masked: u64,
     unscalable: bool,
 }
 
@@ -5893,9 +5960,11 @@ fn prepare_entry(
     let mut l_relaxed: Option<Vec<f64>> = None;
     let mut u_relaxed: Option<Vec<f64>> = None;
     let mut n_relaxed = 0u64;
+    let mut n_relaxed_masked = 0u64;
     if noise_relax_enabled() {
         if let Some(r) = relax_noise_entries(&csc_w, m, n, c, l, u, b, &gate_l, &gate_u, opts) {
             n_relaxed = r.relaxed as u64;
+            n_relaxed_masked = r.relaxed_by_mask as u64;
             csc_w = r.csc;
             (gate_l, gate_u) = tiny_entry_gate_box(&csc_w, m, n, &r.l, &r.u, b, opts);
             l_relaxed = Some(r.l);
@@ -5908,6 +5977,7 @@ fn prepare_entry(
         l: l_relaxed,
         u: u_relaxed,
         n_relaxed,
+        n_relaxed_masked,
         unscalable,
     }
 }
@@ -13063,6 +13133,7 @@ mod tests {
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
+            relaxable_rows: None,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -14074,6 +14145,7 @@ mod tests {
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
+            relaxable_rows: None,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -16389,6 +16461,7 @@ mod tests {
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
+            relaxable_rows: None,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         };
@@ -16535,6 +16608,7 @@ pub(crate) mod sparse_milp_diff {
                 node_hook_rounds: 0,
                 node_hook_cut_cap: 0,
                 root_cut_time_s: None,
+                relaxable_rows: None,
                 root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
@@ -16879,6 +16953,7 @@ pub(crate) mod sparse_milp_diff {
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
+            relaxable_rows: None,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         };
@@ -17198,6 +17273,7 @@ mod lazy_separation {
                 node_hook_rounds: 0,
                 node_hook_cut_cap: 0,
                 root_cut_time_s: None,
+                relaxable_rows: None,
                 root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
@@ -17507,6 +17583,7 @@ mod node_separation {
                 node_hook_rounds: rounds,
                 node_hook_cut_cap: cap,
                 root_cut_time_s: None,
+                relaxable_rows: None,
                 root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
@@ -17799,6 +17876,7 @@ mod lazy_infeasible_node {
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
+            relaxable_rows: None,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -17947,6 +18025,7 @@ mod root_cut_budget_tests {
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
             root_cut_time_s,
+            relaxable_rows: None,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -18739,6 +18818,7 @@ mod tiny_entry_tests {
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
+            relaxable_rows: None,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -19682,6 +19762,7 @@ mod hook_stop_2223 {
             node_hook_rounds: 0,
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
+            relaxable_rows: None,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -19908,6 +19989,218 @@ mod hook_stop_2223 {
         assert!(
             without_inc > 0,
             "no stop without an incumbent was exercised"
+        );
+    }
+}
+
+/// #2223 cause B — `MilpOptions::relaxable_rows`: rows a caller marks (the OA
+/// master's cut rows) may relax noise entries past the absolute cap, so a
+/// gradient-noise entry on a cut row no longer withdraws the certificate. Every
+/// test asserts the relaxation counters (CLAUDE.md §6).
+#[cfg(test)]
+mod relaxable_rows_2223 {
+    use super::*;
+    use crate::lp::simplex::sparse::SparseCols;
+
+    fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {
+        MilpOptions {
+            n_struct: ns,
+            integer_cols: int_cols,
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
+            max_nodes: 10_000,
+            max_open_nodes: None,
+            time_limit_s: None,
+            stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
+            extend_no_incumbent_s: None,
+            gap_tol: 1e-9,
+            abs_gap_tol: None,
+            root_cuts: 0,
+            cut_rounds: 1,
+            gmi_cuts: false,
+            cmir_cuts: false,
+            cut_select: false,
+            node_cuts: false,
+            max_pool_cuts: 0,
+            heuristics: true,
+            presolve: true,
+            strong_branch: true,
+            node_propagation: true,
+            reduced_cost_fixing: true,
+            sb_max_cands: 8,
+            sb_node_budget: 1000,
+            initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
+            root_cut_time_s: None,
+            relaxable_rows: None,
+            root_cut_prune: true,
+            simplex: SimplexOptions::default(),
+        }
+    }
+
+    struct AcceptAll;
+    impl MilpLazyHook for AcceptAll {
+        fn separate(&self, _x: &[f64]) -> MilpLazyVerdict {
+            MilpLazyVerdict::Accept
+        }
+    }
+
+    /// Solve under the profile override and return the result plus the
+    /// (relaxed, relaxed-by-mask, decertified) counters.
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        dense: &[f64],
+        m: usize,
+        n: usize,
+        c: &[f64],
+        l: &[f64],
+        u: &[f64],
+        b: &[f64],
+        o: &MilpOptions,
+    ) -> (MilpResult, u64, u64, u64) {
+        use crate::profile::{counter, Ctr};
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        crate::profile::reset();
+        let r = solve_milp_node_hooked(
+            SparseCols::from_dense(dense, m, n),
+            m,
+            n,
+            c,
+            l,
+            u,
+            b,
+            0.0,
+            o,
+            None,
+            Some(&AcceptAll),
+            None,
+        );
+        let out = (
+            counter(Ctr::MilpNoiseEntriesRelaxed),
+            counter(Ctr::MilpNoiseEntriesRelaxedMasked),
+            counter(Ctr::MilpTinyEntryDecert),
+        );
+        crate::profile::set_enabled(false);
+        (r, out.0, out.1, out.2)
+    }
+
+    /// `min -x` s.t. `x + 1e-11 y <= 1` (a cut row with a gradient-noise entry),
+    /// `y <= 5e4`, x in {0,1}, y declared `[0, inf)`. The entry moves its row by
+    /// 5e-7 over the implied box: above the 1e-7 absolute cap (so unmasked it
+    /// withdraws the certificate), within 1e-6 of the row. Optimum `-1`.
+    #[test]
+    fn masked_cut_row_noise_entry_is_relaxed_2223() {
+        let (m, n, ns) = (2, 4, 2);
+        #[rustfmt::skip]
+        let dense = vec![
+            1.0, 1e-11, 1.0, 0.0,
+            0.0, 1.0,   0.0, 1.0,
+        ];
+        let c = [-1.0, 0.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [1.0, INF, INF, INF];
+        let b = [1.0, 5e4];
+        let o = opts(ns, vec![0]);
+        let (r0, relaxed0, masked0, decert0) = run(&dense, m, n, &c, &l, &u, &b, &o);
+        // Unmasked: the #1296 gate withdraws, exactly as before #2223.
+        assert_eq!(relaxed0, 0, "unmasked relaxation ran: {r0:?}");
+        assert_eq!(masked0, 0);
+        assert_eq!(decert0, 1, "unmasked gate did not withdraw: {r0:?}");
+        assert_eq!(r0.status, MilpStatus::Feasible, "{r0:?}");
+        assert_eq!(r0.bound, f64::NEG_INFINITY, "{r0:?}");
+        // Masked (the cut row only): relaxed, certified, bound valid.
+        let mut om = o.clone();
+        om.relaxable_rows = Some(vec![true, false]);
+        let (r1, relaxed1, masked1, decert1) = run(&dense, m, n, &c, &l, &u, &b, &om);
+        assert!(
+            relaxed1 > 0 && masked1 > 0,
+            "mask did not fire: {relaxed1} {masked1}"
+        );
+        assert_eq!(decert1, 0, "{r1:?}");
+        assert_eq!(r1.status, MilpStatus::Optimal, "{r1:?}");
+        assert!((r1.obj + 1.0).abs() < 1e-7, "{r1:?}");
+        assert!(
+            r1.bound <= -1.0 + 1e-9,
+            "bound {} above the optimum",
+            r1.bound
+        );
+        // Masking the other row does nothing for this entry.
+        let mut ow = o.clone();
+        ow.relaxable_rows = Some(vec![false, true]);
+        let (r2, _, masked2, decert2) = run(&dense, m, n, &c, &l, &u, &b, &ow);
+        assert_eq!(masked2, 0);
+        assert_eq!(decert2, 1, "{r2:?}");
+    }
+
+    /// The #1537 big-M fixture: `min -x + 3z` s.t. `x - M z <= 0`, x in [0, 10],
+    /// z binary. The entry on `x` is noise next to M but worth 10 on its row; a
+    /// mask must not relax it (its cap is `1e-6 * max(|b|, 1)` = 1e-6), so every
+    /// returned point satisfies the original row and the bound stays valid.
+    #[test]
+    fn masked_row_does_not_unlock_the_1537_bigm_fixture_2223() {
+        let mut checked = 0usize;
+        for big in [1e9, 1e12, 1e14] {
+            let dense = [1.0, -big, 1.0];
+            let (l, u, b) = ([0.0; 3], [10.0, 1.0, INF], [0.0]);
+            let mut o = opts(2, vec![1]);
+            o.relaxable_rows = Some(vec![true]);
+            let (gl, gu) =
+                tiny_entry_gate_box(&SparseCols::from_dense(&dense, 1, 3), 1, 3, &l, &u, &b, &o);
+            assert!(
+                relax_noise_entries(
+                    &SparseCols::from_dense(&dense, 1, 3),
+                    1,
+                    3,
+                    &[-1.0, 3.0, 0.0],
+                    &l,
+                    &u,
+                    &b,
+                    &gl,
+                    &gu,
+                    &o
+                )
+                .is_none(),
+                "M {big:e}: a masked O(10) entry was relaxed"
+            );
+            let (r, _, masked, _) = run(&dense, 1, 3, &[-1.0, 3.0, 0.0], &l, &u, &b, &o);
+            assert_eq!(masked, 0, "M {big:e}");
+            assert!(r.x[0] - big * r.x[1] <= 1e-6, "M {big:e}: {r:?}");
+            assert!(r.bound <= -7.0 + 1e-6, "M {big:e}: {r:?}");
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
+    }
+
+    /// The mask is refused without a lazy hook: only a separator that re-validates
+    /// accepted points makes the relaxed incumbents acceptable.
+    #[test]
+    #[should_panic(expected = "requires a lazy-constraint hook")]
+    fn mask_without_a_lazy_hook_is_refused_2223() {
+        let dense = [1.0, 1e-11, 1.0];
+        let mut o = opts(2, vec![0]);
+        o.relaxable_rows = Some(vec![true]);
+        let _ = solve_milp_node_hooked(
+            SparseCols::from_dense(&dense, 1, 3),
+            1,
+            3,
+            &[-1.0, 0.0, 0.0],
+            &[0.0; 3],
+            &[1.0, 10.0, INF],
+            &[1.0],
+            0.0,
+            &o,
+            None,
+            None,
+            None,
         );
     }
 }

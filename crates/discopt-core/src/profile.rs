@@ -839,6 +839,10 @@ counters!(
     // #2107: noise-floor entries relaxed into their row's slack instead of
     // withdrawing the certificate.
     MilpNoiseEntriesRelaxed,
+    // #2223: the subset of those relaxed only because the caller marked the row
+    // relaxable (`MilpOptions::relaxable_rows`): their row total exceeded the
+    // unmasked absolute cap.
+    MilpNoiseEntriesRelaxedMasked,
     // #2107: c-MIR candidates the root separator returned (before selection).
     SepCmirCuts,
     Phase1ViolLe1Expand,

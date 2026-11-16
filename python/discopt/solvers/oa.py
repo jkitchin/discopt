@@ -6086,6 +6086,56 @@ def _oa_node_cuts_enabled() -> bool:
     return os.environ.get("DISCOPT_OA_NODE_CUTS", "1") not in ("0", "", "false", "False")
 
 
+def _oa_master_relax_cut_noise_enabled() -> bool:
+    """``DISCOPT_OA_MASTER_RELAX_CUT_NOISE``: let the in-house lazy master relax
+    gradient-noise entries of the OA cut rows past the absolute cap (#2223).
+
+    The #1296 gate withdraws the certificate of a MILP whose matrix holds an entry
+    below its line's equilibration floor that can still move its row; #2107 relaxes
+    such an entry into the row's slack when the row's total relaxed effect stays
+    within an ABSOLUTE ``1e-7``, the incumbent-feasibility budget. OA cut rows carry
+    gradient noise: on ``clay0303hfsg`` (304 x 99 master) six entries below 1e-10
+    relative sit in cut rows and are refused only by that absolute cap, so the master
+    exits ``bound=-inf`` (``MilpTinyEntryDecert=1``, ``MilpNoiseEntriesRelaxed=3``)
+    and the route falls back. Zeroing them (an unsound experiment, cross-checked
+    against the reference optimum) certified the first master in 225 nodes.
+
+    With the flag on, the master marks the OA cut rows ``relaxable_ub_rows``; their
+    cap becomes ``1e-6 * max(|b_i|, 1)`` (``MilpOptions::relaxable_rows``). Any
+    relaxation is a superset of the feasible set, so the master bound stays valid;
+    what the absolute cap protected is the master's *incumbent*, and every point the
+    master accepts is re-validated by ``lazy_callback`` against the constraints the
+    rows linearize. Only applied while ``master_bound_valid``. Bound-changing
+    (CLAUDE.md §5 regime 2): **default OFF** pending the corpus panel recorded in
+    ``docs/dev/flag-retirement-audit.md``. Read at call time.
+    """
+    return os.environ.get("DISCOPT_OA_MASTER_RELAX_CUT_NOISE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _oa_cut_row_mask(master, linear_senses, n_oa_rows: int) -> np.ndarray:
+    """Boolean mask over ``master.A_ub`` marking the OA cut rows (#2223).
+
+    :func:`_build_master_milp_data` writes the linear ``<=``/``>=`` rows first, in
+    sense order, then one row per OA cut, then the perspective / split-row / SOC
+    blocks. Checked against the built matrix rather than assumed.
+    """
+    n_lin = sum(1 for sense in linear_senses if sense in ("<=", ">="))
+    m_ub = 0 if master.A_ub is None or master.b_ub is None else int(master.A_ub.shape[0])
+    if n_lin + n_oa_rows > m_ub:
+        raise ValueError(
+            f"OA cut-row mask: {n_lin} linear + {n_oa_rows} cut rows exceed the "
+            f"master's {m_ub} A_ub rows"
+        )
+    mask = np.zeros(m_ub, dtype=bool)
+    mask[n_lin : n_lin + n_oa_rows] = True
+    return mask
+
+
 def _oa_node_cut_rounds() -> int:
     """Separation rounds one master node may run (``DISCOPT_OA_NODE_CUT_ROUNDS``).
 
@@ -7319,6 +7369,8 @@ def solve_lp_nlp_bb(
         perspective_row_epigraph=perspective_row_epigraph,
         soc_outer=soc_outer,
     )
+    #: OA cut rows the master was built with (#2223 mask); the list keeps growing.
+    n_oa_rows_in_master = len(oa_A_rows)
     #: Perspective epigraph rows already in the master. The build below takes
     #: whatever the pool holds at that moment; everything the search adds after
     #: it has to reach the tree as a lazy row like any other cut. Rows that are
@@ -7733,6 +7785,12 @@ def solve_lp_nlp_bb(
                 return lb >= incumbent_obj or _compute_gap(lb, incumbent_obj) <= gap_tolerance
 
             lazy_kwargs["confirm_bound_if"] = _would_certify
+    if lazy_backend == "simplex" and master_bound_valid and _oa_master_relax_cut_noise_enabled():
+        # #2223: the cut rows' gradient-noise entries may be relaxed past the
+        # absolute cap; see ``_oa_master_relax_cut_noise_enabled``.
+        lazy_kwargs["relaxable_ub_rows"] = _oa_cut_row_mask(
+            master, decomp.linear_senses, n_oa_rows_in_master
+        )
     if lazy_backend == "gurobi":
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
     elif lazy_backend == "simplex":

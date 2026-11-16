@@ -1481,6 +1481,7 @@ pub fn solve_milp_csc_py<'py>(
             rel_gap_max_abs,
             bound_hook: node_bound_hook,
             bound_hook_every: node_bound_every,
+            relaxable_rows: None,
         },
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
@@ -1831,6 +1832,7 @@ pub fn solve_milp_relu_csc_py<'py>(
             rel_gap_max_abs,
             bound_hook: None,
             bound_hook_every: 1,
+            relaxable_rows: None,
         },
     )?;
     Ok((
@@ -1898,7 +1900,7 @@ pub fn solve_milp_relu_csc_py<'py>(
                     root_cut_prune=true,
                     debug_hook=None,
                     node_callback=None, node_hook_rounds=0, node_hook_cut_cap=0,
-                    abs_gap_tol=None, rel_gap_max_abs=false))]
+                    abs_gap_tol=None, rel_gap_max_abs=false, relaxable_rows=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_lazy_csc_py<'py>(
     py: Python<'py>,
@@ -1942,6 +1944,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
     node_hook_cut_cap: usize,
     abs_gap_tol: Option<f64>,
     rel_gap_max_abs: bool,
+    relaxable_rows: Option<Vec<bool>>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1956,6 +1959,15 @@ pub fn solve_milp_lazy_csc_py<'py>(
 )> {
     if !lazy_callback.bind(py).is_callable() {
         return Err(PyValueError::new_err("lazy_callback must be callable"));
+    }
+    if let Some(mask) = relaxable_rows.as_ref() {
+        // #2223: one flag per standard-form row; the driver asserts the same.
+        if mask.len() != m {
+            return Err(PyValueError::new_err(format!(
+                "relaxable_rows has {} flags for {m} rows",
+                mask.len()
+            )));
+        }
     }
     if let Some(cb) = node_callback.as_ref() {
         if !cb.bind(py).is_callable() {
@@ -2033,6 +2045,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
         None,
         MilpExtra {
             rel_gap_max_abs,
+            relaxable_rows,
             ..MilpExtra::default()
         },
     )
@@ -2048,6 +2061,8 @@ struct MilpExtra {
     /// Python `f(lb, ub) -> float | None` node lower-bound source.
     bound_hook: Option<Py<PyAny>>,
     bound_hook_every: usize,
+    /// #2223: `MilpOptions::relaxable_rows` (lazy entry only).
+    relaxable_rows: Option<Vec<bool>>,
 }
 
 impl Default for MilpExtra {
@@ -2062,6 +2077,7 @@ impl Default for MilpExtra {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            relaxable_rows: None,
         }
     }
 }
@@ -2184,6 +2200,7 @@ pub(crate) fn milp_options(
         initial_incumbent,
         root_cut_time_s: parse_budget_secs(root_cut_time_s)?,
         root_cut_prune,
+        relaxable_rows: None,
         simplex: SimplexOptions {
             tol,
             max_iter: 100_000,
@@ -2276,6 +2293,13 @@ fn run_milp_hooked<'py>(
     usize,
     usize,
 )> {
+    if extra.relaxable_rows.is_some() && lazy_callback.is_none() {
+        // #2223: see `MilpOptions::relaxable_rows` -- only a lazy separator makes
+        // the relaxed rows' incumbents acceptable.
+        return Err(PyValueError::new_err(
+            "relaxable_rows requires a lazy_callback that re-validates accepted points",
+        ));
+    }
     if relu_separator.is_some() && node_callback.is_some() {
         return Err(PyValueError::new_err(
             "a native ReLU separator and a Python node_callback cannot share the one \
@@ -2319,6 +2343,7 @@ fn run_milp_hooked<'py>(
         selection: extra.selection.unwrap_or(opts.selection),
         branch_rule: extra.branch_rule.unwrap_or(opts.branch_rule),
         rel_gap_max_abs: extra.rel_gap_max_abs || opts.rel_gap_max_abs,
+        relaxable_rows: extra.relaxable_rows,
         ..opts
     };
     if extra.bound_hook_every == 0 {
