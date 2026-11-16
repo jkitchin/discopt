@@ -116,6 +116,43 @@ pub struct Pseudocosts {
     up_count: Vec<u32>,
     /// Default pseudocost for variables with no observations.
     default_cost: f64,
+    /// Children of a down / up branch on this variable that came back with no
+    /// bound because their relaxation was infeasible (the `1e30` exclusion
+    /// sentinel). Kept apart from the cost sums: an infeasible child is a
+    /// *cutoff* observation, not a bound gain (HiGHS's `ncutoffsdown` /
+    /// `ncutoffsup`, `HighsPseudocost::addCutoffObservation`).
+    down_cutoffs: Vec<u32>,
+    up_cutoffs: Vec<u32>,
+    /// Running totals over all variables, for the scale-free normalisation in
+    /// [`Pseudocosts::score`]: sum of per-unit cost observations, their count,
+    /// and the number of cutoff observations.
+    cost_total_sum: f64,
+    cost_total_count: u64,
+    cutoff_total: u64,
+}
+
+/// Weight of the cutoff-rate term in [`Pseudocosts::score`], relative to the
+/// (mapped, normalised) cost term. HiGHS's value (`HighsPseudocost::getScore`).
+const CUTOFF_SCORE_WEIGHT: f64 = 1e-4;
+
+/// Floor for the normalised score factors (HiGHS's `minThreshold`).
+const SCORE_MIN: f64 = 1e-6;
+
+/// `s / (1 + s)`: maps a non-negative score into `[0, 1)` monotonically, so
+/// terms on unrelated scales can be added. Algebraically HiGHS's `mapScore`,
+/// `1 - 1/(1+s)`, but that form cancels catastrophically for small `s` (it is
+/// exactly 0 below ~1e-16) and turns near-ties into exact ties -- measured: it
+/// changed which column the cost term alone picks. This form keeps full
+/// relative precision, so the cost term ranks exactly as the raw product.
+fn map_score(s: f64) -> f64 {
+    s / (1.0 + s)
+}
+
+/// Whether `v` can be a relaxation bound: finite and below the LP layer's `INF`
+/// sentinel (`1e20`). The `1e30` infeasibility/exclusion sentinel a pruned child
+/// carries fails this, as do `±inf`.
+fn is_bound(v: f64) -> bool {
+    v.is_finite() && v.abs() < 1e20
 }
 
 impl Pseudocosts {
@@ -127,6 +164,11 @@ impl Pseudocosts {
             up_sum: vec![0.0; n_vars],
             up_count: vec![0; n_vars],
             default_cost: 1.0,
+            down_cutoffs: vec![0; n_vars],
+            up_cutoffs: vec![0; n_vars],
+            cost_total_sum: 0.0,
+            cost_total_count: 0,
+            cutoff_total: 0,
         }
     }
 
@@ -148,19 +190,49 @@ impl Pseudocosts {
         if var_index >= self.down_sum.len() {
             return;
         }
+        crate::profile::incr(crate::profile::Ctr::PseudocostUpdates);
+        // A child pruned as LP-infeasible carries the `1e30` exclusion sentinel
+        // as its "lower bound"; an unbounded or failed relaxation carries `±inf`.
+        // Neither is a bound, so neither is a bound gain: taken at face value one
+        // infeasible child added ~1e30/frac to this variable's sum for the rest of
+        // the search and dominated every later score. It is a *cutoff*
+        // observation instead, as in HiGHS (`addCutoffObservation` vs
+        // `addObservation`), scored by its own small term in [`Self::score`].
+        // The cost count is not incremented, so a variable is not made
+        // "reliable" by children that taught nothing about its cost. With no
+        // parent bound there is nothing to measure a gain against at all.
+        if !is_bound(parent_lb) || !is_bound(child_lb) {
+            crate::profile::incr(crate::profile::Ctr::PseudocostSentinelSkipped);
+            if is_bound(parent_lb) && child_lb >= 1e20 {
+                crate::profile::incr(crate::profile::Ctr::PseudocostCutoffObservations);
+                if is_down {
+                    self.down_cutoffs[var_index] += 1;
+                } else {
+                    self.up_cutoffs[var_index] += 1;
+                }
+                self.cutoff_total += 1;
+            }
+            return;
+        }
         let delta_bound = child_lb - parent_lb;
         // delta_bound should be >= 0 (child is at least as tight as parent)
         let delta_bound = delta_bound.max(0.0);
 
-        if is_down {
+        let per_unit = if is_down {
             let delta_var = frac_part.max(1e-10);
-            self.down_sum[var_index] += delta_bound / delta_var;
+            let g = delta_bound / delta_var;
+            self.down_sum[var_index] += g;
             self.down_count[var_index] += 1;
+            g
         } else {
             let delta_var = (1.0 - frac_part).max(1e-10);
-            self.up_sum[var_index] += delta_bound / delta_var;
+            let g = delta_bound / delta_var;
+            self.up_sum[var_index] += g;
             self.up_count[var_index] += 1;
-        }
+            g
+        };
+        self.cost_total_sum += per_unit;
+        self.cost_total_count += 1;
     }
 
     /// Get the average down pseudocost for a variable.
@@ -187,16 +259,53 @@ impl Pseudocosts {
         self.down_count[var_index] + self.up_count[var_index]
     }
 
+    /// Cutoff observations (infeasible children) recorded for a variable,
+    /// `(down, up)`.
+    pub fn cutoff_counts(&self, var_index: usize) -> (u32, u32) {
+        if var_index >= self.down_cutoffs.len() {
+            return (0, 0);
+        }
+        (self.down_cutoffs[var_index], self.up_cutoffs[var_index])
+    }
+
     /// Compute the pseudocost score for branching on a variable.
     ///
-    /// Uses the product scoring rule: score = down_gain * up_gain,
-    /// where gain = pseudocost * delta_var. This is the standard
-    /// SCIP/Gurobi scoring heuristic.
+    /// Cost term: the product rule `(1e-6 + down_gain) * (1e-6 + up_gain)`,
+    /// gain = pseudocost * delta_var (SCIP/Gurobi), divided by the squared mean
+    /// per-unit cost over all observations and mapped into `[0, 1)`. Both steps
+    /// are monotone with a constant shared by every candidate, so on their own
+    /// they rank candidates exactly as the raw product does.
+    ///
+    /// Cutoff term (HiGHS `getScore`): each direction's cutoff rate
+    /// `cutoffs / (cutoffs + cost observations)`, as a product normalised by the
+    /// squared mean rate and mapped likewise, weighted by
+    /// [`CUTOFF_SCORE_WEIGHT`]. It breaks near-ties toward a variable whose
+    /// branches tend to be infeasible (a "fail-first" signal) without letting
+    /// one infeasible child dominate, which is what the raw `1e30` sentinel did
+    /// when it was taken as a bound gain.
+    ///
+    /// Only the ORDER of scores is used (every caller takes a maximum).
     pub fn score(&self, var_index: usize, frac_part: f64) -> f64 {
         let d = self.down_cost(var_index) * frac_part;
         let u = self.up_cost(var_index) * (1.0 - frac_part);
-        // Product score with small epsilon to avoid zero
-        (1e-6 + d) * (1e-6 + u)
+        let cost = (1e-6 + d) * (1e-6 + u);
+        let avg_cost = if self.cost_total_count > 0 && self.cost_total_sum > 0.0 {
+            self.cost_total_sum / self.cost_total_count as f64
+        } else {
+            self.default_cost
+        };
+        let mut s = map_score(cost / (avg_cost * avg_cost).max(SCORE_MIN));
+        if self.cutoff_total > 0 && var_index < self.down_cutoffs.len() {
+            let rate = |cut: u32, obs: u32| cut as f64 / ((cut + obs) as f64).max(1.0);
+            let r_down = rate(self.down_cutoffs[var_index], self.down_count[var_index]);
+            let r_up = rate(self.up_cutoffs[var_index], self.up_count[var_index]);
+            let avg_rate = self.cutoff_total as f64
+                / ((self.cutoff_total + self.cost_total_count) as f64).max(1.0);
+            let cut =
+                r_down.max(SCORE_MIN) * r_up.max(SCORE_MIN) / (avg_rate * avg_rate).max(SCORE_MIN);
+            s += CUTOFF_SCORE_WEIGHT * map_score(cut);
+        }
+        s
     }
 }
 
@@ -1361,6 +1470,27 @@ mod tests {
     }
 
     #[test]
+    fn test_pseudocosts_ignore_sentinel_and_nonfinite_bounds() {
+        // An LP-infeasible child carries the 1e30 exclusion sentinel; before the
+        // guard it added (1e30 - 1)/0.5 ~ 2e30 to var 0's down sum.
+        let mut pc = Pseudocosts::new(2);
+        pc.update(0, 1.0, 3.0, 0.5, true); // a real observation: 4.0 per unit
+        pc.update(0, 1.0, 1e30, 0.5, true); // infeasible child
+        pc.update(0, 1.0, 1e20, 0.5, true); // the LP layer's INF
+        pc.update(0, 1.0, f64::INFINITY, 0.5, true);
+        pc.update(0, 1.0, f64::NAN, 0.5, true);
+        pc.update(0, f64::NEG_INFINITY, 3.0, 0.5, true); // unbounded parent
+        pc.update(0, 1.0, 1e30, 0.5, false); // infeasible up child
+        assert_eq!(pc.observation_count(0), 1);
+        assert!((pc.down_cost(0) - 4.0).abs() < 1e-10, "{}", pc.down_cost(0));
+        assert_eq!(pc.up_cost(0), 1.0, "up side keeps the default");
+        // A large but genuine bound still counts.
+        pc.update(1, 0.0, 1e15, 0.5, true);
+        assert_eq!(pc.observation_count(1), 1);
+        assert!((pc.down_cost(1) - 2e15).abs() < 1.0);
+    }
+
+    #[test]
     fn test_pseudocosts_negative_delta_clamped() {
         let mut pc = Pseudocosts::new(2);
         // child_lb < parent_lb → delta clamped to 0.
@@ -1375,9 +1505,42 @@ mod tests {
         pc.update(0, 0.0, 1.0, 0.5, true); // per-unit = 2.0
         pc.update(0, 0.0, 1.5, 0.5, false); // per-unit = 3.0
         let score = pc.score(0, 0.5);
-        // d = 2.0 * 0.5 = 1.0, u = 3.0 * 0.5 = 1.5
-        // score = (1e-6 + 1.0) * (1e-6 + 1.5) ≈ 1.5
-        assert!((score - 1.5).abs() < 0.01);
+        // d = 2.0 * 0.5 = 1.0, u = 3.0 * 0.5 = 1.5 -> product ~1.5; mean per-unit
+        // cost (2+3)/2 = 2.5, so the normalised product is 1.5/6.25 = 0.24 and
+        // the mapped score 0.24 / 1.24.
+        assert!((score - 0.24 / 1.24).abs() < 1e-5, "{score}");
+        // Ranking follows the raw product: var 1 with larger gains scores higher.
+        pc.update(1, 0.0, 3.0, 0.5, true);
+        pc.update(1, 0.0, 3.0, 0.5, false);
+        assert!(pc.score(1, 0.5) > pc.score(0, 0.5));
+    }
+
+    #[test]
+    fn test_pseudocosts_cutoff_term_breaks_ties_but_never_dominates_cost() {
+        // Two variables with identical cost observations; var 0 also has
+        // infeasible children. It must win the tie, but a variable with clearly
+        // larger cost gains must still beat it (the old 1e30 pollution made
+        // var 0 win regardless).
+        let mut pc = Pseudocosts::new(3);
+        for v in 0..2 {
+            pc.update(v, 0.0, 1.0, 0.5, true);
+            pc.update(v, 0.0, 1.0, 0.5, false);
+        }
+        pc.update(0, 0.0, 1e30, 0.5, true);
+        pc.update(0, 0.0, 1e30, 0.5, false);
+        assert_eq!(pc.cutoff_counts(0), (1, 1));
+        assert_eq!(
+            pc.observation_count(0),
+            2,
+            "cutoffs are not cost observations"
+        );
+        assert!(pc.score(0, 0.5) > pc.score(1, 0.5));
+        pc.update(2, 0.0, 3.0, 0.5, true);
+        pc.update(2, 0.0, 3.0, 0.5, false);
+        assert!(pc.score(2, 0.5) > pc.score(0, 0.5));
+        // No parent bound: nothing recorded at all.
+        pc.update(1, f64::NEG_INFINITY, 1e30, 0.5, true);
+        assert_eq!(pc.cutoff_counts(1), (0, 0));
     }
 
     #[test]
