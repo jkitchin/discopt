@@ -7813,7 +7813,9 @@ fn solve_milp_node_search(
     let mut highs_outcome: Option<highs_env::Outcome> = None;
     'search: loop {
         if fire_dbg!(MilpCheckpoint::IterStart) {
+            // #2223: a hook stop is a limit, never an emptiness proof.
             gap_certified = false;
+            search_incomplete = true;
             break;
         }
         // #2163: stop on the caller's gap test or a drained tree, never on
@@ -7937,7 +7939,19 @@ fn solve_milp_node_search(
                 batch_best_x: None,
             };
             if matches!(h.checkpoint(&state), MilpDebugControl::Stop) {
+                // #2223: `export_batch` already popped these nodes and marked them
+                // `Evaluated`, so the frontier's `open_count()` no longer sees them.
+                // Breaking without putting them back let a stop in the last batch of a
+                // search with no incumbent read as an empty tree, and `decide_status`
+                // returned `Infeasible` for a search that never looked at those boxes.
+                // Re-open every one (each keeps its parent-inherited bound, which the
+                // global bound already counts) and record the truncation: a stop is a
+                // limit, never an emptiness proof (the C-2 invariant).
+                for &id in &batch.node_ids {
+                    tm.requeue_node(id);
+                }
                 gap_certified = false;
+                search_incomplete = true;
                 break 'search;
             }
         }
@@ -9148,6 +9162,7 @@ fn solve_milp_node_search(
                 dbg_last_inc = v;
                 if fire_dbg!(MilpCheckpoint::IncumbentFound) {
                     gap_certified = false;
+                    search_incomplete = true;
                     break 'search;
                 }
             }
@@ -9184,7 +9199,9 @@ fn solve_milp_node_search(
             dbg_best.map(|(b, _)| b),
             dbg_best.map(|(_, x)| x)
         ) {
+            // #2223: a hook stop is a limit, never an emptiness proof.
             gap_certified = false;
+            search_incomplete = true;
             break 'search;
         }
         dbg_iter += 1;
@@ -19610,5 +19627,287 @@ mod submip_work_tests {
         assert_eq!(nested_work_budget(50), 50);
         crate::work::add(crate::work::Kind::Lu, 400);
         assert_eq!(nested_work_budget(1000), 0);
+    }
+}
+
+/// #2223 — a debug-hook `Stop` is a limit, never an emptiness proof.
+///
+/// The hook stop at `AfterSelect` fires after `export_batch` has popped the batch
+/// and marked it `Evaluated`. Before #2223 the driver broke out without putting
+/// those nodes back, so a stop in a search with no incumbent left an "empty" tree
+/// and `decide_status` returned `Infeasible` — a false certificate, exactly the
+/// C-2 shape. Every test asserts the hook actually fired and stopped the search
+/// (CLAUDE.md §6) before asserting the verdict.
+#[cfg(test)]
+mod hook_stop_2223 {
+    use super::*;
+    use crate::lp::simplex::sparse::SparseCols;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {
+        MilpOptions {
+            n_struct: ns,
+            integer_cols: int_cols,
+            implied_int_cols: Vec::new(),
+            max_stall_nodes: 0,
+            max_leaves: 0,
+            max_work: None,
+            max_nodes: 100_000,
+            max_open_nodes: None,
+            time_limit_s: None,
+            stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
+            extend_no_incumbent_s: None,
+            gap_tol: 1e-9,
+            abs_gap_tol: None,
+            root_cuts: 16,
+            cut_rounds: 3,
+            gmi_cuts: true,
+            cmir_cuts: false,
+            cut_select: true,
+            node_cuts: true,
+            max_pool_cuts: 500,
+            heuristics: true,
+            presolve: true,
+            strong_branch: true,
+            node_propagation: true,
+            reduced_cost_fixing: true,
+            sb_max_cands: 8,
+            sb_node_budget: 1024,
+            initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
+            root_cut_time_s: None,
+            root_cut_prune: true,
+            simplex: SimplexOptions::default(),
+        }
+    }
+
+    /// Stops at the `k`-th `AfterSelect` check-in (1-based); counts check-ins and
+    /// whether it actually returned `Stop`.
+    struct StopAt {
+        k: usize,
+        seen: AtomicUsize,
+        stopped: AtomicUsize,
+    }
+
+    impl StopAt {
+        fn new(k: usize) -> Self {
+            StopAt {
+                k,
+                seen: AtomicUsize::new(0),
+                stopped: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl MilpDebugHook for StopAt {
+        fn checkpoint(&self, s: &MilpDebugState<'_>) -> MilpDebugControl {
+            if s.checkpoint != MilpCheckpoint::AfterSelect {
+                return MilpDebugControl::Continue;
+            }
+            let n = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
+            if n >= self.k {
+                self.stopped.fetch_add(1, Ordering::SeqCst);
+                MilpDebugControl::Stop
+            } else {
+                MilpDebugControl::Continue
+            }
+        }
+    }
+
+    /// Accepts every point: turns the lazy single-tree machinery on (which keeps the
+    /// batched search, the route the OA master runs on) without changing the model.
+    struct AcceptAll;
+    impl MilpLazyHook for AcceptAll {
+        fn separate(&self, _x: &[f64]) -> MilpLazyVerdict {
+            MilpLazyVerdict::Accept
+        }
+    }
+
+    /// The lazy constraint `x + y <= 3`, as `-x - y >= -3`.
+    struct SumAtMostThree {
+        calls: AtomicUsize,
+    }
+    impl MilpLazyHook for SumAtMostThree {
+        fn separate(&self, x: &[f64]) -> MilpLazyVerdict {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if x[0] + x[1] > 3.0 + 1e-9 {
+                MilpLazyVerdict::Reject(vec![GomoryCut {
+                    coeffs: vec![-1.0, -1.0],
+                    rhs: -3.0,
+                }])
+            } else {
+                MilpLazyVerdict::Accept
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        a: &[f64],
+        m: usize,
+        n: usize,
+        c: &[f64],
+        l: &[f64],
+        u: &[f64],
+        b: &[f64],
+        o: &MilpOptions,
+        hook: Option<&dyn MilpDebugHook>,
+        lazy: Option<&dyn MilpLazyHook>,
+    ) -> MilpResult {
+        solve_milp_node_hooked(
+            SparseCols::from_dense(a, m, n),
+            m,
+            n,
+            c,
+            l,
+            u,
+            b,
+            0.0,
+            o,
+            hook,
+            lazy,
+            None,
+        )
+    }
+
+    /// `min -x - y`, `x, y ∈ {0..3}`, `x + y <= 4.5` (slack column `s`), lazy
+    /// `x + y <= 3`. Optimum `-3`. A stop at the first check-in (the root batch,
+    /// no incumbent yet) was reported `Infeasible` before #2223.
+    #[test]
+    fn hook_stop_without_incumbent_is_a_limit_not_infeasible_2223() {
+        let (m, n) = (1, 3);
+        let a = [1.0, 1.0, 1.0];
+        let c = [-1.0, -1.0, 0.0];
+        let l = [0.0, 0.0, 0.0];
+        let u = [3.0, 3.0, INF];
+        let b = [4.5];
+        let o = opts(2, vec![0, 1]);
+        // Unstopped control: the lazy constraint binds and the answer is certified.
+        let sep0 = SumAtMostThree {
+            calls: AtomicUsize::new(0),
+        };
+        let base = run(&a, m, n, &c, &l, &u, &b, &o, None, Some(&sep0));
+        assert_eq!(base.status, MilpStatus::Optimal, "control status");
+        assert!((base.obj + 3.0).abs() < 1e-9, "control obj {}", base.obj);
+        let mut stops = 0usize;
+        for k in 1..=3 {
+            let sep = SumAtMostThree {
+                calls: AtomicUsize::new(0),
+            };
+            let hook = StopAt::new(k);
+            let r = run(&a, m, n, &c, &l, &u, &b, &o, Some(&hook), Some(&sep));
+            if hook.stopped.load(Ordering::SeqCst) == 0 {
+                // The search ended before the k-th check-in: it must then be the control.
+                assert_eq!(r.status, MilpStatus::Optimal, "k={k} unstopped status");
+                continue;
+            }
+            stops += 1;
+            assert_ne!(
+                r.status,
+                MilpStatus::Infeasible,
+                "k={k}: a hook stop was reported as an infeasibility proof"
+            );
+            assert_ne!(r.status, MilpStatus::Optimal, "k={k}: a stop certified");
+            assert!(
+                r.bound <= -3.0 + 1e-9,
+                "k={k}: stopped bound {} above the optimum -3",
+                r.bound
+            );
+            if r.obj.is_finite() {
+                assert!(
+                    r.x[0] + r.x[1] <= 3.0 + 1e-9,
+                    "k={k}: vetoed point returned"
+                );
+            } else {
+                assert_eq!(r.status, MilpStatus::NodeLimit, "k={k}: no-incumbent stop");
+            }
+        }
+        assert!(
+            stops >= 1,
+            "no k stopped the search: the test exercised nothing"
+        );
+    }
+
+    /// Random small knapsacks (min, integer in `[0, 3]`) under an accept-all lazy
+    /// hook, stopped at the `k`-th check-in for every `k` until the search finishes
+    /// on its own. The stopped bound must never exceed the true optimum, no stop
+    /// may read as `Infeasible`, and both a stop with and one without an incumbent
+    /// must have been exercised.
+    #[test]
+    fn hook_stop_bound_is_valid_2223() {
+        let mut seed: u64 = 2223;
+        let mut rnd = move |lo: u64, hi: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + (seed >> 33) % (hi - lo)
+        };
+        let (mut cmp, mut with_inc, mut without_inc) = (0usize, 0usize, 0usize);
+        for _inst in 0..6 {
+            let (ns, m) = (10usize, 4usize);
+            let n = ns + m;
+            let mut a = vec![0.0; m * n];
+            let mut b = vec![0.0; m];
+            for i in 0..m {
+                for j in 0..ns {
+                    a[i * n + j] = rnd(1, 30) as f64;
+                }
+                a[i * n + ns + i] = 1.0;
+                b[i] = (0..ns).map(|j| a[i * n + j]).sum::<f64>() * 0.37 + 0.5;
+            }
+            let mut c = vec![0.0; n];
+            for cj in c.iter_mut().take(ns) {
+                *cj = -(rnd(5, 40) as f64);
+            }
+            let l = vec![0.0; n];
+            let mut u = vec![3.0; n];
+            for uj in u.iter_mut().skip(ns) {
+                *uj = INF;
+            }
+            let o = opts(ns, (0..ns).collect());
+            let base = run(&a, m, n, &c, &l, &u, &b, &o, None, Some(&AcceptAll));
+            assert_eq!(base.status, MilpStatus::Optimal, "reference status");
+            let opt = base.obj;
+            for k in 1..=60 {
+                let hook = StopAt::new(k);
+                let r = run(&a, m, n, &c, &l, &u, &b, &o, Some(&hook), Some(&AcceptAll));
+                if hook.stopped.load(Ordering::SeqCst) == 0 {
+                    assert_eq!(r.status, MilpStatus::Optimal, "unstopped k={k}");
+                    assert!((r.obj - opt).abs() <= 1e-6 * opt.abs().max(1.0));
+                    break;
+                }
+                assert_ne!(r.status, MilpStatus::Infeasible, "stop read as Infeasible");
+                assert_ne!(r.status, MilpStatus::Optimal, "a stop certified");
+                if r.obj.is_finite() {
+                    with_inc += 1;
+                    assert!(
+                        r.obj >= opt - 1e-6 * opt.abs().max(1.0),
+                        "incumbent below opt"
+                    );
+                } else {
+                    without_inc += 1;
+                }
+                if r.bound.is_finite() {
+                    cmp += 1;
+                    assert!(
+                        r.bound <= opt + 1e-6 * opt.abs().max(1.0),
+                        "k={k}: stopped bound {} above the optimum {opt}",
+                        r.bound
+                    );
+                }
+            }
+        }
+        assert!(cmp > 0, "no finite stopped bound was compared");
+        assert!(with_inc > 0, "no stop with an incumbent was exercised");
+        assert!(
+            without_inc > 0,
+            "no stop without an incumbent was exercised"
+        );
     }
 }
