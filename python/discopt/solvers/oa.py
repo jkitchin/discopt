@@ -6131,7 +6131,9 @@ def _oa_cut_row_mask(master, linear_senses, n_oa_rows: int) -> np.ndarray:
 
     :func:`_build_master_milp_data` writes the linear ``<=``/``>=`` rows first, in
     sense order, then one row per OA cut, then the perspective / split-row / SOC
-    blocks. Checked against the built matrix rather than assumed.
+    blocks. The only check made against the built matrix is that the linear and
+    cut rows fit inside ``master.A_ub``; the layout itself is the contract of
+    :func:`_build_master_milp_data` (pinned by ``test_2223_cut_row_noise.py``).
     """
     n_lin = sum(1 for sense in linear_senses if sense in ("<=", ">="))
     m_ub = 0 if master.A_ub is None or master.b_ub is None else int(master.A_ub.shape[0])

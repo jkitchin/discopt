@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import math
 import os
 import time
 from collections.abc import Iterable, Sequence
@@ -2023,6 +2024,10 @@ def solve_milp_with_lazy_cuts(
     the certificate (``MilpOptions::relaxable_rows``). It exists for the OA master's
     cut rows, whose incumbents ``lazy_callback`` re-validates against the
     constraint each row linearizes; any relaxation keeps every dual bound valid.
+    The driver only checks that *some* lazy hook is installed, so the obligation is
+    the caller's: ``lazy_callback`` must re-validate every point against the
+    original (unrelaxed) rows it marks -- a separator that accepts everything makes
+    a marked row's relaxation reach the returned incumbent.
     ``None`` or an all-false mask is the unmasked solve, bit for bit.
 
     ``callback_stats`` reports ``mipsol_calls`` (separator invocations),
@@ -2149,6 +2154,11 @@ def _solve_lazy_restarting(
     running_bound: Optional[float] = None
     nodes_total = 0
     seed = mip_start
+    # The best point any tree's separator accepted (#2223 review). A restart hands
+    # it on only as ``mip_start``, which the next tree may drop at seed validation;
+    # the call must never report less than it has already accepted.
+    c_vec = np.asarray(common["c"], dtype=np.float64).ravel()
+    best_acc: list = [None, math.inf]
     while True:
         new_lazy: list[tuple[np.ndarray, float]] = []
         new_node: list[tuple[np.ndarray, float]] = []
@@ -2159,9 +2169,13 @@ def _solve_lazy_restarting(
 
         def _lazy(x, _sink=new_lazy, _want=want_restart, _may=may_restart):
             rows = lazy_callback(x)
-            if rows is None:
+            rows = [] if rows is None else list(rows)
+            if not rows:
+                xa = np.asarray(x, dtype=np.float64).ravel().copy()
+                obj = float(c_vec @ xa)
+                if obj < best_acc[1]:
+                    best_acc[0], best_acc[1] = xa, obj
                 return None
-            rows = list(rows)
             if rows:
                 _sink.extend(rows)
                 if _may:
@@ -2247,7 +2261,9 @@ def _solve_lazy_restarting(
                 if mask_cur is not None:
                     mask_cur = np.concatenate([mask_cur, np.ones(len(add_rows), dtype=bool)])
             restarts += 1
-            if res.x is not None and res.objective is not None:
+            if best_acc[0] is not None:
+                seed = best_acc[0]
+            elif res.x is not None and res.objective is not None:
                 seed = np.asarray(res.x, dtype=np.float64)
             if not out_of_time:
                 continue
@@ -2269,6 +2285,21 @@ def _solve_lazy_restarting(
                 final.bound = running_bound
             final.node_count = nodes_total
             final.wall_time = time.perf_counter() - t_start
+        if best_acc[0] is not None:
+            if final.status == SolveStatus.INFEASIBLE:
+                # A point was accepted, so the call is not infeasible: the final tree
+                # lost the seed. Report the accepted point, uncertified.
+                final = MILPResult(
+                    status=SolveStatus.ITERATION_LIMIT,
+                    x=best_acc[0],
+                    objective=best_acc[1],
+                    bound=running_bound,
+                    node_count=nodes_total,
+                    wall_time=time.perf_counter() - t_start,
+                    callback_stats=final.callback_stats,
+                )
+            elif final.x is None or final.objective is None:
+                final.x, final.objective = best_acc[0], best_acc[1]
         out_stats = dict(final.callback_stats or {})
         out_stats.update(totals)
         out_stats["restarts"] = restarts

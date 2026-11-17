@@ -11,6 +11,8 @@ certifying and the route fell back (35.3 s total); with
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import pytest
 from discopt.solvers import SolveStatus
@@ -224,6 +226,110 @@ def test_node_cut_cap_spans_restarts(monkeypatch):
         assert stats["restart_rows_node"] == cap, trees.calls
     assert res.status == SolveStatus.OPTIMAL
     assert res.objective == pytest.approx(opt, abs=1e-6)
+
+
+def _ellipsoid(seed: int = 2223):
+    """max c.x over x in {0..3}^6 inside the convex ellipsoid ``w.x^2 <= R``, which
+    lives only in the separators (tangent cuts): unlike the four hidden knapsack
+    rows above, it keeps producing rows after a restart, so fractional nodes of a
+    restarted tree still separate. The optimum is by enumeration (4^6 points)."""
+    rng = np.random.default_rng(seed)
+    n = 6
+    w = rng.uniform(0.5, 2.0, n)
+    c = -rng.uniform(1.0, 5.0, n)
+    R = 0.35 * float(w @ np.full(n, 9.0))
+
+    def cut(x):
+        x = np.asarray(x, dtype=float)
+        g = float(w @ x**2 - R)
+        if g <= 1e-9:
+            return []
+        grad = 2.0 * w * x
+        return [(grad, float(grad @ x - g))]
+
+    pts = np.array(list(itertools.product(range(4), repeat=n)), dtype=float)
+    feas = pts[(pts**2) @ w <= R + 1e-9]
+    opt = float(np.min(feas @ c))
+    kw = dict(
+        A_ub=np.ones((1, n)),
+        b_ub=np.array([100.0]),
+        bounds=[(0, 3)] * n,
+        integrality=np.ones(n),
+        gap_tolerance=1e-9,
+        time_limit=60.0,
+    )
+    return c, w, R, cut, opt, kw
+
+
+def test_node_hook_fires_in_restarted_trees_under_the_default(monkeypatch):
+    """The node-hook path under the graduated default K (test_1060/test_1141 pin
+    ``=0`` for their single-tree semantics, so this is its coverage at K=3)."""
+    c, w, R, cut, opt, kw = _ellipsoid()
+    monkeypatch.delenv("DISCOPT_MILP_LAZY_RESTARTS", raising=False)
+    assert ms._lazy_restarts() == 3
+    trees = _Trees(monkeypatch)
+    per_tree: dict[int, int] = {}
+
+    def node(x):
+        rows = cut(x)
+        if rows:
+            t = len(trees.calls) - 1
+            per_tree[t] = per_tree.get(t, 0) + 1
+        return rows
+
+    res = ms.solve_milp_with_lazy_cuts(
+        c,
+        **kw,
+        lazy_callback=cut,
+        node_callback=node,
+        node_hook_rounds=2,
+        node_hook_cut_cap=200,
+    )
+    stats = res.callback_stats
+    assert stats["restarts"] >= 1, "no restart: this is the single-tree path again"
+    assert stats["mipnode_calls"] > 0 and stats["driver_node_cuts"] > 0
+    assert any(t >= 1 for t in per_tree), f"node hook never fired after a restart: {per_tree}"
+    assert res.status == SolveStatus.OPTIMAL
+    assert res.objective == pytest.approx(opt, abs=1e-6)
+    assert res.bound <= opt + 1e-6
+    assert float(w @ res.x**2) <= R + 1e-6
+
+
+def test_an_accepted_point_survives_a_tree_that_loses_its_seed(monkeypatch):
+    """#2228 review: a restart hands the accepted point on only as ``mip_start``. If
+    a later tree drops it and reports INFEASIBLE (or no point), the call must still
+    return the accepted point, uncertified -- never INFEASIBLE after an acceptance.
+
+    The trees are scripted, so the scenario is exact: tree 1 offers a feasible point
+    (accepted) and an infeasible one (vetoed), then stops at its check-in for the
+    restart without publishing a point; tree 2 loses the seed and reports
+    INFEASIBLE."""
+    c, w, R, cut, opt, kw = _ellipsoid()
+    monkeypatch.setenv("DISCOPT_MILP_LAZY_RESTARTS", "3")
+    good = np.zeros(6)
+    bad = np.full(6, 3.0)
+    assert not cut(good) and cut(bad)
+    trees: list[dict] = []
+
+    def scripted(*args, **kwargs):
+        trees.append(kwargs)
+        if len(trees) == 1:
+            assert not kwargs["lazy_callback"](good)
+            assert kwargs["lazy_callback"](bad)
+            assert kwargs["terminate_callback"]({"dual_bound": -np.inf}) is True
+            return ms.MILPResult(
+                status=SolveStatus.ITERATION_LIMIT, node_count=3, callback_stats={}
+            )
+        return ms.MILPResult(status=SolveStatus.INFEASIBLE, node_count=1, callback_stats={})
+
+    monkeypatch.setattr(ms, "_solve_lazy_tree", scripted)
+    res = ms.solve_milp_with_lazy_cuts(c, **kw, lazy_callback=cut)
+    assert len(trees) == 2, "the restart did not happen"
+    assert np.allclose(trees[1]["mip_start"], good), "the accepted point was not the seed"
+    assert res.status == SolveStatus.ITERATION_LIMIT
+    assert res.x is not None and np.allclose(res.x, good)
+    assert res.objective == pytest.approx(float(c @ good))
+    assert res.callback_stats["restarts"] == 1
 
 
 @pytest.mark.slow

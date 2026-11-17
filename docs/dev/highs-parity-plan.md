@@ -2048,9 +2048,12 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    | syn/rsyn routed MINLPLib, 47 | 30, 637.5 s | **30**, 621.7 s (0 lost) | 29, 709.9 s | -- |
 
    The syn/rsyn `.nl` files were fetched from minlplib.org into `ref/minlplib/nl`
-   (git-ignored); the 47 routed are the P5.1 count. Per-flag arms (run 1, syn):
-   noise alone 90 / 364.4 s and 30 / 638.1 s; K=3 alone 92 / 294.1 s and 30 / 613.7 s;
+   (git-ignored); the 47 routed are the P5.1 count. Per-flag arms (route run 1,
+   then syn/rsyn): noise alone 90 / 364.4 s and 30 / 638.1 s; K=3 alone 92 / 294.1 s and 30 / 613.7 s;
    K=1 lost `clay0303hfsg@0` at the 30 s edge; K=5/10 lost it in an aborted first run.
+   K=3 is therefore chosen on one instance's 30 s edge (K=2/4 not run). Timing caveats: the
+   runs were in a 4-core cloud container with no `uptime` load gate recorded, and the
+   syn/rsyn arms and the HiGHS arm are single runs; only the route OFF arm was repeated.
    Residual against HiGHS on the route: HiGHS-only `clay0303hfsg@3/@6` (row-scaled;
    their remaining noise entries exceed the `1e-6 * max(|b_i|, 1)` masked cap, e.g.
    `a = -1.7e-6` on a row with `|b| = 64`, `max|a| = 5.4e4`), Rust-only
