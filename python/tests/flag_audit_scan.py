@@ -100,6 +100,16 @@ def _is_env_flag(node: ast.Call) -> bool:
     )
 
 
+def _is_env_selector(node: ast.Call) -> bool:
+    """``solver._env_selector(F)`` (the 2026-11-17 engine switch): it returns the
+    variable's lowercased string or ``None``, so every read through it is a selector by
+    construction, never a boolean gate."""
+    f = node.func
+    return (isinstance(f, ast.Name) and f.id == "_env_selector") or (
+        isinstance(f, ast.Attribute) and f.attr == "_env_selector"
+    )
+
+
 def _is_env_subscript(node: ast.Subscript) -> bool:
     v = node.value
     return (isinstance(v, ast.Name) and v.id == "environ") or (
@@ -303,6 +313,13 @@ def scan() -> dict[str, list[Site]]:
                     )
                 continue
             if not isinstance(node, ast.Call):
+                continue
+            if _is_env_selector(node):
+                flag = _flag_of(node, consts)
+                if flag:
+                    by_flag[flag].append(
+                        Site(flag, "env_selector", "selector", rel, node.lineno, "-")
+                    )
                 continue
             if _is_env_flag(node):
                 flag = _flag_of(node, consts)

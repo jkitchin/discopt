@@ -1,11 +1,14 @@
 """HiGHS reach, in one place: whether it is installed, and the error when it is not.
 
-``highspy`` is the optional ``discopt[highs]`` extra (highs-parity P6.3). This module is
+``highspy`` is a core dependency again since the 2026-11-17 engine switch (it was the
+optional ``discopt[highs]`` extra from highs-parity P6.3), but discopt must still run
+without it: Pyodide has no wheel, and there ``DISCOPT_LP_ENGINE=auto`` resolves to the
+in-house Rust engine (``solver._lp_engine``). This module is
 the single place that imports it, so every reach can be inventoried
 (``docs/dev/highs-optional-inventory.md``) and fails at the entry point with a message
 naming the feature and the extra instead of ``No module named 'highspy'`` from somewhere
-inside it. No default path needs it: without it the pure-MILP route falls back to the
-in-house engine (``solver._lp_milp_backend``); the explicit HiGHS opt-ins raise.
+inside it. No default path needs it: without it the pure LP/MILP routes and IIS run on
+the in-house engine (``solver._engine_default``); the explicit HiGHS opt-ins raise.
 
 :class:`MissingHighsError` subclasses ``ModuleNotFoundError`` (``name="highspy"``), so
 code that already handles a missing optional package through ``except ImportError``

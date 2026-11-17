@@ -25,6 +25,20 @@ from discopt._relax.term_classifier import classify_nonlinear_terms
 pytest.importorskip("highspy")
 
 
+def _milp_prefix() -> str:
+    """The pure-MILP route label the default engine gives (DISCOPT_LP_ENGINE)."""
+    from discopt.solver import _lp_milp_backend
+
+    return "highs-milp" if _lp_milp_backend() == "highs" else "native-milp"
+
+
+def _lp_prefix() -> str:
+    """The pure-LP route label the default engine gives (DISCOPT_LP_ENGINE)."""
+    from discopt.solver import _lp_backend
+
+    return "highs-lp" if _lp_backend() == "highs" else "rust-lp"
+
+
 def _param_times_sum(form: str, pval: float):
     m = dm.Model("r")
     x = m.integer("x", lb=0, ub=10)
@@ -43,8 +57,8 @@ def test_c1_parameter_times_sum_goes_to_the_milp_route(form, pval, expected):
     r = m.solve(time_limit=30)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(expected, abs=1e-6)
-    # The pure-MILP route (its default engine is the Rust one since PR #2196).
-    assert r.algorithm_route is not None and r.algorithm_route.startswith("native-milp"), (
+    # The pure-MILP route, on whichever engine DISCOPT_LP_ENGINE selects.
+    assert r.algorithm_route is not None and r.algorithm_route.startswith(_milp_prefix()), (
         r.algorithm_route
     )
 
@@ -231,9 +245,9 @@ def test_a21_zero_quadratic_coefficient_is_linear(form, where, integer):
     r = m.solve(time_limit=30)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(12.0, abs=1e-6)  # x=4, y=0
-    # A MILP goes to the MILP route (Rust engine by default since PR #2196); an LP to the
-    # default LP route (Rust since highs-parity D1).
-    assert _route(r).startswith("native-milp" if integer else "rust-lp"), r.algorithm_route
+    # A MILP goes to the MILP route, an LP to the default LP route, each on the engine
+    # DISCOPT_LP_ENGINE selects.
+    assert _route(r).startswith(_milp_prefix() if integer else _lp_prefix()), r.algorithm_route
 
 
 @pytest.mark.parametrize("where", ["objective", "constraint"])

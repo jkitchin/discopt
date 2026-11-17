@@ -341,12 +341,13 @@ def _solve_lp_like_default_route(
     """Solve a pure LP with the engine ``Model.solve()``'s default route uses.
 
     The same dispatch as the LP branch of ``solver._solve_impl``: the verified
-    LP backend of :func:`discopt.solver._lp_backend` (the Rust simplex, then POUNCE, by
-    default since highs-parity D1; the verified HiGHS route under ``=highs``).
+    LP engine of :func:`discopt.solver._solve_lp_default_engine` (HiGHS with the Rust
+    fallback under ``DISCOPT_LP_ENGINE=auto``; the Rust simplex, then POUNCE, under
+    ``rust``). As in AMP's shortcut, the caller's ``highs_options`` apply to the HiGHS
+    LP here since the engine switch, and HiGHS presolve stays on (no ``presolve=``
+    argument reaches this path).
     """
-    if solver_module._lp_backend() == "highs":
-        return cast(SolveResult, solver_module._solve_lp_highs(model, t_start, time_limit))
-    return cast(SolveResult, solver_module._solve_lp(model, t_start, time_limit))
+    return cast(SolveResult, solver_module._solve_lp_default_engine(model, t_start, time_limit))
 
 
 def _try_integer_free_lp(
@@ -387,8 +388,17 @@ def _try_integer_free_lp(
         shot_config=shot_config,
         selected_strategy="direct_lp",
         problem_class=ProblemClass.LP.value,
-        backend=solver_module._lp_backend(),
+        backend=_answering_lp_engine(result, solver_module),
     )
+
+
+def _answering_lp_engine(result: SolveResult, solver_module: Any) -> str:
+    """The engine that produced *result*: ``"rust"`` after an ``auto`` fallback, else the
+    selected one (``_lp_backend()`` names the engine tried first, not the one that
+    answered)."""
+    if (result.solver_stats or {}).get("lp/engine_fallback"):
+        return "rust"
+    return str(solver_module._lp_backend())
 
 
 def _unlift_result(result: SolveResult, source: Model, lifted: Model) -> SolveResult:

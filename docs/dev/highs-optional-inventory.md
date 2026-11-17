@@ -1,6 +1,13 @@
 # HiGHS as an optional dependency — inventory (highs-parity P6.1)
 
-Status: **done (P6.3, 2026-11-08): `highspy` is the optional `discopt[highs]` extra.**
+Status update (2026-11-17, the engine switch): **`highspy` is a core dependency again**
+and HiGHS is the default pure-LP, pure-MILP and IIS engine (`DISCOPT_LP_ENGINE=auto`,
+with the Rust engine as fallback on a HiGHS `error`; evidence in
+`highs-parity-plan.md` §6, "Engine switch"). Everything below about a HiGHS-less install
+still holds, because `auto` resolves to the Rust engine when `highspy` is absent
+(Pyodide, `--no-deps`); the `Python without HiGHS` CI lane keeps it so.
+
+Previous status: **done (P6.3, 2026-11-08): `highspy` is the optional `discopt[highs]` extra.**
 No default path needs it. Without it the pure-MILP route (#1 below) falls back to the
 in-house MILP engine, and the explicit HiGHS opt-ins raise `MissingHighsError` naming the
 extra. D2 (whether the in-house engine should be the MILP default *with* HiGHS installed)

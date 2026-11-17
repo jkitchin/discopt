@@ -741,13 +741,18 @@ print("RESULT", r.status, route, "highspy" in sys.modules)
 
 @pytest.mark.parametrize("kind", ["minlp", "milp"])
 def test_default_route_imports_highspy_only_for_pure_lp_milp(kind):
-    """Plan §4: a default MINLP solve never imports highspy. Since PR #2196 a default
-    pure MILP does not either: it takes the Rust engine on every install.
+    """Plan §4: a default MINLP solve never imports highspy. A default pure MILP takes
+    the HiGHS route since the 2026-11-17 engine switch (PR #2196 had made it Rust), so it
+    imports highspy and records the route; the MINLP arm must still import nothing.
 
     A fresh interpreter with the flag unset, so the graduated default is what runs and
     nothing earlier in the test process has imported highspy.
     """
-    env = {k: v for k, v in os.environ.items() if k != "DISCOPT_LP_MILP_BACKEND"}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("DISCOPT_LP_MILP_BACKEND", "DISCOPT_LP_ENGINE")
+    }
     out = subprocess.run(
         [sys.executable, "-c", _DEFAULT_ROUTE_PROBE, kind],
         env=env,
@@ -760,4 +765,5 @@ def test_default_route_imports_highspy_only_for_pure_lp_milp(kind):
     assert len(lines) == 1, out.stdout + out.stderr
     _, status, route, imported = lines[0]
     assert status == "optimal"
-    assert (route, imported) == ("None", "False"), (kind, route, imported)
+    expected = ("None", "False") if kind == "minlp" else ("1.0", "True")
+    assert (route, imported) == expected, (kind, route, imported)

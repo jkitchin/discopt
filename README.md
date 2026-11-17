@@ -21,7 +21,7 @@ Jacobian, and Hessian evaluation.
 - **Algebraic modeling API** -- continuous, binary, and integer variables with operator overloading
 - **Spatial Branch and Bound** -- Rust-powered node pool, branching, and pruning; the native Rust spatial B&B kernel is the default engine (`DISCOPT_NATIVE_SPATIAL_KERNEL=0` opts back to the Python tree)
 - **Rust AD tape for NLP evaluation** -- objective, gradient, constraint Jacobian, and Lagrangian Hessian (dense and sparse) come from a POUNCE-backed tape with no JAX on the path; `DISCOPT_NLP_EVAL=jax` restores the legacy JAX evaluator
-- **In-house LP/MILP engine** -- pure-Rust primal/dual simplex with warm starts and a sparse LU basis (`feral`); it drives every MINLP node LP. Models classified as *pure* LP/MILP at entry are routed to HiGHS instead, with discopt-verified certificates (`DISCOPT_LP_MILP_BACKEND=rust` opts back to the Rust simplex)
+- **In-house LP/MILP engine** -- pure-Rust primal/dual simplex with warm starts and a sparse LU basis (`feral`); it drives every MINLP node LP. Models classified as *pure* LP/MILP at entry are routed to HiGHS instead, with discopt-verified certificates and an automatic fallback to the Rust engine when the HiGHS route errors (`DISCOPT_LP_ENGINE=rust` selects the Rust engine throughout)
 - **NLP backends** -- POUNCE (pure-Rust Ipopt port, the universal default) and cyipopt (Ipopt); `nlp_solver="simplex"` selects the pure-Rust warm-started-simplex MILP B&B. The pure-JAX IPM has been retired -- `"ipm"`/`"sparse_ipm"` remain as back-compat aliases
 - **Convex relaxations** -- an LP-form McCormick relaxation with lifted bilinear/multilinear terms (exact multilinear hull via RLT) plus a 22-intrinsic univariate envelope table in the uniform factorable engine (`exp`/`log` family, trig and inverse trig, hyperbolics and their inverses, `erf`, `log1p`, `sigmoid`/`softplus`, `entropy`, ...); every univariate function the API exposes except `sign` gets a certified dual bound. Rigorous alphaBB underestimators and G-convexity / convex-transformable relaxations; adaptive McCormick partitioning via AMP (below)
 - **Certified global MINLP** -- Adaptive Multivariate Partitioning (`solver="amp"`) for nonconvex bilinear/trilinear/signomial/trig models, and a signomial global optimizer (`DISCOPT_SGO`) for mixed-sign signomial and integer-signomial problems
@@ -130,9 +130,10 @@ with its piecewise, Taylor/Chebyshev and learned envelope variants was retired i
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port) for
 LP/QP/NLP, the in-house simplex LP/MILP backends, cyipopt for Ipopt, AMP, the MIP-NLP
 decomposition family, GDPopt-LOA, the DFO backends (`direct`, `surrogate`), and an
-optional Gurobi backend. HiGHS (`highspy`) is the optional `discopt[highs]` extra:
-with it a pure MILP takes the verified HiGHS route (`lp_milp_highs.py`); without it
-the in-house MILP engine solves it, and every other path is in-house either way.
+optional Gurobi backend. HiGHS (`highspy`) is a core dependency: a pure LP or MILP
+takes the verified HiGHS route (`lp_milp_highs.py`) and falls back to the in-house
+engine if that route errors. `DISCOPT_LP_ENGINE=rust` (or an install without
+`highspy`, such as the browser build) uses the in-house engine instead.
 
 **Interfaces** (`python/discopt/interfaces`): PyCUTEst-based evaluator for NLP
 benchmarking against the CUTEst test set, and a native QPLIB reader.
@@ -192,11 +193,11 @@ See the benchmark notebooks for full scaling plots and details:
 
 Requires Python 3.12+; building from source additionally needs Rust 1.84+.
 POUNCE -- the default numerical engine -- is a pure-Rust Ipopt port installed as a
-core dependency, with no system libraries needed. **HiGHS is optional** (the
-`discopt[highs]` extra): where it is installed a pure MILP defaults to the verified
-HiGHS route, which closes more hard MIPLIB instances within a time limit than the
-in-house MILP engine; without it that engine solves the MILP, with the same certificate
-checks. **JAX is optional** (the `discopt[jax]` extra, #1873):
+core dependency, with no system libraries needed. **HiGHS** (`highspy`) is a core
+dependency too: pure LP and MILP models default to the verified HiGHS route, which
+closes more hard MIPLIB instances within a time limit than the in-house engine, with
+the in-house engine as the fallback when that route errors. Select the engine with
+`DISCOPT_LP_ENGINE=auto|highs|rust` (default `auto`). **JAX is optional** (the `discopt[jax]` extra, #1873):
 a default solve does not import it (see the NLP-evaluation note above). It is needed
 for a model with no tape opcode (`dm.custom`, a matrix 2-norm), `DISCOPT_NLP_EVAL=jax`,
 and the features that use JAX autodiff on purpose -- `discopt.estimate`,
@@ -211,9 +212,6 @@ pip install discopt
 
 # JAX-backed features (dm.custom, estimation, sensitivity, differentiable layers, ...)
 pip install "discopt[jax]"
-
-# HiGHS for pure MILPs (and the opt-ins milp_solver="highs", highs_options=...)
-pip install "discopt[highs]"
 
 # Optional cyipopt fallback (needs the Ipopt C library; macOS: brew install ipopt)
 pip install "discopt[ipopt]"
