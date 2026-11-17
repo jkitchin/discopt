@@ -1933,7 +1933,12 @@ Rust certifies.**
 None of them was a wrong certificate. Hence `auto` = **HiGHS first, then a Rust re-solve
 when the HiGHS route returns `error`**. A certified status is never retried, so the
 fallback cannot add a certificate the Rust engine would not have produced. With
-`highs`, `rust` or any per-seam variable set, no fallback is taken.
+`highs`, `rust` or any per-seam variable set, no fallback is taken. Neither is it taken
+when the caller passed `highs_options`: those are a request for HiGHS, so the error is
+reported instead of being answered by an engine that never saw them. Every HiGHS seam
+shares this one decision (`solver._engine_fallback_applies`): the LP route, the MILP
+route and the #2157 ReLU native-cut MILP route. An empty or blank selector variable
+counts as unset.
 
 **Defaults now:**
 

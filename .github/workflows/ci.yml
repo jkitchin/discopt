@@ -925,7 +925,7 @@ jobs:
       - name: Smoke tier on the Rust engine
         run: |
           source .venv/bin/activate
-          python -c "from discopt.solver import _lp_backend, _lp_milp_backend; assert (_lp_backend(), _lp_milp_backend()) == ('rust', 'rust')"
+          python -c "from discopt.solver import _lp_backend, _lp_milp_backend; from discopt._iis_milp import _resolve_iis_engine; assert (_lp_backend(), _lp_milp_backend(), _resolve_iis_engine(None)) == ('rust',) * 3"
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
             -q --tb=short --timeout=300 -m smoke -n 4 -p no:cacheprovider
 

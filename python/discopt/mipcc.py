@@ -60,22 +60,6 @@ _OWN_MIN = 2.0 * CHECK_TOL  # the certified element violated by more than this
 _INF = 1e20  # the engine's unbounded sentinel
 
 
-def iis_engine() -> str:
-    """The MILP solver behind the entry's IIS probes: the library's own choice
-    (``_iis_milp._resolve_iis_engine``: ``DISCOPT_IIS_ENGINE`` when set, else HiGHS
-    when ``highspy`` is importable, else the in-house Rust driver).
-
-    The entry used to override a ``"rust"`` library default here (#2225: on the MIPcc27
-    smallset at 120 s the Rust driver gave bell3ainf 174 vs 130 elements and left dell,
-    jjliu_clique and hole9 incomplete, and was 1.9-2.6x slower where both finished).
-    Since the 2026-11-17 engine switch the library default is HiGHS too, so the entry
-    simply follows it. The entry's container installs ``discopt[highs]``.
-    """
-    from discopt._iis_milp import _resolve_iis_engine
-
-    return _resolve_iis_engine(None)
-
-
 def budget(limit: float) -> tuple[float, float]:
     """``(engine_budget, hard_stop)`` in seconds after launch for a run limit of
     ``limit`` seconds. The margin covers container start-up before Python runs
@@ -404,7 +388,11 @@ def _run(
         data["is_int"],
     )
     elapsed = time.perf_counter() - t0
-    engine = iis_engine()
+    # The IIS engine follows DISCOPT_LP_ENGINE (DISCOPT_IIS_ENGINE overrides). The
+    # entry's own HiGHS override (#2225) became redundant with the engine switch.
+    from discopt._iis_milp import _resolve_iis_engine
+
+    engine = _resolve_iis_engine(None)
     try:
         res = milp_iis_arrays(
             arrays,

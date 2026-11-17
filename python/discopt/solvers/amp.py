@@ -2382,8 +2382,13 @@ def _solve_amp_impl(
 
             is_convex, _ = _classify_convexity(model, use_certificate=True)
             if is_convex and _routes_to_verified_lp(model):
-                # A pure LP takes the default route's verified LP engine (#1229;
-                # the Rust route by default since highs-parity D1).
+                # A pure LP takes the default route's verified LP engine (#1229):
+                # ``DISCOPT_LP_ENGINE`` decides, with the same Rust fallback as
+                # ``Model.solve()``. Since the 2026-11-17 engine switch the HiGHS LP
+                # runs inside ``_highs_route_options``, so the caller's
+                # ``highs_options`` now apply here (before, this call bypassed them
+                # and the #1620 "not used" warning fired). HiGHS presolve stays on,
+                # as before: AMP takes no ``presolve=`` argument to pass through.
                 # The NLP certificate below cannot certify an LP whose columns are
                 # free on the 1e20 default box: no float multiplier cancels the
                 # slope exactly, and a 1e-17 slope over a 1e19 reach is ~1e2 of
@@ -2395,7 +2400,7 @@ def _solve_amp_impl(
                     model,
                     t_start,
                     time_limit,
-                    rust_route_label="rust-lp: discopt LP solve (AMP, pure LP)",
+                    route_suffix=" (AMP, pure LP)",
                 )
                 result.convex_fast_path = True
                 return _finish(result)

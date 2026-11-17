@@ -579,12 +579,10 @@ def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
     never wrong. ``DISCOPT_IIS_ENGINE=rust`` / ``DISCOPT_LP_ENGINE=rust`` select the
     Rust driver."""
     if iis_engine is None:
-        env = os.environ.get("DISCOPT_IIS_ENGINE")
-        if env is not None and env.strip():
-            return env.strip().lower()
-        from discopt.solver import _engine_default
+        from discopt.solver import _engine_default, _env_selector
 
-        return _engine_default()
+        env = _env_selector("DISCOPT_IIS_ENGINE")
+        return env if env is not None else _engine_default()
     return iis_engine
 
 

@@ -154,3 +154,107 @@ def test_ordinary_models_take_highs_without_fallback(clean_env):
     assert r.status == "optimal" and r.objective == pytest.approx(14.5)
     assert r.algorithm_route.startswith("highs-milp"), r.algorithm_route
     assert _ENGINE_FALLBACK_NOTE not in r.algorithm_route
+
+
+# --- review round (PR #2233) -------------------------------------------------------
+
+
+def _forced_highs_error(*_a, **_k):
+    from discopt.modeling.core import SolveResult
+
+    return SolveResult(status="error", algorithm_route="highs-lp: forced error (test)")
+
+
+def test_empty_selector_values_mean_unset(clean_env):
+    """An exported-but-empty variable is "not set" for every selector: it neither
+    breaks the solve nor counts as a per-seam override that blocks the fallback."""
+    from discopt._iis_milp import _resolve_iis_engine
+    from discopt.solver import _lp_engine_falls_back
+
+    for v in _SEAM_VARS:
+        clean_env.setenv(v, "  ")
+    assert _lp_engine() == "auto"
+    assert (_lp_backend(), _lp_milp_backend(), _resolve_iis_engine(None)) == ("highs",) * 3
+    assert _lp_engine_falls_back("DISCOPT_LP_BACKEND", "DISCOPT_LP_MILP_BACKEND")
+    r = _huge_box_lp().solve(time_limit=60)
+    _check_huge_box(r)
+    assert _ENGINE_FALLBACK_NOTE in r.algorithm_route
+
+
+def test_lp_fallback_passes_the_caller_gap_tolerances(clean_env):
+    """The Rust fallback gets the same gap tolerances the pinned-Rust route gets, and
+    names its engine like the main route does."""
+    import discopt.solver as S
+
+    seen = []
+    real = S._solve_lp
+
+    def spy(model, t_start, time_limit=None, gap_tolerance=None, abs_gap_tolerance=None):
+        seen.append((gap_tolerance, abs_gap_tolerance))
+        return real(model, t_start, time_limit, gap_tolerance, abs_gap_tolerance)
+
+    clean_env.setattr(S, "_solve_lp", spy)
+    r = _huge_box_lp().solve(time_limit=60, gap_tolerance=1e-3, abs_gap_tolerance=1e-5)
+    _check_huge_box(r)
+    assert seen == [(1e-3, 1e-5)], seen
+    assert r.algorithm_route.startswith("rust-lp: discopt LP solve, "), r.algorithm_route
+    assert _ENGINE_FALLBACK_NOTE in r.algorithm_route
+
+
+def test_highs_options_block_the_fallback(clean_env):
+    """``highs_options`` are a request for HiGHS: a HiGHS error under them is reported,
+    not answered by an engine that never saw the options."""
+    r = _huge_box_lp().solve(time_limit=60, highs_options={"output_flag": False})
+    assert r.status == "error", (r.status, r.algorithm_route)
+    assert _ENGINE_FALLBACK_NOTE not in (r.algorithm_route or "")
+    r = _tiny_coef_milp().solve(time_limit=30, highs_options={"output_flag": False})
+    assert r.status == "error", (r.status, r.algorithm_route)
+
+
+def test_relu_native_cut_milp_falls_back_too(clean_env):
+    """The #2157 ReLU native-cut MILP branch shares the auto fallback: a HiGHS error
+    there is re-solved on the Rust engine with node separation, not returned."""
+    import discopt.solver as S
+    from discopt.ml import DenseLayer, NetworkDefinition, NNFormulation
+
+    rng = np.random.default_rng(0)
+    layers = [
+        DenseLayer(rng.normal(0, 1, (2, 4)), rng.normal(0, 0.3, 4), activation="relu"),
+        DenseLayer(rng.normal(0, 1, (4, 1)), rng.normal(0, 0.3, 1), activation="linear"),
+    ]
+    net = NetworkDefinition(layers, input_bounds=(np.full(2, -1.0), np.full(2, 1.0)))
+
+    def build():
+        m = dm.Model("relu")
+        nn = NNFormulation(m, net, strategy="relu_bigm", prefix="p", ideal_cuts=True)
+        nn.formulate()
+        m.minimize(nn.outputs[0])
+        return m, nn
+
+    m, nn = build()
+    ref = m.solve(time_limit=60, cut_callback=nn.cut_callback)
+    assert ref.status == "optimal" and ref.algorithm_route.startswith("native-relu-cuts")
+    assert "HiGHS" in ref.algorithm_route
+
+    clean_env.setattr(S, "_solve_milp_highs", _forced_highs_error)
+    m, nn = build()
+    r = m.solve(time_limit=60, cut_callback=nn.cut_callback)
+    assert r.status == "optimal", (r.status, r.algorithm_route)
+    assert r.objective == pytest.approx(ref.objective, abs=1e-6)
+    assert "Rust MILP engine" in r.algorithm_route, r.algorithm_route
+    assert _ENGINE_FALLBACK_NOTE in r.algorithm_route
+    assert r.solver_stats["lp/engine_fallback"] == 1
+
+    clean_env.setenv("DISCOPT_LP_ENGINE", "highs")  # pinned: no fallback
+    m, nn = build()
+    assert m.solve(time_limit=60, cut_callback=nn.cut_callback).status == "error"
+
+
+def test_mip_nlp_trace_names_the_engine_that_answered(clean_env):
+    import discopt.solver as S
+    from discopt.modeling.core import SolveResult
+    from discopt.solvers import mip_nlp
+
+    fell_back = SolveResult(status="optimal", solver_stats={"lp/engine_fallback": 1})
+    assert mip_nlp._answering_lp_engine(fell_back, S) == "rust"
+    assert mip_nlp._answering_lp_engine(SolveResult(status="optimal"), S) == "highs"

@@ -336,6 +336,8 @@ def test_entry_falls_back_to_rust_without_highspy(monkeypatch):
 
     monkeypatch.delenv("DISCOPT_IIS_ENGINE", raising=False)
     monkeypatch.delenv("DISCOPT_LP_ENGINE", raising=False)
-    assert mipcc.iis_engine() == "highs"
+    from discopt._iis_milp import _resolve_iis_engine
+
+    assert _resolve_iis_engine(None) == "highs"
     monkeypatch.setitem(sys.modules, "highspy", None)
-    assert mipcc.iis_engine() == "rust"
+    assert _resolve_iis_engine(None) == "rust"
