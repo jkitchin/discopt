@@ -8494,6 +8494,7 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchSepCalls, o.sep_calls as u64);
                     incr_by(Ctr::HighsMipSearchSepLifts, o.sep_lifts as u64);
                     incr_by(Ctr::HighsMipSearchSubMipHits, o.sub_mip_hits as u64);
+                    incr_by(Ctr::PreIncScoreBranchings, o.preinc_branchings as u64);
                     incr_by(Ctr::HighsSearchCutRowsAdded, o.cut_rows_added as u64);
                     incr_by(Ctr::HighsSearchCutRowsDeleted, o.cut_rows_deleted as u64);
                     incr_by(Ctr::HighsSearchCutEpochs, o.cut_epochs as u64);
@@ -14304,6 +14305,174 @@ mod tests {
             // optimal problem are infeasible problems the search itself refuted.
             optimal > 100 && infeasible > 10 && limited > 20 && runs >= 2 * optimal + 10,
             "probe fired too little: optimal {optimal} infeasible {infeasible} limited {limited} runs {runs}"
+        );
+    }
+
+    /// #2224 (`DISCOPT_MILP_PREINC_SCORE`): on random pure-integer and mixed MILPs with
+    /// equality rows, the raised pre-incumbent score weight reaches the same status and
+    /// certified optimum as HiGHS's weights, and a solve in which no branching was taken
+    /// without an incumbent (the gate never opened) is bit-identical to the flag-off solve
+    /// -- node count, objective and bound -- so the gate does not leak past the first
+    /// incumbent.
+    #[test]
+    fn preinc_score_keeps_the_optimum_and_does_not_leak() {
+        use super::highs_env::{FORCE_PREINC_SCORE, PREINC_BRANCHINGS};
+        let mut seed = 2224u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut optimal, mut infeasible, mut fired, mut gated_identical) = (0, 0, 0, 0);
+        for it in 0..120 {
+            // Even problems: parity rows `sum_{j in S_i} x_j - 2 y_i = b_i` over binary
+            // `x` and integer `y` (the Lights-Out structure of `enlight*`), equalities, so
+            // rounding rarely finds a point and the search branches before its first
+            // incumbent. Odd problems: general integer rows `a x + s = b`, every other one
+            // an equality, one in three mixed-integer. `b` comes from an integer point
+            // `x0` of the box, so every problem is feasible.
+            let parity = it % 2 == 0;
+            let mixed = !parity && it % 3 == 2;
+            let (ns, m) = if parity {
+                let nx = rnd(14, 20) as usize;
+                let m = rnd(nx as i64 / 2, nx as i64 - 2) as usize;
+                (nx + m, m)
+            } else {
+                (rnd(10, 20) as usize, rnd(4, 9) as usize)
+            };
+            let nx = if parity { ns - m } else { ns };
+            let is_int: Vec<bool> = (0..ns).map(|_| !mixed || rnd(0, 2) != 0).collect();
+            let l = vec![0.0; ns];
+            let u: Vec<f64> = (0..ns)
+                .map(|j| match (parity, j < nx) {
+                    (true, true) => 1.0,
+                    (true, false) => nx as f64,
+                    _ => rnd(1, 4) as f64,
+                })
+                .collect();
+            let c: Vec<f64> = (0..ns)
+                .map(|j| match (parity, j < nx) {
+                    (true, true) => rnd(1, 5) as f64,
+                    (true, false) => 0.0,
+                    _ => rnd(-3, 9) as f64,
+                })
+                .collect();
+            let x0: Vec<f64> = (0..nx).map(|j| rnd(0, u[j] as i64) as f64).collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            let mut eq = Vec::new();
+            for i in 0..m {
+                let mut ax0 = 0.0;
+                for (j, col) in cols.iter_mut().enumerate().take(nx) {
+                    let v = if parity {
+                        i64::from(rnd(0, 2) == 0)
+                    } else if rnd(0, 2) == 0 {
+                        rnd(-3, 5)
+                    } else {
+                        0
+                    };
+                    if v != 0 {
+                        col.push((i, v as f64));
+                        ax0 += v as f64 * x0[j];
+                    }
+                }
+                if parity {
+                    cols[nx + i].push((i, -2.0));
+                    b.push(ax0 % 2.0);
+                    eq.push(true);
+                } else {
+                    b.push(ax0 + if i % 2 == 0 { 0.0 } else { rnd(0, 3) as f64 });
+                    eq.push(i % 2 == 0);
+                }
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for (i, &is_eq) in eq.iter().enumerate() {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(if is_eq { 0.0 } else { INF });
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let o = opts(ns, ints);
+            let solve = |on: bool| {
+                FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(Some(true)));
+                FORCE_PREINC_SCORE.with(|f| f.set(Some(on)));
+                PREINC_BRANCHINGS.with(|c| c.set(0));
+                let r = solve_milp_node_search(
+                    csc.clone(),
+                    m,
+                    n,
+                    &cf,
+                    &lf,
+                    &uf,
+                    &b,
+                    0.0,
+                    &o,
+                    None,
+                    None,
+                    None,
+                );
+                FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(None));
+                FORCE_PREINC_SCORE.with(|f| f.set(None));
+                (r, PREINC_BRANCHINGS.with(|c| c.get()))
+            };
+            let (off, off_pre) = solve(false);
+            let (on, on_pre) = solve(true);
+            assert_eq!(off_pre, 0, "flag off took a raised-weight branching");
+            assert_eq!(on.status, off.status, "status differs (problem {it})");
+            match off.status {
+                MilpStatus::Optimal => {
+                    optimal += 1;
+                    let tol = 1e-6 * (1.0 + off.obj.abs());
+                    assert!(
+                        (on.obj - off.obj).abs() <= tol,
+                        "problem {it}: optimum {} vs {}",
+                        on.obj,
+                        off.obj
+                    );
+                    assert!(
+                        on.bound <= off.obj + tol,
+                        "problem {it}: bound past optimum"
+                    );
+                }
+                MilpStatus::Infeasible => infeasible += 1,
+                other => panic!("problem {it}: ended {other:?}"),
+            }
+            if on_pre > 0 {
+                fired += 1;
+            } else {
+                gated_identical += 1;
+                assert_eq!(on.nodes, off.nodes, "problem {it}: gate leaked (nodes)");
+                assert_eq!(on.obj.to_bits(), off.obj.to_bits(), "problem {it}: obj");
+                assert_eq!(
+                    on.bound.to_bits(),
+                    off.bound.to_bits(),
+                    "problem {it}: bound"
+                );
+            }
+        }
+        eprintln!(
+            "optimal {optimal} infeasible {infeasible} fired {fired} gated-identical \
+             {gated_identical}"
+        );
+        // Measured: 120 optimal, 21 fired (a branching without an incumbent), 99
+        // gated-identical.
+        assert!(
+            optimal > 100 && fired > 10 && gated_identical > 10,
+            "probe fired too little: optimal {optimal} infeasible {infeasible} fired {fired} \
+             gated-identical {gated_identical}"
         );
     }
 

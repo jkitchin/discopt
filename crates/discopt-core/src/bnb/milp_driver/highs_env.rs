@@ -40,7 +40,9 @@ use super::highs_eval::HighsEval;
 use super::*;
 use crate::bnb::highs_search::node_queue::NodeIdent;
 use crate::bnb::highs_search::node_queue::{DomainChange as QDomainChange, NodeQueue, OpenNode};
-use crate::bnb::highs_search::pseudocost::{Pseudocost, DEFAULT_MIN_RELIABLE};
+use crate::bnb::highs_search::pseudocost::{
+    Pseudocost, DEFAULT_MIN_RELIABLE, HIGHS_FEASIBILITY_WEIGHT,
+};
 use crate::bnb::highs_search::search::{
     BranchOutcome, BranchStep, MainLoop, NodeData, NodeFate, NodeResult as SearchResult, Search,
     SearchEnv, NO_NODE_LIMIT,
@@ -121,6 +123,62 @@ pub(super) fn heur_effort_enabled() -> bool {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Branchings taken with the raised pre-incumbent weight on this thread.
+    pub(super) static PREINC_BRANCHINGS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// Tests force `DISCOPT_MILP_PREINC_SCORE` without touching the process
+    /// environment (tests run in parallel).
+    pub(super) static FORCE_PREINC_SCORE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The weight [`preinc_score_enabled`] gives the cutoff and inference terms of the
+/// branching scores while the search has no incumbent.
+pub(super) const PREINC_FEASIBILITY_WEIGHT: f64 = 1.0;
+
+/// `DISCOPT_MILP_PREINC_SCORE` (#2224; not a HiGHS component): while the top-level
+/// search holds no incumbent (`self.best` is `None`, so the cutoff is `+inf` and the
+/// cost term of the branching score cannot prune anything), weight the cutoff-rate and
+/// inference terms of the pseudocost scores (`get_score*`) at
+/// [`PREINC_FEASIBILITY_WEIGHT`] instead of HiGHS's `1e-4`; from the first incumbent on
+/// (the driver's initial point included, which is accepted before the root) the scores
+/// are HiGHS's exactly. It changes which column is branched on and which child is
+/// plunged first, never a bound, a pruning test or an incumbent check.
+///
+/// Top-level search only: a sub-MIP (RENS/RINS, `milp_depth > 0`) keeps HiGHS's weights
+/// even before its own first point, because the hypothesis is about a solve that has no
+/// primal bound at all, and a sub-MIP runs under a parent that may already hold one.
+///
+/// Default ON (graduated, #2224 / PR #2229 review round). Not a HiGHS component, so the
+/// bar was "measurably helpful": on 47 MIPLIB 2017 collection instances selected by the
+/// property "the ON search branched before its first incumbent" (none from the
+/// enlight*/amur families the first entry rested on), 7 gains, 0 losses, 0 violations;
+/// with the first entry population and the MIPLIB-38+M panel in §8.16. `0` (or empty)
+/// restores HiGHS's `1e-4` throughout.
+///
+/// `1`/`0` (also `true`/`yes`/`on`, `false`/`no`/`off`/empty, as
+/// [`heur_effort_enabled`]); anything else is refused. Profile counter
+/// `PreIncScoreBranchings`: branchings taken with the raised weight. Measurement:
+/// `docs/dev/flag-retirement-audit.md` and `docs/dev/highs-mip-replacement-plan.md` §8.16.
+pub(super) fn preinc_score_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(v) = FORCE_PREINC_SCORE.with(|f| f.get()) {
+        return v;
+    }
+    match std::env::var("DISCOPT_MILP_PREINC_SCORE") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_PREINC_SCORE={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
 /// Why the search stopped early.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Stop {
@@ -161,6 +219,9 @@ pub(super) struct Outcome {
     pub sep_lifts: usize,
     /// Better points the sub-MIP heuristics found.
     pub sub_mip_hits: usize,
+    /// Branchings taken with the raised pre-incumbent score weight
+    /// (`DISCOPT_MILP_PREINC_SCORE`).
+    pub preinc_branchings: usize,
     /// `MilpBoundHook` calls, and the node bounds they raised.
     pub bound_hook_calls: usize,
     pub bound_hook_raised: usize,
@@ -517,6 +578,10 @@ pub(super) struct HighsEnv<'a, 'b> {
     pub sep_calls: usize,
     pub sep_lifts: usize,
     pub sub_mip_hits: usize,
+    /// `DISCOPT_MILP_PREINC_SCORE` is on for this search, and the branchings taken
+    /// with its raised weight (no incumbent yet).
+    preinc_score: bool,
+    pub preinc_branchings: usize,
     /// The queue slot of the node emplaced last (for [`SearchEnv::queue_tag`]).
     last_slot: i64,
     pub dbg: Option<Debugger<'a>>,
@@ -939,6 +1004,8 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     fn accept(&mut self, x: Vec<f64>, v: f64) {
         if self.best.as_ref().is_none_or(|b| v < b.1) {
             self.best = Some((x, v));
+            // From the first incumbent on the scores are HiGHS's.
+            self.pc.set_feasibility_weight(HIGHS_FEASIBILITY_WEIGHT);
             // The driver's objective lattice (HiGHS: `isIntegral` and the floored
             // upper limit): with lattice spacing g a better point is at least g
             // below the incumbent.
@@ -1397,6 +1464,12 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 self.eval.dom.col_upper[..ns].to_vec(),
             )
         });
+        if self.preinc_score && self.best.is_none() {
+            debug_assert_eq!(self.pc.feasibility_weight(), PREINC_FEASIBILITY_WEIGHT);
+            self.preinc_branchings += 1;
+            #[cfg(test)]
+            PREINC_BRANCHINGS.with(|c| c.set(c.get() + 1));
+        }
         let out = self.eval.branch(&ctx, &mut self.pc, top, parent, &bc);
         if let (Some(rc), Some((mut lo, mut hi))) = (self.refp.as_mut(), ref_box) {
             if rc.contains(&lo, &hi) && rc.active(self.eval.cutoff) {
@@ -1801,19 +1874,24 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     ) -> Option<Self> {
         let mut eval = HighsEval::new(ctx)?;
         eval.tighten_cutoff = false;
+        let preinc_score = preinc_score_enabled();
+        let mut pc = Pseudocost::new(
+            ctx.ns,
+            if lim.strong_branch {
+                DEFAULT_MIN_RELIABLE
+            } else {
+                0
+            },
+        );
+        if preinc_score {
+            pc.set_feasibility_weight(PREINC_FEASIBILITY_WEIGHT);
+        }
         Some(HighsEnv {
             ctx,
             lim,
             sub_mip,
             eval,
-            pc: Pseudocost::new(
-                ctx.ns,
-                if lim.strong_branch {
-                    DEFAULT_MIN_RELIABLE
-                } else {
-                    0
-                },
-            ),
+            pc,
             q: NodeQueue::new(ctx.ns),
             best: None,
             nseen: 0,
@@ -1830,6 +1908,8 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             sep_calls: 0,
             sep_lifts: 0,
             sub_mip_hits: 0,
+            preinc_score,
+            preinc_branchings: 0,
             last_slot: -1,
             dbg,
             hook_nodes: 0,
@@ -1897,6 +1977,11 @@ pub(super) fn run<'a>(
         nodebox::harness(ctx, lim, initial.as_ref(), &seed_pool);
     }
     let mut env = HighsEnv::new(ctx, lim, sub_mip, dbg, refcheck::RefCheck::load(ctx))?;
+    if !top_level {
+        // `DISCOPT_MILP_PREINC_SCORE` acts on the top-level search only.
+        env.preinc_score = false;
+        env.pc.set_feasibility_weight(HIGHS_FEASIBILITY_WEIGHT);
+    }
     if let Some(rc) = env.refp.as_mut() {
         let xb = rc.x.clone();
         for cut in ctx.gmi_pool.iter() {
@@ -1976,6 +2061,7 @@ pub(super) fn run<'a>(
         sep_calls: env.sep_calls,
         sep_lifts: env.sep_lifts,
         sub_mip_hits: env.sub_mip_hits,
+        preinc_branchings: env.preinc_branchings,
         bound_hook_calls: env.bound_hook_calls,
         bound_hook_raised: env.bound_hook_raised,
         cut_rows_added: env.cut_rows_added,

@@ -32,6 +32,13 @@
 //! - `deltas.reserve(min(256, numCol))` is a capacity hint only.
 //! - The `HS_PSCOST_ONLY` environment switch in the vendored `getScore` is discopt's own
 //!   debugging patch of the HiGHS tree, not upstream behaviour, and is left out.
+//!
+//! discopt extension (#2224, not in HiGHS): the weight of the cutoff and inference
+//! terms of the three scores is a field ([`Pseudocost::set_feasibility_weight`]). It
+//! is HiGHS's literal `1e-4` ([`HIGHS_FEASIBILITY_WEIGHT`]) unless the top-level search
+//! raises it while it has no incumbent (`DISCOPT_MILP_PREINC_SCORE`, default ON, `0` opts
+//! out); at `1e-4` the scores are HiGHS's bit for bit
+//! (`preinc_weights_default_is_highs_score`).
 
 // The code mirrors the C++ statement for statement (index loops over parallel arrays),
 // so a reader can check it against HiGHS line by line.
@@ -252,7 +259,15 @@ pub struct Pseudocost {
     delta_ninferencestotal: i64,
     minreliable: i32,
     degeneracy_factor: f64,
+    /// discopt extension (#2224, not in HiGHS): the weight of the cutoff and inference
+    /// terms of the branching scores. [`HIGHS_FEASIBILITY_WEIGHT`] (`1e-4`, HiGHS's
+    /// literal) unless the driver raises it with [`Self::set_feasibility_weight`].
+    feasibility_weight: f64,
 }
+
+/// HiGHS's weight of the cutoff and inference terms in `getScore`, `getScoreUp` and
+/// `getScoreDown`.
+pub const HIGHS_FEASIBILITY_WEIGHT: f64 = 1e-4;
 
 /// `addDeltaAverage` for `HighsInt` counts.
 fn add_delta_average_i32(avg: &mut f64, count: &mut i32, delta_sum: f64, delta_count: i32) {
@@ -305,6 +320,7 @@ impl Pseudocost {
             delta_ninferencestotal: 0,
             minreliable,
             degeneracy_factor: 1.0,
+            feasibility_weight: HIGHS_FEASIBILITY_WEIGHT,
         }
     }
 
@@ -389,6 +405,18 @@ impl Pseudocost {
                 delta.conflictscoredown_sum *= scale;
             }
         }
+    }
+
+    /// discopt extension (#2224): set the weight of the cutoff and inference terms of
+    /// [`Self::get_score_costs`], [`Self::get_score_up`] and [`Self::get_score_down`].
+    /// At [`HIGHS_FEASIBILITY_WEIGHT`] the scores are HiGHS's, bit for bit.
+    pub fn set_feasibility_weight(&mut self, weight: f64) {
+        self.feasibility_weight = weight;
+    }
+
+    /// The current weight of the cutoff and inference terms.
+    pub fn feasibility_weight(&self) -> f64 {
+        self.feasibility_weight
     }
 
     /// `setDegeneracyFactor`.
@@ -658,7 +686,8 @@ impl Pseudocost {
         map_score(cost_score) / self.degeneracy_factor
             + self.degeneracy_factor
                 * (1e-2 * map_score(conflict_score)
-                    + 1e-4 * (map_score(cutoff_score) + map_score(inference_score)))
+                    + self.feasibility_weight
+                        * (map_score(cutoff_score) + map_score(inference_score)))
     }
 
     /// `getScore(col, frac)`: [`Self::get_score_costs`] with the unblended
@@ -688,7 +717,7 @@ impl Pseudocost {
 
         map_score(cost_score)
             + (1e-2 * map_score(conflict_score)
-                + 1e-4 * (map_score(cutoff_score) + map_score(inference_score)))
+                + self.feasibility_weight * (map_score(cutoff_score) + map_score(inference_score)))
     }
 
     /// `getScoreDown`; see [`Self::get_score_up`].
@@ -708,7 +737,7 @@ impl Pseudocost {
 
         map_score(cost_score)
             + (1e-2 * map_score(conflict_score)
-                + 1e-4 * (map_score(cutoff_score) + map_score(inference_score)))
+                + self.feasibility_weight * (map_score(cutoff_score) + map_score(inference_score)))
     }
 
     /// `getAvgInferencesUp`.
@@ -1148,6 +1177,128 @@ mod tests {
         );
         p.bits(fresh.get_score_up(1, 0.5), 0.0, "fresh getScoreUp");
         p.finish(14);
+    }
+
+    /// #2224: at its default the feasibility weight is HiGHS's literal `1e-4`, and the
+    /// three scores are bit-identical to HiGHS's formulas (recomputed here with the
+    /// literal) on random pseudocost states -- also after the weight was raised and set
+    /// back, as the search does at its first incumbent.
+    #[test]
+    fn preinc_weights_default_is_highs_score() {
+        let mut p = Probe::new("preinc_default");
+        let ms = |s: f64| 1.0 - 1.0 / (1.0 + s);
+        let mut seed = 2224u64;
+        let mut rnd = |n: u64| -> u64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let nc = 6;
+        for state in 0..200 {
+            let mut ps = Pseudocost::new(nc, 8);
+            for _ in 0..rnd(40) {
+                let col = rnd(nc as u64) as usize;
+                match rnd(5) {
+                    0 => ps.add_observation(col, 0.25 + rnd(4) as f64 * 0.25, rnd(9) as f64),
+                    1 => ps.add_observation(col, -0.5, rnd(9) as f64 * 0.5),
+                    2 => ps.add_cutoff_observation(col, rnd(2) == 0),
+                    3 => ps.add_inference_observation(col, rnd(7) as i32, rnd(2) == 0),
+                    _ => ps.increase_conflict_score_up(col),
+                }
+            }
+            if state % 3 == 0 {
+                ps.set_degeneracy_factor(1.0 + rnd(4) as f64);
+            }
+            if state % 2 == 0 {
+                ps.set_feasibility_weight(1.0);
+                ps.set_feasibility_weight(HIGHS_FEASIBILITY_WEIGHT);
+            }
+            p.bits(ps.feasibility_weight(), 1e-4, "default weight");
+            let avgc = ps.avg_cutoffs();
+            let cavg = ps.conflict_avg_score / (ps.conflict_weight * nc as f64);
+            for col in 0..nc {
+                let frac = 0.125 + rnd(6) as f64 * 0.125;
+                let (up, dn) = (
+                    ps.get_pseudocost_up(col, frac),
+                    ps.get_pseudocost_down(col, frac),
+                );
+                let cost = cmax(up, MIN_THRESHOLD) * cmax(dn, MIN_THRESHOLD)
+                    / cmax(MIN_THRESHOLD, ps.cost_total * ps.cost_total);
+                let inf = cmax(ps.inferencesup[col], MIN_THRESHOLD)
+                    * cmax(ps.inferencesdown[col], MIN_THRESHOLD)
+                    / cmax(MIN_THRESHOLD, ps.inferences_total * ps.inferences_total);
+                let (cu, cd) = (
+                    Pseudocost::cutoff_rate(ps.ncutoffsup[col], ps.nsamplesup[col]),
+                    Pseudocost::cutoff_rate(ps.ncutoffsdown[col], ps.nsamplesdown[col]),
+                );
+                let cut = cmax(cu, MIN_THRESHOLD) * cmax(cd, MIN_THRESHOLD)
+                    / cmax(MIN_THRESHOLD, avgc * avgc);
+                let (fu, fd) = (
+                    ps.conflictscoreup[col] / ps.conflict_weight,
+                    ps.conflictscoredown[col] / ps.conflict_weight,
+                );
+                let conf = cmax(fu, MIN_THRESHOLD) * cmax(fd, MIN_THRESHOLD)
+                    / cmax(MIN_THRESHOLD, cavg * cavg);
+                let df = ps.degeneracy_factor;
+                let want = ms(cost) / df + df * (1e-2 * ms(conf) + 1e-4 * (ms(cut) + ms(inf)));
+                p.bits(ps.get_score(col, frac), want, "getScore");
+                let want_up = ms(up / cmax(MIN_THRESHOLD, ps.cost_total))
+                    + (1e-2 * ms(fu / cmax(MIN_THRESHOLD, cavg))
+                        + 1e-4
+                            * (ms(cu / cmax(MIN_THRESHOLD, avgc))
+                                + ms(
+                                    ps.inferencesup[col] / cmax(MIN_THRESHOLD, ps.inferences_total)
+                                )));
+                p.bits(ps.get_score_up(col, frac), want_up, "getScoreUp");
+                let want_dn = ms(dn / cmax(MIN_THRESHOLD, ps.cost_total))
+                    + (1e-2 * ms(fd / cmax(MIN_THRESHOLD, cavg))
+                        + 1e-4
+                            * (ms(cd / cmax(MIN_THRESHOLD, avgc))
+                                + ms(ps.inferencesdown[col]
+                                    / cmax(MIN_THRESHOLD, ps.inferences_total))));
+                p.bits(ps.get_score_down(col, frac), want_dn, "getScoreDown");
+            }
+        }
+        p.finish(200 * (1 + 3 * 6));
+    }
+
+    /// #2224: column 0 has a slightly larger pseudocost, column 1 was cut off in both
+    /// directions. HiGHS's `1e-4` weight ranks column 0 first (the cost term dominates);
+    /// the raised pre-incumbent weight ranks column 1 first.
+    #[test]
+    fn preinc_weights_rank_cutoff_rate_over_small_cost_gap() {
+        let mut p = Probe::new("preinc_rank");
+        let mut ps = Pseudocost::new(2, 8);
+        for _ in 0..2 {
+            ps.add_observation(0, 0.5, 0.55);
+            ps.add_observation(0, -0.5, 0.55);
+            ps.add_observation(1, 0.5, 0.5);
+            ps.add_observation(1, -0.5, 0.5);
+        }
+        ps.add_cutoff_observation(1, true);
+        ps.add_cutoff_observation(1, false);
+        let (s0, s1) = (ps.get_score(0, 0.5), ps.get_score(1, 0.5));
+        p.truth(s0 > s1, "HiGHS weight: cost gap decides");
+        p.truth(
+            ps.get_score_up(0, 0.5) > ps.get_score_up(1, 0.5),
+            "up, HiGHS weight",
+        );
+        ps.set_feasibility_weight(1.0);
+        let (r0, r1) = (ps.get_score(0, 0.5), ps.get_score(1, 0.5));
+        p.truth(r1 > r0, "raised weight: cutoff rate decides");
+        p.truth(
+            ps.get_score_up(1, 0.5) > ps.get_score_up(0, 0.5),
+            "up, raised weight",
+        );
+        p.truth(
+            ps.get_score_down(1, 0.5) > ps.get_score_down(0, 0.5),
+            "down, raised weight",
+        );
+        ps.set_feasibility_weight(HIGHS_FEASIBILITY_WEIGHT);
+        p.bits(ps.get_score(0, 0.5), s0, "restored 0");
+        p.bits(ps.get_score(1, 0.5), s1, "restored 1");
+        p.finish(7);
     }
 
     /// `increaseConflictWeight`, `increaseConflictScoreUp/Down`, and the rescaling at
