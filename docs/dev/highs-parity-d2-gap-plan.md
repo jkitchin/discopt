@@ -2011,7 +2011,7 @@ separation at nodes, clique-table propagation in the domain, presolve's row exte
   in 2.5 s; `otra` stops at 20.5 s. MIPLIB-38+M build A/B (62 rows x 3 reps, 20 s, each
   build's own panel worker): 147 = 147 certified, nodes over the 46 rows both certify 18,061
   = 18,061, no dual or incumbent loss, total wall 965 vs 970 s; bar 1's only rows are
-  `1451`, in both builds (an LP-reader/oracle disagreement, open). (The new build there also
+  `1451`, in both builds: a measurement artifact, not a solver error: this run's `ref/HiGHS` checkout was HiGHS master, whose `check/instances/1451.lp` has 11 rows (expected objective 9 in HiGHS's own `TestFilereader.cpp`), while the manifest's oracle 2.0 is for the pinned v1.15.1 file (1 row); on the pinned file discopt and HiGHS both certify 2.0. (The new build there also
   carried a presolve-free re-decision of MILP presolve's infeasibility claims, measured as
   mixed for the IIS engine and not merged.)
 - *Found, open:* the Rust engine judges infeasibility more strictly than the checker. On
