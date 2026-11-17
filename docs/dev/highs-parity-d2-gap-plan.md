@@ -1999,3 +1999,33 @@ reductions than HiGHS, never a wrong one). `DISCOPT_HIGHS_SEPA_CLIQUE`, default 
 MIPLIB-38+M, 3 reps, 20 s): 147 = 147 certified, nothing lost, nodes 18,168 -> 18,061 --
 neutral, graduated as a faithful HiGHS component (CLAUDE.md §5 bar 2). Not yet ported: clique
 separation at nodes, clique-table propagation in the domain, presolve's row extension.
+
+**Follow-up (2026-11-17): the presolve-free re-decision and a path-separator spin.**
+
+- *A presolve infeasibility claim is re-decided presolve-free.* The driver never trusts its
+  MILP presolve's Infeasible/Unbounded (`solve_presolved` declines and the original is
+  solved). That re-decision now runs with no presolve at all (root bound tightening off) and
+  `MilpResult::presolve_free` reports it, so a presolve-on Infeasible carrying the flag is
+  already the #1634 pair; the IIS engine skips its own `presolve="off"` re-solve exactly
+  then (`n_cross_inline`). **Retracted:** the claim (this issue's thread, 2026-11-16) that
+  each infeasible Rust probe cost three solves. In the default `confirm="final"` mode a probe
+  is never re-solved (`n_cross_checks` 0 on both builds below); only confirmations run the
+  presolve-free route, so that is all this removes. Measured, one order (ICB), 100 s, old
+  build (d24da79) vs new, interleaved, 2 reps: `bf2670-001` 272 -> 258 solves, 30.5 -> 22.9 s;
+  `aim-200-1_6-no-2` 226 -> 219 solves, 82.4 -> 87.1 s (the re-decision without root
+  tightening costs more per solve there); IIS sizes equal.
+- *Path separator spin.* `LpAggregator::current_aggregation` keeps a dropped entry whose
+  bound on that side is infinite (the fac2 soundness fix), so a column cancelled by its
+  substitution row came back with a roundoff coefficient, was substituted again, and the
+  path loop's `continue` never advanced. One MIPcc27 `dell` probe spun over 120 s against a
+  5 s budget; `neos-3135947-otra`'s full model ran past 140 s against 20 s. The path now
+  skips entries at most `small_matrix_value`, as HiGHS's sum does. `dell` probe: Infeasible
+  in 2.5 s; `otra` stops at 20.5 s. MIPLIB-38+M build A/B (62 rows x 3 reps, 20 s, each
+  build's own panel worker): 147 = 147 certified, nodes over the 46 rows both certify 18,061
+  = 18,061, no dual or incumbent loss, total wall 965 vs 970 s; bar 1's only rows are
+  `1451`, in both builds (an LP-reader/oracle disagreement, open).
+- *Found, open:* the Rust engine judges infeasibility more strictly than the checker. On
+  `dell` (`DISCOPT_IIS_ENGINE=rust`, 120 s) its answer was infeasible at 1e-9 but HiGHS at its
+  default 1e-6 (and the checker at 1e-5) accepts an integral point violating rows by 1.7e-7,
+  so `discopt.mipcc`'s checker-settings guard replaced it with the whole model. The entry
+  runs HiGHS by default, which keeps such sets.
