@@ -819,6 +819,10 @@ counters!(
     PseudocostSentinelSkipped,
     // ... of those, the ones recorded as cutoff (infeasible-child) observations.
     PseudocostCutoffObservations,
+    // #2156: a column narrower than `small_matrix_value` with a negative coefficient,
+    // substituted at its UPPER bound by `TransformedLp::transform` (HiGHS substitutes
+    // `min(lb, ub)`, which tightened the row and cut feasible points).
+    TlNarrowColUpperSubst,
     PseudocostUntrustedChild,
     // #1296: MILP solves whose certificate was withdrawn because an entry sits
     // below the equilibration noise floor of its line while still able to move
@@ -857,6 +861,10 @@ counters!(
     // #2107: noise-floor entries relaxed into their row's slack instead of
     // withdrawing the certificate.
     MilpNoiseEntriesRelaxed,
+    // #2223: the subset of those relaxed only because the caller marked the row
+    // relaxable (`MilpOptions::relaxable_rows`): their row total exceeded the
+    // unmasked absolute cap.
+    MilpNoiseEntriesRelaxedMasked,
     // #2107: c-MIR candidates the root separator returned (before selection).
     SepCmirCuts,
     Phase1ViolLe1Expand,

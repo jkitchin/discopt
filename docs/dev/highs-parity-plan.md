@@ -2017,6 +2017,54 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    - **(c)** continue on the six instances: per-row equilibration choice, the
      root-cut budget on portfolio masters, and the `rsyn` master trees.
 
+   **D3 closed, 2026-11-16 (#2223).** The Rust lazy master now matches or beats the
+   HiGHS master on both P5.1 populations, cert-clean. Three changes, one per measured
+   cause (planning probes and panels in the #2223 PR; no run data in the repo):
+
+   - *Defect C (correctness, bound-neutral).* A debug-hook `Stop` at `AfterSelect` broke
+     out after `export_batch` had popped the batch, so a stopped lazy master with no
+     incumbent read as an empty tree and returned `Infeasible`. The stop now re-queues
+     the batch and sets `search_incomplete`. 12 random knapsacks stopped after K
+     check-ins: 48 stops, 12 false INFEASIBLE before, 0 after, 0 bound violations; 80
+     unstopped lazy solves bit-identical (status, nodes, objective, bound).
+   - *Cause B, `DISCOPT_OA_MASTER_RELAX_CUT_NOISE` (graduated ON).* Gradient-noise
+     entries in OA cut rows were refused by #2107's absolute 1e-7 row cap, so the #1296
+     gate withdrew the master's certificate (`clay0303hfsg`: four master calls, all
+     `bound=None`, fallback, 35 s). The master now marks its cut rows
+     (`MilpOptions::relaxable_rows`, cap `1e-6 * max(|b_i|, 1)`), and a mask without a
+     lazy hook is refused; `clay0303hfsg` certifies in one master call, 3.9 s.
+   - *Cause A, `DISCOPT_MILP_LAZY_RESTARTS` (graduated, K=3).* The Rust master never
+     restarts, so its root and root cuts predate every OA row (static replay on
+     `cvxnonsep_psig40r`: 31-37 nodes with the rows static, 2,321 lazily). Up to three
+     restarts carry the rows into a fresh tree: `cvxnonsep_psig40r` 35.3 s -> 1.8 s.
+
+   Panels (30 s, interleaved arms, `p51_route_master_panel.py --arms`, commits
+   `0d77640`/`02eabec`/`b0cac36`; 0 bound violations in every arm):
+
+   | population | Rust, both flags OFF | Rust, graduated (noise ON, K=3) | HiGHS master | repeated OFF (spread) |
+   |---|---|---|---|---|
+   | route, 94 models, run 1 | 90, 391.6 s | **92**, 268.2 s (0 lost) | -- | 90, 388.9 s |
+   | route, 94 models, run 2 | 90, 396.2 s | **92**, 269.3 s (0 lost) | 92, 292.8 s | -- |
+   | syn/rsyn routed MINLPLib, 47 | 30, 637.5 s | **30**, 621.7 s (0 lost) | 29, 709.9 s | -- |
+
+   The syn/rsyn `.nl` files were fetched from minlplib.org into `ref/minlplib/nl`
+   (git-ignored); the 47 routed are the P5.1 count. Per-flag arms (route run 1,
+   then syn/rsyn): noise alone 90 / 364.4 s and 30 / 638.1 s; K=3 alone 92 / 294.1 s and 30 / 613.7 s;
+   K=1 lost `clay0303hfsg@0` at the 30 s edge; K=5/10 lost it in an aborted first run.
+   K=3 is therefore chosen on one instance's 30 s edge (K=2/4 not run). Timing caveats: the
+   runs were in a 4-core cloud container with no `uptime` load gate recorded, and the
+   syn/rsyn arms and the HiGHS arm are single runs; only the route OFF arm was repeated.
+   Residual against HiGHS on the route: HiGHS-only `clay0303hfsg@3/@6` (row-scaled;
+   their remaining noise entries exceed the `1e-6 * max(|b_i|, 1)` masked cap, e.g.
+   `a = -1.7e-6` on a row with `|b| = 64`, `max|a| = 5.4e4`), Rust-only
+   `cvxnonsep_psig40r@6` and `portfol_roundlot@6`.
+
+   *Open question from the plan, answered:* rows the lazy and node hooks append are never
+   seen by the #1296 gate. On the #1296 big-M witness and 80 random ill-scaled models
+   whose every noise entry lives only in hook rows (against the same models in
+   well-scaled variables): 92 bound comparisons, 0 above the optimum, 0 wrong
+   certificates. Pinned by `test_2223_hook_row_noise_bound.py`; no fix was needed.
+
 3. **The `solve_lp_std` seam default** (`DISCOPT_LP_STD_ENGINE=highs`): 5 corpus
    instances reach HiGHS only through it. R1-LP parity is met, so this is the cheapest
    remaining removal (a flip + the P1.x identity checks).

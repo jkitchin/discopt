@@ -28,6 +28,15 @@ _R2 = 5.0
 _LO, _HI = -3.0, 3.0
 
 
+@pytest.fixture(autouse=True)
+def _single_tree(monkeypatch):
+    """These tests pin the single tree's node hook. Under #2223's restarts
+    (``DISCOPT_MILP_LAZY_RESTARTS``, default 3) the ball model is solved at a
+    restarted root before any fractional node exists, so the hook rightly never
+    fires; ``0`` is the single tree."""
+    monkeypatch.setenv("DISCOPT_MILP_LAZY_RESTARTS", "0")
+
+
 def _ball_cut(x):
     """Tangent of the convex ``g(x) = x0² + x1² − R²`` at ``x`` (globally valid)."""
     x = np.asarray(x, dtype=float)
