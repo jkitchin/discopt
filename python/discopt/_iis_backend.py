@@ -14,6 +14,8 @@ the same code whichever solver answers:
   the budget) or :data:`OTHER` (any other non-proof status);
 * ``presolve_only(stop)`` -- does presolve alone prove the set infeasible;
 * ``point()``, ``last_nodes()`` -- the last run's point and node count;
+* ``last_presolve_free()`` -- whether the last run's :data:`INFEASIBLE` was decided by a
+  search with no presolve at all, even under ``presolve="choose"`` (#2225);
 * ``mip_tol()`` and ``lp_tolerance(tol)`` -- the witness repair's tolerances.
 
 :class:`HighsBackend` is the code ``_Engine`` ran before P3.2, moved here unchanged.
@@ -177,6 +179,11 @@ class HighsBackend:
     def last_nodes(self) -> int:
         return int(getattr(self.h.getInfo(), "mip_node_count", 0) or 0)
 
+    def last_presolve_free(self) -> bool:
+        # A presolve-on HiGHS verdict comes from the presolved model; only a
+        # ``presolve="off"`` run is presolve-free, and the engine re-solves for that.
+        return False
+
     def mip_tol(self) -> float:
         v = self.h.getOptionValue("mip_feasibility_tolerance")
         return float(v[1] if isinstance(v, tuple) else v)
@@ -224,6 +231,7 @@ class RustBackend:
             np.asarray(is_int, dtype=bool).copy(),
         ]
         self._last: Any = None
+        self._last_pfree = False
         self._A = __import__("scipy.sparse").sparse.csc_matrix(A, dtype=np.float64)
         self._ladder_x: Optional[np.ndarray] = None
 
@@ -252,9 +260,13 @@ class RustBackend:
         r = self.handle.solve(**kw)
         self._last = r
         self._ladder_x = None
+        self._last_pfree = False
         if r.status in ("optimal", "feasible"):
             return OPTIMAL
         if r.status == "infeasible":
+            # The driver never trusts its presolve's infeasibility claim: it re-decides
+            # it on the original rows with no presolve (`MilpResult::presolve_free`).
+            self._last_pfree = bool(r.presolve_free)
             return INFEASIBLE
         if r.status == "node_limit" and time.perf_counter() >= stop:
             return INTERRUPTED
@@ -300,6 +312,9 @@ class RustBackend:
 
     def last_nodes(self) -> int:
         return 0 if self._last is None else int(self._last.nodes)
+
+    def last_presolve_free(self) -> bool:
+        return self._last_pfree
 
     def mip_tol(self) -> float:
         return MIP_FEASIBILITY_TOLERANCE

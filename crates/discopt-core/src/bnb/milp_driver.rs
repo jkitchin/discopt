@@ -155,6 +155,14 @@ pub struct MilpResult {
     pub bound_hook_calls: usize,
     /// [`MilpBoundHook`] calls whose value raised the node's bound.
     pub bound_hook_raised: usize,
+    /// The status was decided by a search that ran no presolve at all: no MILP
+    /// presolve and no root bound tightening (#2225). True for every `presolve: false`
+    /// solve, and for a `presolve: true` solve whose reduced problem claimed
+    /// infeasibility (or unboundedness): that claim is never trusted and is re-decided
+    /// on the original rows presolve-free, so the solve itself is the #1634 pair --
+    /// a presolve-on claim confirmed by a presolve-free search. The IIS engine reads
+    /// it to skip a presolve-free re-solve that would repeat this one.
+    pub presolve_free: bool,
 }
 
 /// A node-lifecycle checkpoint fired to an attached [`MilpDebugHook`].
@@ -4889,6 +4897,8 @@ pub fn solve_milp_node_hooked(
     // with presolve on, the search runs one level down and would silently ignore it.
     let seed_file_set =
         MILP_DEPTH.with(|d| d.get()) == 0 && std::env::var_os("DISCOPT_MILP_SEED_POINT").is_some();
+    // Set when presolve claimed infeasibility (#2225): see `MilpResult::presolve_free`.
+    let mut presolve_claim = false;
     if milp_presolve_enabled()
         && opts.presolve
         && opts.initial_incumbent.is_none()
@@ -4899,7 +4909,19 @@ pub fn solve_milp_node_hooked(
         && opts.bound_hook.is_none()
         && (MILP_DEPTH.with(|d| d.get()) == 0 || (in_sub_mip() && submip_presolve_enabled()))
     {
-        if let Some(mut res) = solve_presolved(&prep.csc, m, n, c, l, u, b, obj_const, opts, t0) {
+        if let Some(mut res) = solve_presolved(
+            &prep.csc,
+            m,
+            n,
+            c,
+            l,
+            u,
+            b,
+            obj_const,
+            opts,
+            t0,
+            &mut presolve_claim,
+        ) {
             crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
             if unscalable {
                 // Counted for the top-level solve only (see below).
@@ -4913,7 +4935,15 @@ pub fn solve_milp_node_hooked(
     }
     // Presolve may have run and declined (no reduction, a refused or unverified
     // reduced solve): the original search gets what is left of the budget, not all of it.
-    let opts = &clock_from(opts, t0);
+    let mut o_search = clock_from(opts, t0);
+    if presolve_claim {
+        // #2225: presolve claimed the problem infeasible (or unbounded) and the claim
+        // is never trusted. Re-decide it with no presolve at all -- root bound
+        // tightening included -- so the verdict does not lean on any presolve step:
+        // the presolve-on claim and its presolve-free check (#1634) in one solve.
+        o_search.presolve = false;
+    }
+    let opts = &o_search;
     // Kept for the unbounded check below (the search consumes and extends the matrix).
     let top_level = MILP_DEPTH.with(|d| d.get()) == 0;
     let csc_orig = (top_level && !opts.integer_cols.is_empty()).then(|| prep.csc.clone());
@@ -4922,6 +4952,12 @@ pub fn solve_milp_node_hooked(
     );
     if res.status == MilpStatus::Unbounded && !opts.integer_cols.is_empty() {
         settle_unbounded(&mut res, csc_orig, m, n, l, u, b, opts, lazy, node, t0);
+    }
+    res.presolve_free = !opts.presolve;
+    // After the search (its `begin_solve` resets the counters); the top-level solve
+    // only, as `MilpTinyEntryDecert` below: a nested sub-MIP's claims are its own.
+    if presolve_claim && MILP_DEPTH.with(|d| d.get()) == 0 {
+        crate::profile::incr(crate::profile::Ctr::MilpPresolveClaimRedecided);
     }
     // After the search: its `begin_solve` resets the counters.
     crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
@@ -5138,6 +5174,7 @@ fn solve_presolved(
     obj_const: f64,
     opts: &MilpOptions,
     t0: std::time::Instant,
+    claim: &mut bool,
 ) -> Option<MilpResult> {
     use crate::bnb::milp_presolve::{presolve_until, row_form_feasible, RowForm};
     assert_implied_subset(opts);
@@ -5244,6 +5281,7 @@ fn solve_presolved(
     }
     if p.infeasible {
         // Never trusted as a certificate: the original is solved instead.
+        *claim = true;
         return None;
     }
     let implied = p.stats.implied_int_primal + p.stats.implied_int_dual;
@@ -5338,6 +5376,7 @@ fn solve_presolved(
                 std::mem::swap(lo, hi);
                 crate::profile::incr(crate::profile::Ctr::MilpPresolveEmptyBoxWidened);
             } else {
+                *claim = true;
                 return None;
             }
         }
@@ -5433,6 +5472,7 @@ fn solve_presolved(
             );
         }
         crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+        *claim = true;
         return None;
     }
     // An incumbent is carried by `obj` (finite), not by the status: a search stopped
@@ -6018,6 +6058,7 @@ fn solve_milp_node_search(
             strong_probe_lps: 0,
             bound_hook_calls: 0,
             bound_hook_raised: 0,
+            presolve_free: false,
         };
     };
     let RootBox { base_l, base_u } = rb;
@@ -9434,6 +9475,7 @@ fn solve_milp_node_search(
         strong_probe_lps,
         bound_hook_calls,
         bound_hook_raised,
+        presolve_free: false,
     };
     // #1296: a feasible point below an ancestor's bound means that bound was
     // wrong, so nothing derived from the tree's bound is a certificate.
@@ -9528,6 +9570,7 @@ fn highs_search_result(
         strong_probe_lps: 0,
         bound_hook_calls: o.bound_hook_calls,
         bound_hook_raised: o.bound_hook_raised,
+        presolve_free: false,
     };
     if has_inc && incumbent_misvalued(res.obj, tree_v) {
         crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
@@ -14953,7 +14996,8 @@ mod tests {
                 presolve_infeasible += 1;
             }
             let t0 = std::time::Instant::now();
-            let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, t0) else {
+            let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, t0, &mut false)
+            else {
                 fallbacks += 1;
                 continue;
             };

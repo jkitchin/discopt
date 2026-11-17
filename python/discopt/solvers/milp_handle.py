@@ -47,6 +47,10 @@ class HandleResult:
     bound: float
     nodes: int
     lp_iters: int
+    #: The status came from a search with no presolve at all (#2225): a
+    #: ``presolve=False`` solve, or a ``presolve=True`` one whose presolve claimed
+    #: infeasibility and was re-decided presolve-free on the original rows.
+    presolve_free: bool = False
 
 
 class MilpHandle:
@@ -143,10 +147,12 @@ class MilpHandle:
     ) -> HandleResult:
         """Solve the current problem. ``options`` are ``solve_milp_csc_py``'s keywords
         (``gap_tol``, ``heuristics``, ...), with its defaults."""
-        status, x, obj, bound, nodes, iters = self._h.solve(
+        status, x, obj, bound, nodes, iters, pfree = self._h.solve(
             max_nodes=int(max_nodes), presolve=bool(presolve), time_limit_s=time_limit, **options
         )
-        return HandleResult(status, np.asarray(x), float(obj), float(bound), int(nodes), int(iters))
+        return HandleResult(
+            status, np.asarray(x), float(obj), float(bound), int(nodes), int(iters), bool(pfree)
+        )
 
     def presolve_only(self) -> bool:
         """``True`` when the driver's root preparation and presolve prove the current
