@@ -138,20 +138,30 @@ thread_local! {
 /// branching scores while the search has no incumbent.
 pub(super) const PREINC_FEASIBILITY_WEIGHT: f64 = 1.0;
 
-/// `DISCOPT_MILP_PREINC_SCORE` (#2224, default ON; not a HiGHS component): while this
+/// `DISCOPT_MILP_PREINC_SCORE` (#2224; not a HiGHS component): while the top-level
 /// search holds no incumbent (`self.best` is `None`, so the cutoff is `+inf` and the
 /// cost term of the branching score cannot prune anything), weight the cutoff-rate and
 /// inference terms of the pseudocost scores (`get_score*`) at
 /// [`PREINC_FEASIBILITY_WEIGHT`] instead of HiGHS's `1e-4`; from the first incumbent on
 /// (the driver's initial point included, which is accepted before the root) the scores
 /// are HiGHS's exactly. It changes which column is branched on and which child is
-/// plunged first, never a bound, a pruning test or an incumbent check. Sub-MIPs run
-/// this same search: a RENS/RINS sub-MIP without an incumbent of its own gets the raised
-/// weight too. Graduated default-ON on the #2224 §5 panel (MIPLIB-38+M, 3 reps, 20 s:
-/// 150 -> 153 certified, +enlight_hard 3/3, nothing lost, cert-clean); `0` restores
-/// HiGHS's `1e-4` throughout. Garbage refused. Profile counter `PreIncScoreNodes`:
-/// branchings taken with the raised weight. Measurement: `docs/dev/flag-retirement-audit.md`
-/// and `docs/dev/highs-mip-replacement-plan.md` §8.16.
+/// plunged first, never a bound, a pruning test or an incumbent check.
+///
+/// Top-level search only: a sub-MIP (RENS/RINS, `milp_depth > 0`) keeps HiGHS's weights
+/// even before its own first point, because the hypothesis is about a solve that has no
+/// primal bound at all, and a sub-MIP runs under a parent that may already hold one.
+///
+/// Default ON (graduated, #2224 / PR #2229 review round). Not a HiGHS component, so the
+/// bar was "measurably helpful": on 47 MIPLIB 2017 collection instances selected by the
+/// property "the ON search branched before its first incumbent" (none from the
+/// enlight*/amur families the first entry rested on), 7 gains, 0 losses, 0 violations;
+/// with the first entry population and the MIPLIB-38+M panel in §8.16. `0` (or empty)
+/// restores HiGHS's `1e-4` throughout.
+///
+/// `1`/`0` (also `true`/`yes`/`on`, `false`/`no`/`off`/empty, as
+/// [`heur_effort_enabled`]); anything else is refused. Profile counter
+/// `PreIncScoreBranchings`: branchings taken with the raised weight. Measurement:
+/// `docs/dev/flag-retirement-audit.md` and `docs/dev/highs-mip-replacement-plan.md` §8.16.
 pub(super) fn preinc_score_enabled() -> bool {
     #[cfg(test)]
     if let Some(v) = FORCE_PREINC_SCORE.with(|f| f.get()) {
@@ -160,8 +170,8 @@ pub(super) fn preinc_score_enabled() -> bool {
     match std::env::var("DISCOPT_MILP_PREINC_SCORE") {
         Err(_) => true,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" | "" => true,
-            "0" | "false" | "no" | "off" => false,
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
             other => {
                 panic!("DISCOPT_MILP_PREINC_SCORE={other:?} is not recognized (expected 1 or 0)")
             }
@@ -1967,6 +1977,11 @@ pub(super) fn run<'a>(
         nodebox::harness(ctx, lim, initial.as_ref(), &seed_pool);
     }
     let mut env = HighsEnv::new(ctx, lim, sub_mip, dbg, refcheck::RefCheck::load(ctx))?;
+    if !top_level {
+        // `DISCOPT_MILP_PREINC_SCORE` acts on the top-level search only.
+        env.preinc_score = false;
+        env.pc.set_feasibility_weight(HIGHS_FEASIBILITY_WEIGHT);
+    }
     if let Some(rc) = env.refp.as_mut() {
         let xb = rc.x.clone();
         for cut in ctx.gmi_pool.iter() {

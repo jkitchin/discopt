@@ -35,9 +35,10 @@
 //!
 //! discopt extension (#2224, not in HiGHS): the weight of the cutoff and inference
 //! terms of the three scores is a field ([`Pseudocost::set_feasibility_weight`]). It
-//! is HiGHS's literal `1e-4` ([`HIGHS_FEASIBILITY_WEIGHT`]) unless the search raises it
-//! while it has no incumbent (`DISCOPT_MILP_PREINC_SCORE`, default ON, `0` opts out); at
-//! `1e-4` the scores are HiGHS's bit for bit (`preinc_weights_default_is_highs_score`).
+//! is HiGHS's literal `1e-4` ([`HIGHS_FEASIBILITY_WEIGHT`]) unless the top-level search
+//! raises it while it has no incumbent (`DISCOPT_MILP_PREINC_SCORE`, default ON, `0` opts
+//! out); at `1e-4` the scores are HiGHS's bit for bit
+//! (`preinc_weights_default_is_highs_score`).
 
 // The code mirrors the C++ statement for statement (index loops over parallel arrays),
 // so a reader can check it against HiGHS line by line.

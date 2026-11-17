@@ -9,10 +9,10 @@ performance-variability probe of the #2224 entry experiment). The optimum is 27 
 Measured on the HiGHS-design search (default route), ``max_nodes=5000``,
 ``deterministic=True``: with HiGHS's ``1e-4`` cutoff/inference weights
 (``DISCOPT_MILP_PREINC_SCORE=0``) the search has **no incumbent** at the node limit (bound
-26); with the default (weight 1 while there is no incumbent) it certifies 27 in 1,352
-nodes. The test runs both arms, so it fails if the mechanism stops firing, stops being
-the default, *or* stops mattering. Work budget, not a wall clock: the
-``time_limit`` is a backstop well above the measured ~5 s per arm.
+26); with the flag (``=1``, weight 1 while there is no incumbent; the default) it
+certifies 27 in 1,352 nodes. The test runs ``=1``, ``=0`` and the default, so it fails if
+the mechanism stops firing, stops being the default, *or* stops mattering. Work budget,
+not a wall clock: the ``time_limit`` is a backstop well above the measured ~5 s per arm.
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ R.profile_reset_py()
 r = m.solve(time_limit=600, gap_tolerance=1e-4, max_nodes=5000, deterministic=True)
 c = {k: int(v) for k, v in R.profile_counters_py().items()}
 print("ROW " + json.dumps({"status": r.status, "cert": bool(r.gap_certified),
-                           "obj": r.objective, "bound": r.bound,
-                           "preinc": c.get("PreIncScoreNodes", 0),
+                           "obj": r.objective, "bound": r.bound, "nodes": int(r.node_count),
+                           "preinc": c.get("PreIncScoreBranchings", 0),
                            "runs": c.get("HighsMipSearchRuns", 0)}))
 """
 
@@ -60,20 +60,26 @@ def _run(flag: str | None) -> dict:
 
 
 def test_preinc_score_certifies_the_permuted_lights_out_puzzle():
-    on = _run(None)  # the default
+    on = _run("1")
     off = _run("0")
+    default = _run(None)
     # The HiGHS-design search ran in both arms (the flag acts only there).
     assert on["runs"] > 0 and off["runs"] > 0, (on, off)
-    # Default (flag on): the raised weight fired and the search certified the optimum.
+    # Flag on: the raised weight fired and the search certified the optimum.
     assert on["preinc"] > 0, on
     assert on["cert"], on
     assert on["obj"] == pytest.approx(OPTIMUM, abs=1e-6), on
     assert on["bound"] <= OPTIMUM + 1e-6, on
-    # Opted out: HiGHS's weights, no raised-weight branching, and the search ends at the
-    # node limit without an incumbent -- the case #2224 is about.
+    # Flag off: HiGHS's weights, no raised-weight branching, and the search is worse
+    # off than ON -- measured: no incumbent at the node limit (the case #2224 is about).
+    # Asserted loosely (no incumbent, or more nodes than ON) so that an unrelated primal
+    # improvement does not fail the test while the flag still matters.
     assert off["preinc"] == 0, off
-    assert not off["cert"] and off["obj"] is None, off
+    assert off["obj"] is None or (off["nodes"] > on["nodes"]), (off, on)
     assert off["bound"] <= OPTIMUM + 1e-6, off
+    # The default is the flag ON (graduated): same search as the explicit `=1` arm.
+    assert default["preinc"] == on["preinc"] and default["nodes"] == on["nodes"], (default, on)
+    assert default["cert"] and default["obj"] == pytest.approx(OPTIMUM, abs=1e-6), default
 
 
 def test_preinc_score_refuses_garbage():

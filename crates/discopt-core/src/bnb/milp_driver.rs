@@ -8410,7 +8410,7 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchSepCalls, o.sep_calls as u64);
                     incr_by(Ctr::HighsMipSearchSepLifts, o.sep_lifts as u64);
                     incr_by(Ctr::HighsMipSearchSubMipHits, o.sub_mip_hits as u64);
-                    incr_by(Ctr::PreIncScoreNodes, o.preinc_branchings as u64);
+                    incr_by(Ctr::PreIncScoreBranchings, o.preinc_branchings as u64);
                     incr_by(Ctr::HighsSearchCutRowsAdded, o.cut_rows_added as u64);
                     incr_by(Ctr::HighsSearchCutRowsDeleted, o.cut_rows_deleted as u64);
                     incr_by(Ctr::HighsSearchCutEpochs, o.cut_epochs as u64);
