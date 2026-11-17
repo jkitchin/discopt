@@ -533,6 +533,11 @@ impl PathSeparator {
                 let mut curr_path_len = 1usize;
                 let mut try_negated_scale = false;
                 aggregated_path.clear();
+                // #2225 progress guard: substitution passes since the path last grew.
+                // Each pass cancels continuous columns through their substitution rows,
+                // so a pass that does not lead to an arc within `num_col` passes is
+                // cycling; the path is abandoned (what it aggregated so far is valid).
+                let mut subst_passes = 0usize;
 
                 while curr_path_len != MAX_PATH_LEN {
                     let (base_inds, base_vals, base_rhs) = agg.current_aggregation(ctx, false);
@@ -648,6 +653,11 @@ impl PathSeparator {
                         }
                     }
                     if added_substitution_rows {
+                        subst_passes += 1;
+                        if subst_passes > num_col {
+                            crate::profile::incr(crate::profile::Ctr::HighsSepaPathSubstCap);
+                            break;
+                        }
                         continue;
                     }
 
@@ -737,6 +747,7 @@ impl PathSeparator {
                     current_path[curr_path_len] = row;
                     agg.add_row(ctx, row, weight);
                     curr_path_len += 1;
+                    subst_passes = 0;
                 }
 
                 let mut path_len = aggregated_path.len();

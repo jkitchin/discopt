@@ -251,6 +251,8 @@ counters!(
     HighsSepaCliqueCuts,
     HighsSepaCliques,
     HighsSepaCliqueMerged,
+    // #2225: path separator paths abandoned by the substitution progress guard.
+    HighsSepaPathSubstCap,
     // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global
     // box tightened by the incumbent's objective cutoff.
     HighsSepaCutoffBox,

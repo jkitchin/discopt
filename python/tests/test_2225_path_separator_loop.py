@@ -18,7 +18,7 @@ z = np.load(sys.argv[1])
 A = sp.csr_matrix((z["data"], z["indices"], z["indptr"]), shape=tuple(z["shape"]))
 b = make_backend("rust", A, z["rlo"], z["rhi"], z["lb"], z["ub"], z["is_int"])
 t = time.perf_counter()
-st = b.run(sys.argv[2], t + 5.0)
+st = b.run(sys.argv[2], t + 30.0)
 print(st, time.perf_counter() - t)
 """
 
@@ -30,8 +30,11 @@ def test_the_path_separator_does_not_spin_on_a_dropped_entry(presolve):
     the path separator: a column whose aggregated coefficient was roundoff, handed back
     by ``current_aggregation``, was substituted again and again without the path
     advancing. Measured before the fix: over 120 s against a 5 s budget, either presolve
-    setting; after: Infeasible in ~2.5 s. Run in a subprocess so a regression fails on
-    the timeout instead of hanging the suite."""
+    setting; after: Infeasible in ~2.5 s on a dev machine.
+
+    The test tells *spinning* from *slow*: the engine gets 30 s (well above the measured
+    time, with CI ~3x slower) and the bar is 20 s of wall, which a spin cannot meet. Run
+    in a subprocess so a regression fails on the timeout instead of hanging the suite."""
     import subprocess
     import sys
     from pathlib import Path
@@ -46,4 +49,4 @@ def test_the_path_separator_does_not_spin_on_a_dropped_entry(presolve):
     assert out.returncode == 0, out.stderr[-2000:]
     status, wall = out.stdout.split()
     assert status == "infeasible", out.stdout
-    assert float(wall) < 5.0 + 1.0, f"probe overran its 5 s budget: {wall} s"
+    assert float(wall) < 20.0, f"probe took {wall} s (a spin ran past 120 s)"
