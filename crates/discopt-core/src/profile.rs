@@ -814,6 +814,10 @@ counters!(
     PseudocostSentinelSkipped,
     // ... of those, the ones recorded as cutoff (infeasible-child) observations.
     PseudocostCutoffObservations,
+    // #2156: a column narrower than `small_matrix_value` with a negative coefficient,
+    // substituted at its UPPER bound by `TransformedLp::transform` (HiGHS substitutes
+    // `min(lb, ub)`, which tightened the row and cut feasible points).
+    TlNarrowColUpperSubst,
     PseudocostUntrustedChild,
     // #1296: MILP solves whose certificate was withdrawn because an entry sits
     // below the equilibration noise floor of its line while still able to move

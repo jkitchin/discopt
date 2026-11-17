@@ -172,6 +172,16 @@ thread_local! {
     pub(crate) static HIGHS_DROPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Whether HiGHS's own small-value semantics are in force: only ever under `cfg(test)`,
+/// for the replays against HiGHS dumps ([`HIGHS_DROPS`]).
+fn highs_drops() -> bool {
+    #[cfg(test)]
+    if HIGHS_DROPS.with(|c| c.get()) {
+        return true;
+    }
+    false
+}
+
 fn is_fixed(ctx: &dyn TlContext, col: i32) -> bool {
     ctx.col_lower(col) == ctx.col_upper(col)
 }
@@ -591,7 +601,28 @@ impl TransformedLp {
             let lb = get_lb(col);
             let ub = get_ub(col);
             if ub - lb < smv {
-                tmp_rhs -= lb.min(ub) * vals[i];
+                // **Deliberate deviation from HiGHS** (`HighsTransformedLp.cpp:174-175`
+                // substitutes `min(lb, ub)` whatever the sign). Removing `vals[i]·x` from
+                // a `≤` row is a relaxation only at the bound that minimises the term:
+                // `lb` for a positive coefficient, `ub` for a negative one. Both bounds
+                // are finite here (`ub - lb < smv`). A large coefficient on a narrow
+                // column makes the difference real: on #2156's ReLU model (coefficient
+                // -1003, width 1.3e-10) HiGHS's substitution let the path separator cut
+                // verified-feasible points, and the root went certified `infeasible`.
+                // Under `cfg(test)`, `HIGHS_DROPS` restores HiGHS's choice for the
+                // bit-identical replays of HiGHS dumps (see `drop_with_bound`).
+                let bound = if highs_drops() {
+                    lb.min(ub)
+                } else if vals[i] > 0.0 {
+                    lb
+                } else {
+                    if ub != lb {
+                        // Where this differs from HiGHS's choice (CLAUDE.md §6).
+                        crate::profile::incr(crate::profile::Ctr::TlNarrowColUpperSubst);
+                    }
+                    ub
+                };
+                tmp_rhs -= bound * vals[i];
                 remove(&mut inds, &mut vals, &mut num_nz, i);
                 continue;
             }
@@ -1098,5 +1129,119 @@ mod drop_soundness {
         );
         let (act, rhs) = round_trip();
         assert!(act <= rhs + 1e-12, "{act} > {rhs}");
+    }
+}
+
+/// A continuous column whose box is narrower than `small_matrix_value` is substituted
+/// by a bound and removed (`HighsTransformedLp::transform`). HiGHS substitutes
+/// `min(lb, ub)` whatever the sign of the coefficient, which tightens the row when the
+/// coefficient is negative: on #2156's ReLU model (coefficient -1003 on a column of
+/// width 1.3e-10) the path separator then emitted `b_718 <= b_553` and twelve similar
+/// cuts that removed verified-feasible points, and the root went certified
+/// `infeasible`. Each test first runs HiGHS's semantics and asserts the violation, so a
+/// probe that measures nothing fails (CLAUDE.md §6).
+#[cfg(test)]
+mod narrow_column_soundness {
+    use super::*;
+
+    /// Columns: 0 = c in [0, 1.3e-10] (continuous, narrower than 1e-9), 1 = y in
+    /// [0, 10] (integer, so the transform keeps it). No model rows are needed.
+    struct Mock;
+    const LB: [f64; 2] = [0.0, 0.0];
+    const UB: [f64; 2] = [1.3e-10, 10.0];
+    /// Valid for `-1e5 c + 1e-5 y <= 0`: activity -1.3e-5 + 1e-5 = -3e-6. (The
+    /// coefficient on `y` stays above feastol, which `untransform` would drop.)
+    const POINT: [f64; 2] = [1.3e-10, 1.0];
+    const Y_COEF: f64 = 1e-5;
+
+    impl TlContext for Mock {
+        fn num_cols(&self) -> usize {
+            2
+        }
+        fn num_rows(&self) -> usize {
+            0
+        }
+        fn feastol(&self) -> f64 {
+            1e-6
+        }
+        fn small_matrix_value(&self) -> f64 {
+            1e-9
+        }
+        fn col_lower(&self, col: i32) -> f64 {
+            LB[col as usize]
+        }
+        fn col_upper(&self, col: i32) -> f64 {
+            UB[col as usize]
+        }
+        fn slack_lower(&self, _row: i32) -> f64 {
+            unreachable!()
+        }
+        fn slack_upper(&self, _row: i32) -> f64 {
+            unreachable!()
+        }
+        fn is_col_integral(&self, col: i32) -> bool {
+            col == 1
+        }
+        fn row(&self, _row: i32) -> (&[i32], &[f64]) {
+            unreachable!()
+        }
+    }
+
+    /// `transform` then `untransform` of `coef·c + 1e-5·y <= rhs`; returns the round-tripped
+    /// row's slack at `POINT` (`rhs - activity`, negative = the point is cut off).
+    fn slack_at_point(coef: f64, rhs: f64, highs: bool) -> f64 {
+        HIGHS_DROPS.with(|c| c.set(highs));
+        let m = Mock;
+        let empty = |_: i32| Vec::new();
+        let setup = TlSetup {
+            col_value: &POINT,
+            col_dual: &[0.0, 0.0],
+            row_value: &[],
+            continuous_cols: &[0],
+            integral_cols: &[1],
+            vubs: &empty,
+            vlbs: &empty,
+        };
+        let mut tl = TransformedLp::new(&m, &setup);
+        let row = tl
+            .transform(&m, 1e-9, vec![0, 1], vec![coef, Y_COEF], rhs, false, false)
+            .expect("the row transforms");
+        let (inds, vals, rhs) = tl
+            .untransform(&m, &row.inds, &row.vals, row.rhs, false)
+            .expect("the row untransforms");
+        HIGHS_DROPS.with(|c| c.set(false));
+        assert!(!inds.contains(&0), "the narrow column is substituted out");
+        let act: f64 = inds
+            .iter()
+            .zip(&vals)
+            .map(|(&j, &v)| v * POINT[j as usize])
+            .sum();
+        rhs - act
+    }
+
+    #[test]
+    fn narrow_column_with_negative_coefficient_keeps_a_feasible_point() {
+        // HiGHS: c -> lb = 0 leaves `1e-5 y <= 0`, cutting off y = 1.
+        let highs = slack_at_point(-1e5, 0.0, true);
+        assert!(
+            highs < -1e-8,
+            "probe: HiGHS's substitution must cut the point ({highs})"
+        );
+        // Substituting c's upper bound keeps the row a relaxation: `1e-5 y <= 1.3e-5`.
+        let ours = slack_at_point(-1e5, 0.0, false);
+        assert!(ours >= -1e-15, "the point is cut off: slack {ours}");
+    }
+
+    #[test]
+    fn narrow_column_with_positive_coefficient_is_unchanged() {
+        // `1e5 c + 1e-5 y <= 3e-5` (activity 2.3e-5 at the point): at its lower bound
+        // c contributes 0, a relaxation; HiGHS and this port agree here.
+        let rhs = 3e-5;
+        let (highs, ours) = (
+            slack_at_point(1e5, rhs, true),
+            slack_at_point(1e5, rhs, false),
+        );
+        assert_eq!(highs, ours);
+        assert!(ours >= -1e-15, "{ours}");
     }
 }
