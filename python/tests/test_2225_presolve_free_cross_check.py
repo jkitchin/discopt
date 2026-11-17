@@ -110,3 +110,41 @@ def test_the_highs_engine_never_skips():
     assert sorted(res.constraints) == [0, 1]
     assert res.n_cross_inline == 0
     assert res.n_cross_checks >= 1
+
+
+_PATH_LOOP = r"""
+import sys, time, numpy as np, scipy.sparse as sp
+from discopt._iis_backend import make_backend
+z = np.load(sys.argv[1])
+A = sp.csr_matrix((z["data"], z["indices"], z["indptr"]), shape=tuple(z["shape"]))
+b = make_backend("rust", A, z["rlo"], z["rhi"], z["lb"], z["ub"], z["is_int"])
+t = time.perf_counter()
+st = b.run(sys.argv[2], t + 5.0)
+print(st, time.perf_counter() - t)
+"""
+
+
+@pytest.mark.parametrize("presolve", ["choose", "off"])
+def test_the_path_separator_does_not_spin_on_a_dropped_entry(presolve):
+    """A MIPcc27 ``dell`` IIS probe (``data/iis_2225_dell_path_loop.npz``: the model and
+    the probe's rows, bounds and integrality) on which the root's node separation spun in
+    the path separator: a column whose aggregated coefficient was roundoff, handed back
+    by ``current_aggregation``, was substituted again and again without the path
+    advancing. Measured before the fix: over 120 s against a 5 s budget, either presolve
+    setting; after: Infeasible in ~2.5 s. Run in a subprocess so a regression fails on
+    the timeout instead of hanging the suite."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    data = Path(__file__).parent / "data" / "iis_2225_dell_path_loop.npz"
+    out = subprocess.run(
+        [sys.executable, "-c", _PATH_LOOP, str(data), presolve],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    status, wall = out.stdout.split()
+    assert status == "infeasible", out.stdout
+    assert float(wall) < 5.0 + 1.0, f"probe overran its 5 s budget: {wall} s"
