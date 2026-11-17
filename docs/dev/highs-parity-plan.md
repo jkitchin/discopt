@@ -1901,6 +1901,59 @@ Baselines (filled by P0.3/P0.4/P0.7; walls carry the load-gate verdict):
 | MIPLIB-38 | R / H / H0 | 14 / 35 / 35 (cert 14 / 35 / —) | 344.89 / 253.17 / 171.04 s | 2.023 / 3.602 / 1.358 s | 708,937 / 14,015 / 18,685 | 0 / 0 / 0 | 12/38 valid → indicative |
 | UC witness (P0.7) | R @ 20/60/120 s; H @ 20 s | R 0/3 at every limit (no incumbent); H 3/3 certified | R 21 / 61–88 / 141–147 s; H 9.9–10.5 s | — | R 3 / 63–95 / 159; H 7 | 0 | idle (load 0.0) |
 
+### Engine switch (2026-11-17, owner decision; `main` at `aa5fbf2d1`)
+
+The owner's goal for the release: the best performance for users, and a clear path for
+continuing the in-house engine. The pure-LP, pure-MILP and IIS defaults were re-measured
+against HiGHS with the panels above, then moved behind one switch,
+`DISCOPT_LP_ENGINE=auto|highs|rust` (`solver._lp_engine`). The measurement wins.
+
+**Measured** (highspy 1.15.1; manifest paths rewritten to a scratch v1.15.1 HiGHS
+checkout, because `ref/HiGHS` was at v1.14; `lp_milp_panel.py run --arms R,H --rounds 3
+--time-limit 20 --load-gate 7`). Load was 4-6 on 14 cores from other sessions, so the
+gate was set to 7, not 4. Arms were interleaved, the relative wall sd was ≤ 0.009, and
+3/38 MIPLIB walls were load-gated. 624 solves were compared, with 0 incorrect.
+
+| Panel | certified R / H | total wall R / H | geo-mean wall R/H | notes |
+|---|---|---|---|---|
+| L (25 LP) | 75/75 / 75/75 | 13 / 9 s | 1.10 | SGM 0.13 / 0.10 s |
+| M (24 MILP) | 72/72 / 72/72 | 16 / 23 s | **0.76** | Rust faster; nodes 1,758 / 374 |
+| INF (16) | 45/48 / 45/48 | 13 / 3 s | 1.78 | `gas11` is correctly unbounded in both arms |
+| MIPLIB-38 | **90/114 / 111/114** | **727 / 325 s** | 1.42 | 7 instances only-H, none only-R; nodes on both-certified 26,753 / 3,382 |
+| IIS (53 P0.6) | 53/53 identical | 1.08 / 0.77 s | median 0.94 | #2225: the Rust driver is 1.9-2.6x slower on the MIPcc27 smallset, with probes incomplete |
+
+**The test suite as a second panel.** The full suite was run with HiGHS forced on every
+seam. 36 tests failed only because of the engine. 27 of those asserted Rust route
+labels or Pyodide behaviour. The remaining **9 were real: the HiGHS route gave up where
+Rust certifies.**
+- 8 were a coefficient or bound at about 1e15, which HiGHS `passModel` refuses.
+- 1 (X-32, `1e-13*y >= 5`) was a HiGHS `kOptimal` incumbent that violates its row by 5.
+  discopt's verification caught it and returned `error`.
+
+None of them was a wrong certificate. Hence `auto` = **HiGHS first, then a Rust re-solve
+when the HiGHS route returns `error`**. A certified status is never retried, so the
+fallback cannot add a certificate the Rust engine would not have produced. With
+`highs`, `rust` or any per-seam variable set, no fallback is taken.
+
+**Defaults now:**
+
+| Seam | Engine |
+|---|---|
+| pure LP | `auto` |
+| pure MILP | `auto` |
+| IIS | HiGHS when installed, with no fallback; an undecided probe leaves the set incomplete, never wrong |
+| decomposition masters | Rust (P5.2) |
+| per-node MINLP LP | Rust |
+
+This supersedes D1 (LP) and the 2026-11-09 MILP and P6.4 IIS Rust defaults. `highspy` is
+a core dependency again. An install without it (Pyodide) runs `auto` as Rust.
+
+**The development path.** CI's `Python Rust engine` lane runs the smoke tier with
+`DISCOPT_LP_ENGINE=rust`, so the Rust engine stays green. A seam returns to Rust by
+default when this section's panel shows it at or ahead of HiGHS there. For MILP that
+means MIPLIB-38 certified count and total wall. Each `[engine fallback: ...]` route label
+is a recorded instance where Rust answered and HiGHS did not.
+
 ### Final gate (P6.6, 2026-11-06, merged `main` at `0e39d8cf`; data `p6.6/`)
 
 Every wall under the load gate (4.0); 0 incorrect anywhere.

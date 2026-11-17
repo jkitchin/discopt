@@ -321,6 +321,7 @@ def test_entry_uses_highs_for_iis_probes_when_installed(tmp_path, monkeypatch, c
     monkeypatch.setattr(engine, "milp_iis_arrays", spy)
     monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
     monkeypatch.delenv("DISCOPT_IIS_ENGINE", raising=False)
+    monkeypatch.delenv("DISCOPT_LP_ENGINE", raising=False)
     inst = _readme_example(tmp_path)
     assert mipcc.main([inst, str(tmp_path / "a.json")]) == 0
     monkeypatch.setenv("DISCOPT_IIS_ENGINE", "rust")
@@ -334,6 +335,7 @@ def test_entry_falls_back_to_rust_without_highspy(monkeypatch):
     import sys
 
     monkeypatch.delenv("DISCOPT_IIS_ENGINE", raising=False)
+    monkeypatch.delenv("DISCOPT_LP_ENGINE", raising=False)
     assert mipcc.iis_engine() == "highs"
     monkeypatch.setitem(sys.modules, "highspy", None)
     assert mipcc.iis_engine() == "rust"

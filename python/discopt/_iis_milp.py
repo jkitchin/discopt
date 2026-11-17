@@ -567,12 +567,24 @@ class _Engine:
 
 
 def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
-    """The IIS matrix engine: an explicit argument, else ``DISCOPT_IIS_ENGINE``, else
-    ``"rust"``, discopt's own MILP driver. That default dates from 2026-11-07
-    (highs-parity P6.4; P3.2 measured 53/53 parity with HiGHS on the fixtures).
-    ``"highs"`` is the opt-out."""
+    """The IIS matrix engine: an explicit argument, else ``DISCOPT_IIS_ENGINE``, else the
+    global engine switch (``discopt.solver._lp_engine``: HiGHS where ``highspy`` is
+    installed, else ``"rust"``, discopt's own MILP driver).
+
+    History: ``"rust"`` was the default from 2026-11-07 (highs-parity P6.4) to the
+    2026-11-17 engine switch. P3.2 measured 53/53 parity on the fixtures, at 1.08 vs
+    0.77 s total wall, and #2225's MIPcc27 smallset found the Rust driver 1.9-2.6x
+    slower and leaving probes undecided where HiGHS decides them. There is no Rust
+    fallback here: a probe the engine cannot decide leaves the set marked incomplete,
+    never wrong. ``DISCOPT_IIS_ENGINE=rust`` / ``DISCOPT_LP_ENGINE=rust`` select the
+    Rust driver."""
     if iis_engine is None:
-        iis_engine = os.environ.get("DISCOPT_IIS_ENGINE", "rust").strip().lower()
+        env = os.environ.get("DISCOPT_IIS_ENGINE")
+        if env is not None and env.strip():
+            return env.strip().lower()
+        from discopt.solver import _engine_default
+
+        return _engine_default()
     return iis_engine
 
 
@@ -968,14 +980,15 @@ def milp_iis(
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
 
     ``iis_engine`` (highs-parity P3.2) names the MILP solver behind every probe:
-    ``"highs"`` (the default) or ``"rust"``, discopt's own MILP driver through a
-    persistent :class:`~discopt.solvers.milp_handle.MilpHandle` (an opt-in). On
+    ``"highs"`` or ``"rust"``, discopt's own MILP driver through a
+    persistent :class:`~discopt.solvers.milp_handle.MilpHandle`. ``None`` follows
+    :func:`_resolve_iis_engine` (HiGHS where installed). On
     P0.6's fixtures the two agree (``DISCOPT_FARKAS_EXACT_OPEN``, default ON); the Rust
     driver still leaves some probes undecided where HiGHS decides them -- integrality
     slack on big-M rows (``INT_TOL`` 1e-5) and hard combinatorial MILPs (pigeonhole)
-    -- recorded in ``docs/dev/highs-parity-plan.md`` P3.2. It is the default since
-    2026-11-07 (P6.4, owner: eliminate HiGHS); ``iis_engine="highs"`` /
-    ``DISCOPT_IIS_ENGINE=highs`` is the opt-out. The deletion
+    -- recorded in ``docs/dev/highs-parity-plan.md`` P3.2. It was the default from
+    2026-11-07 (P6.4) until the 2026-11-17 engine switch; ``iis_engine="rust"`` /
+    ``DISCOPT_IIS_ENGINE=rust`` selects it. The deletion
     filter, the #1634 presolve-on / presolve-off cross-checks, the witness repair and the
     confirmations are the same code either way (``discopt._iis_backend``).
 

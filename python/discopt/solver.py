@@ -18679,8 +18679,14 @@ def solve_model(
                 )
             # highs-parity D1: a pure LP with no ``milp_backend`` named follows
             # ``_lp_backend()`` (default rust); an explicit keyword still decides.
+            # The engine switch: unnamed, ``_solve_lp_default_engine`` runs HiGHS with
+            # the Rust fallback under DISCOPT_LP_ENGINE=auto.
             _lp_engine_choice = _lp_backend() if milp_backend is None else _lpm_backend
             if _lp_engine_choice == "highs":
+                if milp_backend is None:
+                    return _solve_lp_default_engine(
+                        model, t_start, time_limit, caller_presolve=_caller_presolve
+                    )
                 with _highs_route_options(presolve=_caller_presolve):
                     return _solve_lp_highs(model, t_start, time_limit)
             _lp_res = _solve_lp(model, t_start, time_limit, gap_tolerance, abs_gap_tolerance)
@@ -18732,9 +18738,11 @@ def solve_model(
             # (``_milp_node_callback_hook``); HiGHS does not, so it keeps the MILP off
             # the HiGHS route.
             _observe_tree = node_callback is not None
+            _milp_highs_fallback_from: Optional[SolveResult] = None
             if lazy_constraints is None and incumbent_callback is None and cut_callback is None:
-                # #1229 HiGHS route (opt-in: milp_backend="highs" /
-                # DISCOPT_LP_MILP_BACKEND=highs; the Rust engine is the default). An explicit
+                # #1229 HiGHS route (the default where highspy is installed, via
+                # DISCOPT_LP_ENGINE=auto; DISCOPT_LP_ENGINE=rust or
+                # DISCOPT_LP_MILP_BACKEND=rust selects the Rust engine). An explicit
                 # ``nlp_solver="simplex"`` still names the Rust engine, and
                 # ``lagrangian_bound`` still needs the per-node Python path.
                 # #2042: HiGHS fires no debugger checkpoint either, so an attached
@@ -18757,8 +18765,22 @@ def solve_model(
                             initial_point=initial_point,
                             abs_gap_tolerance=abs_gap_tolerance,
                         )
-                    if _highs_res is not None:
+                    if _highs_res is not None and not (
+                        _highs_res.status == "error"
+                        and milp_backend is None
+                        and _lp_engine_falls_back("DISCOPT_LP_MILP_BACKEND")
+                    ):
                         return _highs_res
+                    if _highs_res is not None:
+                        # DISCOPT_LP_ENGINE=auto: the HiGHS route errored (refused
+                        # the model, or its incumbent failed discopt's check), so
+                        # the Rust MILP engine below answers instead.
+                        logger.info(
+                            "MILP engine auto: the HiGHS route returned error (%s); "
+                            "re-solving on the Rust engine",
+                            _highs_res.algorithm_route,
+                        )
+                        _milp_highs_fallback_from = _highs_res
                 # Warm-started-simplex engine: the whole MILP B&B runs in Rust
                 # with dual-warm-started simplex node solves. Reached explicitly
                 # via ``nlp_solver="simplex"``, and — since the routing panel
@@ -18835,6 +18857,8 @@ def solve_model(
                     _simplex_res.algorithm_route = (
                         f"native-milp: discopt monolithic Rust MILP engine ({_why})"
                     )
+                if _simplex_res is not None and _milp_highs_fallback_from is not None:
+                    _mark_engine_fallback(_simplex_res, _milp_highs_fallback_from, "native-milp")
                 if _simplex_res is not None:
                     return _simplex_res
                 # The Rust engine declined a pure MILP. Since the Python MILP tree was
@@ -37311,26 +37335,86 @@ def _separate_gomory_cuts(lp_data, x_vertex, n_orig, int_idx, max_cuts: int = 8)
 _SIMPLEX_MILP_BUDGET_CAP_S = 10.0
 
 
+#: Values ``DISCOPT_LP_ENGINE`` accepts (the LP/MILP engine switch).
+_LP_ENGINE_VALUES = ("auto", "highs", "rust")
+
+
+def _lp_engine() -> str:
+    """The global LP/MILP engine choice: ``"auto"`` (default), ``"highs"`` or ``"rust"``.
+
+    One switch over the pure-LP, pure-MILP and IIS seams (``DISCOPT_LP_ENGINE``). The
+    per-seam variables (``DISCOPT_LP_BACKEND``, ``DISCOPT_LP_MILP_BACKEND``,
+    ``DISCOPT_IIS_ENGINE``) and the ``milp_backend=`` keyword still override it, so every
+    existing A/B run keeps its meaning. Decomposition masters and the per-node MINLP LP
+    are not governed by it: both stay on the in-house simplex (masters since P5.2; the
+    node LP is the Rust engine by design).
+
+    * ``auto`` -- HiGHS when ``highspy`` is importable, with the in-house Rust engine as
+      an automatic fallback whenever the HiGHS route returns ``error`` (it refused the
+      model, e.g. a coefficient ``>= 1e15`` at ``passModel``, or its answer failed
+      discopt's own verification). The fallback is taken only from ``error``, never
+      from a certified status, so it cannot introduce a certificate the Rust engine
+      would not itself have produced. Without ``highspy`` (Pyodide, a minimal install)
+      ``auto`` is the Rust engine.
+    * ``highs`` -- HiGHS only, no fallback (needs ``highspy``).
+    * ``rust`` -- the in-house engine only: the development switch.
+
+    Evidence for ``auto`` (2026-11-17, ``aa5fbf2d1``, highspy 1.15.1, 624 interleaved
+    solves over 3 rounds, 0 incorrect): MIPLIB-38 certified 111/114 HiGHS vs 90/114
+    Rust, total wall 325 vs 727 s; LP panel SGM 0.10 vs 0.13 s; INF panel 3 vs 13 s
+    total; IIS fixtures 53/53 identical. Rust was faster only on the small-MILP panel
+    M (geo-mean wall ratio 0.76). Re-read on every call so tests and panels can flip it
+    in-process; any other value is refused loudly.
+    """
+    raw = os.environ.get("DISCOPT_LP_ENGINE")
+    if raw is None:
+        return "auto"
+    val = raw.strip().lower()
+    if val not in _LP_ENGINE_VALUES:
+        raise ValueError(
+            f"DISCOPT_LP_ENGINE={val!r}: expected one of {', '.join(_LP_ENGINE_VALUES)}"
+        )
+    return val
+
+
+def _engine_default() -> str:
+    """The seam engine :func:`_lp_engine` names when no per-seam variable is set:
+    ``"highs"`` or ``"rust"`` (``auto`` is HiGHS iff ``highspy`` is importable)."""
+    from discopt._optional_highs import highs_available
+
+    eng = _lp_engine()
+    if eng == "auto":
+        return "highs" if highs_available() else "rust"
+    return eng
+
+
+def _lp_engine_falls_back(*seam_vars: str) -> bool:
+    """Whether a HiGHS ``error`` on a seam is retried on the Rust engine: only under
+    ``DISCOPT_LP_ENGINE=auto`` with none of that seam's own variables set. An explicit
+    ``highs`` anywhere means "HiGHS, and tell me when it fails"."""
+    if _lp_engine() != "auto":
+        return False
+    return all(os.environ.get(v) is None for v in seam_vars)
+
+
+#: The Rust-engine fallback note an ``auto`` solve records in ``algorithm_route``.
+_ENGINE_FALLBACK_NOTE = "engine fallback: HiGHS route returned error"
+
+
 def _lp_milp_backend() -> str:
     """Which engine solves a pure LP / MILP: ``"highs"`` or ``"rust"``.
 
-    Issue #1229; the contract is ``docs/dev/lp-milp-highs-routing-plan.md`` §3, and
-    the graduation evidence is its §12 (P4). ``DISCOPT_LP_MILP_BACKEND`` selects the
-    engine (``rust`` or ``highs``). Re-read each call so tests and panels can flip
-    it in-process. Any other value is refused loudly: a typo must not silently run the
-    default engine and be reported as a measurement of the other one.
-
-    Unset, the default is ``"rust"`` -- discopt's own MILP engine -- whether or not
-    ``highspy`` is installed (owner decision, 2026-11-09, PR #2196 review item 4: the
-    same model and code take the same engine on every install). HiGHS is the opt-in:
-    ``DISCOPT_LP_MILP_BACKEND=highs`` or ``Model.solve(milp_backend="highs")``, which
-    needs the optional ``discopt[highs]`` extra and raises ``MissingHighsError``
-    without it. Before this, an unset variable meant HiGHS wherever ``highspy`` was
-    present (#1229, highs-parity P6.3).
+    Issue #1229; the contract is ``docs/dev/lp-milp-highs-routing-plan.md`` §3.
+    ``DISCOPT_LP_MILP_BACKEND`` (``rust`` or ``highs``) selects the engine when set.
+    Unset, :func:`_lp_engine` decides: HiGHS where ``highspy`` is installed, with the
+    Rust engine as a fallback on ``error``. That reverts the 2026-11-09 Rust default
+    (PR #2196) after the 2026-11-17 MIPLIB panel recorded in :func:`_lp_engine`.
+    Re-read each call; any other value is refused loudly, so a typo cannot run the
+    other engine and be reported as a measurement of it.
     """
     raw = os.environ.get("DISCOPT_LP_MILP_BACKEND")
     if raw is None:
-        return "rust"
+        return _engine_default()
     val = raw.strip().lower()
     if val not in ("rust", "highs"):
         raise ValueError(f"DISCOPT_LP_MILP_BACKEND={val!r}: expected 'rust' or 'highs'")
@@ -37338,19 +37422,17 @@ def _lp_milp_backend() -> str:
 
 
 def _lp_backend() -> str:
-    """Which engine solves a pure LP when no ``milp_backend`` is named: ``"rust"``
-    (default since highs-parity D1, 2026-11-05) or ``"highs"``.
+    """Which engine solves a pure LP when no ``milp_backend`` is named: ``"highs"`` or
+    ``"rust"``.
 
     Precedence: ``DISCOPT_LP_BACKEND`` if set; else ``DISCOPT_LP_MILP_BACKEND`` if set
     (so every A/B run and opt-out that named the joint variable keeps its meaning); else
-    ``"rust"``. MILP reads only ``DISCOPT_LP_MILP_BACKEND`` (:func:`_lp_milp_backend`;
-    ``"rust"`` unless set).
+    :func:`_lp_engine` (HiGHS with a Rust fallback where ``highspy`` is installed).
 
-    D1's evidence (``docs/dev/highs-parity-plan.md`` P2.6, ``p2.6/gate_L_INF.json``): 3
-    rounds under a load gate, 480 solves, 0 incorrect; the Rust route certifies all 25 L
-    LPs like the HiGHS route and decides every INF LP correctly, at 1.07x the HiGHS
-    route's wall on L (0.97x on INF). ``=highs`` is the opt-out, kept so the default can
-    be A/B'd. Any other value is refused loudly, like :func:`_lp_milp_backend`.
+    History: highs-parity D1 (2026-11-05) made Rust the LP default at 1.07x the HiGHS
+    route's wall on L. The 2026-11-17 re-measurement found HiGHS ahead on L (SGM 0.10
+    vs 0.13 s) and INF (3 vs 13 s total), so the engine switch returns LP to HiGHS with
+    MILP. Any other value is refused loudly.
     """
     for var in ("DISCOPT_LP_BACKEND", "DISCOPT_LP_MILP_BACKEND"):
         raw = os.environ.get(var)
@@ -37359,7 +37441,53 @@ def _lp_backend() -> str:
             if val not in ("rust", "highs"):
                 raise ValueError(f"{var}={val!r}: expected 'rust' or 'highs'")
             return val
-    return "rust"
+    return _engine_default()
+
+
+def _solve_lp_default_engine(
+    model: Model,
+    t_start: float,
+    time_limit: float | None,
+    *,
+    caller_presolve: bool = True,
+    rust_route_label: str | None = None,
+) -> SolveResult:
+    """Solve a pure LP with the default engine (:func:`_lp_backend`), falling back to
+    the Rust engine on a HiGHS ``error`` under ``DISCOPT_LP_ENGINE=auto``.
+
+    The one LP dispatch shared by ``_solve_impl``, AMP's pure-LP shortcut and MIP-NLP's
+    integer-free shortcut, so all three take the same engine and the same fallback.
+    ``rust_route_label`` names the Rust route when the Rust LP solve leaves
+    ``algorithm_route`` unset.
+    """
+    if _lp_backend() == "highs":
+        with _highs_route_options(presolve=caller_presolve):
+            res = _solve_lp_highs(model, t_start, time_limit)
+        if res.status != "error" or not _lp_engine_falls_back(
+            "DISCOPT_LP_BACKEND", "DISCOPT_LP_MILP_BACKEND"
+        ):
+            return res
+        logger.info(
+            "LP engine auto: the HiGHS route returned error (%s); re-solving on the Rust engine",
+            res.algorithm_route,
+        )
+        fb = _solve_lp(model, t_start, time_limit)
+        _mark_engine_fallback(fb, res, rust_route_label or "rust-lp: discopt LP solve")
+        return fb
+    res = _solve_lp(model, t_start, time_limit)
+    if res.algorithm_route is None and rust_route_label is not None:
+        res.algorithm_route = rust_route_label
+    return res
+
+
+def _mark_engine_fallback(res: SolveResult, highs_res: SolveResult, label: str) -> None:
+    """Record on *res* that the Rust engine answered after the HiGHS route errored."""
+    route = res.algorithm_route or label
+    why = highs_res.algorithm_route or "error"
+    res.algorithm_route = f"{route} [{_ENGINE_FALLBACK_NOTE}: {why}]"
+    stats = dict(res.solver_stats or {})
+    stats["lp/engine_fallback"] = 1
+    res.solver_stats = stats
 
 
 #: Values the ``milp_backend=`` keyword of :func:`solve_model` accepts (#1535).

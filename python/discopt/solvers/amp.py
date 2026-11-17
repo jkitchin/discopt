@@ -2389,14 +2389,14 @@ def _solve_amp_impl(
                 # slope exactly, and a 1e-17 slope over a 1e19 reach is ~1e2 of
                 # bound (#1605). The LP route corrects the dual in exact rational
                 # arithmetic instead.
-                from discopt.solver import _lp_backend, _solve_lp, _solve_lp_highs
+                from discopt.solver import _solve_lp_default_engine
 
-                if _lp_backend() == "highs":
-                    result = _solve_lp_highs(model, t_start, time_limit)
-                else:
-                    result = _solve_lp(model, t_start, time_limit)
-                    if result.algorithm_route is None:
-                        result.algorithm_route = "rust-lp: discopt LP solve (AMP, pure LP)"
+                result = _solve_lp_default_engine(
+                    model,
+                    t_start,
+                    time_limit,
+                    rust_route_label="rust-lp: discopt LP solve (AMP, pure LP)",
+                )
                 result.convex_fast_path = True
                 return _finish(result)
             if is_convex:

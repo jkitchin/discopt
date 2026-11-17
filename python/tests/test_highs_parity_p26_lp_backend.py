@@ -1,4 +1,8 @@
-"""highs-parity D1: a pure LP defaults to the Rust route; MILP stays on HiGHS.
+"""highs-parity D1: the pure-LP engine selector, ``DISCOPT_LP_BACKEND``.
+
+Update 2026-11-17 (the engine switch): with no variable set, ``DISCOPT_LP_ENGINE=auto``
+now decides, and that is HiGHS where highspy is installed, for LP and MILP alike. The
+D1 history below stays as the record of why ``DISCOPT_LP_BACKEND`` exists.
 
 Owner decision 2026-11-05 on the P2.6 gate (3 rounds, 480 solves, 0 incorrect; Rust
 certifies all 25 L LPs, 1.07x the HiGHS route's wall). ``DISCOPT_LP_BACKEND`` selects the
@@ -39,9 +43,15 @@ def _on_highs(r) -> bool:
 def _clean_env(monkeypatch):
     monkeypatch.delenv("DISCOPT_LP_BACKEND", raising=False)
     monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
+    monkeypatch.delenv("DISCOPT_LP_ENGINE", raising=False)
 
 
-def test_lp_defaults_to_the_rust_route():
+def test_lp_defaults_to_highs_and_rust_is_one_switch_away(monkeypatch):
+    assert S._lp_backend() == "highs"
+    r = _lp().solve(time_limit=30)
+    assert r.status == "optimal" and r.gap_certified and _on_highs(r)
+    assert r.objective == pytest.approx(2.0)
+    monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
     assert S._lp_backend() == "rust"
     r = _lp().solve(time_limit=30)
     assert r.status == "optimal" and r.gap_certified
@@ -50,10 +60,13 @@ def test_lp_defaults_to_the_rust_route():
     assert r.objective == pytest.approx(2.0)
 
 
-def test_lp_backend_highs_opts_out(monkeypatch):
+def test_lp_backend_selects_either_engine(monkeypatch):
     monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     r = _lp().solve(time_limit=30)
     assert r.status == "optimal" and r.gap_certified and _on_highs(r)
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "rust")
+    r = _lp().solve(time_limit=30)
+    assert r.status == "optimal" and r.gap_certified and not _on_highs(r)
 
 
 def test_joint_variable_still_decides_an_lp_when_lp_backend_is_unset(monkeypatch):
@@ -64,10 +77,12 @@ def test_joint_variable_still_decides_an_lp_when_lp_backend_is_unset(monkeypatch
     assert S._lp_backend() == "rust"
 
 
-def test_milp_default_is_the_rust_engine():
-    """Since PR #2196 the pure-MILP default is the Rust engine on every install."""
+def test_milp_default_is_highs():
+    """Since the 2026-11-17 engine switch the pure-MILP default is HiGHS where highspy is
+    installed (PR #2196 had made it the Rust engine)."""
+    pytest.importorskip("highspy")
     r = _milp().solve(time_limit=30)
-    assert r.status == "optimal" and r.gap_certified and not _on_highs(r)
+    assert r.status == "optimal" and r.gap_certified and _on_highs(r)
 
 
 def test_explicit_keyword_decides_the_lp(monkeypatch):
