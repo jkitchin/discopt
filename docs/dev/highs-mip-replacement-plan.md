@@ -56,7 +56,7 @@ not involved), and parity of the whole is checked statistically on the panel.
 | `HighsSeparation` | 293 | partial | `bridge.rs` (root rounds) | root only; node path uses a fresh pool per round |
 | `HighsDomain` | 4,645 | ported (wiring pending) | `domain.rs`, `objective.rs`, `conflict_pool.rs` | row, cut-pool, objective and conflict-pool propagation; conflict analysis (`ConflictSet`, both entry points, reconvergence cuts); clique-table reasons explained; missing `tightenCoefficients`, `fixCol`, redundant-row recording |
 | `HighsImplications` | 1,118 | partial | `vbound.rs` | variable-bound discovery/storage; missing probing implications |
-| `HighsCliqueTable` | 2,582 | missing | - | - |
+| `HighsCliqueTable` | 2,582 | ported; root separation wired (#2225) | `clique.rs`, `bridge.rs` | root rounds: `extractCliques` (each side of a ranged row as its own row), `runCliqueMerging` with the extended packing rows into the pool (HiGHS writes them into the rows in presolve), `separateCliques` per round (`DISCOPT_HIGHS_SEPA_CLIQUE`, default ON); not yet in node separation, domain propagation or presolve |
 | `HighsRedcostFixing` | 380 | missing (discopt's own root-only RC fixing) | `milp_driver.rs` `reduced_cost_fix` | - |
 | `HighsConflictPool` | 409 | missing | - | - |
 | `HighsObjectiveFunction` | 195 | missing | - | - |

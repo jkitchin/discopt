@@ -4,8 +4,9 @@ bars the P4.4 panel lacked).
 
 ``--flag NAME`` (or a comma-separated bundle, toggled together) is set to
 ``--on-value`` (default ``1``) in the ON arm and REMOVED in the
-OFF arm; ``--fired REGEX`` names the driver profile counters (or ``solver_stats`` keys)
-that prove the mechanism ran
+OFF arm, or set to ``--off-value`` when given (a default-ON flag's OFF arm is ``0``:
+removing it would run ON twice); ``--fired REGEX`` names the driver profile counters (or
+``solver_stats`` keys) that prove the mechanism ran
 (summed per solve; ON must be > 0, OFF must be 0). Population and arms as
 ``p44_gmi_repair_panel.py``: MIPLIB-38 + the M panel, Rust MILP route, fresh subprocess per
 solve, ``DISCOPT_PROFILE=1`` in both arms, arm order alternating, ``--reps`` 3,
@@ -58,6 +59,7 @@ import p42_rens_panel as R  # noqa: E402, N812  (population, gaps, cert checks)
 
 FLAG = ""
 ON_VALUE = "1"
+OFF_VALUE: str | None = None
 _CTR = re.compile(r"$^")
 _CTR_NAME = re.compile(r"$^")
 
@@ -69,6 +71,9 @@ def solve(path: str, on: bool, a) -> dict:
     if on:
         for f in flags:
             env[f] = ON_VALUE
+    elif OFF_VALUE is not None:
+        for f in flags:
+            env[f] = OFF_VALUE
     cmd = [sys.executable, str(PANEL_PY), "worker", path, "R", str(a.time_limit), str(a.gap),
            str(a.max_nodes)]  # fmt: skip
     load = os.getloadavg()[0]
@@ -186,6 +191,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--flag", default="")
     ap.add_argument("--on-value", default="1")
+    ap.add_argument(
+        "--off-value",
+        default=None,
+        help="set the flag to this in the OFF arm instead of removing it (default-ON flags)",
+    )
     ap.add_argument("--fired", default="", help="regex over profile counter names")
     ap.add_argument("--time-limit", type=float, default=20.0)
     ap.add_argument("--gap", type=float, default=P.GAP)
@@ -230,8 +240,8 @@ def main(argv=None) -> int:
         ap.error("--flag, --fired and --out are required unless --rescore is given")
     if a.deterministic:
         os.environ["DISCOPT_PANEL_DETERMINISTIC"] = "1"
-    global FLAG, ON_VALUE, _CTR, _CTR_NAME
-    FLAG, ON_VALUE = a.flag, a.on_value
+    global FLAG, ON_VALUE, OFF_VALUE, _CTR, _CTR_NAME
+    FLAG, ON_VALUE, OFF_VALUE = a.flag, a.on_value, a.off_value
     _CTR = re.compile(rf"^\s+({a.fired})\s+(\d+)$")
     _CTR_NAME = re.compile(a.fired)
 

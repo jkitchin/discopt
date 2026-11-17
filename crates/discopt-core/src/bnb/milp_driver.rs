@@ -19477,6 +19477,82 @@ mod sepa_cutoff_box_tests {
     }
 }
 
+/// The clique separator in the ported root separation (#2225): a set-packing model the
+/// LP cannot see through (pairwise conflicts only) gets its clique cut.
+#[cfg(test)]
+mod sepa_clique_tests {
+    use super::*;
+    use crate::lp::highs_cutgen::bridge::{RootSeparation, StdFormRound};
+
+    /// `max x0 + x1 + x2` over binaries with the three pairwise rows `x_i + x_j <= 1`
+    /// (a triangle of conflicts), in standard form: `x_i + x_j - s_k = 0`, `s_k <= 1`.
+    /// The LP optimum is `x = (1/2, 1/2, 1/2)`; the clique `x0 + x1 + x2 <= 1` cuts it off.
+    #[test]
+    fn root_round_separates_the_triangle_clique() {
+        const M: usize = 3;
+        const N: usize = 6;
+        const NS: usize = 3;
+        #[rustfmt::skip]
+        let a = vec![
+            1.0, 1.0, 0.0, -1.0,  0.0,  0.0,
+            1.0, 0.0, 1.0,  0.0, -1.0,  0.0,
+            0.0, 1.0, 1.0,  0.0,  0.0, -1.0,
+        ];
+        let csc = SparseCols::from_dense(&a, M, N);
+        let b = vec![0.0; M];
+        let c = vec![-1.0, -1.0, -1.0, 0.0, 0.0, 0.0];
+        let l = vec![0.0, 0.0, 0.0, -INF, -INF, -INF];
+        let u = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let is_int = vec![true, true, true, false, false, false];
+        let sol = solve_lp_root_csc(&csc, M, N, &c, &l, &u, &b, &SimplexOptions::default());
+        assert_eq!(sol.status, LpStatus::Optimal);
+        assert!((sol.obj + 1.5).abs() < 1e-9, "LP optimum {}", sol.obj);
+        let mut hs = RootSeparation::new(NS, M, 6, false);
+        let rc = hs.round(&StdFormRound {
+            csc: &csc,
+            m: M,
+            n: N,
+            ns: NS,
+            b: &b,
+            l: &l,
+            u: &u,
+            is_int: &is_int,
+            x: &sol.x,
+            y: &sol.dual,
+            basic_vars: &sol.basis.basic_vars,
+            deadline: None,
+        });
+        // Every binary point satisfying the rows: 0 and the unit vectors.
+        let keep: [[f64; NS]; 4] = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let mut checks = 0usize;
+        let mut clique = false;
+        for (_, k) in &rc.cuts {
+            let act = |x: &[f64]| -> f64 { (0..NS).map(|j| k.coeffs[j] * x[j]).sum() };
+            for p in &keep {
+                assert!(
+                    act(p) >= k.rhs - 1e-9,
+                    "cut {:?} >= {} cuts off {p:?}",
+                    k.coeffs,
+                    k.rhs
+                );
+                checks += 1;
+            }
+            assert!(
+                act(&sol.x) < k.rhs - 1e-6,
+                "cut does not separate the LP point"
+            );
+            clique |= k.coeffs[..NS] == [-1.0, -1.0, -1.0] && k.rhs == -1.0;
+        }
+        assert!(clique, "no clique cut among {:?}", rc.cuts);
+        assert!(checks >= 4, "only {checks} checks");
+    }
+}
+
 /// Status edge-case matrix (S1 of the 2026-11-14 review): small MILPs with answers
 /// known by enumeration, each solved plain, without heuristics, and seeded with the
 /// optimum, a worse feasible point and an infeasible point, through the production

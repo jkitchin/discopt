@@ -1974,3 +1974,48 @@ HiGHS's dumped node inputs with one input swapped at a time for discopt's own.
 `DISCOPT_HIGHS_ROOT_POOL=all` were removed with their implementations (measurements above);
 their HiGHS behaviours return inside the search-core replacement
 (`highs-mip-replacement-plan.md`, stages 3-4). The replay resync diagnostic stays.
+
+### 12.40 The clique separator at the root (#2225, 2026-11-16)
+
+**Why.** The IIS engine's Rust backend (`iis_engine="rust"`, default since P6.4) returned the
+whole model on MIPcc27's pigeonhole instances: the full-model probe on `hole9` branched 10,185
+nodes (7.3 s) and `hole10` ran past 60 s, where HiGHS proves both at or near the root. Their
+pairwise rows `-x_ik - x_jk >= -1` have a feasible LP; the hole cliques `sum_i x_ik <= 1` make
+it infeasible. `HighsCliqueTable` was ported (`clique.rs`, stage 7) but not wired in.
+
+**What.** `RootSeparation` (`bridge.rs`) builds the table once from the model rows over the
+round's global box, each side of a ranged row as its own `<=` row (root presolve leaves
+`hole9`'s rows ranged, `[-1, 1.8e-15]`, and the set-packing test needs `row_upper == 1`), runs
+`runCliqueMerging`, and puts every extended packing row into the pool (HiGHS writes the
+extensions into the rows in presolve; discopt re-decides a presolve-infeasible verdict on the
+original rows, so the strengthening must reach the original root). Each round then runs
+`separateCliques` before the LP separators, as `HighsSeparation::separationRound` does. The
+table works on a private copy of the box: its fixings are not applied to the LP (fewer
+reductions than HiGHS, never a wrong one). `DISCOPT_HIGHS_SEPA_CLIQUE`, default ON; `=0` opts out.
+
+**Measured.** Full-model probes, smallset (50 infeasible models, 20 s, presolve off): decided
+36 -> 37 (+hole10, +jjliu_clique, -normalized-3_4_13), nodes over the 35 both decide 16,694 ->
+5,887, no feasible verdict; `hole9` 115 nodes / 0.09 s. §5 panel (`d2_flag_panel.py`,
+MIPLIB-38+M, 3 reps, 20 s): 147 = 147 certified, nothing lost, nodes 18,168 -> 18,061 --
+neutral, graduated as a faithful HiGHS component (CLAUDE.md §5 bar 2). Not yet ported: clique
+separation at nodes, clique-table propagation in the domain, presolve's row extension.
+
+**Follow-up (2026-11-17): a path-separator spin.**
+
+- *Path separator spin.* `LpAggregator::current_aggregation` keeps a dropped entry whose
+  bound on that side is infinite (the fac2 soundness fix), so a column cancelled by its
+  substitution row came back with a roundoff coefficient, was substituted again, and the
+  path loop's `continue` never advanced. One MIPcc27 `dell` probe spun over 120 s against a
+  5 s budget; `neos-3135947-otra`'s full model ran past 140 s against 20 s. The path now
+  skips entries at most `small_matrix_value`, as HiGHS's sum does. `dell` probe: Infeasible
+  in 2.5 s; `otra` stops at 20.5 s. MIPLIB-38+M build A/B (62 rows x 3 reps, 20 s, each
+  build's own panel worker): 147 = 147 certified, nodes over the 46 rows both certify 18,061
+  = 18,061, no dual or incumbent loss, total wall 965 vs 970 s; bar 1's only rows are
+  `1451`, in both builds: a measurement artifact, not a solver error: this run's `ref/HiGHS` checkout was HiGHS master, whose `check/instances/1451.lp` has 11 rows (expected objective 9 in HiGHS's own `TestFilereader.cpp`), while the manifest's oracle 2.0 is for the pinned v1.15.1 file (1 row); on the pinned file discopt and HiGHS both certify 2.0. (The new build there also
+  carried a presolve-free re-decision of MILP presolve's infeasibility claims, measured as
+  mixed for the IIS engine and not merged.)
+- *Found, open:* the Rust engine judges infeasibility more strictly than the checker. On
+  `dell` (`DISCOPT_IIS_ENGINE=rust`, 120 s) its answer was infeasible at 1e-9 but HiGHS at its
+  default 1e-6 (and the checker at 1e-5) accepts an integral point violating rows by 1.7e-7,
+  so `discopt.mipcc`'s checker-settings guard replaced it with the whole model. The entry
+  runs HiGHS by default, which keeps such sets.

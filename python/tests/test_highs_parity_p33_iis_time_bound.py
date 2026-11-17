@@ -53,18 +53,30 @@ def test_rust_probe_returns_within_one_second_of_a_half_second_budget(presolve):
 
 def test_rust_engine_honours_the_total_budget():
     """A whole IIS run on the Rust engine ends within its ``total_time_limit`` (plus a
-    CI margin): pigeonhole PHP(10,9) cannot be proven in 2 s, so it raises
-    ``TimeoutError`` -- an honest "nothing confirmed", on time."""
-    import sys
-    from pathlib import Path
+    CI margin): the capacity-2 pigeonhole (13 pigeons, 6 holes of capacity 2, one
+    ``x_a + x_b + x_c <= 2`` row per hole and triple) cannot be proven in 2 s, so it
+    raises ``TimeoutError`` -- an honest "nothing confirmed", on time.
 
-    sys.path.insert(0, str(Path(__file__).parent))
-    from test_iis_sat_candidate import _pigeonhole_model
+    It was PHP(10,9) until #2225: the root clique separator now proves pairwise
+    pigeonhole at the root, so that model finishes. Capacity 2 gives the clique table
+    nothing (no two literals conflict); measured 2026-11-17, the whole run times out
+    even at 20 s."""
+    import itertools
+
+    import discopt.modeling as dm
+
+    p, k = 13, 6
+    mod = dm.Model("php_cap2")
+    x = mod.binary("x", shape=(p, k))
+    for i in range(p):
+        mod.subject_to(sum(x[i, j] for j in range(k)) >= 1)
+    for j in range(k):
+        for a, b, c in itertools.combinations(range(p), 3):
+            mod.subject_to(-x[a, j] - x[b, j] - x[c, j] >= -2)
+    mod.minimize(0 * x[0, 0])
 
     budget = 2.0
     t0 = time.perf_counter()
     with pytest.raises(TimeoutError):
-        _iis_milp.milp_iis(
-            _pigeonhole_model(10, 9), time_limit=10, total_time_limit=budget, iis_engine="rust"
-        )
+        _iis_milp.milp_iis(mod, time_limit=10, total_time_limit=budget, iis_engine="rust")
     assert time.perf_counter() - t0 < budget + 1.5

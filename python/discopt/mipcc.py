@@ -60,6 +60,29 @@ _OWN_MIN = 2.0 * CHECK_TOL  # the certified element violated by more than this
 _INF = 1e20  # the engine's unbounded sentinel
 
 
+def iis_engine() -> str:
+    """The MILP solver behind the entry's IIS probes: ``DISCOPT_IIS_ENGINE`` when set,
+    else HiGHS when ``highspy`` is importable, else the in-house Rust driver.
+
+    The library default is ``"rust"`` (P6.4). The entry departs from it because the
+    Rust driver does not yet match HiGHS on the competition's subsystem probes (#2225).
+    Measured on the MIPcc27 smallset at 120 s, 4 threads, 2026-11-16, the Rust engine
+    vs HiGHS: bell3ainf 174 vs 130 elements, dell 923 (incomplete) vs 157, jjliu_clique
+    667 (incomplete) vs 280, hole9 493 (incomplete) vs 479. On instances both finish
+    (aim-200, bf2670-001, jnh15) it gives the same sizes 1.9-2.6x slower. The issue's
+    full 50-instance rerun with ``DISCOPT_IIS_ENGINE=highs`` reproduced the pre-P6.4
+    results (50/50 PASS, 44 complete). The entry's container installs ``discopt[highs]``
+    for the checker-mirroring re-solve, so HiGHS is there. Return this to the library
+    default once a smallset run on ``"rust"`` matches ``"highs"``.
+    """
+    env = os.environ.get("DISCOPT_IIS_ENGINE", "").strip().lower()
+    if env:
+        return env
+    from discopt._optional_highs import highs_available
+
+    return "highs" if highs_available() else "rust"
+
+
 def budget(limit: float) -> tuple[float, float]:
     """``(engine_budget, hard_stop)`` in seconds after launch for a run limit of
     ``limit`` seconds. The margin covers container start-up before Python runs
@@ -388,9 +411,11 @@ def _run(
         data["is_int"],
     )
     elapsed = time.perf_counter() - t0
+    engine = iis_engine()
     try:
         res = milp_iis_arrays(
             arrays,
+            iis_engine=engine,
             portfolio=DEFAULT_PORTFOLIO,
             workers=max(1, min(threads, len(DEFAULT_PORTFOLIO))),
             total_time_limit=max(engine_budget - elapsed, 0.5),
@@ -445,6 +470,7 @@ def _run(
                 certificates=len(res.certificates),
                 certificates_dropped=getattr(solution_json, "n_bad", 0),
                 order=res.order,
+                engine=engine,
                 wall=round(time.perf_counter() - t0, 2),
             )
         ),
