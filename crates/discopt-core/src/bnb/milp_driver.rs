@@ -5869,8 +5869,9 @@ fn root_box(
 /// the handle's `presolve_only()`): the same #2107 entry relaxation
 /// ([`prepare_entry`]), #1287 integer rounding and root presolve the search runs,
 /// with root presolve forced on. `true` means that box is proven empty -- the
-/// verdict a `presolve=true` solve returns as `Infeasible` with zero nodes;
-/// `false` decides nothing.
+/// verdict a `presolve=true` solve returns as `Infeasible`, with zero nodes unless
+/// MILP presolve claimed infeasibility first and the claim was re-decided with no
+/// presolve (`MilpResult::presolve_free`, #2225); `false` decides nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn milp_presolve_verdict(
     csc: SparseCols,

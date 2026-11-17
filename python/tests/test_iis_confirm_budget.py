@@ -157,6 +157,12 @@ def test_final_confirmation_still_refutes_a_wrong_presolve_on_claim(monkeypatch)
     # The faked presolve-free point must be reached: keep the exact-reduction
     # route (tried first) from deciding the set before it.
     monkeypatch.setattr(_iis_milp._Engine, "_reduced", lambda self, stop_at: None)
+    # #2225: on the Rust engine a presolve-on Infeasible is usually re-decided
+    # presolve-free inside the same solve, which makes the presolve-free route below
+    # unnecessary (`n_cross_inline`). This test is about that route itself, which still
+    # serves claims proven without that in-solve check (and the HiGHS engine), so the
+    # in-solve check is switched off here.
+    monkeypatch.setattr(_bk.RustBackend, "last_presolve_free", lambda self: False)
     res = milp_iis(_parity_model(8), sat_candidate=False)
     assert state["used"]
     assert res.fallback and res.complete  # redone with per-probe confirmation

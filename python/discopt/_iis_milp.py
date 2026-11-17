@@ -211,6 +211,7 @@ class _Engine:
         # search inside that same solve (#2225, `backend.last_presolve_free()`): its
         # presolve-free route is proven too, and a confirmation skips it.
         self._proven_off: Optional[tuple[frozenset, frozenset, frozenset]] = None
+        self._last_pfree = False  # the last `_solve`'s Infeasible was presolve-free
         self._stop = math.inf
         self.n_interrupted = 0
         self.n_repairs = 0
@@ -299,8 +300,12 @@ class _Engine:
         if stop - now < _MIN_SOLVE_S:
             raise _OutOfTime
         self.n_solves += 1
+        self._last_pfree = False
         try:
             status = self.backend.run(presolve, stop, max_nodes)
+            # Read once, from this run: whether its Infeasible was decided with no
+            # presolve at all (#2225). Anything that bypasses this method reads False.
+            self._last_pfree = status == _bk.INFEASIBLE and self.backend.last_presolve_free()
         finally:
             self._recent.append(time.perf_counter() - now)
         if status == _bk.INTERRUPTED:
@@ -391,7 +396,7 @@ class _Engine:
             return (False, x) if x is not None else (None, None)
         if ms not in (_bk.INFEASIBLE, _bk.UNBOUNDED_OR_INFEASIBLE):
             return None, None
-        if ms == _bk.INFEASIBLE and self.backend.last_presolve_free():
+        if ms == _bk.INFEASIBLE and self._last_pfree:
             # #2225: the solver re-decided its presolve's claim with no presolve at all
             # inside this solve (the Rust driver never trusts a presolved Infeasible):
             # the claim and its presolve-free check are both done, and a second
@@ -506,7 +511,7 @@ class _Engine:
             if st == _bk.OPTIMAL and self._witness(stop_at) is not None:
                 return False
             ok = st == _bk.INFEASIBLE
-            if ok and p == "choose" and self.backend.last_presolve_free():
+            if ok and p == "choose" and self._last_pfree:
                 off_done = True
                 self._proven_off = key
             if not ok and p == "off":

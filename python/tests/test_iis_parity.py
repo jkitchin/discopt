@@ -17,6 +17,7 @@ uses it twice:
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from discopt import _iis_backend as _bk
 from discopt import _iis_milp
 from discopt._iis_milp import _gf2_certificates, _parity_core, milp_iis
 
@@ -110,6 +111,12 @@ def test_parity_confirms_a_set_beyond_the_exact_caps_without_presolve_off(monkey
 
     monkeypatch.setattr(_iis_milp._Engine, "_solve", solve)
     monkeypatch.setattr(_iis_milp._Engine, "confirm_infeasible", confirm)
+    # #2225: on the Rust engine a presolve-on Infeasible is usually re-decided
+    # presolve-free inside the same solve, which makes the presolve-free route below
+    # unnecessary (`n_cross_inline`). This test is about that route itself, which still
+    # serves claims proven without that in-solve check (and the HiGHS engine), so the
+    # in-solve check is switched off here.
+    monkeypatch.setattr(_bk.RustBackend, "last_presolve_free", lambda self: False)
     res = milp_iis(m, total_time_limit=60.0)
     assert first["verdict"] is True and first["solves"] == []  # checkpoint 0
     assert res.complete and res.n_exact_confirmed >= 1

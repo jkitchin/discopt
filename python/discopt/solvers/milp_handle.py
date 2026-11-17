@@ -156,7 +156,8 @@ class MilpHandle:
 
     def presolve_only(self) -> bool:
         """``True`` when the driver's root preparation and presolve prove the current
-        box empty (a ``presolve=True`` solve's zero-node ``infeasible``); ``False``
+        box empty (a ``presolve=True`` solve then returns ``infeasible``, at zero nodes
+        unless MILP presolve's own claim was re-decided presolve-free, #2225); ``False``
         decides nothing."""
         return bool(self._h.presolve_only())
 
