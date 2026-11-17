@@ -711,6 +711,14 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "_deadline = None if time_limit is None else time.perf_counter() + max(0.0, time_limit)",
         "contract",
     ),
+    # #2223: the lazy master's restart loop stops restarting once the caller's own
+    # ``time_limit`` is spent and reports a limit -- ``contract``. How much work each
+    # tree does is decided by the restart count K and the node-cut cap, not the clock.
+    (
+        "solvers/milp_simplex.py",
+        "out_of_time = time_limit is not None and (time.perf_counter() - t_start) >= float(",
+        "contract",
+    ),
     (
         "solvers/mip_nlp_rootsearch.py",
         "deadline = None if time_limit is None else time.perf_counter() + "
