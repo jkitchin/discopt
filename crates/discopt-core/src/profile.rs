@@ -502,8 +502,6 @@ counters!(
     MilpPresolveRowsRemoved,
     MilpPresolveInfeasibleFallback,
     MilpPresolveVerifyFallback,
-    // #2225: presolve infeasibility claims re-decided presolve-free.
-    MilpPresolveClaimRedecided,
     // Unbounded relaxations re-checked by a zero-objective feasibility solve, and the
     // verdicts that check overturned (`settle_unbounded`).
     MilpUnboundedSettle,

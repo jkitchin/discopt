@@ -16,17 +16,7 @@ use pyo3::prelude::*;
 use crate::lp_bindings::milp_options;
 
 /// `solve_milp_csc_py`'s return: `(status, x, obj, bound, nodes, lp_iters)`.
-/// `(status, x, obj, bound, nodes, lp_iters, presolve_free)`; the last is
-/// `MilpResult::presolve_free` (#2225).
-type SolveTuple<'py> = (
-    String,
-    Bound<'py, PyArray1<f64>>,
-    f64,
-    f64,
-    usize,
-    usize,
-    bool,
-);
+type SolveTuple<'py> = (String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize);
 
 #[pyclass(name = "MilpHandle", module = "discopt._rust")]
 pub struct PyMilpHandle {
@@ -248,7 +238,6 @@ impl PyMilpHandle {
             res.bound,
             res.nodes,
             res.lp_iters,
-            res.presolve_free,
         ))
     }
 

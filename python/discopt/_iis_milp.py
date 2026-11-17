@@ -128,9 +128,6 @@ class MilpIIS:
     n_solves: int = 0
     proven_irreducible: bool = True
     n_cross_checks: int = 0  # infeasibility claims re-solved with presolve off (#1634)
-    # ... claims whose presolve-free check ran inside the solver's own presolve-on solve,
-    # so no re-solve was needed (#2225; the Rust driver re-decides presolve's claims)
-    n_cross_inline: int = 0
     n_refuted: int = 0  # ... that the presolve-free solve found feasible
     n_cross_inconclusive: int = 0  # ... that the presolve-free solve could not decide
     confirm: str = "final"  # where the #1634 confirmation ran: "each" probe or the "final" set
@@ -185,8 +182,6 @@ class _Engine:
         self.probe_tl = probe_tl
         self.n_solves = 0
         self.n_cross_checks = 0  # infeasibility claims re-solved with presolve off
-        # ... checked presolve-free inside the presolve-on solve itself (#2225)
-        self.n_cross_inline = 0
         self.n_refuted = 0  # ... of which the presolve-free solve found feasible
         self.n_cross_inconclusive = 0  # ... of which the presolve-free solve was undecided
         self.confirm_each = confirm_each
@@ -207,11 +202,6 @@ class _Engine:
         # not drop was put back, so its final confirmation needs only the
         # presolve-free route (:meth:`proven_on`).
         self._proven_on: Optional[tuple[frozenset, frozenset, frozenset]] = None
-        # The last set whose presolve-on Infeasible was decided by a presolve-free
-        # search inside that same solve (#2225, `backend.last_presolve_free()`): its
-        # presolve-free route is proven too, and a confirmation skips it.
-        self._proven_off: Optional[tuple[frozenset, frozenset, frozenset]] = None
-        self._last_pfree = False  # the last `_solve`'s Infeasible was presolve-free
         self._stop = math.inf
         self.n_interrupted = 0
         self.n_repairs = 0
@@ -300,12 +290,8 @@ class _Engine:
         if stop - now < _MIN_SOLVE_S:
             raise _OutOfTime
         self.n_solves += 1
-        self._last_pfree = False
         try:
             status = self.backend.run(presolve, stop, max_nodes)
-            # Read once, from this run: whether its Infeasible was decided with no
-            # presolve at all (#2225). Anything that bypasses this method reads False.
-            self._last_pfree = status == _bk.INFEASIBLE and self.backend.last_presolve_free()
         finally:
             self._recent.append(time.perf_counter() - now)
         if status == _bk.INTERRUPTED:
@@ -396,15 +382,6 @@ class _Engine:
             return (False, x) if x is not None else (None, None)
         if ms not in (_bk.INFEASIBLE, _bk.UNBOUNDED_OR_INFEASIBLE):
             return None, None
-        if ms == _bk.INFEASIBLE and self._last_pfree:
-            # #2225: the solver re-decided its presolve's claim with no presolve at all
-            # inside this solve (the Rust driver never trusts a presolved Infeasible):
-            # the claim and its presolve-free check are both done, and a second
-            # presolve-free solve would repeat the first.
-            self.n_cross_inline += 1
-            self._record_proven(active_cons, active_bounds, active_int)
-            self._proven_off = self._proven_on
-            return True, None
         if ms == _bk.INFEASIBLE and not self.confirm_each:
             self._record_proven(active_cons, active_bounds, active_int)
             return True, None
@@ -484,15 +461,8 @@ class _Engine:
         "feasible" status whose point is a tolerance artifact). ``presolve``
         restricts the check to configurations not already proven for this set."""
         self._configure(active_cons, active_bounds, active_int)
-        key = (frozenset(active_cons), frozenset(active_bounds), frozenset(active_int))
-        off_done = self._proven_off == key
         all_infeasible = True
         for p in presolve:
-            if p == "off" and off_done:
-                # Proven presolve-free already (#2225): by a presolve-on solve whose
-                # claim was re-decided with no presolve, here or in the probe.
-                self.n_cross_inline += 1
-                continue
             if p == "off":
                 rlo, rhi, _, _ = self._cfg
                 if self._parity_infeasible(rlo, rhi):
@@ -511,9 +481,6 @@ class _Engine:
             if st == _bk.OPTIMAL and self._witness(stop_at) is not None:
                 return False
             ok = st == _bk.INFEASIBLE
-            if ok and p == "choose" and self._last_pfree:
-                off_done = True
-                self._proven_off = key
             if not ok and p == "off":
                 # Presolve-off could not answer (on big-M sets it returns
                 # "Optimal" points whose integers are 1e-11 off and do not
@@ -1840,7 +1807,6 @@ def _milp_iis_arrays(
         n_solves=eng.n_solves,
         proven_irreducible=proven,
         n_cross_checks=eng.n_cross_checks,
-        n_cross_inline=eng.n_cross_inline,
         n_refuted=eng.n_refuted,
         n_cross_inconclusive=eng.n_cross_inconclusive,
         confirm=confirm,

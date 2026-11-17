@@ -19,8 +19,7 @@
 //! [`MilpHandle::presolve_only`] runs the driver's own root preparation --
 //! #2107 entry relaxation, #1287 integer rounding and root presolve -- through
 //! [`milp_presolve_verdict`] and reports whether it proves the box empty, which is
-//! the verdict a `presolve = true` solve returns as `Infeasible` (with zero nodes,
-//! unless MILP presolve's own claim was re-decided presolve-free, #2225).
+//! the verdict a `presolve = true` solve returns as `Infeasible` with zero nodes.
 
 use super::milp_driver::{milp_presolve_verdict, solve_milp_node_hooked, MilpOptions, MilpResult};
 use crate::lp::simplex::sparse::SparseCols;
@@ -479,12 +478,7 @@ mod tests {
                 let full = fresh(&csc, m, n, &c, &lw, &uw, &b, &op);
                 if pre {
                     assert_eq!(full.status, MilpStatus::Infeasible, "{name} step {step}");
-                    // #2225: when MILP presolve itself claims infeasibility, the claim is
-                    // re-decided with no presolve (root bound tightening off), which may
-                    // need nodes to reach the same verdict.
-                    if !full.presolve_free {
-                        assert_eq!(full.nodes, 0, "{name} step {step}");
-                    }
+                    assert_eq!(full.nodes, 0, "{name} step {step}");
                 }
                 statuses.insert(format!("{:?}", got.status));
                 compared += 1;

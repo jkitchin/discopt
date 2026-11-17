@@ -168,12 +168,6 @@ def test_engine_confirms_through_the_reduction_when_presolve_free_cannot(monkeyp
         return real(self, presolve, stop_at)
 
     monkeypatch.setattr(_iis_milp._Engine, "_solve", solve)
-    # #2225: on the Rust engine a presolve-on Infeasible is usually re-decided
-    # presolve-free inside the same solve, which makes the presolve-free route below
-    # unnecessary (`n_cross_inline`). This test is about that route itself, which still
-    # serves claims proven without that in-solve check (and the HiGHS engine), so the
-    # in-solve check is switched off here.
-    monkeypatch.setattr(_bk.RustBackend, "last_presolve_free", lambda self: False)
     res = milp_iis(_dijle_like(), total_time_limit=60.0, sat_candidate=False)
     assert res.n_reduced_confirmed >= 1
     assert res.complete and not res.fallback
