@@ -65,9 +65,9 @@ def _solve_profiled(name, time_limit):
 def _divergence_report(runs, counters):
     """What differs between two certifying runs that disagree.
 
-    Used when two default-mode certificates of `tls2` disagree on the optimum (a
-    soundness failure). It was added for differing node counts, which #2240 showed
-    the default mode does not promise.
+    Used when one default-mode certificate of `tls2` proves a bound above the
+    other run's incumbent (a soundness failure). It was added for differing node
+    counts, which #2240 showed the default mode does not promise.
 
     #2234's CI run certified `tls2` twice in one worker with 104 then 70 nodes, and
     nothing in the failure said why; 70+ local runs (contention, clock scaling,
@@ -190,13 +190,22 @@ def test_the_suite_does_not_claim_determinism_for_a_budgeted_exit(monkeypatch):
         # against ~1 s / 82 nodes in the default mode. Measured on tls2 at 5 s, one
         # core shared with 2 busy loops, 8 runs: one certified (82 nodes, 3.0 s),
         # seven took a slower path and hit the budget at 47-71 nodes; #2234's CI
-        # worker certified it twice at 104 then 70 nodes. Two certificates of one
-        # instance must still agree, and when they do not the report says why.
-        tol = 1e-6 * max(1.0, abs(runs[0].objective))
-        assert abs(runs[0].objective - runs[1].objective) <= tol, (
-            f"tls2 certified two different optima, {runs[0].objective!r} then "
-            f"{runs[1].objective!r}\n" + _divergence_report(runs, counters)
-        )
+        # worker certified it twice at 104 then 70 nodes.
+        #
+        # What two certificates of one instance must still satisfy is
+        # CROSS-soundness: each run's proven bound is valid for the problem, so it
+        # cannot sit above the OTHER run's feasible incumbent. Not equal
+        # incumbents: each certificate promises only ``gap_tolerance`` (1e-4
+        # relative by default), so two sound runs may differ by that much, and a
+        # tighter equality would be another load-dependent flake. Cross-soundness
+        # also implies the incumbents agree within the larger of the two gaps, and
+        # it catches a false bound in either run with the other run's point.
+        for i, j in ((0, 1), (1, 0)):
+            tol = 1e-6 * max(1.0, abs(runs[j].objective))
+            assert runs[i].bound <= runs[j].objective + tol, (
+                f"run {i} proved bound {runs[i].bound!r} above run {j}'s incumbent "
+                f"{runs[j].objective!r}\n" + _divergence_report(runs, counters)
+            )
 
 
 @pytest.mark.smoke
