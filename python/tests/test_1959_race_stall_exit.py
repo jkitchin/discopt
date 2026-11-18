@@ -131,9 +131,9 @@ def test_engine_no_incumbent_exit_returns_its_valid_bound(monkeypatch):
     optimum, deterministic over repeated runs, ~1.6 s). The exit must carry the route
     marker, no point, and a bound that is valid (never above the optimum 27).
 
-    Its status reads ``time_limit`` although the node cap stopped it: the driver's
-    ``NodeLimit`` means "budget spent" for nodes and clock alike, so the label is not
-    asserted here. Tracked by #2239; assert ``node_limit`` once it is fixed.
+    #2239: the node cap stopped it, so the exit is labelled ``node_limit`` (status and
+    termination). Before the fix the driver's ``NodeLimit`` meant "budget spent" for
+    nodes and clock alike and this exit read ``time_limit``.
     """
     monkeypatch.setenv("DISCOPT_MILP_PREINC_SCORE", "0")
     fixture = os.path.join(DATA, "issue_2224", "enlight8_perm3.mps.gz")
@@ -142,5 +142,6 @@ def test_engine_no_incumbent_exit_returns_its_valid_bound(monkeypatch):
     )
     assert STALL_ROUTE in (r.algorithm_route or ""), r.algorithm_route
     assert r.objective is None and not r.gap_certified, r
-    assert r.status in ("node_limit", "time_limit"), r.status
+    assert r.status == "node_limit", r.status
+    assert r.termination == "node_limit", r.termination
     assert r.bound is not None and r.bound <= 27.0 + 1e-6, r.bound

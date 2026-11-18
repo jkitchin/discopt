@@ -1493,7 +1493,7 @@ pub fn solve_milp_csc_py<'py>(
 thread_local! {
     /// Per-solve counters of the last MILP-driver solve on this thread
     /// (`run_milp_hooked`): `(root_cut_rows, strong_probe_lps)`.
-    static LAST_MILP_STATS: std::cell::Cell<Option<(usize, usize, usize, usize)>> =
+    static LAST_MILP_STATS: std::cell::Cell<Option<(usize, usize, usize, usize, &'static str)>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -1513,7 +1513,7 @@ pub fn milp_last_solve_stats_py(
     take: bool,
 ) -> PyResult<Option<Bound<'_, pyo3::types::PyDict>>> {
     let got = LAST_MILP_STATS.with(|c| if take { c.take() } else { c.get() });
-    let Some((rows, probes, bh_calls, bh_raised)) = got else {
+    let Some((rows, probes, bh_calls, bh_raised, stop)) = got else {
         return Ok(None);
     };
     let d = pyo3::types::PyDict::new(py);
@@ -1521,6 +1521,10 @@ pub fn milp_last_solve_stats_py(
     d.set_item("strong_probe_lps", probes)?;
     d.set_item("bound_hook_calls", bh_calls)?;
     d.set_item("bound_hook_raised", bh_raised)?;
+    // #2239: which budget, if any, stopped the search ("none", "nodes", "open_nodes",
+    // "time", "stall", "work", "interrupted", "hook_failed"). The status string
+    // "node_limit" is returned for every budget alike; this names the one.
+    d.set_item("stop_reason", stop)?;
     Ok(Some(d))
 }
 
@@ -2454,6 +2458,7 @@ fn run_milp_hooked<'py>(
             res.strong_probe_lps,
             res.bound_hook_calls,
             res.bound_hook_raised,
+            res.stop.as_str(),
         )));
     });
     Ok((
