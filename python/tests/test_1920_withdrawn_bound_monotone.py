@@ -341,10 +341,18 @@ def test_root_lp_tolerance_vertex_never_refutes_or_publishes(monkeypatch):
     assert injected, "MEASURED NOTHING: the root LP vertex was never injected"
     assert r.objective == pytest.approx(31.0, abs=1e-6), (r.status, r.objective)
     assert r.bound is None or r.bound <= 31.0 + 1e-6
-    assert r.solver_stats.get("milp/root_point_rederived_shift") == pytest.approx(20.0)
     x = np.concatenate([np.atleast_1d(np.asarray(r.x[v.name], float)) for v in m._variables])
     ok, why = check_feasibility(m, x, tol=1e-5)
     assert ok, why
+    shift = r.solver_stats.get("milp/root_point_rederived_shift")
+    if shift is None and r.solver_stats.get("highs/version", 0.0) < 11200.0:
+        # Measured 2026-11-18 (#2221): on highspy 1.11.0 the #1509 check never holds this
+        # vertex as a candidate. The two checks where it verifies on 1.12.0, 1.13.1,
+        # 1.14.0, 1.15.0, 1.15.1 and 1.16.0 (even with DISCOPT_MILP_ROW_FORM=0) do not
+        # run there; only the coefficient-tightened form's checks do, where the vertex
+        # does not verify. The invariants above still hold on it.
+        pytest.skip("highspy 1.11 does not reach the #1509 check with the vertex in hand")
+    assert shift == pytest.approx(20.0)
 
 
 # ── The fix-and-propagate start ──

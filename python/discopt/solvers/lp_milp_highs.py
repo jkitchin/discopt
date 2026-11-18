@@ -107,12 +107,13 @@ _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS = 1 << 13
 #: Sparsify is the one taken: it only re-expresses rows to cut fill, while 9 and 12
 #: eliminate columns. On 23 HiGHS check instances in this route's standard form, sparsify
 #: on and off gave the same status and objective on every instance (panel in the #1667 PR).
-#: The upstream bug is tracked in #1671. Through highspy 1.15.1 it still cycles. HiGHS's
-#: unreleased ``latest`` branch does not: it stops at ERGO-Code/HiGHS PR 2962 (bisected).
-#: highspy 1.16.0 is the first release with that fix: there sparsify on and off both reach
-#: ``Optimal`` 450623.7692 on the hand-off (2.2 s / 1.5 s, measured 2026-11-18, #2221). The
-#: bit is kept as a documented opt-out because the supported floor (``highspy>=1.11``)
-#: still cycles; it can go once the floor is >= 1.16 and the #1667 panel is re-measured.
+#: The upstream bug is tracked in #1671. It is a regression window, not a floor: measured
+#: 2026-11-18 (#2221) with the canary's ``presolve()`` probe on the hand-off, highspy
+#: 1.12.0, 1.13.0, 1.13.1, 1.14.0, 1.15.0 and 1.15.1 cycle, and 1.11.0 and 1.16.0 return.
+#: The fix is ERGO-Code/HiGHS PR 2962 (bisected on ``latest``), first released in 1.16.0,
+#: where sparsify on and off both reach ``Optimal`` 450623.7692 (2.2 s / 1.5 s). The bit is
+#: kept as a documented opt-out because ``highspy>=1.11`` still admits the cycling
+#: releases; it can go once the floor is >= 1.16 and the #1667 panel is re-measured.
 #: ``test_1671_highs_presolve_cycle_canary.py`` enforces both halves.
 _PRESOLVE_RULE_SPARSIFY = 1 << 14
 #: Every ``presolve_rule_off`` bit the MILP route sets.
