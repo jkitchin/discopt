@@ -527,9 +527,39 @@ def declined_lp_cert_enabled() -> bool:
     )
 
 
+def _verified_lp_engines() -> tuple[Optional[str], ...]:
+    """The ``solve_lp_std`` engines :func:`_verified_free_column_bound` tries, in order.
+
+    #2226: this route was written as "the verified HiGHS LP route" (#1869 (b)), and
+    ``solve_lp_std``'s own default became the Rust engine in #2196 (P6.4), which
+    silently moved it. #2233 returned the LP seams to ``DISCOPT_LP_ENGINE=auto``
+    (HiGHS where ``highspy`` imports, the Rust engine on ``error``) but missed this
+    one. Measured on ex8_5_3 (bundle ON, 300 nodes): one node LP (155 x 192, |A| in
+    [8e-3, 171]) on which the Rust simplex reports ``numerical`` -- its final audit
+    finds a basic column outside its bound after EXPAND -- while HiGHS solves it to
+    ``optimal`` -0.0676; the declined node was fathomed without proof, its pop-time
+    bound -0.5665 became the reported floor, and the solve stopped uncertified where
+    it had certified at 219 nodes. Same rule as #2233: an explicit
+    ``DISCOPT_LP_STD_ENGINE`` (``None`` here: ``solve_lp_std`` reads it) or
+    ``DISCOPT_LP_ENGINE`` is honoured with no fallback. Every engine's answer is
+    re-verified against the LP by ``solve_lp_std``, so the order never decides
+    soundness.
+    """
+    if os.environ.get("DISCOPT_LP_STD_ENGINE", "").strip():
+        return (None,)
+    from discopt._optional_highs import highs_available
+    from discopt.solver import _lp_engine
+
+    eng = _lp_engine()
+    if eng == "auto":
+        return ("highs", "rust") if highs_available() else ("rust",)
+    return (eng,)
+
+
 def _verified_free_column_bound(milp, time_limit: Optional[float]):
-    """``(bound, x)`` from the verified HiGHS route on ``min c'x, A_ub x <= b_ub``
-    (slacks in ``[0, inf)`` make it the route's equality form), or ``(None, None)``."""
+    """``(bound, x)`` from the verified LP route on ``min c'x, A_ub x <= b_ub``
+    (slacks in ``[0, inf)`` make it the route's equality form), or ``(None, None)``.
+    The engine follows ``DISCOPT_LP_ENGINE`` (:func:`_verified_lp_engines`)."""
     import scipy.sparse as sp
 
     from discopt.solvers.lp_milp_highs import StdForm, solve_lp_std
@@ -551,7 +581,16 @@ def _verified_free_column_bound(milp, time_limit: Optional[float]):
         np.concatenate([hi, np.full(m, np.inf)]),
         obj_const=float(milp._obj_offset),
     )
-    out = solve_lp_std(sf, time_limit=time_limit)
+    t0 = time.perf_counter()
+    engines = _verified_lp_engines()
+    for k, eng in enumerate(engines):
+        rem = None if time_limit is None else float(time_limit) - (time.perf_counter() - t0)
+        if rem is not None and rem <= 0.0:
+            return None, None
+        out = solve_lp_std(sf, time_limit=rem, engine=eng)
+        if out.status != "error" or k == len(engines) - 1:
+            break
+        BOUND_PROVENANCE["verified_engine_fallback"] += 1
     if out.status != "optimal" or out.bound is None or not np.isfinite(out.bound):
         return None, None
     if out.x is None:

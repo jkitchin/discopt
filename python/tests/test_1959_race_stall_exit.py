@@ -10,7 +10,8 @@ its branch are gone. These tests pin:
 
 * that only the two opening SLICES are marked as such, never the continuation;
 * on the #1940 dense integer QP, that the race still certifies the optimum and the
-  lift slice ends on the engine's own no-incumbent result.
+  lift slice ends on the engine's own result (with the no-incumbent marker when it has
+  no incumbent).
 """
 
 from __future__ import annotations
@@ -101,7 +102,7 @@ def test_dense_qp_race_ends_its_lift_slice_on_the_stall_and_certifies(monkeypatc
     def spy(*a, **k):
         r = real(*a, **k)
         if S._IPX_RACE_ARM.get() is not None:
-            slices.append((S._IPX_RACE_ARM.get(), r.algorithm_route or ""))
+            slices.append((S._IPX_RACE_ARM.get(), r.algorithm_route or "", r.objective))
         return r
 
     monkeypatch.setattr(S, "solve_model", spy)
@@ -110,4 +111,11 @@ def test_dense_qp_race_ends_its_lift_slice_on_the_stall_and_certifies(monkeypatc
     assert r.objective == pytest.approx(-1060.5575443498, rel=1e-6)
     assert r.bound <= r.objective + 1e-6 * abs(r.objective)
     assert slices and slices[0][0] == "lift"
-    assert STALL_ROUTE in slices[0][1], slices
+    # The lift slice ends on the MILP engine's own result, never a hand-off.
+    assert slices[0][1].startswith("native-milp: discopt monolithic Rust MILP engine"), slices
+    # #2226: the engine now finds an incumbent inside the slice (measured 2026-11-17:
+    # ``feasible`` -567.45 at bound -1888.25 after 13 nodes, 5.0 s), so the
+    # no-incumbent exit is no longer reached on this instance. When it is, the route
+    # must say so.
+    if slices[0][2] is None:
+        assert STALL_ROUTE in slices[0][1], slices

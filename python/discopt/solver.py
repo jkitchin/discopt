@@ -18841,6 +18841,19 @@ def solve_model(
                 if _simplex_res is not None and _simplex_res.algorithm_route is None:
                     # #1614 C1: the in-house engine answering a MILP must say so.
                     _why = "nlp_solver=simplex" if nlp_solver == "simplex" else "default"
+                    if (
+                        _why == "default"
+                        and milp_backend is None
+                        and _env_selector("DISCOPT_LP_MILP_BACKEND") is None
+                        and _lp_engine() == "auto"
+                    ):
+                        from discopt._optional_highs import highs_available
+
+                        if not highs_available():
+                            # #2226: under ``auto`` the Rust engine is the default
+                            # only because HiGHS is absent; the route says so, as it
+                            # did before the #2196/#2233 engine switches.
+                            _why += "; highspy is not installed"
                     if lagrangian_bound:
                         _why += "; lagrangian_bound node hook"
                     _simplex_res.algorithm_route = (
@@ -37562,8 +37575,9 @@ def _resolve_lp_milp_backend(milp_backend: Optional[str]) -> str:
     """The engine for a pure LP / MILP: ``"highs"``, ``"rust"`` or ``"native"``.
 
     ``milp_backend=None`` defers to :func:`_lp_milp_backend` (the
-    ``DISCOPT_LP_MILP_BACKEND`` env var; default ``"rust"`` whether or not ``highspy`` is
-    installed), so a solve that does not name a backend is unchanged.
+    ``DISCOPT_LP_MILP_BACKEND`` env var, else ``DISCOPT_LP_ENGINE``: under the default
+    ``auto``, ``"highs"`` where ``highspy`` is installed and ``"rust"`` otherwise), so a
+    solve that does not name a backend is unchanged.
     An explicit keyword wins over the env var:
 
     * ``"highs"`` -- the #1229 HiGHS route, with discopt-verified certificates.

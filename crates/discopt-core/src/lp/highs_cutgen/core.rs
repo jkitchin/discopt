@@ -120,8 +120,21 @@ pub struct CutGenCore {
     deltas: Vec<f64>,
 }
 
+/// `fast_floor` from `HighsCutGeneration.cpp`: floor via an `int64_t` truncation.
+///
+/// The C++ cast is undefined behaviour outside the `int64_t` range; Rust's `as`
+/// saturates to `i64::MIN`, and `i64::MIN - 1` then panics under overflow checks
+/// (#2226, the `m6` Benders master) or wraps to `i64::MAX` without them -- a
+/// "floor" of `-1e30` equal to `+9.2e18`. Every `f64` with `|x| >= 2^52` is already
+/// an integer, so it is its own floor; inside that range the arithmetic is the
+/// HiGHS one unchanged, so cut replay stays bit-identical. NaN takes the original
+/// path (`as` maps it to 0), as before.
 #[inline(always)]
 fn fast_floor(x: f64) -> f64 {
+    const EXACT: f64 = 4_503_599_627_370_496.0; // 2^52
+    if x.abs() >= EXACT {
+        return x;
+    }
     let t = x as i64;
     (t - ((x < t as f64) as i64)) as f64
 }
@@ -1263,6 +1276,40 @@ impl CutGenCore {
                 self.inds[i] = self.inds[r];
                 self.vals[i] = self.vals[r];
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod fast_floor_tests {
+    use super::fast_floor;
+
+    /// #2226: an out-of-`i64` value panicked (`i64::MIN - 1`) under overflow
+    /// checks and wrapped to `+9.2e18` without them.
+    #[test]
+    fn out_of_range_values_are_their_own_floor() {
+        for x in [-1e30, -9.3e18, -f64::MAX, 1e30, f64::MAX, -4.6e15, 4.6e15] {
+            assert_eq!(fast_floor(x), x, "{x}");
+        }
+        assert_eq!(fast_floor(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert_eq!(fast_floor(f64::INFINITY), f64::INFINITY);
+    }
+
+    #[test]
+    fn in_range_values_match_floor() {
+        for x in [
+            -2.5,
+            -2.0,
+            -0.3,
+            -0.0,
+            0.0,
+            0.7,
+            3.0,
+            3.999,
+            -4.4e15,
+            4.4e15 + 0.5,
+        ] {
+            assert_eq!(fast_floor(x), x.floor(), "{x}");
         }
     }
 }

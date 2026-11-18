@@ -6,7 +6,8 @@ with its columns and rows permuted by ``numpy.random.default_rng(3).permutation`
 performance-variability probe of the #2224 entry experiment). The optimum is 27 (MIPLIB
 2017 ``.solu``; HiGHS 1.15.1 proves it on this copy).
 
-Measured on the HiGHS-design search (default route), ``max_nodes=5000``,
+Measured on the HiGHS-design search of the Rust MILP engine (``DISCOPT_LP_ENGINE=rust``;
+the default route when this was written), ``max_nodes=5000``,
 ``deterministic=True``: with HiGHS's ``1e-4`` cutoff/inference weights
 (``DISCOPT_MILP_PREINC_SCORE=0``) the search has **no incumbent** at the node limit (bound
 26); with the flag (``=1``, weight 1 while there is no incumbent; the default) it
@@ -45,8 +46,21 @@ print("ROW " + json.dumps({"status": r.status, "cert": bool(r.gap_certified),
 """
 
 
-def _run(flag: str | None) -> dict:
+def _env() -> dict:
+    """A clean ``DISCOPT_*`` environment on the in-house MILP engine.
+
+    #2226: the flag acts only in the Rust engine's HiGHS-design search. This test was
+    written when that engine was the default MILP route (#2196); #2233 made HiGHS the
+    default under ``DISCOPT_LP_ENGINE=auto``, so a bare environment never reached the
+    search (CI: ``runs == 0`` and no flag parse). Pin the engine the flag belongs to.
+    """
     env = {k: v for k, v in os.environ.items() if not k.startswith("DISCOPT_")}
+    env["DISCOPT_LP_ENGINE"] = "rust"
+    return env
+
+
+def _run(flag: str | None) -> dict:
+    env = _env()
     env["DISCOPT_PROFILE"] = "1"
     if flag is not None:
         env["DISCOPT_MILP_PREINC_SCORE"] = flag
@@ -83,7 +97,7 @@ def test_preinc_score_certifies_the_permuted_lights_out_puzzle():
 
 
 def test_preinc_score_refuses_garbage():
-    env = {k: v for k, v in os.environ.items() if not k.startswith("DISCOPT_")}
+    env = _env()
     env["DISCOPT_MILP_PREINC_SCORE"] = "maybe"
     p = subprocess.run(
         [sys.executable, "-c", _PROBE, str(FIXTURE)],

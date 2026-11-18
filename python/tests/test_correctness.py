@@ -950,17 +950,39 @@ class TestMINLP:
         )
         assert r.node_count >= 1, "MINLP should use branch-and-bound"
 
-    def test_default_convex_route_reports_its_work(self) -> None:
+    def test_default_convex_route_reports_its_work(self, monkeypatch) -> None:
         """#1269: the default solve is a MIP-NLP route that reports its work.
 
-        Its work is reported as master MILP solves and NLP subproblems, which
-        must be nonzero. Otherwise a 0 would be the reporting defect #1059 fixed.
-        The route was OA when this was written, which runs no tree: ``node_count``
-        is 0. Since #1658 a certified-convex MINLP goes to LP/NLP-BB, a single
-        tree inside the HiGHS master, and ``node_count`` is HiGHS's
-        ``mip_node_count``, which counts the root (the convention ``Model.solve``
-        documents for the HiGHS route): 1 here, on macOS and on the CI runner.
+        Its work is reported as master MILP solves and NLP subproblems. The route
+        was OA when this was written, which runs no tree: ``node_count`` is 0. Since
+        #1658 a certified-convex MINLP goes to LP/NLP-BB, a single tree inside the
+        master, and ``node_count`` counts the root: 1 here.
+
+        #2226: ``subnlp_calls`` counts fixed-integer NLP subproblems, not the root
+        NLP relaxation. Here the relaxation's optimum is already integral
+        (``x3 = 0``) and closes the gap at the root, so no subproblem is posed and
+        ``subnlp_calls == 0`` is the truth (measured 2026-11-17: 1 relaxation, 0
+        fixed NLPs). Asserting ``>= 1`` pinned the old search path, not the
+        reporting. The #1059 defect (a 0 reported for subproblems that ran) is
+        checked directly instead: the count must equal the subproblem solves a spy
+        observes, and some NLP must have run.
         """
+        from discopt.solvers import oa
+
+        seen = {"relax": 0, "sub": 0}
+
+        def _spy(name, key):
+            real = getattr(oa, name)
+
+            def wrapped(*a, **k):
+                seen[key] += 1
+                return real(*a, **k)
+
+            monkeypatch.setattr(oa, name, wrapped)
+
+        _spy("_solve_nlp_relaxation", "relax")
+        _spy("_solve_nlp_subproblem", "sub")
+        _spy("_solve_fixed_nlp_subproblem_attempt", "sub")
         r = _build_simple_minlp().solve()
         assert r.status == "optimal"
         assert r.algorithm_route is not None and r.algorithm_route.startswith(
@@ -971,7 +993,8 @@ class TestMINLP:
         else:
             assert r.node_count >= 1, "the single tree reported no nodes"
         assert r.mip_count >= 1
-        assert r.subnlp_calls >= 1
+        assert seen["relax"] + seen["sub"] >= 1, "the route solved no NLP at all"
+        assert r.subnlp_calls == seen["sub"], (r.subnlp_calls, seen)
 
 
 # ──────────────────────────────────────────────────────────

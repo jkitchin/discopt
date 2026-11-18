@@ -235,6 +235,13 @@ def test_issue_2059_portfol_classical050_1_certifies(monkeypatch):
     from discopt.validation.feasibility import verify_point
 
     monkeypatch.delenv(FLAG, raising=False)  # the default
+    # #2226: the block is wired into the HiGHS master only (``solve_lp_nlp_bb``,
+    # ``lazy_backend == "highs"``). #2196 made the in-house lazy master the
+    # route's default, where the block never runs: CI then certified through the
+    # NLP-BB fallback in 325 s with ``oa/soc_outer_rows == 0`` and this test's
+    # anti-vacuity check fired. Pin the master the block belongs to; carrying it
+    # to the in-house master is bound-changing work with its own panel.
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
     nl = DATA / "portfol_classical050_1.nl"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
