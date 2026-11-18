@@ -19,8 +19,9 @@ to branch are removed unbounded and floor the tree at 62.83 against an optimum o
 out) adds an exact dual projection as the last rung of the NS ladder
 (``crates/discopt-core/src/lp/simplex/project.rs``): the open columns' reduced
 costs are made exactly zero on an enclosure of a nearby dual, and the bound is
-evaluated rigorously over the enclosure. Measured here: abstentions 3194 -> 0,
-master certified optimal. The Rust unit tests in ``project.rs`` pin the mechanism
+evaluated rigorously over the enclosure. Measured here at #2115: abstentions
+3194 -> 0, master certified optimal (2026-11-17, #2226: 219 -> 3 on a driver that
+now needs ~1.1k nodes; see the tests). The Rust unit tests in ``project.rs`` pin the mechanism
 on a 2x4 LP (including a 2000-dual soundness sweep); this pins the real master.
 
 Each arm runs in its own process: the flag is read once per process (a Rust
@@ -29,6 +30,7 @@ Each arm runs in its own process: the flag is read once per process (a Rust
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
@@ -68,8 +70,14 @@ print("RESULT " + json.dumps({
 """
 
 
+@functools.lru_cache(maxsize=None)
 def _solve(flag: str | None, time_limit: float) -> dict:
-    """``flag=None`` leaves ``DISCOPT_NS_PROJECT`` unset: the shipped default."""
+    """``flag=None`` leaves ``DISCOPT_NS_PROJECT`` unset: the shipped default.
+
+    Cached per ``(flag, time_limit)``: both tests read the OFF arm, which is
+    deterministic (#2226 review), so it runs once per session. Callers must not mutate
+    the returned dict.
+    """
     env = {**os.environ, "DISCOPT_PROFILE": "1"}
     env.pop("DISCOPT_NS_PROJECT", None)
     if flag is not None:
@@ -94,14 +102,20 @@ def test_m6_master_certifies_with_ns_projection():
     within the master's gap of the optimum and never above it, and the projection
     is what supplied the bounds (anti-vacuity, §6).
 
-    Measured: 25 406 nodes, 9.1 s (dev machine, unloaded); the 120 s limit is a
-    backstop, not the bar.
+    Measured at #2115: 25 406 nodes, 9.1 s, abstentions 3194 -> 0. Re-measured
+    2026-11-17 (#2226; the driver since #2196 solves the master in ~1.1k nodes,
+    deterministic over 3 runs): ON 1072 nodes, 3 abstentions, 119 rescues; OFF 1212
+    nodes, 219 abstentions. The bar is therefore relative to the OFF arm of the same
+    build, not an absolute count: the projection removes at least 90% of the
+    abstentions. The 120 s limit is a backstop, not the bar.
     """
     r = _solve(None, 120.0)
+    off = _solve("0", 120.0)
     # The NS ladder ran, and its last rung is what fired.
     assert r["ns_bound"] > 0, r
     assert r["rescue"] > 0, r
-    assert r["abstain"] == 0, r
+    assert off["abstain"] > 0, off  # the defect the projection addresses is present
+    assert 10 * r["abstain"] <= off["abstain"], (r, off)
     assert r["status"] == "optimal", r
     tol = 1e-6 * (1.0 + M6_OPTIMUM)
     assert r["bound"] <= M6_OPTIMUM + tol, f"bound {r['bound']} above the optimum"
@@ -113,15 +127,20 @@ def test_m6_master_certifies_with_ns_projection():
 @pytest.mark.correctness
 def test_m6_master_premise_without_ns_projection():
     """OFF (``DISCOPT_NS_PROJECT=0``, premise): the plain NS ladder abstains on
-    thousands of nodes and the master is not certified. If this starts passing
-    certified, the defect moved and the ON test above no longer exercises the
+    nodes the projection would rescue, and no rescue happens. If the abstentions
+    vanish, the defect moved and the ON test above no longer exercises the
     projection.
 
-    Measured: 38 594 nodes, ``iteration_limit`` at bound 62.83 after 14 s
-    (the tree drains; the time limit is not what stops it).
+    Measured at #2115: 38 594 nodes, ``iteration_limit`` at bound 62.83 after 14 s.
+    Re-measured 2026-11-17 (#2226): 1212 nodes, 219 abstentions, and the master now
+    certifies ``optimal`` without the projection -- the abstaining nodes no longer
+    floor a tree this small -- so the premise is the abstentions themselves, not a
+    failed certificate. Any certificate it does give must still be sound.
     """
     r = _solve("0", 120.0)
     assert r["rescue"] == 0, r
-    assert r["abstain"] > 1000, r
-    assert r["status"] != "optimal", r
-    assert r["bound"] is None or r["bound"] <= M6_OPTIMUM + 1e-6 * (1.0 + M6_OPTIMUM), r
+    assert r["abstain"] > 0, r
+    tol = 1e-6 * (1.0 + M6_OPTIMUM)
+    assert r["bound"] is None or r["bound"] <= M6_OPTIMUM + tol, r
+    if r["status"] == "optimal":
+        assert r["objective"] >= M6_OPTIMUM - tol, r

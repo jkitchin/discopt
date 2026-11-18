@@ -10,7 +10,8 @@ its branch are gone. These tests pin:
 
 * that only the two opening SLICES are marked as such, never the continuation;
 * on the #1940 dense integer QP, that the race still certifies the optimum and the
-  lift slice ends on the engine's own no-incumbent result.
+  lift slice ends on the engine's own result (with the no-incumbent marker when it has
+  no incumbent).
 """
 
 from __future__ import annotations
@@ -101,7 +102,7 @@ def test_dense_qp_race_ends_its_lift_slice_on_the_stall_and_certifies(monkeypatc
     def spy(*a, **k):
         r = real(*a, **k)
         if S._IPX_RACE_ARM.get() is not None:
-            slices.append((S._IPX_RACE_ARM.get(), r.algorithm_route or ""))
+            slices.append((S._IPX_RACE_ARM.get(), r.algorithm_route or "", r.objective))
         return r
 
     monkeypatch.setattr(S, "solve_model", spy)
@@ -110,4 +111,36 @@ def test_dense_qp_race_ends_its_lift_slice_on_the_stall_and_certifies(monkeypatc
     assert r.objective == pytest.approx(-1060.5575443498, rel=1e-6)
     assert r.bound <= r.objective + 1e-6 * abs(r.objective)
     assert slices and slices[0][0] == "lift"
-    assert STALL_ROUTE in slices[0][1], slices
+    # The lift slice ends on the MILP engine's own result, never a hand-off.
+    assert slices[0][1].startswith("native-milp: discopt monolithic Rust MILP engine"), slices
+    # #2226: the engine now finds an incumbent inside the slice (measured 2026-11-17:
+    # ``feasible`` -567.45 at bound -1888.25 after 13 nodes, 5.0 s), so the
+    # no-incumbent exit is no longer reached on this instance. When it is, the route
+    # must say so.
+    if slices[0][2] is None:
+        assert STALL_ROUTE in slices[0][1], slices
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_engine_no_incumbent_exit_returns_its_valid_bound(monkeypatch):
+    """#2226 review: the dense-QP lift slice above now finds an incumbent, so its
+    no-incumbent branch no longer fires there. This forces the same engine exit with a
+    work budget (no clock): #2224's permuted Lights-Out fixture has no incumbent after
+    20 nodes with ``DISCOPT_MILP_PREINC_SCORE=0`` (measured 2026-11-18: bound 27.0, the
+    optimum, deterministic over repeated runs, ~1.6 s). The exit must carry the route
+    marker, no point, and a bound that is valid (never above the optimum 27).
+
+    Its status reads ``time_limit`` although the node cap stopped it: the driver's
+    ``NodeLimit`` means "budget spent" for nodes and clock alike, so the label is not
+    asserted here. Tracked by #2239; assert ``node_limit`` once it is fixed.
+    """
+    monkeypatch.setenv("DISCOPT_MILP_PREINC_SCORE", "0")
+    fixture = os.path.join(DATA, "issue_2224", "enlight8_perm3.mps.gz")
+    r = dm.from_mps(fixture).solve(
+        nlp_solver="simplex", max_nodes=20, deterministic=True, time_limit=600
+    )
+    assert STALL_ROUTE in (r.algorithm_route or ""), r.algorithm_route
+    assert r.objective is None and not r.gap_certified, r
+    assert r.status in ("node_limit", "time_limit"), r.status
+    assert r.bound is not None and r.bound <= 27.0 + 1e-6, r.bound

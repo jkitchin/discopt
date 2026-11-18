@@ -136,6 +136,39 @@ def _build_simple_minlp() -> Model:
     return example_simple_minlp()
 
 
+def _spy_oa_nlp_solves(monkeypatch) -> dict:
+    """Count OA's NLP solves as ``subnlp_calls`` defines them: the root relaxation
+    (``relax``) and fixed-integer subproblems (``sub``).
+
+    ``_solve_fixed_nlp_subproblem_attempt`` calls ``_solve_nlp_subproblem`` through the
+    module name, so wrapping both would count one subproblem twice; only the outermost
+    call of a nest is counted (#2226 review).
+    """
+    from discopt.solvers import oa
+
+    seen = {"relax": 0, "sub": 0}
+    depth = {"sub": 0, "relax": 0}
+
+    def _spy(name: str, key: str) -> None:
+        real = getattr(oa, name)
+
+        def wrapped(*a, **k):
+            if depth[key] == 0:
+                seen[key] += 1
+            depth[key] += 1
+            try:
+                return real(*a, **k)
+            finally:
+                depth[key] -= 1
+
+        monkeypatch.setattr(oa, name, wrapped)
+
+    _spy("_solve_nlp_relaxation", "relax")
+    _spy("_solve_nlp_subproblem", "sub")
+    _spy("_solve_fixed_nlp_subproblem_attempt", "sub")
+    return seen
+
+
 def _build_rosenbrock() -> Model:
     """min (1-x)^2 + 100(y-x^2)^2, x,y in [-5,5]. Optimal at (1,1), obj=0."""
     m = dm.Model("rosenbrock")
@@ -950,17 +983,24 @@ class TestMINLP:
         )
         assert r.node_count >= 1, "MINLP should use branch-and-bound"
 
-    def test_default_convex_route_reports_its_work(self) -> None:
+    def test_default_convex_route_reports_its_work(self, monkeypatch) -> None:
         """#1269: the default solve is a MIP-NLP route that reports its work.
 
-        Its work is reported as master MILP solves and NLP subproblems, which
-        must be nonzero. Otherwise a 0 would be the reporting defect #1059 fixed.
-        The route was OA when this was written, which runs no tree: ``node_count``
-        is 0. Since #1658 a certified-convex MINLP goes to LP/NLP-BB, a single
-        tree inside the HiGHS master, and ``node_count`` is HiGHS's
-        ``mip_node_count``, which counts the root (the convention ``Model.solve``
-        documents for the HiGHS route): 1 here, on macOS and on the CI runner.
+        Its work is reported as master MILP solves and NLP subproblems. The route
+        was OA when this was written, which runs no tree: ``node_count`` is 0. Since
+        #1658 a certified-convex MINLP goes to LP/NLP-BB, a single tree inside the
+        master, and ``node_count`` counts the root: 1 here.
+
+        #2226: ``subnlp_calls`` counts fixed-integer NLP subproblems, not the root
+        NLP relaxation. Here the relaxation's optimum is already integral
+        (``x3 = 0``) and closes the gap at the root, so no subproblem is posed and
+        ``subnlp_calls == 0`` is the truth (measured 2026-11-17: 1 relaxation, 0
+        fixed NLPs). Asserting ``>= 1`` pinned the old search path, not the
+        reporting. The #1059 defect (a 0 reported for subproblems that ran) is
+        checked directly instead: the count must equal the subproblem solves a spy
+        observes, and some NLP must have run.
         """
+        seen = _spy_oa_nlp_solves(monkeypatch)
         r = _build_simple_minlp().solve()
         assert r.status == "optimal"
         assert r.algorithm_route is not None and r.algorithm_route.startswith(
@@ -971,7 +1011,29 @@ class TestMINLP:
         else:
             assert r.node_count >= 1, "the single tree reported no nodes"
         assert r.mip_count >= 1
-        assert r.subnlp_calls >= 1
+        assert seen["relax"] + seen["sub"] >= 1, "the route solved no NLP at all"
+        assert r.subnlp_calls == seen["sub"], (r.subnlp_calls, seen)
+
+    def test_convex_route_counts_each_fixed_nlp_once(self, monkeypatch) -> None:
+        """#2226 review: the count must match on a model that DOES pose fixed NLPs,
+        or the comparison above only ever checks 0 == 0 (CLAUDE.md §6). The
+        relaxation optimum here has ``b`` fractional, so the master poses fixed-integer
+        NLPs (measured 2026-11-18: 3 subproblems, ``subnlp_calls == 3``)."""
+        m = dm.Model("convex_route_fixed_nlp")
+        x = m.continuous("x", lb=-3, ub=3)
+        z = m.continuous("z", lb=-3, ub=3)
+        b = m.binary("b")
+        m.minimize(x**2 + z**2 + 0.5 * b)
+        m.subject_to(x + z >= 1.5 - 2 * b)
+        m.subject_to(x * x + z * z <= 4)
+        seen = _spy_oa_nlp_solves(monkeypatch)
+        r = m.solve()
+        assert r.status == "optimal"
+        assert r.algorithm_route is not None and r.algorithm_route.startswith(
+            ("mip-nlp/oa", "mip-nlp/lp_nlp_bb")
+        ), r.algorithm_route
+        assert seen["sub"] >= 1, seen  # the probe fired
+        assert r.subnlp_calls == seen["sub"], (r.subnlp_calls, seen)
 
 
 # ──────────────────────────────────────────────────────────

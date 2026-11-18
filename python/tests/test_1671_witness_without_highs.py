@@ -9,7 +9,9 @@ condition, in a fresh interpreter whose import system refuses ``highspy``: a pla
 ``m.solve`` must take the native Rust MILP route and certify the known optimum.
 
 Measured 2026-11-08 (highspy blocked, 3 runs): ``optimal`` 450623.7692106857, certified,
-29.1-29.6 s, route ``native-milp ... (default; highspy is not installed)``. Before the
+29.1-29.6 s, route ``native-milp ... (default; highspy is not installed)``. Re-measured
+2026-11-17 (#2226): ``optimal`` 450643.769 at bound 450605.869 (gap 8.4e-5, inside the
+default 1e-4), 11.2 s. Before the
 highs-parity work the Rust route found no incumbent in 120 s (P0.7,
 ``docs/dev/data/highs-parity/uc-timelimit-fix/``). The 120 s limit is a backstop, sized
 well above the measured time (CLAUDE.md, slow-lane rules), not the quality bar.
@@ -73,7 +75,17 @@ def test_the_1671_witness_is_certified_without_highs():
         "RESUL", "ROUTE", "CERT ")}  # fmt: skip
     status, obj, bound, _wall = out["RESULT"].split()
     assert status == "optimal", p.stdout[-2000:]
-    assert abs(float(obj) - UC_OPT) <= 1e-6 * (1.0 + UC_OPT), obj
-    assert float(bound) <= UC_OPT + 1e-6 * (1.0 + UC_OPT), bound
+    obj_f, bound_f = float(obj), float(bound)
+    tol = 1e-6 * (1.0 + UC_OPT)
+    # Soundness: no incumbent below the optimum, no bound above it.
+    assert obj_f >= UC_OPT - tol, obj
+    assert bound_f <= UC_OPT + tol, bound
+    # The certificate a plain solve promises: the MILP driver's own default test,
+    # ``(incumbent - bound) / max(|incumbent|, 1) <= gap_tolerance`` (1e-4;
+    # ``TreeManager::gap`` / ``gap_closed`` in the Rust driver). #2226: this used to
+    # pin the objective to 1e-6 of UC_OPT, stricter than the solve's contract; since
+    # #2196 the engine stops at 450643.769 (bound 450605.869, gap 8.4e-5) -- a valid
+    # certificate the pin read as a failure.
+    assert (obj_f - bound_f) / max(abs(obj_f), 1.0) <= 1e-4, (obj, bound)
     assert out["CERT"].split()[0] == "True" and out["CERT"].split()[2] == "False", out["CERT"]
     assert out["ROUTE"].startswith("native-milp") and "highspy is not installed" in out["ROUTE"]
