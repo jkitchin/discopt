@@ -1131,6 +1131,51 @@ fn cold_with_dual_cleanup(
     sol
 }
 
+/// The #2236 clean-up (`DISCOPT_LP_PRIMAL_DUAL_CLEANUP`, see
+/// [`super::primal::primal_dual_cleanup_enabled`]): `sol` is a cold primal solve of
+/// this LP that the final audit refused on a bounds excursion. Re-optimize it warm
+/// with the dual simplex from `sol`'s own basis and return that answer only when it is
+/// `Optimal` and its point passes the audit on `sp`; otherwise return `sol` unchanged.
+///
+/// Only the prepared-dual path runs: a basis the dual will not prepare is declined
+/// here rather than handed to the primal-warm / cold fallback, which would re-run
+/// the solve that just failed. The warm dual's own deep fallback may still cold-solve;
+/// [`super::primal::IN_PRIMAL_DUAL_CLEANUP`] keeps that solve from cleaning up again.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn bounds_refusal_dual_cleanup(
+    sol: LpSolve,
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> LpSolve {
+    use super::primal::IN_PRIMAL_DUAL_CLEANUP;
+    crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupAttempts);
+    if sol.basis.basic_vars.len() != m || sol.basis.col_status.len() != n {
+        crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupPrepRefused);
+        return sol;
+    }
+    let Some(p) = PreparedDual::prepare_cols(sp, m, n, c, l, u, &sol.basis, opts) else {
+        crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupPrepRefused);
+        return sol;
+    };
+    let outer = IN_PRIMAL_DUAL_CLEANUP.replace(true);
+    let mut warm = warm_dual_armed(&p, sp, m, n, c, l, u, b, &sol.basis, opts);
+    IN_PRIMAL_DUAL_CLEANUP.set(outer);
+    if warm.status == LpStatus::Optimal
+        && super::primal::point_passes_original_audit(&warm.x, sp, m, n, b, l, u)
+    {
+        crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupRescues);
+        warm.iters += sol.iters;
+        return warm;
+    }
+    sol
+}
+
 /// [`solve_lp_warm_csc`] without the #2125 huge-box relaxation: the solve plus
 /// its terminal-verdict count.
 ///

@@ -139,10 +139,16 @@ pub fn solve_lp_cols(
     // dual path already clones the CSC per solve — see dual.rs — so this is
     // in-family), and nothing extra with the route OFF (default).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
+    // #2236: the dual clean-up needs the matrix after `run` has consumed it. O(nnz),
+    // paid only with the flag ON and never inside the clean-up's own solves.
+    let cleanup_cols =
+        (primal_dual_cleanup_enabled() && !IN_PRIMAL_DUAL_CLEANUP.get()).then(|| cols.clone());
     crate::profile::incr(crate::profile::Ctr::EntryCols);
     let mut sx0 = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
     sx0.no_expand = expand_suppressed_globally();
+    BOUNDS_REFUSAL.set(false);
     let mut sol = sx0.run();
+    let refused_on_bounds = BOUNDS_REFUSAL.replace(false);
     if let Some(cols2) = retry_cols {
         if dense_retry_wanted(&sol) {
             sol = dense_retry(sol, || {
@@ -150,11 +156,73 @@ pub fn solve_lp_cols(
             });
         }
     }
+    if let Some(cc) = cleanup_cols {
+        if refused_on_bounds && sol.status == LpStatus::Numerical {
+            sol = super::dual::bounds_refusal_dual_cleanup(sol, &cc, m, n, c, l, u, b, opts);
+        }
+    }
     // #956 T2' had an EXPAND-free re-solve here (`DISCOPT_PRIMAL_EXPAND_RESET`),
     // retired by #2211 on its §5 panel: 230 rescues on 14 corpus instances, 0
     // certificates gained, 0 bounds tightened, one bound loosened (`4stufen`, where
     // 1357 retries spent the wall budget). `docs/dev/flag-retirement-audit.md`.
     sol
+}
+
+thread_local! {
+    /// Set by [`Simplex::assemble`] when its final audit downgrades an `Optimal` to
+    /// `Numerical` because a column sits outside its box (#2236). Cleared and read
+    /// by [`solve_lp_cols`] around its own `run`, so a nested solve cannot leak in.
+    static BOUNDS_REFUSAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Re-entry guard for the #2236 clean-up: the warm dual it runs can fall back
+    /// to a cold [`solve_lp_cols`], which must not start a clean-up of its own.
+    pub(super) static IN_PRIMAL_DUAL_CLEANUP: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` (#2236, **default OFF**, `=1` opts in; read once):
+/// when a cold primal solve reaches `Optimal` and the final audit in
+/// [`Simplex::assemble`] refuses it because a column sits outside its bound,
+/// re-optimize with the **dual** simplex warm from the basis the primal stopped on,
+/// and keep that answer only if it is `Optimal` and its point passes the same audit on
+/// the matrix this solve was given. Anything else returns the original `Numerical`,
+/// so the flag can turn a refusal into a decided `Optimal` but cannot change a verdict
+/// the primal already reached.
+///
+/// Why: the refused basis is dual feasible (phase 2 priced it optimal) and only
+/// slightly primal infeasible, which is the situation the dual simplex starts from.
+/// It is the mechanism #2125's `cold_with_dual_cleanup` already ships for
+/// huge-bound LPs, extended to every cold primal solve. Unlike the retired
+/// `DISCOPT_PRIMAL_EXPAND_RESET` (#2211), it does not re-solve from scratch.
+///
+/// Entry experiment (#2236 fixture `python/tests/data/lp_2226_ex8_5_3_node.npz`, the
+/// ex8_5_3 node LP HiGHS solves to −0.06756047745693): the cold primal refuses it on
+/// both the scaled and the unscaled matrix; the warm dual from each refused basis
+/// returns `Optimal` in 2 and 10 pivots, at −0.067560477455 (box violation ≤ 7.8e-11,
+/// row residual ≤ 4.4e-16). Prevalence on `main` (the issue thread): 3,393 bounds-audit
+/// refusals on 20 of 74 in-repo instances, all on a basic column, 99.5% not repaired
+/// by refinement.
+///
+/// Default OFF because it changes LP verdicts; it graduates only on the §5
+/// corpus differential panel (row in `docs/dev/flag-retirement-audit.md`).
+pub(crate) fn primal_dual_cleanup_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_PRIMAL_DUAL_CLEANUP").unwrap_or_default();
+        parse_primal_dual_cleanup(&raw)
+    })
+}
+
+/// The parse table behind [`primal_dual_cleanup_enabled`]; garbage is refused.
+fn parse_primal_dual_cleanup(raw: &str) -> bool {
+    match raw.trim() {
+        "" | "0" | "false" | "off" => false,
+        "1" | "true" | "on" => true,
+        other => panic!(
+            "DISCOPT_LP_PRIMAL_DUAL_CLEANUP={other:?} is not a recognized value; use 1/on or \
+             0/off"
+        ),
+    }
 }
 
 /// Whether EXPAND is suppressed on the **primary** solve, not just the retry
@@ -3840,6 +3908,7 @@ impl<'a> Simplex<'a> {
                 // Bound excursion: refinement can't help — downgrade directly.
                 Feasibility::Bounds => {
                     crate::profile::incr(crate::profile::Ctr::LpAuditBoundsFail);
+                    BOUNDS_REFUSAL.set(true);
                     // #956 T2' diagnostic (profiling-gated, so production pays
                     // nothing): re-test `assemble`'s standing claim that a bounds
                     // excursion is a Harris artefact no sharper `x_B` can repair.

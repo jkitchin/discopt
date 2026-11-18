@@ -950,6 +950,13 @@ counters!(
     // simplex from their own (dual-feasible) basis, and how many that decided.
     HugeBoxDualCleanupAttempts,
     HugeBoxDualCleanupRescues,
+    // #2236 (`DISCOPT_LP_PRIMAL_DUAL_CLEANUP`): cold primal solves the final audit
+    // refused on a BOUNDS excursion, re-optimized warm by the dual simplex from
+    // the refused basis. Attempts = PrepRefused + (warm solves run); Rescues counts
+    // the warm solves that returned an audited `Optimal` (CLAUDE.md §6).
+    PrimalDualCleanupAttempts,
+    PrimalDualCleanupPrepRefused,
+    PrimalDualCleanupRescues,
     // #2125: active-huge-bound solves by fixing the column and removing the rows
     // it makes slack (`solve_huge_active_fixed`), and how many it certified.
     HugeBoxFixActiveAttempts,
