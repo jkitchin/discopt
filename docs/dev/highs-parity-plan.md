@@ -2123,48 +2123,44 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    well-scaled variables): 92 bound comparisons, 0 above the optimum, 0 wrong
    certificates. Pinned by `test_2223_hook_row_noise_bound.py`; no fix was needed.
 
-   **Reversed 2026-11-18 (#2237, owner decision).** The routed OA master no longer
-   defaults to the in-house engine. With `DISCOPT_CONVEX_ROUTE_OA_MASTER` unset it now
-   follows `DISCOPT_LP_ENGINE`, like the pure LP/MILP/IIS seams since the 2026-11-17
-   engine switch:
-   - `auto` gives HiGHS where `highspy` imports, otherwise the in-house master.
-   - `highs` gives HiGHS.
-   - `rust` gives the in-house master.
+   **Re-measured 2026-11-18 (#2237); D3 kept.** #2237 measured a HiGHS default for
+   the routed OA master (with `DISCOPT_CONVEX_ROUTE_OA_MASTER` unset, follow
+   `DISCOPT_LP_ENGINE`, as the pure LP/MILP/IIS seams do). It failed bar 2 on the
+   syn/rsyn population (below), so **the default stays the in-house master**, and
+   `DISCOPT_LP_ENGINE` does not govern it. `=highs` is a documented opt-in (CLAUDE.md
+   §5): it is the only way to get the #2059 SOC outer block, which is what certifies
+   `portfol_classical050_1` on the route. **What would change the default:** a panel
+   where the HiGHS master is at or ahead of the in-house one on syn/rsyn, or the SOC
+   block ported to the in-house master (which removes the reason for the opt-in).
+   Under D3, `portfol_classical050_1` on the in-house master did not certify on the
+   route in 203.5 s and the NLP-BB fallback certified in 307 s total with
+   `oa/soc_outer_rows` 0; `test_2059_soc_outer` therefore keeps its `=highs` pin.
 
-   `=simplex|highs` still overrides, and is the documented opt-out. Under `auto`, a
-   routed solve whose HiGHS master raised, or recorded an `error` master call *and did
-   not finish the model* (`_route_result_is_certified`), is re-run once on the
-   in-house master, if at least `_CONVEX_ROUTE_FALLBACK_FLOOR_S` of the route budget is
-   left. The re-run is recorded as `[engine fallback: ...]`. This is the seams'
-   convention. It does not apply when the variable is set, `highs_options` are passed,
-   or the caller passed `milp_solver=`. It is triggered only by failure: never by an
-   uncertified status alone, and never over a result that closed its gap after an
-   `error` call (OA can, via `converged_early`). A raise the re-run recovers from is
-   still reported, as a `RuntimeWarning` carrying the message and in the route note.
-   When the re-run does not finish the model either, the two attempts are combined by
-   the #1059 merge rules, so the first attempt's incumbent and bound are not dropped.
-
-   *Why.* #2223's parity was measured without the #2059 SOC outer block, which
-   `oa.solve_lp_nlp_bb` builds on the HiGHS master only. D3 therefore left the block
-   dead on the default route. On `portfol_classical050_1` under D3, the in-house master
-   did not certify in 203.5 s, and the NLP-BB fallback certified in 307 s total with
-   `oa/soc_outer_rows` 0. On the new default, `test_2059_soc_outer` now runs unpinned
-   and certifies on the route with the block active and no fallback (50 s, 2026-11-18).
+   #2241 also ships the fallback policy a HiGHS default would need (the seams'
+   convention), reachable on no shipped configuration today and tested by simulating
+   such a default: a router-picked HiGHS master that raised, or recorded an `error`
+   master call *and did not finish the model* (`_route_result_is_certified`), is re-run
+   once on the in-house master if at least `_CONVEX_ROUTE_FALLBACK_FLOOR_S` of the
+   route budget is left, recorded as `[engine fallback: ...]`. Never under an explicit
+   `=highs`, `highs_options` or the caller's `milp_solver=`; never on an uncertified
+   status alone or over a result that closed its gap after an `error` call. A
+   recovered raise is reported as a `RuntimeWarning` with its message; a re-run that
+   does not finish either is merged with the first attempt by the #1059 rules.
 
    *Route panel* (`p51_route_master_panel.py --off-arm default`, 30 s, arms
    interleaved, one repetition, pre-#2247 build, pyscipopt installed, load average
    12-31, so wall times are indicative only; 0 bound violations over 336 checks):
-   default (HiGHS) **93** certified, 224.8 s, SOC block fired on 9, engine fallback on
+   the HiGHS-default arm **93** certified, 224.8 s, SOC block fired on 9, engine fallback on
    1; `=simplex` 92, 273.8 s, SOC 0.
    - Lost on the in-house master: `clay0303hfsg@6` (HiGHS-only in #2223 as well) and
      `flay03m@6`.
    - Gained on the in-house master: `cvxnonsep_psig40r@6` (in-house-only in #2223).
    - `portfol_roundlot@6`, the other instance that was in-house-only in #2223,
-     certifies on the default through the engine fallback.
+     certifies in the HiGHS-default arm through the engine fallback.
 
    *syn/rsyn panel* (post-#2247 build, the 47 routed syn/rsyn MINLPLib instances,
-   30 s, three arms rotated per instance: `=simplex`, default HiGHS with SCIP, and
-   default HiGHS with `_scip_available` patched off (a plain install); load average
+   30 s, three arms rotated per instance: `=simplex`, the HiGHS default with SCIP, and
+   the HiGHS default with `_scip_available` patched off (a plain install); load average
    5-10 on 14 cores; 156 bound checks, 0 violations):
 
    | arm | certified | total wall | at the 30 s limit | master time | #2069 confirmation |
@@ -2189,15 +2185,13 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    - The SOC block and the engine fallback fired on none of the 47 instances; the
      difference is engine cost alone.
 
-   *Bar 2.* The syn population fails "not harmful" on wall (1.16x, beyond spread) and
-   on certification in the SCIP-less arm (one instance lost). The route population
-   gains one certificate at lower wall. The reason this default is taken anyway is the
-   owner decision of 2026-11-18, not a neutral-component exemption: HiGHS is the
-   reference engine itself, and the SOC block that certifies `portfol_classical050_1`
-   exists only on it. The syn regression is recorded here as an open cost of that
-   decision.
+   *Bar 2: failed.* The syn population is harmed on wall (1.16x, beyond the spread)
+   and loses a certificate in the SCIP-less arm (`rsyn0805m02m`). The route
+   population gains one certificate at lower wall, but under a load of 12-31 and on a
+   pre-#2247 build. So the default stays on the in-house master, and `=highs` is kept
+   as the opt-in with these numbers as its record.
 
-   *#2235 is fixed (#2247), so SCIP is no longer required for `portfol_classical050_1`.*
+   *The case for the opt-in: `portfol_classical050_1`, and #2235 is fixed (#2247), so the opt-in no longer needs SCIP there.*
    Measured on the post-#2247 build, TL=120, load ~6: with SCIP it certifies on the
    route in 38.2 s (confirmation 11.0 s, by SCIP); without SCIP it certifies on the
    route in 52.7 s (confirmation 25.5 s, in-house, OPTIMAL), SOC rows 1 in both.

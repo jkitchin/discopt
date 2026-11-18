@@ -1,19 +1,21 @@
-"""#2237: the convex-MINLP route's OA master follows ``DISCOPT_LP_ENGINE``.
+"""#2237: the convex-MINLP route's OA master, and the fallback a HiGHS default needs.
 
 highs-parity D3 (2026-11-07) made the in-house lazy master the route's default, and
 the #2059 SOC outer block, which ``oa.solve_lp_nlp_bb`` builds on the HiGHS master
-only, went dead on the default route (``portfol_classical050_1`` stopped certifying on
-the route and fell back to NLP-BB). Owner decision 2026-11-18: with
-``DISCOPT_CONVEX_ROUTE_OA_MASTER`` unset the master follows the global engine switch,
-as the pure LP/MILP/IIS seams do since the 2026-11-17 engine switch:
+only, is not built on the default route. #2237 measured a HiGHS default (following
+``DISCOPT_LP_ENGINE``) and it failed bar 2 on the 47 routed syn/rsyn instances
+(certified 31 in-house / 32 HiGHS+SCIP / 30 HiGHS without SCIP; wall 537 / 624 /
+640 s), so the default stays on the in-house master:
 
-* ``auto`` -> HiGHS where ``highspy`` imports, else the in-house master (silently);
-* ``highs`` -> HiGHS (``MissingHighsError`` without ``highspy``);
-* ``rust`` -> the in-house master.
+* unset or ``simplex`` -> the in-house master, whatever ``DISCOPT_LP_ENGINE`` says;
+* ``highs`` -> HiGHS, the documented opt-in (``MissingHighsError`` without
+  ``highspy``); it never falls back.
 
-The explicit variable still overrides. Under ``auto`` a routed solve whose HiGHS
-master failed (raised, or ended ``error``) is re-run once on the in-house master, the
-seams' engine-fallback convention; an explicit ``highs`` anywhere reports the failure.
+The engine-fallback machinery (re-run a failed router-picked HiGHS master once on the
+in-house master, merge the two attempts, warn on a recovered raise) is reachable on no
+shipped configuration; the tests below exercise it by simulating a router whose
+default is HiGHS (``_router_defaults_to_highs``), the configuration a future flip
+would ship.
 """
 
 from __future__ import annotations
@@ -57,28 +59,28 @@ def _block_highspy(monkeypatch):
     monkeypatch.setitem(sys.modules, "highspy", None)
 
 
-@pytest.mark.requires_highs
-def test_default_master_is_highs_where_highspy_imports():
-    """The regression: unset, the route master is HiGHS (it was ``simplex`` under D3,
-    which left the #2059 SOC block dead on the default route)."""
-    assert _convex_route_oa_master() == "highs"
+def test_default_master_is_the_in_house_master():
+    """#2237 kept D3: unset, the route master is the in-house one, and the route
+    fires on it."""
+    assert _convex_route_oa_master() == "simplex"
     method, reason, opts = _convex_minlp_auto_route(from_nl(str(NL)))
-    assert method == "lp_nlp_bb" and opts == {"milp_solver": "highs"}, reason
-    assert "master=highs" in reason
+    assert method == "lp_nlp_bb" and opts == {"milp_solver": "simplex"}, reason
+    assert "master=simplex" in reason
 
 
 @pytest.mark.parametrize(
     "engine, var, expected",
     [
+        # DISCOPT_LP_ENGINE does not govern the route master.
         ("rust", None, "simplex"),
-        ("highs", None, "highs"),
-        ("auto", None, "highs"),
-        # The per-seam variable outranks the switch in both directions.
+        ("highs", None, "simplex"),
+        ("auto", None, "simplex"),
+        # The variable is the only way in, in both directions.
         ("rust", "highs", "highs"),
+        ("auto", "highs", "highs"),
         ("highs", "simplex", "simplex"),
-        ("auto", "simplex", "simplex"),
         # Blank means unset (``_env_selector``), as on every other seam.
-        ("rust", "  ", "simplex"),
+        ("highs", "  ", "simplex"),
     ],
 )
 @pytest.mark.requires_highs
@@ -89,19 +91,20 @@ def test_engine_switch_and_override(monkeypatch, engine, var, expected):
     assert _convex_route_oa_master() == expected
 
 
-def test_auto_without_highspy_is_the_in_house_master_silently(monkeypatch):
-    """No default path needs HiGHS: ``auto`` on a HiGHS-less install routes to the
-    in-house master without raising, and the route still fires."""
+def test_default_needs_no_highspy(monkeypatch):
+    """No default path needs HiGHS: on a HiGHS-less install the route still fires on
+    the in-house master, even under ``DISCOPT_LP_ENGINE=highs``."""
     _block_highspy(monkeypatch)
-    assert _convex_route_oa_master() == "simplex"
+    for engine in ("auto", "highs"):
+        monkeypatch.setenv(ENGINE_ENV, engine)
+        assert _convex_route_oa_master() == "simplex"
     method, reason, opts = _convex_minlp_auto_route(from_nl(str(NL)))
     assert method == "lp_nlp_bb" and opts == {"milp_solver": "simplex"}, reason
 
 
-@pytest.mark.parametrize("env", [(ENGINE_ENV, "highs"), (MASTER_ENV, "highs")])
-def test_explicit_highs_without_highspy_raises(monkeypatch, env):
+def test_explicit_highs_without_highspy_raises(monkeypatch):
     _block_highspy(monkeypatch)
-    monkeypatch.setenv(*env)
+    monkeypatch.setenv(MASTER_ENV, "highs")
     with pytest.raises(MissingHighsError):
         _convex_route_oa_master()
 
@@ -132,6 +135,14 @@ def test_fallback_never_applies_under_highs_options():
     finally:
         solver_mod._HIGHS_OPTIONS_REQUEST.reset(token)
     assert _convex_route_oa_master_falls_back()
+
+
+@pytest.fixture
+def _router_defaults_to_highs(monkeypatch):
+    """Simulate a router whose default master is HiGHS (the variable stays unset),
+    the only configuration in which the #2237 engine fallback applies."""
+    pytest.importorskip("highspy")
+    monkeypatch.setattr(solver_mod, "_convex_route_oa_master", lambda: "highs")
 
 
 class _R:
@@ -202,7 +213,9 @@ def _break_highs_master(monkeypatch, mode):
 
 @pytest.mark.requires_highs
 @pytest.mark.parametrize("mode", ["raise", "error_bare"])
-def test_auto_reruns_a_failed_highs_master_on_the_in_house_master(monkeypatch, mode):
+def test_auto_reruns_a_failed_highs_master_on_the_in_house_master(
+    monkeypatch, _router_defaults_to_highs, mode
+):
     calls = _break_highs_master(monkeypatch, mode)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -244,7 +257,9 @@ def test_explicit_highs_master_failure_is_not_answered_by_the_in_house_master(mo
 
 
 @pytest.mark.requires_highs
-def test_caller_milp_solver_highs_is_never_answered_by_the_in_house_master(monkeypatch):
+def test_caller_milp_solver_highs_is_never_answered_by_the_in_house_master(
+    monkeypatch, _router_defaults_to_highs
+):
     """An explicit ``milp_solver="highs"`` is the caller's pick, not the router's: a
     failed HiGHS master is reported and the #1059 fallback answers, never a re-run."""
     calls = _break_highs_master(monkeypatch, "raise")
@@ -258,7 +273,7 @@ def test_caller_milp_solver_highs_is_never_answered_by_the_in_house_master(monke
 
 
 @pytest.mark.requires_highs
-def test_rerun_that_fails_too_keeps_the_first_attempt(monkeypatch):
+def test_rerun_that_fails_too_keeps_the_first_attempt(monkeypatch, _router_defaults_to_highs):
     """Review of #2241: the failed HiGHS attempt is merged into what the #1059
     fallback sees, never dropped, even when the in-house re-run raises."""
     import discopt.solvers.milp_simplex as milp_simplex
@@ -294,7 +309,9 @@ def test_rerun_that_fails_too_keeps_the_first_attempt(monkeypatch):
 
 
 @pytest.mark.requires_highs
-def test_an_error_master_call_the_route_recovers_from_is_not_rerun(monkeypatch):
+def test_an_error_master_call_the_route_recovers_from_is_not_rerun(
+    monkeypatch, _router_defaults_to_highs
+):
     """Review of #2241, end to end: a master call relabelled ERROR that still carries
     its point and bound lets ``solve_lp_nlp_bb`` close the gap, so the route
     *finished* the model and its certificate is returned, not re-run."""

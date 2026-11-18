@@ -235,21 +235,21 @@ def test_issue_2059_portfol_classical050_1_certifies(monkeypatch):
     from discopt.validation.feasibility import verify_point
 
     monkeypatch.delenv(FLAG, raising=False)  # the default
-    # The default route, end to end. The block is wired into the HiGHS master only
-    # (``solve_lp_nlp_bb``, ``lazy_backend == "highs"``). #2196 (D3) made the
-    # in-house lazy master the route's default, where the block never runs: CI
-    # then certified through the NLP-BB fallback in 325 s with
-    # ``oa/soc_outer_rows == 0`` and the anti-vacuity check below fired, so #2226
-    # pinned ``DISCOPT_CONVEX_ROUTE_OA_MASTER=highs``. #2237 made the master
-    # follow ``DISCOPT_LP_ENGINE`` (HiGHS under ``auto``), so the pin is gone and
-    # this measures the default again. It does not need ``pyscipopt``: since #2247
-    # (#2235) the in-house #2069 confirmation certifies this model on its own.
-    # Measured 2026-11-18, TL=120, load ~6: with SCIP 38.2 s (confirmation 11.0 s,
-    # SCIP), without SCIP 52.7 s (confirmation 25.5 s, in-house), both certified on
-    # the route with ``oa/soc_outer_rows`` 1. Before #2247 the SCIP-less
-    # confirmation ran 273.9 s to ITERATION_LIMIT and the route fell back.
-    for var in ("DISCOPT_CONVEX_ROUTE_OA_MASTER", "DISCOPT_LP_ENGINE"):
-        monkeypatch.delenv(var, raising=False)
+    # #2226: the block is wired into the HiGHS master only (``solve_lp_nlp_bb``,
+    # ``lazy_backend == "highs"``). #2196 made the in-house lazy master the
+    # route's default, where the block never runs: CI then certified through the
+    # NLP-BB fallback in 325 s with ``oa/soc_outer_rows == 0`` and this test's
+    # anti-vacuity check fired. Pin the master the block belongs to; carrying it
+    # to the in-house master is bound-changing work with its own panel. #2237
+    # measured a HiGHS default and kept the in-house one (bar 2 failed on
+    # syn/rsyn), so ``=highs`` stays the documented opt-in this test exercises.
+    # It does not need ``pyscipopt``: since #2247 (#2235) the in-house #2069
+    # confirmation certifies this model on its own. Measured 2026-11-18, TL=120,
+    # load ~6: with SCIP 38.2 s (confirmation 11.0 s, SCIP), without SCIP 52.7 s
+    # (confirmation 25.5 s, in-house), both certified on the route with
+    # ``oa/soc_outer_rows`` 1. Before #2247 the SCIP-less confirmation ran 273.9 s
+    # to ITERATION_LIMIT and the route fell back.
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
     nl = DATA / "portfol_classical050_1.nl"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
