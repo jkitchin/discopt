@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from types import ModuleType
+from typing import Any, Callable
 
 HIGHS_EXTRA = "discopt[highs]"
 INSTALL_HINT = f"pip install '{HIGHS_EXTRA}'"
@@ -65,3 +66,71 @@ def require_highspy(feature: str = "this HiGHS-backed feature") -> ModuleType:
         raise missing_highs_error(feature) from err
     mod: ModuleType = highspy
     return mod
+
+
+# ---------------------------------------------------------------------------
+# Exceptions raised inside a HiGHS callback (#2221)
+# ---------------------------------------------------------------------------
+#: Attribute on a ``highspy.Highs`` instance holding the exceptions its wrapped
+#: callbacks raised that :func:`run_checked` has not re-raised yet.
+_CALLBACK_ERRORS_ATTR = "_discopt_callback_errors"
+
+
+def wrap_callback(h: Any, fn: Callable[..., Any]) -> Callable[..., Any]:
+    """``fn`` as a callback of ``h`` whose exception :func:`run_checked` re-raises.
+
+    Up to highspy 1.15 a Python exception raised inside a callback propagated out of
+    ``Highs.run()``. From 1.16 ``Highs::run`` wraps the solve in ``try``/``catch
+    (const std::exception&)``; pybind11's ``error_already_set`` is a
+    ``std::exception``, so the exception is swallowed and ``run`` returns ``kError``
+    with model status ``kSolveError``. Measured (#2221) on a two-variable MILP whose
+    ``kCallbackMipImprovingSolution`` callback raises: highspy 1.15.1 raises it out of
+    ``run``, 1.16.0 returns ``HighsStatus.kError``. A caller that maps ``kSolveError``
+    to a status would then report a broken separator as an ordinary solver error
+    (CLAUDE.md §7), so every Python callback discopt hands HiGHS goes through this
+    wrapper and every ``run`` that can call one goes through
+    :func:`run_checked`. The exception is still raised inside the callback,
+    so HiGHS stops the solve as before on either version.
+    """
+    errors = getattr(h, _CALLBACK_ERRORS_ATTR, None)
+    if errors is None:
+        errors = []
+        setattr(h, _CALLBACK_ERRORS_ATTR, errors)
+
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except BaseException as exc:
+            errors.append(exc)
+            raise
+
+    return _wrapped
+
+
+def run_checked(h: Any) -> Any:
+    """``h.run()``, re-raising the first exception a :func:`wrap_callback` callback raised.
+
+    The record is cleared before the run, so an exception from an earlier run of the
+    same object (which on highspy <= 1.15 already left that run) is never re-raised
+    here. After the run, ANY recorded exception is re-raised, whatever status HiGHS
+    ended the run with: highspy 1.16 ends a run whose callback raised in ``kSolveError``
+    (measured, #2221), but the guarantee does not rest on that detail, so an exception
+    from an interrupt-style callback that a later release ended in, say,
+    ``kInterrupt`` is not dropped either. On highspy <= 1.15 the exception leaves
+    ``run`` itself and propagates unchanged; the record is cleared on the way out.
+    Returns ``run``'s :class:`HighsStatus`.
+    """
+    errors = getattr(h, _CALLBACK_ERRORS_ATTR, None)
+    if errors is not None:
+        errors.clear()
+    try:
+        status = h.run()
+    except BaseException:
+        if errors is not None:
+            errors.clear()
+        raise
+    if errors:
+        exc = errors[0]
+        errors.clear()
+        raise exc
+    return status

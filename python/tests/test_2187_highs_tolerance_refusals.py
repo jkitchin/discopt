@@ -594,3 +594,16 @@ def test_adopt_without_a_rederived_point_adopts_nothing(monkeypatch):
     lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, [])
     assert out.objective == -19.0
     assert out.stats["milp/presolve_cross_incumbent_not_rederived"] == 1.0
+
+
+def test_presolve_free_stage_triggers_on_either_presolve_refutation():
+    """#2221: the stage runs after a refutation over the re-solve's own integers (#2187,
+    highspy <= 1.15) OR by its #1634 presolve-free cross-check (highspy 1.16 on s413),
+    and not after a refutation by a different integer assignment."""
+    own = HighsOutcome("feasible", refuted_by="own-integers")
+    cross = HighsOutcome("feasible", stats={"milp/presolve_certificate_refuted": 1.0})
+    other = HighsOutcome("feasible", refuted_by="root-lp")
+    assert lp_milp_highs._refuted_by_presolve(own)
+    assert lp_milp_highs._refuted_by_presolve(cross)
+    assert not lp_milp_highs._refuted_by_presolve(other)
+    assert not lp_milp_highs._refuted_by_presolve(HighsOutcome("feasible"))

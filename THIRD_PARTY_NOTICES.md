@@ -21,7 +21,9 @@ pdqsort part of `stdalgo`), and the HiGHS-derived primal heuristics, child selec
 strong-branching budget in `crates/discopt-core/src/bnb/milp_driver.rs`, and the trivial
 heuristics and Feasibility Jump solver in `crates/discopt-core/src/bnb/feas_jump.rs`
 (from `highs/mip/HighsMipSolverData.cpp`, `HighsFeasibilityJump.cpp` and
-`feasibilityjump.hh`), are Rust translations
+`feasibilityjump.hh`), and the LP-format reader in `crates/discopt-core/src/lp_file.rs`
+(from HiGHS 1.16.0's `highs/io/LpReader.cpp` and the model checks of `passModel`), are
+Rust translations
 of, or are derived from, HiGHS (https://github.com/ERGO-Code/HiGHS), modified for discopt. The
 HiGHS patches under `docs/dev/data/highs-parity/gap-plan-p3/` are diffs of HiGHS source.
 

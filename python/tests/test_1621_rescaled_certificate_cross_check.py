@@ -199,11 +199,57 @@ def test_cross_check_refutes_a_rescaled_certificate(monkeypatch, M):  # noqa: N8
     # and the result is still declined). Pin the pre-#1634 presolve so this test keeps
     # exercising the #1621 cross-check it is about.
     monkeypatch.setattr(L, "MILP_PRESOLVE_RULE_OFF", 0)
+    # #2221: highspy 1.16 solves the rescaled form correctly (its MIP fixes), so the
+    # false certificates no longer arise on their own and the cross-check had nothing
+    # to refute. The fault is therefore injected at the seam: the rescaled solve's
+    # outcome is replaced by exactly what highspy <= 1.15 returned for it (certified
+    # ``infeasible`` at M = 1e9, certified ``optimal`` at the zero point at M = 1e10).
+    injected = _inject_issue_1621_certificate(monkeypatch, M)
     r = _blend(M).solve(time_limit=60)
     st = r.solver_stats or {}
+    assert injected, "the rescaled form was never solved: the fault was not injected"
     assert st.get("route/lp_milp_backend") == 1.0
     assert st.get("milp/rescale_certificate_refuted") == 1.0, st
     _assert_not_falsely_certified(r, BLEND_OPT, maximize=True)
+
+
+def _inject_issue_1621_certificate(monkeypatch, M):  # noqa: N803
+    """Make every solve of a rescaled form return the issue's false certificate.
+
+    A rescaled form is recognised by identity: it is whatever ``_scale_logicals``
+    returned. The forms themselves are kept (not their ``id()``), so a freed form's id
+    reused by an unrelated ``StdForm`` cannot inject a false certificate into it.
+    The optimal claim is the issue's ``x = z = n = 0`` point (objective 0),
+    with the route's logicals completed from it, so it passes the rescaled path's own
+    point re-verification and only the #1621 cross-check can refute it. Returns the
+    list of injected statuses (empty when the seam was never reached)."""
+    scaled: list = []
+    real_scale, real_solve = L._scale_logicals, L._solve_milp_std
+    injected: list[str] = []
+
+    def scale(sf, f):
+        out = real_scale(sf, f)
+        scaled.append(out)
+        return out
+
+    def solve(sf, **kw):
+        out = real_solve(sf, **kw)
+        if not any(sf is s for s in scaled):
+            return out
+        out.gap_certified = True
+        if M < 5e9:
+            out.status, out.x, out.objective, out.bound = "infeasible", None, None, None
+        else:
+            x = L.complete_seed(sf, np.zeros(kw["n_struct"]), kw["n_struct"])
+            assert x is not None, "the zero point has no logical completion"
+            obj = float(sf.c @ x) + sf.obj_const
+            out.status, out.x, out.objective, out.bound = "optimal", x, obj, obj
+        injected.append(out.status)
+        return out
+
+    monkeypatch.setattr(L, "_scale_logicals", scale)
+    monkeypatch.setattr(L, "_solve_milp_std", solve)
+    return injected
 
 
 def test_cross_check_keeps_a_sound_rescaled_certificate():

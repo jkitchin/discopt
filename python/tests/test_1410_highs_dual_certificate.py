@@ -132,6 +132,15 @@ def test_rust_backend_is_correct_on_the_same_model(monkeypatch: pytest.MonkeyPat
     assert res.objective == pytest.approx(truth, rel=1e-9, abs=1e-12), res.objective
 
 
+#: The root-LP primal/dual pair highspy <= 1.15 returned for this matrix in the slack form
+#: ``[A I] (x, s) = b`` (measured on 1.15.1, #2221): ``y_0 = 1.03e-8 > 0`` prices the
+#: slack ``s_0`` (at its lower bound 0) at ``d = -1.03e-8``, a wrong-signed reduced cost
+#: of relative size 1.0, and the pair's NS gap is 0.0221. highspy 1.16 solves this LP
+#: correctly (relative violation 5.6e-17), so the guard is pinned on the recorded pair.
+MISSOLVED_ROOT_X = [0.0, 0.140247763738469, 0.0, 0.0, 0.0, 0.0, 16142.942270090263]
+MISSOLVED_ROOT_Y = [1.030059692070618e-08, -0.0]
+
+
 def test_box_dual_violation_separates_this_matrix_from_a_well_scaled_one() -> None:
     """The guard signal itself: machine-precision on a sane LP, order 1 on this one."""
     import scipy.sparse as sp
@@ -174,9 +183,8 @@ def test_box_dual_violation_separates_this_matrix_from_a_well_scaled_one() -> No
         worst_ok = max(worst_ok, v)
     assert checks >= 10, f"MEASURED NOTHING: only {checks} well-scaled LPs solved"
     sf_bad = slacked(np.array(C), np.array(A), np.array(B), np.zeros(5), np.array(UB, float))
-    out_bad = solve_lp_std(sf_bad, time_limit=60.0)
-    assert out_bad.x is not None and out_bad.row_dual is not None
-    v_bad = box_dual_violation(sf_bad, out_bad.x, out_bad.row_dual)
+    # #2221: the pair HiGHS <= 1.15 returned, not a live solve (see MISSOLVED_ROOT_X).
+    v_bad = box_dual_violation(sf_bad, np.array(MISSOLVED_ROOT_X), np.array(MISSOLVED_ROOT_Y))
     checks += 1
     tol = dual_violation_tolerance(sf_bad)
     assert worst_ok <= tol, f"well-scaled LPs must pass the guard: {worst_ok:.3g} > {tol:.3g}"

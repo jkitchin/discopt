@@ -89,6 +89,7 @@ def _drop_negligible_enabled() -> bool:
 
 
 from discopt._optional_highs import MissingHighsError as HighsBackendUnavailable  # noqa: E402, F401
+from discopt._optional_highs import run_checked, wrap_callback  # noqa: E402
 
 
 def _require_highspy():
@@ -995,9 +996,9 @@ def _cross_check_lazy_master(
             else:
                 data_in.user_interrupt = False
 
-        g.setCallback(_stop_at_claim, None)
+        g.setCallback(wrap_callback(g, _stop_at_claim), None)
         g.startCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
-    g.run()
+    run_checked(g)  # #2221: highspy >= 1.16 swallows a callback's exception
     if not infeasible:
         g.stopCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
         g.clearCallbacks()
@@ -1140,10 +1141,42 @@ _SIMPLEX_BUDGET_BEFORE_SCIP_S = 1.0
 
 
 def _run_simplex_engine(arrays, budget, gap, seed):
-    """The in-house Rust B&B on *arrays*: ``(status, bound or None, nodes)``."""
+    """The in-house Rust B&B on *arrays*: ``(status, bound or None, nodes)``.
+
+    #2235: on the driver's batched search (``batched_search=True``), which
+    evaluates node LPs in parallel, not the HiGHS-design search the driver runs
+    by default since #2196. That search is a port of HiGHS's serial default search,
+    and this call only needs a valid bound on a fixed MILP as fast as possible.
+    It is also an independent check of HiGHS, and the batched search is a design
+    of discopt's own. Measured on the 21 confirmation masters the in-repo
+    ``minlplib_nl`` corpus produces under ``DISCOPT_CONVEX_ROUTE_OA_MASTER=highs``
+    (4-core machine, 60 s, 3 interleaved reps per thread count), every master
+    certified by both searches in every rep:
+
+    * 4 threads: sum of median walls 20.2 s (HiGHS search) vs 2.3 s (batched);
+      the worst batched loss was 0.07 s (tls2, 0.05 -> 0.12 s).
+    * 1 thread: 21.5 s vs 3.5 s; the batched search is slower on the small
+      masters by up to 0.27 s (``cvxnonsep_psig40r`` master 1, 0.20 -> 0.47 s).
+    * Either way the second ``cvxnonsep_psig40r`` master dominates: 19.2-20.2 s
+      (652 nodes) against 1.2-1.4 s (3 nodes).
+
+    End to end over the 21 instances, old vs new confirmation (SCIP present at 4
+    and 1 threads, and absent at 4 threads): every instance certified in both
+    arms, no claim withdrawn, the same engine confirmed each claim, and every
+    certified point verified feasible. The one claim the in-house engine cannot
+    confirm within ``_SIMPLEX_BUDGET_BEFORE_SCIP_S`` (``portfol_classical050_1``)
+    falls through to SCIP in both arms. Without SCIP the 21 solves took 279 s
+    (old) and 96 s (new); ``portfol_classical050_1`` alone 255 s and 81 s.
+
+    There is no environment opt-out. ``DISCOPT_HIGHS_MIP_SEARCH=1`` does not put
+    this call back on the HiGHS-design search, because the keyword is fixed here;
+    an A/B edits this call.
+    """
     from discopt.solvers import milp_simplex
 
-    res = milp_simplex.solve_milp(**arrays, time_limit=budget, gap_tolerance=gap, mip_start=seed)
+    res = milp_simplex.solve_milp(
+        **arrays, time_limit=budget, gap_tolerance=gap, mip_start=seed, batched_search=True
+    )
     ebound = None if res.bound is None or not np.isfinite(res.bound) else float(res.bound)
     return res.status, ebound, int(res.node_count)
 
@@ -1722,7 +1755,7 @@ def solve_milp_with_lazy_cuts(
             for key, val in (("solve_relaxation", True),):
                 if h.setOptionValue(key, val) != highspy.HighsStatus.kOk:
                     raise RuntimeError(f"HiGHS rejected option {key}={val!r}")
-            h.run()
+            run_checked(h)
             if h.setOptionValue("solve_relaxation", False) != highspy.HighsStatus.kOk:
                 raise RuntimeError("HiGHS rejected option solve_relaxation=False")
             counts["mipnode_calls"] += 1
@@ -1754,7 +1787,10 @@ def solve_milp_with_lazy_cuts(
             if added == 0:
                 return
 
-    h.setCallback(_callback, None)
+    # #2221: highspy >= 1.16 swallows an exception raised in a callback (``run``
+    # returns kError); the wrapper records it and ``run_checked`` re-raises it
+    # after every ``run`` below, so a raising separator still crashes the solve.
+    h.setCallback(wrap_callback(h, _callback), None)
     h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution)
     if terminate_callback is not None:
         h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
@@ -1775,7 +1811,7 @@ def solve_milp_with_lazy_cuts(
         pending.clear()
         if node_callback is not None:
             _lp_relaxation_rounds()
-        h.run()
+        run_checked(h)
 
         info = h.getInfo()
         nodes += int(info.mip_node_count)

@@ -1,61 +1,82 @@
-//! Provenance: derived from HiGHS source (https://github.com/ERGO-Code/HiGHS, Copyright (c) HiGHS,
-//! MIT License): its behaviour reproduces HiGHS's LP-file reader (`io/FilereaderLp.cpp`,
-//! `io/filereaderlp/*`), cited below. See `THIRD_PARTY_NOTICES.md` at the repository root for the
-//! license text.
+//! Provenance: derived from HiGHS 1.16.0 (https://github.com/ERGO-Code/HiGHS, Copyright (c) HiGHS,
+//! MIT License): a translation of its LP-file reader `highs/io/LpReader.cpp` (the lexer and
+//! recursive-descent parser) plus the parts of `Highs::readModel` -> `passModel` that a read model
+//! passes through (`lp_data/Highs.cpp`, `lp_data/HighsLpUtils.cpp::assessLp`,
+//! `util/HighsMatrixUtils.cpp::assessMatrix`, `model/HighsHessianUtils.cpp`), cited below. See
+//! `THIRD_PARTY_NOTICES.md` at the repository root for the license text.
 //!
-//! CPLEX-LP-format (`.lp`) reader that reproduces HiGHS 1.15.1's `readModel` ->
-//! `getLp` (and `getModel().hessian_`) exactly, quirks included (highs-parity P6:
-//! the in-house replacement for HiGHS's reader in the benchmark loader, and the
-//! reader users get for `.lp` models).
+//! CPLEX-LP-format (`.lp`) reader that reproduces HiGHS 1.16.0's `readModel` ->
+//! `getLp` (and `getModel().hessian_`) exactly (highs-parity P6: the in-house
+//! replacement for HiGHS's reader in the benchmark loader, and the reader users get
+//! for `.lp` models).
 //!
-//! "Exactly" is the contract, tested by an exact differential against highspy
-//! (`python/tests/test_lp_reader.py`, `docs/dev/data/highs-parity/lp_reader/`).
-//! HiGHS's reader is not a grammar but a staged pipeline, and a grammar-driven reader
-//! disagrees with it, so this module ports the pipeline stage by stage. Sources are
-//! `ref/HiGHS/highs/io/filereaderlp/reader.cpp` (R), `io/FilereaderLp.cpp` (F),
-//! `filereaderlp/builder.hpp` (B), `lp_data/Highs.cpp` (H) and
-//! `model/HighsHessianUtils.cpp` (HU):
+//! "Exactly" is the contract, tested by an exact differential against highspy >= 1.16
+//! (`python/tests/test_lp_reader.py`; against a frozen fixture of HiGHS 1.16.0's
+//! readings on an older highspy).
 //!
-//! 1. **Raw lexer** (R:1224-1361, [`lex`]): lines from `getline`, one trailing `\r`
-//!    dropped; only `' '`/`'\t'` separate; `\` comments to end of line anywhere; a
-//!    `;` at the START of a token drops the rest of the line (inside a name it is a
-//!    name character); NUL at a token start is an error; single-character tokens
-//!    `[ ] < > = : + ^ / * -`; otherwise C `strtod` at the token start ([`c_strtod`]:
-//!    leading `isspace` skipped, hex floats, `inf`/`infinity`/`nan(...)`, longest
-//!    valid prefix, so `2e3x` is `2000` then `x`); otherwise a name up to the next
-//!    character of `"\t\n\\:+<>^= /-*[]"` (R:1349).
-//! 2. **Token classifier** (R:915-1175, `classify`), in R's order: an exact
-//!    lowercase section keyword followed by `:` is a row name (R:919); `/* ... */`
-//!    skipped TWO raw tokens at a time (so an odd number of tokens inside is an
-//!    error, R:925-935); `STR - STR` -> `semi-continuous`; `STR STR` ->
-//!    `subject to` / `such that`; a single keyword (case-insensitive) is recognised
-//!    ANYWHERE; `S1 ::` / `S2 ::`; `STR :` or `number :` -> row name (literal text);
-//!    `free`; at most two signs combine and a sign before a name pushes `+-1`;
-//!    `-[` and `number [` are errors; `<` `=` merge into `<=` across whitespace.
-//! 3. **Section splitter** (R:849-913, `split`): tokens before the first keyword are
-//!    ignored; an empty section is not recorded; a section type may repeat only
-//!    adjacently; the last non-empty section must be closed by a keyword; a non-empty
-//!    `end` section is an error.
-//! 4. **Section parsers in HiGHS's FIXED order** (R:837-847): objective (MIN wins over
-//!    MAX), constraints, bounds, general, binary, semi-continuous, SOS. Columns are
-//!    created on first mention in that order (B:15-22), default `[0, +inf]`.
-//! 5. **Assembly** (F:40-269): cost ASSIGNED per term (last wins), offset the sum of
-//!    constants, `HiGHS_R<i>` automatic row names (cleared when an explicit name
-//!    starts with `HiGHS_R` and one was needed), a square Hessian (`x*y` coefficient
-//!    halved into both columns), the column-wise matrix with duplicates summed into
-//!    the first position and zero sums dropped.
-//! 6. **`passModel`** (H:443-512): `assessLp` (costs/bounds at or past 1e20 become
-//!    infinite, NaN or wrong-side-infinite bounds and `|a| >= 1e15` are errors,
-//!    `|a| <= 1e-9` and NaN entries dropped) and `assessHessian` (HU:22-169):
-//!    duplicates summed, `normaliseHessian` ported literally (HU:320-560: in the
-//!    square case the gather overwrites its own input, which fixes the entry order),
-//!    small entries dropped, missing diagonals filled with explicit zeros; a Hessian
-//!    with no nonzeros is cleared.
+//! **Why 1.16.0 and not 1.15.1 (#2221).** Up to 1.15.1 HiGHS's reader was a staged
+//! pipeline (lexer, token classifier, section splitter, per-section parsers in a FIXED
+//! order) and this module ported it quirks included. Several of those quirks silently
+//! read a valid file as a DIFFERENT model: an objective cost was ASSIGNED per term
+//! (`2 x + 3 y - x` gave `c_x = -1`), `minimise`/`maximise` objectives were dropped,
+//! `x + inf` in an objective became an infinite offset, keywords were recognised
+//! anywhere on a line. HiGHS 1.16.0 (HiGHS PRs #3355, #3446) replaced it with a
+//! parser for a formal grammar that rejects invalid files instead. A reader that
+//! misreads a valid file is a correctness bug, so this module ports the 1.16.0 reader.
+//!
+//! The grammar (LpReader.cpp:13-39; keywords case-insensitive):
+//!
+//! ```text
+//! <file>        := { <section> } "end" | <empty>
+//! <objective>   := ("minimize" | "maximize") [<name>] <expression>
+//! <constraints> := "subject to" { [<name>] <expression> <comparison> <number> <newline> }
+//! <bounds>      := "bounds" { <identifier> "free" | <identifier> <cmp> <number>
+//!                           | <number> <cmp> <identifier> [<cmp> <number>] } (one per line)
+//! general | binary | semi-continuous := { <identifier> }
+//! <term>        := <constant> [["*"] <identifier>] | <identifier> | "[" quad "]" ["/" "2"]
+//! ```
+//!
+//! What is not in the grammar (LpReader.cpp:41-67), all reproduced here:
+//!
+//! 1. **Lexer** ([`lex`], LpReader.cpp:388-508): `\` comments to end of line; C
+//!    `isspace` separates; a section keyword is one only as the FIRST token of its line
+//!    and not followed by `:`; identifiers are any printable byte except whitespace and
+//!    `\ : + - * ^ < > = [ ]`, not starting with a digit, `/`, or `.digit`; a number
+//!    is `digits[.digits][e[+-]digits]` (so `2e3x` is `2000` then `x`, `0x10` is `0`
+//!    then `x10`); `inf`/`infinity` are numbers only where a number is expected (a
+//!    bound or right-hand side), elsewhere they are variable names; a control byte
+//!    is an error.
+//! 2. **Parser** ([`Parser`], LpReader.cpp:510-1150): sections are parsed in FILE
+//!    order and columns are created on first mention in file order; objective
+//!    coefficients are SUMMED; a repeated variable in a row is summed (zero sums
+//!    dropped); a constant on a constraint's left-hand side is ignored (a warning in
+//!    HiGHS); the objective may appear once; `sos`, indicator constraints and
+//!    quadratic constraints are errors; `[ ... ]` without `/ 2` is doubled; a binary
+//!    column gets upper bound 1 only when its upper bound is still infinite; unnamed
+//!    rows are `HiGHS_R<i>`, and all row names are cleared when an explicit name also
+//!    starts with `HiGHS_R`.
+//! 3. **`passModel`** (H:455-540): no rows or no columns means an empty matrix;
+//!    `assessLp` (costs/bounds at or past 1e20 become infinite, NaN or wrong-side
+//!    infinite bounds are errors; the matrix entries with `|a| >= 1e15` an error,
+//!    `|a| <= 1e-9` dropped, NaN KEPT, which is 1.16's `assessMatrix`) and
+//!    `assessHessian` (HU:22-89): duplicates summed, `normaliseHessian` ported
+//!    literally (in the square case the gather overwrites its own input, which fixes
+//!    the entry order), small entries dropped, missing diagonals filled with explicit
+//!    zeros; a Hessian with no nonzeros is cleared.
 //!
 //! A file HiGHS rejects (`readModel` returns `kError`) is rejected with
-//! [`LpFileError`]; a file HiGHS reads with `kWarning` (duplicate entries, explicit
-//! zeros, crossed bounds, tiny entries) is read the same way. SOS sets with entries
-//! are refused, as in HiGHS (F:31).
+//! [`LpFileError`]; a file HiGHS reads with `kWarning` (repeated variables, a
+//! left-hand-side constant, crossed bounds, tiny entries) is read the same way.
+//!
+//! One known limit of "bit-exact": HiGHS sums repeated Hessian terms after a
+//! `std::sort` on (column, row), which is not stable; this port uses a stable sort.
+//! The two can differ only in the last bit of a Hessian entry written three or more
+//! times in one objective (floating-point addition is not associative), and the C++
+//! order itself depends on the platform's standard library.
+//!
+//! Sources: `highs/io/LpReader.cpp` (LpReader.cpp), `lp_data/Highs.cpp` (H),
+//! `util/HighsMatrixUtils.cpp` (MU), `model/HighsHessianUtils.cpp` (HU), all HiGHS
+//! 1.16.0.
 
 use std::collections::HashMap;
 
@@ -129,925 +150,1019 @@ fn err<T>(msg: impl Into<String>) -> Result<T, LpFileError> {
     Err(LpFileError(msg.into()))
 }
 
-/// HiGHS's `lpassert` (def.hpp): a failed check aborts the read.
-fn lpassert(cond: bool, what: &str) -> Result<(), LpFileError> {
-    if cond {
-        Ok(())
-    } else {
-        err(what.to_string())
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Stage 1: C strtod and the raw lexer.
+// Lexer (LpReader.cpp `Lexer`).
 // ---------------------------------------------------------------------------
 
-fn c_isspace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
-
-fn starts_with_ci(s: &[u8], pat: &[u8]) -> bool {
-    s.len() >= pat.len() && s[..pat.len()].eq_ignore_ascii_case(pat)
-}
-
-/// glibc `strtod` (C locale) on the start of `s`: `(value, bytes consumed)`, with
-/// `0` consumed when no conversion is possible. Leading `isspace` characters are
-/// skipped, then an optional sign, then `infinity`/`inf`, `nan` (optionally
-/// `nan(chars)`), a hexadecimal float (`0x` + at least one hex digit, optional
-/// `p` exponent) or a decimal float; the longest valid prefix is taken. Overflow is
-/// `+-inf`, underflow keeps its sign (`-1e-400` is `-0.0`).
-///
-/// A hexadecimal mantissa is rounded once to nearest from up to 124 significant bits
-/// (a sticky bit beyond); only a result in the subnormal range can round twice.
-pub fn c_strtod(s: &[u8]) -> (f64, usize) {
-    let mut i = 0;
-    while i < s.len() && c_isspace(s[i]) {
-        i += 1;
-    }
-    let mut neg = false;
-    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
-        neg = s[i] == b'-';
-        i += 1;
-    }
-    let sign = if neg { -1.0 } else { 1.0 };
-    let rest = &s[i..];
-    if starts_with_ci(rest, b"infinity") {
-        return (sign * INF, i + 8);
-    }
-    if starts_with_ci(rest, b"inf") {
-        return (sign * INF, i + 3);
-    }
-    if starts_with_ci(rest, b"nan") {
-        let mut j = 3;
-        if rest.get(3) == Some(&b'(') {
-            let mut k = 4;
-            while k < rest.len() && (rest[k].is_ascii_alphanumeric() || rest[k] == b'_') {
-                k += 1;
-            }
-            if rest.get(k) == Some(&b')') {
-                j = k + 1;
-            }
-        }
-        let nan = if neg { -f64::NAN } else { f64::NAN };
-        return (nan, i + j);
-    }
-    if starts_with_ci(rest, b"0x") {
-        if let Some((v, used)) = hex_float(&rest[2..]) {
-            return (sign * v, i + 2 + used);
-        }
-        // "0x" without a hex digit: only the "0" converts (falls through).
-    }
-    // Decimal: digits [. digits] (at least one digit) [e [sign] digits].
-    let mut j = 0;
-    let mut mant = 0usize;
-    while j < rest.len() && rest[j].is_ascii_digit() {
-        j += 1;
-        mant += 1;
-    }
-    if j < rest.len() && rest[j] == b'.' {
-        j += 1;
-        while j < rest.len() && rest[j].is_ascii_digit() {
-            j += 1;
-            mant += 1;
-        }
-    }
-    if mant == 0 {
-        return (0.0, 0);
-    }
-    let mut end = j;
-    if j < rest.len() && (rest[j] == b'e' || rest[j] == b'E') {
-        let mut k = j + 1;
-        if k < rest.len() && (rest[k] == b'+' || rest[k] == b'-') {
-            k += 1;
-        }
-        let d0 = k;
-        while k < rest.len() && rest[k].is_ascii_digit() {
-            k += 1;
-        }
-        if k > d0 {
-            end = k;
-        }
-    }
-    let txt = std::str::from_utf8(&rest[..end]).expect("ASCII digits");
-    let v: f64 = txt.parse().expect("a valid decimal float literal");
-    (sign * v, i + end)
-}
-
-/// The hexadecimal float after `0x`: `None` without a hex digit.
-fn hex_float(b: &[u8]) -> Option<(f64, usize)> {
-    let mut j = 0;
-    let mut mant: u128 = 0;
-    let mut exp2: i64 = 0;
-    let mut sticky = false;
-    let mut any = false;
-    let cap: u128 = 1u128 << 120;
-    while j < b.len() && b[j].is_ascii_hexdigit() {
-        let d = (b[j] as char).to_digit(16).unwrap() as u128;
-        if mant < cap {
-            mant = mant * 16 + d;
-        } else {
-            exp2 += 4;
-            sticky |= d != 0;
-        }
-        j += 1;
-        any = true;
-    }
-    if j < b.len() && b[j] == b'.' {
-        let mut k = j + 1;
-        let mut frac_any = false;
-        while k < b.len() && b[k].is_ascii_hexdigit() {
-            let d = (b[k] as char).to_digit(16).unwrap() as u128;
-            if mant < cap {
-                mant = mant * 16 + d;
-                exp2 -= 4;
-            } else {
-                sticky |= d != 0;
-            }
-            k += 1;
-            frac_any = true;
-        }
-        if any || frac_any {
-            j = k;
-            any = true;
-        }
-    }
-    if !any {
-        return None;
-    }
-    if j < b.len() && (b[j] == b'p' || b[j] == b'P') {
-        let mut k = j + 1;
-        let mut eneg = false;
-        if k < b.len() && (b[k] == b'+' || b[k] == b'-') {
-            eneg = b[k] == b'-';
-            k += 1;
-        }
-        let d0 = k;
-        let mut e: i64 = 0;
-        while k < b.len() && b[k].is_ascii_digit() {
-            e = e.saturating_mul(10).saturating_add((b[k] - b'0') as i64);
-            e = e.min(1 << 40);
-            k += 1;
-        }
-        if k > d0 {
-            exp2 += if eneg { -e } else { e };
-            j = k;
-        }
-    }
-    if mant == 0 {
-        return Some((0.0, j));
-    }
-    if sticky {
-        mant |= 1;
-    }
-    let mut v = mant as f64;
-    let mut e = exp2;
-    while e > 0 {
-        let step = e.min(1000);
-        v *= 2f64.powi(step as i32);
-        e -= step;
-        if v.is_infinite() {
-            break;
-        }
-    }
-    while e < 0 {
-        let step = (-e).min(1000);
-        v *= 2f64.powi(-(step as i32));
-        e += step;
-        if v == 0.0 {
-            break;
-        }
-    }
-    Some((v, j))
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Raw {
-    Str(Vec<u8>),
-    /// A number (`strtod` value) and its literal text (a row name when `:` follows).
-    Cons(f64, Vec<u8>),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Identifier,
+    Number,
+    Plus,
+    Minus,
+    Times,
+    Divide,
+    Power,
+    OpenBracket,
+    CloseBracket,
+    Colon,
     Less,
     Greater,
     Equal,
-    Colon,
-    Flend,
-    BrkOp,
-    BrkCl,
-    Plus,
-    Minus,
-    Hat,
-    Slash,
-    Asterisk,
+    Implies,
+    EndOfFile,
 }
 
-/// `Reader::readnexttoken` (R:1224-1361) over the whole file, ending in `Flend`.
-/// Lexing is context-free, so lexing ahead is equivalent to HiGHS's lazy lexing.
-fn lex(text: &[u8]) -> Result<Vec<Raw>, LpFileError> {
-    const DELIMS: &[u8] = b"\t\n\\:+<>^= /-*[]";
-    let mut out = Vec::new();
-    for line in text.split(|&b| b == b'\n') {
-        let line = match line.last() {
-            Some(b'\r') => &line[..line.len() - 1],
-            _ => line,
-        };
-        let mut pos = 0;
-        while pos < line.len() {
-            let c = line[pos];
-            let single = match c {
-                b'\\' | b';' => break,
-                b'[' => Some(Raw::BrkOp),
-                b']' => Some(Raw::BrkCl),
-                b'<' => Some(Raw::Less),
-                b'>' => Some(Raw::Greater),
-                b'=' => Some(Raw::Equal),
-                b':' => Some(Raw::Colon),
-                b'+' => Some(Raw::Plus),
-                b'^' => Some(Raw::Hat),
-                b'/' => Some(Raw::Slash),
-                b'*' => Some(Raw::Asterisk),
-                b'-' => Some(Raw::Minus),
-                b' ' | b'\t' => {
-                    pos += 1;
-                    continue;
-                }
-                0 => return err("NUL character in the file (R:1336)"),
-                _ => None,
-            };
-            if let Some(t) = single {
-                out.push(t);
-                pos += 1;
-                continue;
-            }
-            let (v, used) = c_strtod(&line[pos..]);
-            if used > 0 {
-                out.push(Raw::Cons(v, line[pos..pos + used].to_vec()));
-                pos += used;
-                continue;
-            }
-            let end = line[pos..]
-                .iter()
-                .position(|b| DELIMS.contains(b))
-                .map_or(line.len(), |k| pos + k);
-            out.push(Raw::Str(line[pos..end].to_vec()));
-            pos = end;
-        }
+/// A token: its kind, location (byte offset, length, line), whether it is the first
+/// token on its line, and a number's value.
+#[derive(Clone, Copy, Debug)]
+struct Token {
+    kind: Kind,
+    pos: usize,
+    len: usize,
+    line: usize,
+    line_start: bool,
+    value: f64,
+}
+
+fn is_digit(c: Option<u8>) -> bool {
+    matches!(c, Some(b'0'..=b'9'))
+}
+
+/// `isIdentifierChar`: printable, not DEL, not one of the operators.
+fn is_identifier_char(c: Option<u8>) -> bool {
+    match c {
+        Some(c) => c > 0x20 && c != 0x7F && !b"\\:+-*^<>=[]".contains(&c),
+        None => false,
     }
-    out.push(Raw::Flend);
-    Ok(out)
+}
+
+/// C `isspace` in the "C" locale.
+fn c_isspace(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r')
+}
+
+/// The whole file as tokens, ending with one `EndOfFile` token. HiGHS lexes lazily,
+/// but a successful parse always reaches the end of the file, so lexing eagerly
+/// accepts and rejects exactly the same files.
+fn lex(text: &[u8]) -> Result<Vec<Token>, LpFileError> {
+    let at = |p: usize| text.get(p).copied();
+    let mut toks = Vec::new();
+    let (mut pos, mut line, mut line_start) = (0usize, 1usize, true);
+    let (mut last_end, mut last_line) = (0usize, 1usize);
+    loop {
+        // Skip whitespace and comments.
+        while let Some(c) = at(pos) {
+            if c == b'\\' {
+                while matches!(at(pos), Some(c) if c != b'\n') {
+                    pos += 1;
+                }
+                continue;
+            }
+            if c == b'\n' {
+                line += 1;
+                line_start = true;
+            } else if (0x21..=0x7E).contains(&c) || !c_isspace(c) {
+                break;
+            }
+            pos += 1;
+        }
+        let Some(c) = at(pos) else {
+            toks.push(Token {
+                kind: Kind::EndOfFile,
+                pos: last_end,
+                len: 0,
+                line: last_line,
+                line_start: false,
+                value: 0.0,
+            });
+            return Ok(toks);
+        };
+        let mut tok = Token {
+            kind: Kind::EndOfFile,
+            pos,
+            len: 1,
+            line,
+            line_start,
+            value: 0.0,
+        };
+        line_start = false;
+        let next = at(pos + 1);
+        if is_digit(Some(c)) || (c == b'.' && is_digit(next)) {
+            // <constant> := <digits> ["." [<digits>]] [<exponent>] | "." <digits> [<exponent>]
+            let mut end = pos;
+            while is_digit(at(end)) {
+                end += 1;
+            }
+            if at(end) == Some(b'.') {
+                end += 1;
+                while is_digit(at(end)) {
+                    end += 1;
+                }
+            }
+            if matches!(at(end), Some(b'e' | b'E')) {
+                let mut exponent = end + 1;
+                if matches!(at(exponent), Some(b'+' | b'-')) {
+                    exponent += 1;
+                }
+                if is_digit(at(exponent)) {
+                    end = exponent;
+                    while is_digit(at(end)) {
+                        end += 1;
+                    }
+                }
+            }
+            tok.kind = Kind::Number;
+            tok.len = end - pos;
+            // The text is ASCII digits/./e/sign, so this is `strtod` (correctly rounded,
+            // overflow to inf, underflow to 0).
+            let s = std::str::from_utf8(&text[pos..end]).expect("ASCII number");
+            tok.value = s
+                .parse::<f64>()
+                .map_err(|e| LpFileError(format!("line {line}: bad number {s:?}: {e}")))?;
+        } else if is_identifier_char(Some(c)) && c != b'/' {
+            tok.kind = Kind::Identifier;
+            while is_identifier_char(at(pos + tok.len)) {
+                tok.len += 1;
+            }
+        } else {
+            tok.kind = match c {
+                b'+' => Kind::Plus,
+                b'-' if next == Some(b'>') => {
+                    tok.len = 2;
+                    Kind::Implies
+                }
+                b'-' => Kind::Minus,
+                b'*' => Kind::Times,
+                b'/' => Kind::Divide,
+                b'^' => Kind::Power,
+                b'[' => Kind::OpenBracket,
+                b']' => Kind::CloseBracket,
+                b':' => Kind::Colon,
+                b'<' | b'>' => {
+                    if next == Some(b'=') {
+                        tok.len = 2;
+                    }
+                    if c == b'<' {
+                        Kind::Less
+                    } else {
+                        Kind::Greater
+                    }
+                }
+                b'=' => {
+                    if matches!(next, Some(b'=' | b'<' | b'>')) {
+                        tok.len = 2;
+                    }
+                    match next {
+                        Some(b'<') => Kind::Less,
+                        Some(b'>') => Kind::Greater,
+                        _ => Kind::Equal,
+                    }
+                }
+                _ => {
+                    return err(format!(
+                        "line {line}: unexpected control character 0x{c:02X}"
+                    ))
+                }
+            };
+        }
+        pos += tok.len;
+        last_end = pos;
+        last_line = line;
+        toks.push(tok);
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2: token classifier.
+// Parser (LpReader.cpp `Parser`).
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kw {
-    ObjMin,
-    ObjMax,
-    Con,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Section {
+    None,
+    Minimize,
+    Maximize,
+    Constraints,
     Bounds,
-    Gen,
-    Bin,
+    General,
+    Binary,
     Semi,
     Sos,
     End,
 }
 
-impl Kw {
-    fn slot(self) -> usize {
-        self as usize
-    }
+/// The section keywords that are one token long (`kKeywords`).
+const KEYWORDS: &[(&[u8], Section)] = &[
+    (b"minimize", Section::Minimize),
+    (b"minimise", Section::Minimize),
+    (b"minimum", Section::Minimize),
+    (b"min", Section::Minimize),
+    (b"maximize", Section::Maximize),
+    (b"maximise", Section::Maximize),
+    (b"maximum", Section::Maximize),
+    (b"max", Section::Maximize),
+    (b"st", Section::Constraints),
+    (b"s.t.", Section::Constraints),
+    (b"st.", Section::Constraints),
+    (b"bounds", Section::Bounds),
+    (b"bound", Section::Bounds),
+    (b"general", Section::General),
+    (b"generals", Section::General),
+    (b"gen", Section::General),
+    (b"integer", Section::General),
+    (b"integers", Section::General),
+    (b"binary", Section::Binary),
+    (b"binaries", Section::Binary),
+    (b"bin", Section::Binary),
+    (b"semi", Section::Semi),
+    (b"semis", Section::Semi),
+    (b"sos", Section::Sos),
+    (b"end", Section::End),
+];
+
+const ROW_PREFIX: &[u8] = b"HiGHS_R";
+
+fn is_comparison(t: &Token) -> bool {
+    matches!(t.kind, Kind::Less | Kind::Greater | Kind::Equal)
 }
 
-/// `sectionkeywordmap` (R:154-179), exact (callers lowercase where R does).
-fn section_keyword(s: &[u8]) -> Option<Kw> {
-    Some(match s {
-        b"minimize" | b"min" | b"minimum" => Kw::ObjMin,
-        b"maximize" | b"max" | b"maximum" => Kw::ObjMax,
-        b"subject to" | b"such that" | b"st" | b"s.t." => Kw::Con,
-        b"bounds" | b"bound" => Kw::Bounds,
-        b"binary" | b"binaries" | b"bin" => Kw::Bin,
-        b"general" | b"generals" | b"gen" | b"integer" | b"integers" => Kw::Gen,
-        b"semi-continuous" | b"semi" | b"semis" => Kw::Semi,
-        b"sos" => Kw::Sos,
-        b"end" => Kw::End,
-        _ => return None,
-    })
+fn is_sign(t: &Token) -> bool {
+    matches!(t.kind, Kind::Plus | Kind::Minus)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Cmp {
-    Leq,
-    L,
-    Eq,
-    G,
-    Geq,
+/// HiGHS's `HessianEntry`: `coef * x[row]` in column `col` of the square Hessian.
+#[derive(Clone, Copy)]
+struct HessianEntry {
+    col: usize,
+    row: usize,
+    value: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum Tok {
-    SecId(Kw),
-    VarId(Vec<u8>),
-    ConId(Vec<u8>),
-    Const(f64),
-    Free,
-    BrkOp,
-    BrkCl,
-    Comp(Cmp),
-    Slash,
-    Asterisk,
-    Hat,
-    SosType(u8),
+/// An entry of the row being parsed (`RowEntry`).
+struct RowEntry {
+    col: usize,
+    value: f64,
 }
 
-fn lower(s: &[u8]) -> Vec<u8> {
-    s.to_ascii_lowercase()
-}
-
-/// `Reader::processtokens` (R:915-1175) over a 3-token window of raw tokens.
-fn classify(mut raw: Vec<Raw>) -> Result<Vec<Tok>, LpFileError> {
-    let last = raw.len() - 1; // the Flend
-    let mut i = 0usize;
-    let mut out = Vec::new();
-    macro_rules! r {
-        ($k:expr) => {
-            &raw[(i + $k).min(last)]
-        };
-    }
-    while *r!(0) != Raw::Flend {
-        // R:917-922: an exact (case-sensitive) keyword followed by ':' is a name.
-        if let Raw::Str(s) = r!(0) {
-            if section_keyword(s).is_some() && *r!(1) == Raw::Colon {
-                let s = s.clone();
-                raw[i] = Raw::Cons(0.0, s);
-            }
-        }
-        // R:924-935: "/*" skips raw tokens two at a time up to "*/".
-        if *r!(0) == Raw::Slash && *r!(1) == Raw::Asterisk {
-            loop {
-                i += 2;
-                if (*r!(0) == Raw::Asterisk && *r!(1) == Raw::Slash) || *r!(0) == Raw::Flend {
-                    break;
-                }
-            }
-            i += 2;
-            continue;
-        }
-        let lc = match r!(0) {
-            Raw::Str(s) => Some(lower(s)),
-            _ => None,
-        };
-        // R:942-954: STR - STR, "semi-continuous".
-        if let (Some(lc0), Raw::Minus, Raw::Str(s2)) = (&lc, r!(1), r!(2)) {
-            let mut k = lc0.clone();
-            k.push(b'-');
-            k.extend(lower(s2));
-            if let Some(kw) = section_keyword(&k) {
-                out.push(Tok::SecId(kw));
-                i += 3;
-                continue;
-            }
-        }
-        // R:956-967: STR STR, "subject to" / "such that".
-        if let (Some(lc0), Raw::Str(s1)) = (&lc, r!(1)) {
-            let mut k = lc0.clone();
-            k.push(b' ');
-            k.extend(lower(s1));
-            if let Some(kw) = section_keyword(&k) {
-                out.push(Tok::SecId(kw));
-                i += 2;
-                continue;
-            }
-        }
-        // R:969-977: a single keyword, case-insensitive.
-        if let Some(lc0) = &lc {
-            if let Some(kw) = section_keyword(lc0) {
-                out.push(Tok::SecId(kw));
-                i += 1;
-                continue;
-            }
-        }
-        // R:979-990: "S1 ::" / "S2 ::".
-        if let (Raw::Str(s), Raw::Colon, Raw::Colon) = (r!(0), r!(1), r!(2)) {
-            lpassert(s.len() == 2, "bad SOS type before '::'")?;
-            lpassert(s[0] == b'S' || s[0] == b's', "bad SOS type before '::'")?;
-            lpassert(s[1] == b'1' || s[1] == b'2', "bad SOS type before '::'")?;
-            out.push(Tok::SosType(if s[1] == b'1' { 1 } else { 2 }));
-            i += 3;
-            continue;
-        }
-        // R:992-1007: "name :" and "number :" (the number's literal text) are row names.
-        match (r!(0), r!(1)) {
-            (Raw::Str(s), Raw::Colon) | (Raw::Cons(_, s), Raw::Colon) => {
-                out.push(Tok::ConId(s.clone()));
-                i += 2;
-                continue;
-            }
-            _ => {}
-        }
-        if let Raw::Str(s) = r!(0) {
-            let lc0 = lc.as_deref().unwrap();
-            if lc0 == b"free" {
-                out.push(Tok::Free); // R:1010
-            } else if lc0 == b"infinity" || lc0 == b"inf" {
-                out.push(Tok::Const(INF)); // R:1017
-            } else {
-                out.push(Tok::VarId(s.clone())); // R:1025
-            }
-            i += 1;
-            continue;
-        }
-        // R:1033-1076: signs.
-        if matches!(r!(0), Raw::Plus | Raw::Minus) {
-            let mut sign = if *r!(0) == Raw::Plus { 1.0 } else { -1.0 };
-            i += 1;
-            if matches!(r!(0), Raw::Plus | Raw::Minus) {
-                sign *= if *r!(0) == Raw::Plus { 1.0 } else { -1.0 };
-                i += 1;
-            }
-            match r!(0) {
-                Raw::Cons(v, _) => {
-                    out.push(Tok::Const(sign * v));
-                    i += 1;
-                    continue;
-                }
-                Raw::BrkOp if sign == 1.0 => {
-                    out.push(Tok::BrkOp);
-                    i += 1;
-                    continue;
-                }
-                Raw::BrkOp => return err("'-[' (negated quadratic bracket, R:1058)"),
-                Raw::Str(_) => {
-                    // Push the sign; the name is classified on the next pass.
-                    out.push(Tok::Const(sign));
-                    continue;
-                }
-                _ => return err("sign followed by an operator (R:1075)"),
-            }
-        }
-        if let Raw::Cons(v, _) = r!(0) {
-            lpassert(*r!(1) != Raw::BrkOp, "number followed by '[' (R:1081)")?;
-            out.push(Tok::Const(*v));
-            i += 1;
-            continue;
-        }
-        let (tok, used) = match (r!(0), r!(1)) {
-            (Raw::BrkOp, _) => (Tok::BrkOp, 1),
-            (Raw::BrkCl, _) => (Tok::BrkCl, 1),
-            (Raw::Slash, _) => (Tok::Slash, 1),
-            (Raw::Asterisk, _) => (Tok::Asterisk, 1),
-            (Raw::Hat, _) => (Tok::Hat, 1),
-            (Raw::Less, Raw::Equal) => (Tok::Comp(Cmp::Leq), 2),
-            (Raw::Less, _) => (Tok::Comp(Cmp::L), 1),
-            (Raw::Greater, Raw::Equal) => (Tok::Comp(Cmp::Geq), 2),
-            (Raw::Greater, _) => (Tok::Comp(Cmp::G), 1),
-            (Raw::Equal, _) => (Tok::Comp(Cmp::Eq), 1),
-            _ => return err("unexpected ':' (R:1171)"),
-        };
-        out.push(tok);
-        i += used;
-    }
-    Ok(out)
-}
-
-// ---------------------------------------------------------------------------
-// Stage 3: section splitter.
-// ---------------------------------------------------------------------------
-
-/// `[begin, end)` token range per section keyword (`Reader::sectiontokens`).
-type Sections = [Option<(usize, usize)>; 9];
-
-/// `Reader::splittokens` (R:849-913), including its `debug_open_section` asserts.
-fn split(toks: &[Tok]) -> Result<Sections, LpFileError> {
-    let mut sec: Sections = [None; 9];
-    let mut current: Option<Kw> = None;
-    let mut open = false;
-    let n = toks.len();
-    for it in 0..n {
-        let Tok::SecId(kw) = toks[it] else { continue };
-        let new_type = current != Some(kw);
-        if new_type {
-            if let Some(c) = current {
-                lpassert(open, "section bookkeeping (R:868)")?;
-                sec[c.slot()].as_mut().unwrap().1 = it;
-                open = false;
-                current = None;
-            }
-        }
-        let next = it + 1;
-        let next_kw = match toks.get(next) {
-            None => None,
-            Some(Tok::SecId(k)) => Some(*k),
-            Some(_) => {
-                // Next section is non-empty.
-                if new_type {
-                    current = Some(kw);
-                    lpassert(sec[kw.slot()].is_none(), "repeated section (R:896)")?;
-                    lpassert(!open, "section bookkeeping (R:899)")?;
-                    sec[kw.slot()] = Some((next, usize::MAX));
-                    open = true;
-                }
-                lpassert(open != current.is_none(), "section bookkeeping (R:905)")?;
-                continue;
-            }
-        };
-        // End of tokens or an empty section. At the end of the tokens R reads the
-        // keyword of the past-the-end element; any value but the open section's
-        // closes it, which is what highspy does (`general x general` at EOF reads).
-        if let Some(c) = current {
-            if next_kw != Some(c) {
-                lpassert(open, "section bookkeeping (R:884)")?;
-                sec[c.slot()].as_mut().unwrap().1 = it;
-                open = false;
-            }
-        }
-        current = None;
-        lpassert(!open, "empty section inside an open section (R:889)")?;
-    }
-    lpassert(
-        current.is_none(),
-        "last section not closed by a keyword (R:910)",
-    )?;
-    Ok(sec)
-}
-
-// ---------------------------------------------------------------------------
-// Stage 4: section parsers (model.hpp, builder.hpp).
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum VarType {
-    Continuous,
-    Binary,
-    General,
-    SemiContinuous,
-    SemiInteger,
-}
-
-struct Var {
-    ty: VarType,
-    lb: f64,
-    ub: f64,
-    name: Vec<u8>,
-}
-
-#[derive(Default)]
-struct Expr {
-    lin: Vec<(usize, f64)>,
-    quad: Vec<(usize, usize, f64)>,
-    offset: f64,
-    name: Vec<u8>,
-}
-
-struct Con {
-    lb: f64,
-    ub: f64,
-    expr: Expr,
-}
-
-#[derive(Default)]
-struct Builder {
-    index: HashMap<Vec<u8>, usize>,
-    vars: Vec<Var>,
-}
-
-impl Builder {
-    /// `Builder::getvarbyname` (B:15-22): created on first mention, `[0, +inf]`.
-    fn var(&mut self, name: &[u8]) -> usize {
-        if let Some(&j) = self.index.get(name) {
-            return j;
-        }
-        let j = self.vars.len();
-        self.vars.push(Var {
-            ty: VarType::Continuous,
-            lb: 0.0,
-            ub: INF,
-            name: name.to_vec(),
-        });
-        self.index.insert(name.to_vec(), j);
-        j
-    }
-}
-
-fn is_const(t: Option<&Tok>) -> Option<f64> {
-    match t {
-        Some(Tok::Const(v)) => Some(*v),
-        _ => None,
-    }
-}
-
-fn is_var(t: Option<&Tok>) -> Option<&[u8]> {
-    match t {
-        Some(Tok::VarId(s)) => Some(s),
-        _ => None,
-    }
-}
-
-/// `Reader::parseexpression` (R:366-532) on `toks[*it..end]`.
-fn parse_expression(
-    b: &mut Builder,
-    toks: &[Tok],
-    it: &mut usize,
-    end: usize,
-    expr: &mut Expr,
-    isobj: bool,
-) -> Result<(), LpFileError> {
-    // Tokens at or past `end` are invisible (HiGHS compares iterators with `end`).
-    let at = |k: usize| if k < end { toks.get(k) } else { None };
-    if let Some(Tok::ConId(s)) = at(*it) {
-        expr.name = s.clone();
-        *it += 1;
-    }
-    while *it < end {
-        let cur = &toks[*it];
-        // const var
-        if let (Some(c), Some(name)) = (is_const(Some(cur)), is_var(at(*it + 1))) {
-            let j = b.var(name);
-            expr.lin.push((j, c));
-            *it += 2;
-            continue;
-        }
-        if let Tok::Const(c) = cur {
-            expr.offset += *c;
-            *it += 1;
-            continue;
-        }
-        if let Tok::VarId(name) = cur {
-            let j = b.var(name);
-            expr.lin.push((j, 1.0));
-            *it += 1;
-            continue;
-        }
-        if *cur == Tok::BrkOp && *it + 1 < end {
-            *it += 1;
-            while *it < end && toks[*it] != Tok::BrkCl {
-                let (t0, t1, t2, t3) = (at(*it), at(*it + 1), at(*it + 2), at(*it + 3));
-                // const var ^ const
-                if let (Some(c), Some(name), Some(Tok::Hat), Some(e)) =
-                    (is_const(t0), is_var(t1), t2, is_const(t3))
-                {
-                    lpassert(e == 2.0, "exponent other than 2 (R:432)")?;
-                    let j1 = b.var(name);
-                    let j2 = b.var(name);
-                    expr.quad.push((j1, j2, c));
-                    *it += 4;
-                    continue;
-                }
-                // var ^ const
-                if let (Some(name), Some(Tok::Hat), Some(e)) = (is_var(t0), t1, is_const(t2)) {
-                    lpassert(e == 2.0, "exponent other than 2 (R:453)")?;
-                    let j1 = b.var(name);
-                    let j2 = b.var(name);
-                    expr.quad.push((j1, j2, 1.0));
-                    *it = (*it + 3).min(end);
-                    continue;
-                }
-                // const var * var
-                if let (Some(c), Some(n1), Some(Tok::Asterisk), Some(n2)) =
-                    (is_const(t0), is_var(t1), t2, is_var(t3))
-                {
-                    let j1 = b.var(n1);
-                    let j2 = b.var(n2);
-                    expr.quad.push((j1, j2, c));
-                    *it += 4;
-                    continue;
-                }
-                // var * var
-                if let (Some(n1), Some(Tok::Asterisk), Some(n2)) = (is_var(t0), t1, is_var(t2)) {
-                    let j1 = b.var(n1);
-                    let j2 = b.var(n2);
-                    expr.quad.push((j1, j2, 1.0));
-                    *it = (*it + 3).min(end);
-                    continue;
-                }
-                break;
-            }
-            if isobj {
-                // R:505-518: "] / 2" must follow in the objective.
-                lpassert(*it < end, "unclosed quadratic bracket")?;
-                lpassert(at(*it + 2).is_some(), "quadratic bracket without '/ 2'")?;
-                lpassert(toks[*it] == Tok::BrkCl, "expected ']' (R:513)")?;
-                lpassert(
-                    toks[*it + 1] == Tok::Slash,
-                    "expected '/' after ']' (R:514)",
-                )?;
-                lpassert(
-                    is_const(at(*it + 2)) == Some(2.0),
-                    "quadratic bracket not divided by 2 (R:515-516)",
-                )?;
-                *it += 3;
-            } else {
-                lpassert(*it < end, "unclosed quadratic bracket (R:519)")?;
-                lpassert(toks[*it] == Tok::BrkCl, "expected ']' (R:520)")?;
-                *it += 1;
-            }
-            continue;
-        }
-        break;
-    }
-    Ok(())
-}
-
-struct Parsed {
-    b: Builder,
+struct Parser<'a> {
+    text: &'a [u8],
+    toks: Vec<Token>,
+    next_tok: usize,
+    // The model, as `HighsLp` fields.
     maximize: bool,
-    obj: Expr,
-    cons: Vec<Con>,
+    offset: f64,
+    objective_name: Vec<u8>,
+    col_names: Vec<Vec<u8>>,
+    col_index: HashMap<Vec<u8>, usize>,
+    col_cost: Vec<f64>,
+    col_lower: Vec<f64>,
+    col_upper: Vec<f64>,
+    integrality: Vec<u8>,
+    row_names: Vec<Vec<u8>>,
+    row_lower: Vec<f64>,
+    row_upper: Vec<f64>,
+    // Row-wise matrix.
+    ar_start: Vec<usize>,
+    ar_index: Vec<usize>,
+    ar_value: Vec<f64>,
+    has_integrality: bool,
+    binary_cols: Vec<usize>,
+    hessian_entries: Vec<HessianEntry>,
+    used_prefix: bool,
+    prefix_ok: bool,
+    row_entries: Vec<RowEntry>,
+    col_slot: Vec<Option<usize>>,
 }
 
-/// `Reader::processsections` (R:837-847): FIXED order, whatever the file order.
-fn process_sections(toks: &[Tok], sec: &Sections) -> Result<Parsed, LpFileError> {
-    let mut b = Builder::default();
-    let range = |kw: Kw| sec[kw.slot()];
-    // processendsec (R:833): an `end` section with content is an error. Checked
-    // last by HiGHS; any error is an error, so order does not matter.
-    lpassert(range(Kw::End).is_none(), "content after 'end' (R:834)")?;
+/// HighsVarType codes.
+const CONTINUOUS: u8 = 0;
+const INTEGER: u8 = 1;
+const SEMI_CONTINUOUS: u8 = 2;
+const SEMI_INTEGER: u8 = 3;
 
-    // processobjsec (R:534-553).
-    let mut obj = Expr::default();
-    let mut maximize = false;
-    if let Some((s, e)) = range(Kw::ObjMin).or(range(Kw::ObjMax)) {
-        maximize = range(Kw::ObjMin).is_none();
-        let mut it = s;
-        parse_expression(&mut b, toks, &mut it, e, &mut obj, true)?;
-        lpassert(it == e, "unparsed tokens in the objective (R:541)")?;
-    }
-
-    // processconsec (R:555-592).
-    let mut cons = Vec::new();
-    if let Some((mut it, e)) = range(Kw::Con) {
-        while it != e {
-            let mut con = Con {
-                lb: -INF,
-                ub: INF,
-                expr: Expr::default(),
-            };
-            parse_expression(&mut b, toks, &mut it, e, &mut con.expr, false)?;
-            lpassert(it != e, "constraint without a comparison (R:566)")?;
-            let Tok::Comp(dir) = toks[it] else {
-                return err("constraint without a comparison (R:567)");
-            };
-            it += 1;
-            lpassert(it != e, "constraint without a right-hand side (R:572)")?;
-            let Some(v) = is_const(Some(&toks[it])) else {
-                return err("right-hand side is not a constant (R:573)");
-            };
-            match dir {
-                Cmp::Eq => {
-                    con.lb = v;
-                    con.ub = v;
-                }
-                Cmp::Leq => con.ub = v,
-                Cmp::Geq => con.lb = v,
-                _ => return err("'<' or '>' in a constraint (R:585)"),
-            }
-            cons.push(con);
-            it += 1;
+impl<'a> Parser<'a> {
+    fn new(text: &'a [u8], toks: Vec<Token>) -> Self {
+        Parser {
+            text,
+            toks,
+            next_tok: 0,
+            maximize: false,
+            offset: 0.0,
+            objective_name: Vec::new(),
+            col_names: Vec::new(),
+            col_index: HashMap::new(),
+            col_cost: Vec::new(),
+            col_lower: Vec::new(),
+            col_upper: Vec::new(),
+            integrality: Vec::new(),
+            row_names: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+            ar_start: vec![0],
+            ar_index: Vec::new(),
+            ar_value: Vec::new(),
+            has_integrality: false,
+            binary_cols: Vec::new(),
+            hessian_entries: Vec::new(),
+            used_prefix: false,
+            prefix_ok: true,
+            row_entries: Vec::new(),
+            col_slot: Vec::new(),
         }
     }
 
-    // processboundssec (R:594-712).
-    if let Some((mut it, e)) = range(Kw::Bounds) {
-        let at = |k: usize| if k < e { toks.get(k) } else { None };
-        while it != e {
-            if let (Some(Tok::VarId(name)), Some(Tok::Free)) = (at(it), at(it + 1)) {
-                let j = b.var(name);
-                b.vars[j].lb = -INF;
-                b.vars[j].ub = INF;
-                it += 2;
-                continue;
-            }
-            let (t0, t1, t2, t3, t4) = (at(it), at(it + 1), at(it + 2), at(it + 3), at(it + 4));
-            // CONST COMP VAR COMP CONST
-            if let (Some(lo), Some(Tok::Comp(d1)), Some(name), Some(Tok::Comp(d3)), Some(hi)) =
-                (is_const(t0), t1, is_var(t2), t3, is_const(t4))
+    /// The token `n` places ahead (the end-of-file token repeats).
+    fn peek(&self, n: usize) -> Token {
+        self.toks[(self.next_tok + n).min(self.toks.len() - 1)]
+    }
+
+    fn next(&mut self) -> Token {
+        let t = self.peek(0);
+        if self.next_tok < self.toks.len() - 1 {
+            self.next_tok += 1;
+        }
+        t
+    }
+
+    fn bytes(&self, t: &Token) -> &'a [u8] {
+        &self.text[t.pos..t.pos + t.len]
+    }
+
+    fn eq_ci(&self, t: &Token, lower: &[u8]) -> bool {
+        t.len == lower.len()
+            && self
+                .bytes(t)
+                .iter()
+                .zip(lower)
+                .all(|(a, b)| a.to_ascii_lowercase() == *b)
+    }
+
+    fn describe(&self, t: &Token) -> String {
+        if t.kind == Kind::EndOfFile {
+            "end of file".to_string()
+        } else {
+            format!("`{}`", String::from_utf8_lossy(self.bytes(t)))
+        }
+    }
+
+    fn error<T>(&self, t: &Token, message: impl Into<String>) -> Result<T, LpFileError> {
+        err(format!("line {}: {}", t.line, message.into()))
+    }
+
+    /// `keywordAt`: the section starting at token `i`, and its length in tokens.
+    fn keyword_at(&self, i: usize) -> (Section, usize) {
+        let token = self.peek(i);
+        if token.kind != Kind::Identifier || !token.line_start {
+            return (Section::None, 0);
+        }
+        // A keyword followed by ":" is a name.
+        let second = self.peek(i + 1);
+        if second.kind == Kind::Colon {
+            return (Section::None, 0);
+        }
+        if (self.eq_ci(&token, b"subject") && self.eq_ci(&second, b"to"))
+            || (self.eq_ci(&token, b"such") && self.eq_ci(&second, b"that"))
+        {
+            return if second.line_start {
+                (Section::None, 0)
+            } else {
+                (Section::Constraints, 2)
+            };
+        }
+        // "semi-continuous", possibly with spaces, but on one line.
+        if self.eq_ci(&token, b"semi") && second.kind == Kind::Minus && !second.line_start {
+            let third = self.peek(i + 2);
+            if third.kind == Kind::Identifier
+                && !third.line_start
+                && self.eq_ci(&third, b"continuous")
             {
-                lpassert(*d1 == Cmp::Leq, "double bound must use '<=' (R:651)")?;
-                lpassert(*d3 == Cmp::Leq, "double bound must use '<=' (R:652)")?;
-                let j = b.var(name);
-                b.vars[j].lb = lo;
-                b.vars[j].ub = hi;
-                it += 5;
-                continue;
+                return (Section::Semi, 3);
             }
-            // CONST COMP VAR
-            if let (Some(v), Some(Tok::Comp(d)), Some(name)) = (is_const(t0), t1, is_var(t2)) {
-                let j = b.var(name);
-                match d {
-                    Cmp::Leq => b.vars[j].lb = v,
-                    Cmp::Geq => b.vars[j].ub = v,
-                    Cmp::Eq => {
-                        b.vars[j].lb = v;
-                        b.vars[j].ub = v;
-                    }
-                    _ => return err("'<' or '>' in a bound (R:677)"),
+        }
+        for &(kw, section) in KEYWORDS {
+            if self.eq_ci(&token, kw) {
+                return (section, 1);
+            }
+        }
+        (Section::None, 0)
+    }
+
+    fn at_keyword(&self) -> bool {
+        self.keyword_at(0).0 != Section::None
+    }
+
+    fn at_section_end(&self) -> bool {
+        self.peek(0).kind == Kind::EndOfFile || self.at_keyword()
+    }
+
+    /// `getColumn`: the column named by the token, created `[0, inf]` if new.
+    fn get_column(&mut self, t: &Token) -> usize {
+        let name = self.bytes(t);
+        if let Some(&col) = self.col_index.get(name) {
+            return col;
+        }
+        let col = self.col_names.len();
+        self.col_names.push(name.to_vec());
+        self.col_index.insert(name.to_vec(), col);
+        self.col_cost.push(0.0);
+        self.col_lower.push(0.0);
+        self.col_upper.push(INF);
+        self.integrality.push(CONTINUOUS);
+        self.col_slot.push(None);
+        col
+    }
+
+    fn parse(&mut self) -> Result<(), LpFileError> {
+        // An empty file (or one with only comments) is an empty model.
+        if self.peek(0).kind == Kind::EndOfFile {
+            return Ok(());
+        }
+        let mut objective_line: Option<usize> = None;
+        loop {
+            let token = self.peek(0);
+            let (section, num_tokens) = self.keyword_at(0);
+            if section == Section::None {
+                if token.kind == Kind::EndOfFile {
+                    return self.error(&token, "expected `end`, found end of file");
                 }
-                it += 3;
-                continue;
+                return self.error(
+                    &token,
+                    format!(
+                        "expected a section keyword, found {}",
+                        self.describe(&token)
+                    ),
+                );
             }
-            // VAR COMP CONST
-            if let (Some(name), Some(Tok::Comp(d)), Some(v)) = (is_var(t0), t1, is_const(t2)) {
-                let j = b.var(name);
-                match d {
-                    Cmp::Leq => b.vars[j].ub = v,
-                    Cmp::Geq => b.vars[j].lb = v,
-                    Cmp::Eq => {
-                        b.vars[j].lb = v;
-                        b.vars[j].ub = v;
+            for _ in 0..num_tokens {
+                self.next();
+            }
+            match section {
+                Section::Minimize | Section::Maximize => {
+                    if let Some(first) = objective_line {
+                        return self.error(
+                            &token,
+                            format!(
+                                "the objective is defined more than once (first on line {first})"
+                            ),
+                        );
                     }
-                    _ => return err("'<' or '>' in a bound (R:701)"),
+                    objective_line = Some(token.line);
+                    self.maximize = section == Section::Maximize;
+                    self.parse_objective()?;
                 }
-                it += 3;
-                continue;
+                Section::Constraints => {
+                    while !self.at_section_end() {
+                        self.parse_constraint()?;
+                    }
+                }
+                Section::Bounds => {
+                    while !self.at_section_end() {
+                        self.parse_bound()?;
+                    }
+                }
+                Section::General | Section::Binary | Section::Semi => {
+                    self.parse_variable_list(section)?;
+                }
+                Section::Sos => {
+                    return self.error(&token, "SOS constraints are not supported by HiGHS")
+                }
+                Section::End => {
+                    let after = self.peek(0);
+                    if after.kind != Kind::EndOfFile {
+                        return self.error(
+                            &after,
+                            format!("expected end of file, found {}", self.describe(&after)),
+                        );
+                    }
+                    return Ok(());
+                }
+                Section::None => unreachable!(),
             }
-            return err("unrecognised bound (R:710)");
         }
     }
 
-    // processgensec, processbinsec, processsemisec (R:714-782).
-    for kw in [Kw::Gen, Kw::Bin, Kw::Semi] {
-        let Some((s, e)) = range(kw) else { continue };
-        for t in &toks[s..e] {
-            if let Tok::SecId(k) = t {
-                lpassert(*k == kw, "foreign keyword in a type section (R:723)")?;
+    /// `<name> := (<identifier> | <number>) ":"`
+    fn parse_name(&mut self) -> Option<Vec<u8>> {
+        let kind = self.peek(0).kind;
+        if !matches!(kind, Kind::Identifier | Kind::Number) || self.peek(1).kind != Kind::Colon {
+            return None;
+        }
+        let t = self.next();
+        self.next(); // :
+        Some(self.bytes(&t).to_vec())
+    }
+
+    /// `<number> := [<signs>] (<constant> | "inf" | "infinity")`
+    fn parse_number(&mut self, label: &str) -> Result<f64, LpFileError> {
+        let mut sign = 1.0f64;
+        while is_sign(&self.peek(0)) {
+            if self.next().kind == Kind::Minus {
+                sign = -sign;
+            }
+        }
+        let token = self.peek(0);
+        if token.kind == Kind::Number {
+            self.next();
+            return Ok(sign * token.value);
+        }
+        if token.kind == Kind::Identifier
+            && (self.eq_ci(&token, b"inf") || self.eq_ci(&token, b"infinity"))
+        {
+            self.next();
+            return Ok(sign * INF);
+        }
+        self.error(
+            &token,
+            format!(
+                "expected a number, found {} ({label})",
+                self.describe(&token)
+            ),
+        )
+    }
+
+    fn parse_variable(&mut self, label: &str) -> Result<usize, LpFileError> {
+        let var = self.peek(0);
+        if var.kind != Kind::Identifier || self.at_keyword() {
+            return self.error(
+                &var,
+                format!(
+                    "expected a variable, found {} ({label})",
+                    self.describe(&var)
+                ),
+            );
+        }
+        let t = self.next();
+        Ok(self.get_column(&t))
+    }
+
+    /// The next token must be on a new line.
+    fn check_new_line(&self, label: &str) -> Result<(), LpFileError> {
+        let t = self.peek(0);
+        if t.kind != Kind::EndOfFile && !t.line_start {
+            return self.error(
+                &t,
+                format!("expected a new line, found {} ({label})", self.describe(&t)),
+            );
+        }
+        Ok(())
+    }
+
+    fn parse_objective(&mut self) -> Result<(), LpFileError> {
+        if let Some(name) = self.parse_name() {
+            self.objective_name = name;
+        }
+        self.parse_expression(true)
+    }
+
+    /// `<expression> := [<signs>] <term> { <signs> <term> }`; in the objective it ends
+    /// at the next section, in a constraint at the comparison.
+    fn parse_expression(&mut self, objective: bool) -> Result<(), LpFileError> {
+        let mut first = true;
+        loop {
+            let token = self.peek(0);
+            if token.kind == Kind::EndOfFile
+                || self.at_keyword()
+                || (!objective && is_comparison(&token))
+            {
+                return Ok(());
+            }
+            let mut has_sign = false;
+            let mut sign = 1.0f64;
+            while is_sign(&self.peek(0)) {
+                if self.next().kind == Kind::Minus {
+                    sign = -sign;
+                }
+                has_sign = true;
+            }
+            if !first && !has_sign {
+                return self.error(
+                    &token,
+                    format!("expected `+` or `-`, found {}", self.describe(&token)),
+                );
+            }
+            self.parse_term(sign, objective)?;
+            first = false;
+        }
+    }
+
+    /// `<term> := <constant> [["*"] <identifier>] | <identifier> | <quadratic>`
+    fn parse_term(&mut self, sign: f64, objective: bool) -> Result<(), LpFileError> {
+        let token = self.peek(0);
+        if token.kind == Kind::Number {
+            self.next();
+            let coef = sign * token.value;
+            let next = self.peek(0);
+            if next.kind == Kind::Times {
+                self.next();
+                let col = self.parse_variable("expected a variable after `*`")?;
+                self.add_variable_term(col, coef, objective)?;
+            } else if next.kind == Kind::Identifier && !self.at_keyword() {
+                let var = self.next();
+                let col = self.get_column(&var);
+                self.add_variable_term(col, coef, objective)?;
+            } else if next.kind == Kind::OpenBracket {
+                return self.error(&next, "a coefficient cannot multiply `[ ]`");
+            } else if objective {
+                self.offset += coef;
+            }
+            // else: a constant on the left-hand side of a constraint is ignored
+            // (a warning in HiGHS, for backwards compatibility).
+        } else if token.kind == Kind::Identifier && !self.at_keyword() {
+            let var = self.next();
+            let col = self.get_column(&var);
+            self.add_variable_term(col, sign, objective)?;
+        } else if token.kind == Kind::OpenBracket {
+            if !objective {
+                return self.error(&token, "quadratic constraints are not supported by HiGHS");
+            }
+            self.parse_quadratic(sign)?;
+        } else {
+            return self.error(
+                &token,
+                format!("expected a term, found {}", self.describe(&token)),
+            );
+        }
+        Ok(())
+    }
+
+    fn add_variable_term(
+        &mut self,
+        col: usize,
+        coef: f64,
+        objective: bool,
+    ) -> Result<(), LpFileError> {
+        if objective {
+            self.col_cost[col] += coef;
+        } else {
+            // Sum repeated variables (a warning in HiGHS).
+            match self.col_slot[col] {
+                None => {
+                    self.col_slot[col] = Some(self.row_entries.len());
+                    self.row_entries.push(RowEntry { col, value: coef });
+                }
+                Some(slot) => self.row_entries[slot].value += coef,
+            }
+        }
+        let next = self.peek(0);
+        if matches!(next.kind, Kind::Times | Kind::Power) {
+            return self.error(&next, "quadratic terms must be inside `[` and `]`");
+        }
+        Ok(())
+    }
+
+    /// `<quadratic> := "[" [[<signs>] <quad-term> { <signs> <quad-term> }] "]" ["/" "2"]`.
+    /// The terms of 2 q(x) are added, and halved when "/ 2" follows.
+    fn parse_quadratic(&mut self, sign: f64) -> Result<(), LpFileError> {
+        let open = self.next();
+        let first_entry = self.hessian_entries.len();
+        let mut first = true;
+        while self.peek(0).kind != Kind::CloseBracket {
+            let token = self.peek(0);
+            if token.kind == Kind::EndOfFile || self.at_keyword() {
+                return self.error(
+                    &token,
+                    format!(
+                        "expected `]`, found {} (the `[` on line {} is never closed)",
+                        self.describe(&token),
+                        open.line
+                    ),
+                );
+            }
+            let mut has_sign = false;
+            let mut term_sign = sign;
+            while is_sign(&self.peek(0)) {
+                if self.next().kind == Kind::Minus {
+                    term_sign = -term_sign;
+                }
+                has_sign = true;
+            }
+            if !first && !has_sign {
+                return self.error(
+                    &token,
+                    format!("expected `+`, `-`, or `]`, found {}", self.describe(&token)),
+                );
+            }
+            self.parse_quadratic_term(term_sign, 2.0)?;
+            first = false;
+        }
+        self.next(); // ]
+        if self.peek(0).kind == Kind::Divide {
+            self.next();
+            let two = self.peek(0);
+            if two.kind != Kind::Number || two.value != 2.0 {
+                return self.error(
+                    &two,
+                    format!("expected `2` after `/`, found {}", self.describe(&two)),
+                );
+            }
+            self.next();
+            for e in &mut self.hessian_entries[first_entry..] {
+                e.value /= 2.0;
+            }
+        }
+        Ok(())
+    }
+
+    /// `<quad-term> := [<constant> ["*"]] <identifier> ("^" "2" | "*" <identifier>)`
+    fn parse_quadratic_term(&mut self, sign: f64, scale: f64) -> Result<(), LpFileError> {
+        let mut coef = sign * scale;
+        if self.peek(0).kind == Kind::Number {
+            coef *= self.next().value;
+            if self.peek(0).kind == Kind::Times {
+                self.next();
+            }
+        }
+        let col1 = self.parse_variable("expected a variable in this term")?;
+        let op = self.peek(0);
+        let mut col2 = col1;
+        if op.kind == Kind::Power {
+            self.next();
+            let two = self.peek(0);
+            if two.kind != Kind::Number || two.value != 2.0 {
+                return self.error(
+                    &two,
+                    format!("expected `2` after `^`, found {}", self.describe(&two)),
+                );
+            }
+            self.next();
+        } else if op.kind == Kind::Times {
+            self.next();
+            col2 = self.parse_variable("expected a variable after `*`")?;
+        } else {
+            return self.error(
+                &op,
+                format!("expected `^` or `*`, found {}", self.describe(&op)),
+            );
+        }
+        // addHessianEntry: coef * x[col1] * x[col2] added to x'Qx.
+        if col1 == col2 {
+            self.hessian_entries.push(HessianEntry {
+                col: col1,
+                row: col1,
+                value: coef,
+            });
+        } else {
+            self.hessian_entries.push(HessianEntry {
+                col: col1,
+                row: col2,
+                value: coef / 2.0,
+            });
+            self.hessian_entries.push(HessianEntry {
+                col: col2,
+                row: col1,
+                value: coef / 2.0,
+            });
+        }
+        Ok(())
+    }
+
+    /// Constraints that are valid LP syntax but not supported by HiGHS.
+    fn check_unsupported_constraint(&self) -> Result<(), LpFileError> {
+        let t = self.peek(0);
+        // <name> S1:: x1:1 x2:2
+        if matches!(t.kind, Kind::Identifier | Kind::Number)
+            && self.peek(1).kind == Kind::Colon
+            && self.peek(2).kind == Kind::Colon
+        {
+            return self.error(&t, "SOS constraints are not supported by HiGHS");
+        }
+        // z = 1 -> x + y <= 1
+        if t.kind == Kind::Identifier
+            && self.peek(1).kind == Kind::Equal
+            && self.peek(2).kind == Kind::Number
+            && self.peek(3).kind == Kind::Implies
+        {
+            return self.error(&t, "indicator constraints are not supported by HiGHS");
+        }
+        Ok(())
+    }
+
+    /// `<constraint> := [<name>] <expression> <comparison> <number> <newline>`
+    fn parse_constraint(&mut self) -> Result<(), LpFileError> {
+        self.check_unsupported_constraint()?;
+        let mut name = Vec::new();
+        if let Some(n) = self.parse_name() {
+            name = n;
+            self.check_unsupported_constraint()?;
+        }
+        self.parse_expression(false)?;
+        let comparison = self.peek(0);
+        if !is_comparison(&comparison) {
+            return self.error(
+                &comparison,
+                format!(
+                    "expected a comparison, found {}",
+                    self.describe(&comparison)
+                ),
+            );
+        }
+        self.next();
+        let rhs = self.parse_number("expected the right-hand side")?;
+        let after = self.peek(0);
+        if after.kind == Kind::Identifier && !after.line_start {
+            return self.error(
+                &after,
+                format!(
+                    "expected a new line, found {} (variable on the right-hand side)",
+                    self.describe(&after)
+                ),
+            );
+        }
+        self.check_new_line("expected the constraint to end before this")?;
+        let lower = if comparison.kind != Kind::Less {
+            rhs
+        } else {
+            -INF
+        };
+        let upper = if comparison.kind != Kind::Greater {
+            rhs
+        } else {
+            INF
+        };
+        self.finish_row(name, lower, upper);
+        Ok(())
+    }
+
+    fn finish_row(&mut self, mut name: Vec<u8>, lower: f64, upper: f64) {
+        for e in self.row_entries.drain(..) {
+            self.col_slot[e.col] = None;
+            if e.value == 0.0 {
                 continue;
             }
-            let Tok::VarId(name) = t else {
-                return err("non-variable in a type section (R:727)");
+            self.ar_index.push(e.col);
+            self.ar_value.push(e.value);
+        }
+        self.ar_start.push(self.ar_index.len());
+        // An unnamed row gets a name, remembering if it could clash with one in the file.
+        if name.starts_with(ROW_PREFIX) {
+            self.prefix_ok = false;
+        } else if name.is_empty() {
+            name = format!("HiGHS_R{}", self.row_names.len()).into_bytes();
+            self.used_prefix = true;
+        }
+        self.row_names.push(name);
+        self.row_lower.push(lower);
+        self.row_upper.push(upper);
+    }
+
+    /// `<bound> := <identifier> "free" | <identifier> <comparison> <number>
+    ///           | <number> <comparison> <identifier> [<comparison> <number>]`,
+    /// each followed by a new line.
+    fn parse_bound(&mut self) -> Result<(), LpFileError> {
+        let token = self.peek(0);
+        let infinity = self.eq_ci(&token, b"inf") || self.eq_ci(&token, b"infinity");
+        if token.kind == Kind::Identifier && !infinity {
+            // x free | x <= 1
+            let t = self.next();
+            let col = self.get_column(&t);
+            let op = self.peek(0);
+            if op.kind == Kind::Identifier && self.eq_ci(&op, b"free") {
+                self.next();
+                self.col_lower[col] = -INF;
+                self.col_upper[col] = INF;
+            } else if is_comparison(&op) {
+                self.next();
+                let value = self.parse_number("expected the value of the bound")?;
+                if op.kind != Kind::Less {
+                    self.col_lower[col] = value;
+                }
+                if op.kind != Kind::Greater {
+                    self.col_upper[col] = value;
+                }
+            } else {
+                return self.error(
+                    &op,
+                    format!(
+                        "expected `free` or a comparison, found {}",
+                        self.describe(&op)
+                    ),
+                );
+            }
+        } else {
+            // 1 <= x | 1 <= x <= 2
+            if !is_sign(&token) && token.kind != Kind::Number && !infinity {
+                return self.error(
+                    &token,
+                    format!("expected a bound, found {}", self.describe(&token)),
+                );
+            }
+            let value = self.parse_number("expected a number")?;
+            let op = self.peek(0);
+            if !is_comparison(&op) {
+                return self.error(
+                    &op,
+                    format!("expected a comparison, found {}", self.describe(&op)),
+                );
+            }
+            self.next();
+            let col = self.parse_variable("expected a variable")?;
+            let op2 = self.peek(0);
+            if is_comparison(&op2) {
+                // 1 <= x <= 2 | 2 >= x >= 1
+                if op.kind == Kind::Equal {
+                    return self.error(&op, "a bound on both sides of a variable cannot use `=`");
+                }
+                if op2.kind != op.kind {
+                    return self.error(
+                        &op2,
+                        "the comparisons in a bound on both sides of a variable must match",
+                    );
+                }
+                self.next();
+                let value2 = self.parse_number("expected the value of the bound")?;
+                let less = op.kind == Kind::Less;
+                self.col_lower[col] = if less { value } else { value2 };
+                self.col_upper[col] = if less { value2 } else { value };
+            } else {
+                if op.kind != Kind::Greater {
+                    self.col_lower[col] = value;
+                }
+                if op.kind != Kind::Less {
+                    self.col_upper[col] = value;
+                }
+            }
+        }
+        self.check_new_line("each bound must be on its own line")
+    }
+
+    /// `{ <identifier> }` in the general, binary and semi-continuous sections.
+    fn parse_variable_list(&mut self, section: Section) -> Result<(), LpFileError> {
+        while !self.at_section_end() {
+            let col = self.parse_variable("expected a variable")?;
+            let ty = self.integrality[col];
+            let semi = ty == SEMI_CONTINUOUS || ty == SEMI_INTEGER;
+            let integer = ty == INTEGER || ty == SEMI_INTEGER;
+            self.integrality[col] = if section == Section::Semi {
+                if integer {
+                    SEMI_INTEGER
+                } else {
+                    SEMI_CONTINUOUS
+                }
+            } else {
+                // A binary column has upper bound 1 unless the bounds section gives one.
+                if section == Section::Binary {
+                    self.binary_cols.push(col);
+                }
+                if semi {
+                    SEMI_INTEGER
+                } else {
+                    INTEGER
+                }
             };
-            let j = b.var(name);
-            let v = &mut b.vars[j];
-            match kw {
-                Kw::Gen => {
-                    v.ty = if v.ty == VarType::SemiContinuous {
-                        VarType::SemiInteger
-                    } else {
-                        VarType::General
-                    }
-                }
-                Kw::Bin => {
-                    v.ty = VarType::Binary;
-                    if v.ub == INF {
-                        v.ub = 1.0; // R:732: only an infinite upper bound becomes 1
-                    }
-                }
-                _ => {
-                    v.ty = if v.ty == VarType::General {
-                        VarType::SemiInteger
-                    } else {
-                        VarType::SemiContinuous
-                    }
-                }
-            }
+            self.has_integrality = true;
         }
+        Ok(())
     }
+}
 
-    // processsossec (R:784-831).
-    let mut n_sos = 0usize;
-    if let Some((mut it, e)) = range(Kw::Sos) {
-        while it != e {
-            lpassert(
-                matches!(toks[it], Tok::ConId(_)),
-                "SOS without a name (R:797)",
-            )?;
-            it += 1;
-            lpassert(it != e, "SOS without a type (R:802)")?;
-            lpassert(
-                matches!(toks[it], Tok::SosType(_)),
-                "SOS without a type (R:803)",
-            )?;
-            it += 1;
-            while it != e {
-                let Tok::ConId(name) = &toks[it] else { break };
-                if let Some(Tok::Const(_)) = toks.get(it + 1).filter(|_| it + 1 < e) {
-                    b.var(name);
-                    it += 2;
-                    continue;
-                }
-                break;
-            }
-            n_sos += 1;
+/// `Parser::finish`'s square Hessian: entries sorted by (column, row), repeats summed
+/// (in sorted order, starting from 0), zero sums dropped; `None` when empty. HiGHS's
+/// `std::sort` is not stable; see the module documentation.
+fn finish_hessian(mut entries: Vec<HessianEntry>, num_col: usize) -> Option<LpHessian> {
+    entries.sort_by_key(|e| (e.col, e.row));
+    let mut start: Vec<usize> = Vec::new();
+    let mut index = Vec::new();
+    let mut value = Vec::new();
+    let mut i = 0;
+    while i < entries.len() {
+        let (col, row) = (entries[i].col, entries[i].row);
+        let mut v = 0.0f64;
+        while i < entries.len() && entries[i].col == col && entries[i].row == row {
+            v += entries[i].value;
+            i += 1;
         }
+        if v == 0.0 {
+            continue;
+        }
+        while start.len() <= col {
+            start.push(index.len());
+        }
+        index.push(row);
+        value.push(v);
     }
-    // F:31-35: any SOS set (even an empty one) makes `m.soss` non-empty.
-    if n_sos > 0 {
-        return err("SOS not supported by HiGHS (F:32)");
+    if index.is_empty() {
+        return None;
     }
-    Ok(Parsed {
-        b,
-        maximize,
-        obj,
-        cons,
+    while start.len() <= num_col {
+        start.push(index.len());
+    }
+    Some(LpHessian {
+        dim: num_col,
+        start,
+        index,
+        value,
     })
 }
 
 // ---------------------------------------------------------------------------
-// Stages 5-6: FilereaderLp assembly, assessLp, assessHessian.
+// passModel: assessLp, assessHessian.
 // ---------------------------------------------------------------------------
 
-/// `assessMatrix` (HighsMatrixUtils.cpp:50-279) on a column-wise matrix: duplicates
-/// summed into their first position (when `sum_duplicates`) or an error, entries
-/// with `|v| >= large` an error, entries with `!(|v| > small)` (NaN included)
-/// dropped.
+/// `assessMatrix` (MU:36-330, HiGHS 1.16.0) on a column-wise matrix. An entry's
+/// magnitude is OK unless `|v| >= large` (an error) or `|v| <= small` (dropped), so a
+/// NaN entry is KEPT (1.15.1 dropped it). Without `sum_duplicates` the magnitude is
+/// checked first and a repeated index among the kept entries is an error; with it,
+/// repeats are summed into their first position and the sums checked afterwards.
 fn assess_matrix(
     start: &mut [usize],
     index: &mut Vec<usize>,
@@ -1057,14 +1172,25 @@ fn assess_matrix(
     sum_duplicates: bool,
 ) -> Result<(), LpFileError> {
     let num_vec = start.len() - 1;
-    let mut num_new = 0usize;
+    let mut new_nz = 0usize;
     let mut large_found = false;
+    let mut ok_magnitude = |v: f64| {
+        let a = v.abs();
+        if a >= large {
+            large_found = true;
+            return false;
+        }
+        a > small || a.is_nan()
+    };
     let mut seen: HashMap<usize, usize> = HashMap::new();
     for ix in 0..num_vec {
         let (from, to) = (start[ix], start[ix + 1]);
-        start[ix] = num_new;
+        start[ix] = new_nz;
         for el in from..to {
             let comp = index[el];
+            if !sum_duplicates && !ok_magnitude(value[el]) {
+                continue;
+            }
             if let Some(&prev) = seen.get(&comp) {
                 if !sum_duplicates {
                     return err("duplicate matrix index");
@@ -1072,39 +1198,38 @@ fn assess_matrix(
                 value[prev] += value[el];
                 continue;
             }
-            index[num_new] = index[el];
-            value[num_new] = value[el];
-            seen.insert(comp, num_new);
-            num_new += 1;
+            seen.insert(comp, new_nz);
+            index[new_nz] = index[el];
+            value[new_nz] = value[el];
+            new_nz += 1;
         }
-        let (from, to) = (start[ix], num_new);
-        num_new = start[ix];
-        for el in from..to {
-            let a = value[el].abs();
-            if a >= large {
-                large_found = true;
-            }
-            if a > small {
-                index[num_new] = index[el];
-                value[num_new] = value[el];
-                num_new += 1;
+        if sum_duplicates {
+            let (from, to) = (start[ix], new_nz);
+            new_nz = start[ix];
+            for el in from..to {
+                if !ok_magnitude(value[el]) {
+                    continue;
+                }
+                index[new_nz] = index[el];
+                value[new_nz] = value[el];
+                new_nz += 1;
             }
         }
         seen.clear();
     }
-    start[num_vec] = num_new;
-    index.truncate(num_new);
-    value.truncate(num_new);
+    start[num_vec] = new_nz;
+    index.truncate(new_nz);
+    value.truncate(new_nz);
     if large_found {
         return err("matrix entry too large");
     }
     Ok(())
 }
 
-/// `normaliseHessian` (HU:320-532) for a SQUARE Hessian (the only format the LP
+/// `normaliseHessian` (HU:309-545) for a SQUARE Hessian (the only format the LP
 /// reader builds), ported literally: the strict upper triangle is moved into a
 /// row-wise `upper`, the lower part compacted in place, and the gather then writes
-/// into the same arrays it reads (`from_hessian` aliases `hessian`, HU:396), which
+/// into the same arrays it reads (`from_hessian` aliases `hessian`, HU:387), which
 /// is what fixes the final entry order.
 fn normalise_square_hessian(
     dim: usize,
@@ -1125,7 +1250,7 @@ fn normalise_square_hessian(
         }
     }
     if num_upper != num_lower {
-        return err("Hessian is not symmetric (HU:345)");
+        return err("Hessian is not symmetric");
     }
     let mut upper_start = vec![0usize];
     let mut upper_index: Vec<usize> = Vec::new();
@@ -1191,7 +1316,7 @@ fn normalise_square_hessian(
             }
         }
         // Gather: `from_hessian` IS `hessian`, so these writes can overwrite entries
-        // of this column not yet read (HU:468-501).
+        // of this column not yet read (HU:459-492).
         let from = start[col];
         start[col] = n_el;
         if truthy(lower_on_below[col]) {
@@ -1220,12 +1345,12 @@ fn normalise_square_hessian(
     index.truncate(n_el);
     value.truncate(n_el);
     if illegal_asymmetry {
-        return err("Hessian asymmetry beyond tolerance (HU:525)");
+        return err("Hessian asymmetry beyond tolerance");
     }
     Ok(())
 }
 
-/// `completeHessianDiagonal` (HU:110-169): an explicit zero first in every column
+/// `completeHessianDiagonal` (HU:93-150): an explicit zero first in every column
 /// whose first entry is not its diagonal.
 fn complete_hessian_diagonal(h: &mut LpHessian) {
     let dim = h.dim;
@@ -1273,8 +1398,8 @@ fn complete_hessian_diagonal(h: &mut LpHessian) {
     debug_assert_eq!(to, 0);
 }
 
-/// `assessHessian` (HU:22-90) plus `passModel`'s clearing of an empty Hessian
-/// (H:496-505). `None` when nothing survives.
+/// `assessHessian` (HU:22-89) plus `passModel`'s clearing of an empty Hessian
+/// (H:520-533). `None` when nothing survives.
 fn assess_hessian(mut h: LpHessian) -> Result<Option<LpHessian>, LpFileError> {
     assess_matrix(&mut h.start, &mut h.index, &mut h.value, 0.0, INF, true)?;
     normalise_square_hessian(h.dim, &mut h.start, &mut h.index, &mut h.value)?;
@@ -1290,138 +1415,64 @@ fn name_string(s: &[u8]) -> String {
     String::from_utf8_lossy(s).into_owned()
 }
 
-/// Read an LP-format model from its bytes, as HiGHS 1.15.1's `readModel` does.
+/// Read an LP-format model from its bytes, as HiGHS 1.16.0's `readModel` does.
 pub fn read_lp_bytes(text: &[u8]) -> Result<LpFileModel, LpFileError> {
-    let toks = classify(lex(text)?)?;
-    let sec = split(&toks)?;
-    let p = process_sections(&toks, &sec)?;
-    let truthy = |v: f64| v != 0.0;
-    let vars = &p.b.vars;
-    let n = vars.len();
-    let m = p.cons.len();
+    let toks = lex(text)?;
+    let mut p = Parser::new(text, toks);
+    p.parse()?;
 
-    // F:40-64: bounds, names, integrality.
-    let mut col_lower: Vec<f64> = vars.iter().map(|v| v.lb).collect();
-    let mut col_upper: Vec<f64> = vars.iter().map(|v| v.ub).collect();
-    let col_names: Vec<String> = vars.iter().map(|v| name_string(&v.name)).collect();
-    let mut integrality: Vec<u8> = vars
-        .iter()
-        .map(|v| match v.ty {
-            VarType::Binary | VarType::General => 1,
-            VarType::SemiContinuous => 2,
-            VarType::SemiInteger => 3,
-            VarType::Continuous => 0,
-        })
-        .collect();
-    if integrality.iter().all(|&t| t == 0) {
+    // Parser::finish (LpReader.cpp:1165-1215).
+    for &col in &p.binary_cols {
+        if p.col_upper[col] == INF {
+            p.col_upper[col] = 1.0;
+        }
+    }
+    let mut integrality = std::mem::take(&mut p.integrality);
+    if !p.has_integrality {
         integrality.clear();
     }
-
-    // F:66-73: offset as written, cost assigned per term (the last term wins).
-    let offset = p.obj.offset;
-    let mut col_cost = vec![0.0f64; n];
-    for &(j, c) in &p.obj.lin {
-        col_cost[j] = c;
-    }
-
-    // F:75-118: the square Hessian.
-    let mut qmat: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-    for &(j1, j2, c) in &p.obj.quad {
-        if j1 != j2 {
-            qmat[j1].push((j2, c / 2.0));
-            qmat[j2].push((j1, c / 2.0));
-        } else {
-            qmat[j1].push((j2, c));
-        }
-    }
-    let qnnz = qmat.iter().flatten().filter(|e| truthy(e.1)).count();
-    let hessian = if qnnz > 0 {
-        let mut h = LpHessian {
-            dim: n,
-            start: Vec::with_capacity(n + 1),
-            index: Vec::new(),
-            value: Vec::new(),
-        };
-        for col in &qmat {
-            h.start.push(h.index.len());
-            for &(r, v) in col {
-                if truthy(v) {
-                    h.index.push(r);
-                    h.value.push(v);
-                }
-            }
-        }
-        h.start.push(h.index.len());
-        Some(h)
-    } else {
-        None
-    };
-
-    // F:120-145: rows; a quadratic term in a row is an error.
-    let mut col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-    let mut row_names: Vec<Vec<u8>> = Vec::with_capacity(m);
-    let mut row_lower = Vec::with_capacity(m);
-    let mut row_upper = Vec::with_capacity(m);
-    for (i, con) in p.cons.iter().enumerate() {
-        row_names.push(con.expr.name.clone());
-        for &(j, c) in &con.expr.lin {
-            col_rows[j].push((i, c));
-        }
-        row_lower.push(con.lb);
-        row_upper.push(con.ub);
-        if !con.expr.quad.is_empty() {
-            return err("Quadratic constraints not supported by HiGHS (F:140)");
-        }
-    }
-
-    // F:147-169: automatic row names and the HiGHS_R clash rule.
-    let mut prefix_ok = true;
-    let mut used_prefix = false;
-    for (i, name) in row_names.iter_mut().enumerate() {
-        // strncmp(name, "HiGHS_R", 7) on a C string: stops at the first NUL.
-        let c_name = name.split(|&b| b == 0).next().unwrap_or(&[]);
-        if c_name.starts_with(b"HiGHS_R") {
-            prefix_ok = false;
-        } else if name.is_empty() {
-            *name = format!("HiGHS_R{i}").into_bytes();
-            used_prefix = true;
-        }
-    }
-    let row_names: Vec<String> = if used_prefix && !prefix_ok {
+    let row_names: Vec<String> = if p.used_prefix && !p.prefix_ok {
         Vec::new()
     } else {
-        row_names.iter().map(|s| name_string(s)).collect()
+        p.row_names.iter().map(|s| name_string(s)).collect()
     };
-
-    // F:171-262: the column-wise matrix, duplicates summed into the first position.
-    let mut a_start = Vec::with_capacity(n + 1);
-    let mut a_index = Vec::new();
-    let mut a_value = Vec::new();
-    let mut column = vec![0.0f64; m];
-    a_start.push(0);
-    for entries in &col_rows {
-        for &(i, v) in entries.iter().filter(|e| truthy(e.1)) {
-            column[i] += v;
-        }
-        for &(i, v) in entries.iter().filter(|e| truthy(e.1)) {
-            let _ = v;
-            if truthy(column[i]) {
-                a_index.push(i);
-                a_value.push(column[i]);
-            }
-            column[i] = 0.0;
-        }
-        a_start.push(a_index.len());
+    let n = p.col_names.len();
+    let m = p.row_lower.len();
+    // ensureColwise: the transpose of the row-wise matrix, rows ascending in a column.
+    let mut a_start = vec![0usize; n + 1];
+    for &j in &p.ar_index {
+        a_start[j + 1] += 1;
     }
+    for j in 0..n {
+        a_start[j + 1] += a_start[j];
+    }
+    let mut a_index = vec![0usize; p.ar_index.len()];
+    let mut a_value = vec![0.0f64; p.ar_index.len()];
+    let mut fill = a_start.clone();
+    for i in 0..m {
+        for k in p.ar_start[i]..p.ar_start[i + 1] {
+            let j = p.ar_index[k];
+            a_index[fill[j]] = i;
+            a_value[fill[j]] = p.ar_value[k];
+            fill[j] += 1;
+        }
+    }
+    let hessian = finish_hessian(std::mem::take(&mut p.hessian_entries), n);
 
-    // passModel (H:461-475): no rows or no columns means an empty matrix.
+    let mut col_cost = p.col_cost;
+    let mut col_lower = p.col_lower;
+    let mut col_upper = p.col_upper;
+    let mut row_lower = p.row_lower;
+    let mut row_upper = p.row_upper;
+
+    // passModel (H:476-487): no rows or no columns means an empty matrix.
     if n == 0 || m == 0 {
         a_start = vec![0; n + 1];
         a_index.clear();
         a_value.clear();
     }
 
-    // assessLp (HighsLpUtils.cpp:33-105): costs, bounds, then the matrix.
+    // assessLp (HighsLpUtils.cpp:34-101): costs, bounds, then the matrix.
     let big = 1e20;
     let fix_inf = |v: f64| {
         if v >= big {
@@ -1467,16 +1518,16 @@ pub fn read_lp_bytes(text: &[u8]) -> Result<LpFileModel, LpFileError> {
         a_index,
         a_value,
         col_cost,
-        offset,
+        offset: p.offset,
         maximize: p.maximize,
         col_lower,
         col_upper,
         row_lower,
         row_upper,
         integrality,
-        col_names,
+        col_names: p.col_names.iter().map(|s| name_string(s)).collect(),
         row_names,
-        objective_name: name_string(&p.obj.name),
+        objective_name: name_string(&p.objective_name),
         hessian,
     })
 }
@@ -1485,113 +1536,176 @@ pub fn read_lp_bytes(text: &[u8]) -> Result<LpFileModel, LpFileError> {
 mod tests {
     use super::*;
 
-    /// `c_strtod` is glibc `strtod`: longest valid prefix, hex floats, inf/nan,
-    /// leading isspace, signed underflow. Every case is counted.
-    #[test]
-    fn strtod_matches_glibc_prefix_semantics() {
-        let cases: &[(&[u8], f64, usize)] = &[
-            (b"2e3x", 2000.0, 3),
-            (b"1d2", 1.0, 1),
-            (b"1e", 1.0, 1),
-            (b"1e+", 1.0, 1),
-            (b".5", 0.5, 2),
-            (b"5.", 5.0, 2),
-            (b"0x10", 16.0, 4),
-            (b"0x1.8p1", 3.0, 7),
-            (b"0x", 0.0, 1),
-            (b"0xg", 0.0, 1),
-            (b"0x.8", 0.5, 4),
-            (b"infeasible", INF, 3),
-            (b"Infinity2", INF, 8),
-            (b"1e400", INF, 5),
-            (b"\x0b5 y", 5.0, 2),
-            (b"\x0b-5", -5.0, 3),
-            (b"x", 0.0, 0),
-            (b".", 0.0, 0),
-            (b"", 0.0, 0),
-        ];
-        let mut checked = 0;
-        for &(s, want, used) in cases {
-            assert_eq!(
-                c_strtod(s),
-                (want, used),
-                "{:?}",
-                String::from_utf8_lossy(s)
-            );
-            checked += 1;
-        }
-        let (v, used) = c_strtod(b"nancy");
-        assert!(v.is_nan() && used == 3);
-        let (v, used) = c_strtod(b"nan(12)x");
-        assert!(v.is_nan() && used == 7);
-        let (v, used) = c_strtod(b"nan(12");
-        assert!(v.is_nan() && used == 3);
-        let (v, _) = c_strtod(b"-1e-400");
-        assert!(v == 0.0 && v.is_sign_negative());
-        assert_eq!(checked, cases.len());
+    fn read(s: &str) -> LpFileModel {
+        read_lp_bytes(s.as_bytes()).unwrap_or_else(|e| panic!("{s:?}: {e}"))
     }
 
-    /// The lexer splits names at HiGHS's delimiter set only and keeps a number's
-    /// literal text.
+    fn rejects(s: &str) {
+        assert!(
+            read_lp_bytes(s.as_bytes()).is_err(),
+            "{s:?} should be rejected"
+        );
+    }
+
     #[test]
     fn lexer_tokens() {
-        let toks = lex(b"a/b 2e3x;c\n1: x;y \\ comment\r\n").unwrap();
+        let toks = lex(b"x1 <= 5. .5e1 2e3x 0x10 =< => == -> [ ] ^ / :").unwrap();
+        let kinds: Vec<Kind> = toks.iter().map(|t| t.kind).collect();
+        use Kind::*;
         assert_eq!(
-            toks,
+            kinds,
             vec![
-                Raw::Str(b"a".to_vec()),
-                Raw::Slash,
-                Raw::Str(b"b".to_vec()),
-                Raw::Cons(2000.0, b"2e3".to_vec()),
-                Raw::Str(b"x;c".to_vec()),
-                Raw::Cons(1.0, b"1".to_vec()),
-                Raw::Colon,
-                Raw::Str(b"x;y".to_vec()),
-                Raw::Flend,
+                Identifier,
+                Less,
+                Number,
+                Number,
+                Number,
+                Identifier,
+                Number,
+                Identifier,
+                Less,
+                Greater,
+                Equal,
+                Implies,
+                OpenBracket,
+                CloseBracket,
+                Power,
+                Divide,
+                Colon,
+                EndOfFile
             ]
         );
-        assert!(lex(b"x\0").is_ok()); // NUL inside a name is a name character
-        assert!(lex(b"x \0").is_err()); // ... at a token start an error
+        let values: Vec<f64> = toks
+            .iter()
+            .filter(|t| t.kind == Number)
+            .map(|t| t.value)
+            .collect();
+        assert_eq!(values, vec![5.0, 5.0, 2000.0, 0.0]);
+        // "1e" and "1e+" are the number 1 followed by an identifier/sign.
+        let toks = lex(b"1e 1e+").unwrap();
+        assert_eq!(toks[0].kind, Number);
+        assert_eq!(toks[0].len, 1);
+        assert_eq!(toks[1].kind, Identifier);
+        assert!(lex(b"x\x01").is_err());
+        assert!(lex(b"x\x7f").is_err());
+        // Bytes >= 0x80 are identifier characters.
+        assert_eq!(lex("é".as_bytes()).unwrap()[0].kind, Identifier);
+        // Overflow and underflow as strtod.
+        let toks = lex(b"1e400 1e-400").unwrap();
+        assert_eq!(toks[0].value, INF);
+        assert_eq!(toks[1].value, 0.0);
     }
 
-    /// normaliseHessian's self-overwriting gather: for `[z*x + y*x + x^2]` the
-    /// x column is "diagonal, below-diagonal survivors, recovered upper entries".
     #[test]
-    fn hessian_order_follows_the_aliased_gather() {
-        let m =
-            read_lp_bytes(b"min\n obj: x + [ z*x + y*x + x^2 ]/2\nst\n c: x + y + z >= 2\nend\n")
-                .unwrap();
-        assert_eq!(m.col_names, vec!["x", "z", "y"]);
-        let h = m.hessian.unwrap();
-        assert_eq!(h.dim, 3);
-        // Column x (0): diagonal 1, then z (1) and y (2) in the order they survive.
-        assert_eq!(h.start, vec![0, 3, 4, 5]);
-        assert_eq!(&h.index[..3], &[0, 2, 1]);
-        assert_eq!(&h.value[..3], &[1.0, 0.5, 0.5]);
-        // Columns z and y have no diagonal: explicit zeros.
-        assert_eq!(&h.index[3..], &[1, 2]);
-        assert_eq!(&h.value[3..], &[0.0, 0.0]);
+    fn keywords_only_start_a_line() {
+        // `st` mid-line is a variable; at the start of a line it starts the constraints.
+        let m = read("min\n x + st\nst\n c: x + st >= 1\nend\n");
+        assert_eq!(m.col_names, vec!["x", "st"]);
+        assert_eq!(m.col_cost, vec![1.0, 1.0]);
+        assert_eq!(m.num_row, 1);
+        // A keyword followed by ':' is a name.
+        let m = read("max\n bounds: x\nend");
+        assert!(m.maximize);
+        assert_eq!(m.objective_name, "bounds");
+        // "subject to" must be on one line.
+        rejects("min\n x\nsubject\nto\n x >= 1\nend");
+        let m = read("min\n x\nsubject to\n x >= 1\nsemi - continuous\n x\nend");
+        assert_eq!(m.integrality, vec![2]);
     }
 
-    /// End to end: cost last-wins, LHS constant dropped, auto row names, duplicate
-    /// entries summed, bin on a bounded column keeps the bound.
     #[test]
     fn assembly_rules() {
-        let m = read_lp_bytes(
-            b"max\n obj: 2 x + 3 y - x + 5\nst\n c1: x + y - 3 >= 2\n x + 2 y + x <= 4\n\
-              bounds\n y <= 5\nbin\n y\nend\n",
-        )
-        .unwrap();
-        assert!(m.maximize);
-        assert_eq!(m.col_cost, vec![-1.0, 3.0]);
-        assert_eq!(m.offset, 5.0);
-        assert_eq!(m.row_lower, vec![2.0, -INF]);
-        assert_eq!(m.row_names, vec!["c1", "HiGHS_R1"]);
-        assert_eq!(m.a_start, vec![0, 2, 4]);
-        assert_eq!(m.a_value, vec![1.0, 2.0, 1.0, 2.0]);
-        assert_eq!((m.col_upper[1], m.integrality.clone()), (5.0, vec![0, 1]));
-        assert!(read_lp_bytes(b"min\n x\nst\n c: x >= 1\n").is_err()); // unclosed
-        assert!(read_lp_bytes(b"min\n x /* a */\nst\n c: x >= 1\nend\n").is_err());
-        assert!(read_lp_bytes(b"min\n x /* a b */\nst\n c: x >= 1\nend\n").is_ok());
+        // Costs are summed; columns in order of first mention in the file.
+        let m = read("min\n 2 x + 3 y - x + 4\nst\n c: z + x + x - 2 x >= 1\nend");
+        assert_eq!(m.col_names, vec!["x", "y", "z"]);
+        assert_eq!(m.col_cost, vec![1.0, 3.0, 0.0]);
+        assert_eq!(m.offset, 4.0);
+        // x + x - 2x sums to zero and is dropped.
+        assert_eq!(m.a_start, vec![0, 0, 0, 1]);
+        assert_eq!(m.row_names, vec!["c"]);
+        // Sections in file order; binary upper bound 1 only when still infinite.
+        let m = read("bounds\n b <= 5\nbinary\n b g\nmax\n g\nend");
+        assert_eq!(m.col_names, vec!["b", "g"]);
+        assert_eq!(m.col_upper, vec![5.0, 1.0]);
+        assert_eq!(m.integrality, vec![1, 1]);
+        // Automatic row names, cleared on a clash with an explicit HiGHS_R name.
+        let m = read("min\n x\nst\n x >= 1\n x <= 2\nend");
+        assert_eq!(m.row_names, vec!["HiGHS_R0", "HiGHS_R1"]);
+        let m = read("min\n x\nst\n x >= 1\n HiGHS_R7: x <= 2\nend");
+        assert!(m.row_names.is_empty());
+        // inf is a variable in an expression and a number in a bound.
+        let m = read("min\n x + inf\nbounds\n x <= inf\n -inf <= y <= 3\nend");
+        assert_eq!(m.col_names, vec!["x", "inf", "y"]);
+        assert_eq!(m.col_lower[2], -INF);
+        // An empty file is an empty model.
+        let m = read("\\ just a comment\n");
+        assert_eq!((m.num_col, m.num_row), (0, 0));
+        // A constant on a constraint's left-hand side is ignored.
+        let m = read("min\n x\nst\n x + 3 >= 1\nend");
+        assert_eq!(m.row_lower, vec![1.0]);
+    }
+
+    #[test]
+    fn rejections() {
+        rejects("garbage");
+        rejects("min\n x\n");
+        rejects("min\n x\nmin\n y\nend");
+        rejects("min\n x y\nend");
+        rejects("min\n x\nst\n x + y\nend");
+        rejects("min\n x\nst\n x >= y\nend");
+        rejects("min\n x\nst\n c: [ x^2 ] <= 1\nend");
+        rejects("min\n x\nst\n z = 1 -> x >= 1\nend");
+        rejects("min\n x\nst\n s1: S1:: x:1 y:2\nend");
+        rejects("min\n x\nsos\n s1: S1:: x:1\nend");
+        rejects("min\n [ x^3 ]\nend");
+        rejects("min\n [ x^2 ]/3\nend");
+        rejects("min\n 2 [ x^2 ]\nend");
+        rejects("min\n x * y\nend");
+        rejects("min\n x\nbounds\n x <= 1 y <= 2\nend");
+        rejects("min\n x\nbounds\n 1 = x = 2\nend");
+        rejects("min\n x\nbounds\n 1 <= x >= 0\nend");
+        rejects("min\n x\nend\nx");
+        rejects("min\n x\nbounds\n x >= inf\nend");
+        rejects("min\n x\nst\n 1e15 x >= 1\nend");
+    }
+
+    #[test]
+    fn hessian_entries_sorted_and_normalised() {
+        // `[ ... ]/2` is x'Qx/2; terms are summed after sorting by (column, row).
+        let m = read("min\n obj: x + [ z*x + y*x + x^2 ]/2\nst\n c: x + y + z >= 1\nend");
+        assert_eq!(m.col_names, vec!["x", "z", "y"]);
+        let h = m.hessian.expect("hessian");
+        assert_eq!(h.dim, 3);
+        // Lower triangle, column-wise, diagonals first, zero-filled.
+        assert_eq!(h.start, vec![0, 3, 4, 5]);
+        assert_eq!(h.index, vec![0, 1, 2, 1, 2]);
+        assert_eq!(h.value, vec![1.0, 0.5, 0.5, 0.0, 0.0]);
+        // Without "/ 2" the bracket is doubled; cancelling terms leave no Hessian.
+        let m = read("min\n [ x^2 ]\nend");
+        assert_eq!(m.hessian.unwrap().value, vec![2.0]);
+        let m = read("min\n [ x^2 - x^2 ]\nend");
+        assert!(m.hessian.is_none());
+    }
+
+    #[test]
+    fn assess_matrix_keeps_nan_and_drops_small() {
+        let mut start = vec![0, 3];
+        let mut index = vec![0, 1, 0];
+        let mut value = vec![f64::NAN, 1e-10, 2.0];
+        // The small entry is dropped before duplicates are checked, but the NaN at
+        // row 0 is kept, so row 0 repeats.
+        assert!(assess_matrix(&mut start, &mut index, &mut value, 1e-9, 1e15, false).is_err());
+        let mut start = vec![0, 2];
+        let mut index = vec![0, 1];
+        let mut value = vec![f64::NAN, 1e-10];
+        assess_matrix(&mut start, &mut index, &mut value, 1e-9, 1e15, false).unwrap();
+        assert_eq!(start, vec![0, 1]);
+        assert!(value[0].is_nan());
+        // Summing duplicates before the magnitude test.
+        let mut start = vec![0, 3];
+        let mut index = vec![1, 1, 0];
+        let mut value = vec![1.0, -1.0, 3.0];
+        assess_matrix(&mut start, &mut index, &mut value, 0.0, INF, true).unwrap();
+        assert_eq!((start, index, value), (vec![0, 1], vec![0], vec![3.0]));
     }
 }

@@ -3,9 +3,11 @@ model as HiGHS's ``readModel`` -> ``getLp`` (and ``getModel().hessian_``) would,
 without HiGHS.
 
 The parser is Rust (``discopt_core::lp_file``, exposed as
-``discopt._rust.read_lp_text``) and ports HiGHS 1.15.1's staged LP reader stage by
-stage, quirks included; the contract is an exact differential against highspy
-(``python/tests/test_lp_reader.py``). Where HiGHS rejects a file (``kError``) this
+``discopt._rust.read_lp_text``) and ports HiGHS 1.16.0's recursive-descent LP reader
+(#2221; it replaced the 1.15 staged reader, which read many edge cases differently),
+quirks included; the contract is an exact differential against HiGHS 1.16.0
+(``python/tests/test_lp_reader.py``: live highspy >= 1.16.0, or 1.16.0's frozen
+readings on older or absent highspy). Where HiGHS rejects a file (``kError``) this
 raises ``ValueError``.
 """
 

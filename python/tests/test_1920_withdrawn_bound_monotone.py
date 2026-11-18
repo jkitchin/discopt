@@ -296,6 +296,120 @@ def test_merge_never_adopts_a_tolerance_point_on_huge_big_m():
     assert ok, why
 
 
+#: highspy 1.16.0's root-LP vertex on ``_sequencing(0, 1e10)``'s standard form (58
+#: columns, 36 rows; measured 2026-11-18, #2221). Every ``y`` sits within 1e-9 of 1 and
+#: the slacks of the big-M rows near 1e10, so it passes the incumbent verifier at
+#: objective 11.0 (relative row tolerance) while violating the model by up to 8. The LP
+#: over its integers gives the true optimum 31.0.
+ROOT_VERTEX_1E10 = [
+    0.0, 0.0, 1.0, 7.0, 5.0, 8.0, 11.0, 0.9999999992, 0.9999999993, 0.9999999999,
+    0.9999999997, 1.0, 0.9999999994, 1.0, 0.9999999998, 1.0, 1.0, 0.9999999998, 1.0,
+    0.9999999994, 0.9999999997, 0.9999999999, 0.0, 9999999985.0, 0.0, 9999999986.0, 0.0,
+    9999999988.0, 0.0, 9999999988.0, 0.0, 9999999990.0, 0.0, 9999999987.0, 0.0,
+    9999999989.0, 0.0, 9999999989.0, 1.0, 9999999990.0, 0.0, 9999999990.0, 0.0,
+    9999999990.0, 1.0, 9999999991.0, 0.0, 9999999992.0, 0.0, 9999999994.0, 0.0,
+    9999999994.0, 3.0, 4.0, 4.0, 0.0, 2.0, 1.0,
+]  # fmt: skip
+
+
+def test_root_lp_tolerance_vertex_never_refutes_or_publishes(monkeypatch):
+    """#2221: the #1509 check's root-LP candidate is re-derived over its integers.
+
+    On highspy 1.16 the root LP of the M = 1e10 sequencing model lands on
+    :data:`ROOT_VERTEX_1E10`. Taken raw, that tolerance point refuted HiGHS's correct
+    bound 31 ("refuted_by=root-lp"), declined the #1654 certificate and was published
+    as an incumbent violating the model by 8. The vertex is injected as the root LP's
+    answer here so the check runs on every highspy, not only the one that finds it.
+    """
+    real = lp_milp_highs.solve_lp_std
+    injected: list = []
+
+    def root_vertex(sf, **kw):
+        out = real(sf, **kw)
+        n = sf.n - sf.m
+        relaxation = bool(np.all(sf.xu[:n] > sf.xl[:n]))
+        if sf.n == len(ROOT_VERTEX_1E10) and relaxation and out.status == "optimal":
+            out.x = np.array(ROOT_VERTEX_1E10)
+            injected.append(1)
+        return out
+
+    monkeypatch.setattr(lp_milp_highs, "solve_lp_std", root_vertex)
+    m = _sequencing(0, 1e10)
+    r = m.solve(time_limit=60)
+    from discopt.warm_start import check_feasibility
+
+    assert injected, "MEASURED NOTHING: the root LP vertex was never injected"
+    assert r.objective == pytest.approx(31.0, abs=1e-6), (r.status, r.objective)
+    assert r.bound is None or r.bound <= 31.0 + 1e-6
+    x = np.concatenate([np.atleast_1d(np.asarray(r.x[v.name], float)) for v in m._variables])
+    ok, why = check_feasibility(m, x, tol=1e-5)
+    assert ok, why
+    shift = r.solver_stats.get("milp/root_point_rederived_shift")
+    if shift is None and r.solver_stats.get("highs/version", 0.0) < 11200.0:
+        # Measured 2026-11-18 (#2221): on highspy 1.11.0 the #1509 check never holds this
+        # vertex as a candidate. The two checks where it verifies on 1.12.0, 1.13.1,
+        # 1.14.0, 1.15.0, 1.15.1 and 1.16.0 (even with DISCOPT_MILP_ROW_FORM=0) do not
+        # run there; only the coefficient-tightened form's checks do, where the vertex
+        # does not verify. The invariants above still hold on it.
+        pytest.skip("highspy 1.11 does not reach the #1509 check with the vertex in hand")
+    assert shift == pytest.approx(20.0)
+
+
+def test_root_lp_vertex_is_dropped_when_it_cannot_be_rederived(monkeypatch):
+    """#2221 review: when the fixed-integer LP over the root vertex's integers gives no
+    point (no time left, or no verified point), the raw vertex must not stand in for it.
+
+    Before the fix ``_rederived_point`` returned the raw vertex in that case, and the
+    #1509 check refuted the correct bound 31 with it and published objective 11, a point
+    violating the model by 8. Here the vertex is injected as the root LP's answer, and the
+    fixed-integer LP is made to fail for that vertex only. The incumbent's own-integers
+    LP still runs normally.
+    """
+    import dataclasses
+
+    real_lp = lp_milp_highs.solve_lp_std
+    real_fx = lp_milp_highs._fixed_integer_lp
+    vertex = np.array(ROOT_VERTEX_1E10)
+    injected: list = []
+    failed: list = []
+
+    def root_vertex(sf, **kw):
+        out = real_lp(sf, **kw)
+        n = sf.n - sf.m
+        relaxation = bool(np.all(sf.xu[:n] > sf.xl[:n]))
+        if sf.n == len(vertex) and relaxation and out.status == "optimal":
+            out.x = vertex.copy()
+            injected.append(1)
+        return out
+
+    def failing_fx(sf, x, time_limit):
+        out = real_fx(sf, x, time_limit)
+        if sf.n == len(vertex) and np.allclose(np.asarray(x, float), vertex, rtol=0, atol=1e-9):
+            failed.append(1)
+            return dataclasses.replace(out, status="error", x=None)
+        return out
+
+    monkeypatch.setattr(lp_milp_highs, "solve_lp_std", root_vertex)
+    monkeypatch.setattr(lp_milp_highs, "_fixed_integer_lp", failing_fx)
+    m = _sequencing(0, 1e10)
+    r = m.solve(time_limit=60)
+    from discopt.warm_start import check_feasibility
+
+    assert injected, "MEASURED NOTHING: the root LP vertex was never injected"
+    if not failed:
+        assert r.solver_stats.get("highs/version", 0.0) < 11200.0, (
+            "MEASURED NOTHING: the vertex's fixed-integer LP was never called"
+        )
+        pytest.skip("highspy 1.11 does not reach the #1509 check with the vertex in hand")
+    assert r.objective is None or r.objective > 11.0 + 1e-6, (r.status, r.objective)
+    assert r.objective == pytest.approx(31.0, abs=1e-6), (r.status, r.objective)
+    assert r.bound is None or r.bound <= 31.0 + 1e-6
+    assert r.solver_stats.get("milp/root_point_dropped") == 1.0
+    x = np.concatenate([np.atleast_1d(np.asarray(r.x[v.name], float)) for v in m._variables])
+    ok, why = check_feasibility(m, x, tol=1e-5)
+    assert ok, why
+
+
 # ── The fix-and-propagate start ──
 
 
@@ -363,7 +477,39 @@ def _fixed_input_pwl():
     return tm
 
 
-def test_a_seeded_optimum_without_a_bound_is_re_solved_cold():
+class _BoundlessSeededOptimum:
+    """A ``highspy.Highs`` that, handed a start, reports ``kOptimal`` with NO dual bound.
+
+    That is what highspy <= 1.15.1 returned on :func:`_fixed_input_pwl` (presolve took
+    the start and stopped at 0 nodes, ``mip_dual_bound = inf``). highspy 1.16 reports a
+    finite bound there (#2221), so the #1920 re-solve is exercised by forcing the 1.15.1
+    answer at the seam. Every other call is forwarded to the real object."""
+
+    def __init__(self, h, fired: list) -> None:
+        self._h, self._fired, self._seeded = h, fired, False
+
+    def __getattr__(self, name):
+        return getattr(self._h, name)
+
+    def setSolution(self, *args):  # noqa: N802 -- the highspy method name
+        st = self._h.setSolution(*args)
+        self._seeded = True
+        return st
+
+    def getInfo(self):  # noqa: N802 -- the highspy method name
+        info = self._h.getInfo()
+        if self._seeded and self._h.getModelStatus().name == "kOptimal":
+            info.mip_dual_bound = float("inf")
+            self._fired.append(1)
+        return info
+
+
+def test_a_seeded_optimum_without_a_bound_is_re_solved_cold(monkeypatch):
+    real = lp_milp_highs._new_highs
+    fired: list = []
+    monkeypatch.setattr(
+        lp_milp_highs, "_new_highs", lambda hp, opts: _BoundlessSeededOptimum(real(hp, opts), fired)
+    )
     tm = _fixed_input_pwl()
     _, n_orig, sf = _highs_std_form(tm)
     start = lp_milp_highs._fixprop_start(sf, n_orig, None, {})
@@ -372,6 +518,7 @@ def test_a_seeded_optimum_without_a_bound_is_re_solved_cold():
         sf, time_limit=30.0, gap_tolerance=1e-4, max_nodes=10**6, n_struct=n_orig,
         initial_point=start[0][:n_orig], root_check=False,
     )  # fmt: skip
+    assert fired, "MEASURED NOTHING: no seeded kOptimal reached the route"
     assert out.stats.get("milp/seeded_optimal_without_bound") == 1.0
     # Never a certificate with nothing behind it.
     assert not (out.gap_certified and out.status == "optimal" and out.bound is None)

@@ -59,7 +59,7 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install maturin
-          pip install jax jaxlib numpy scipy "highspy!=1.16.0" pytest pytest-timeout pytest-xdist hypothesis
+          pip install jax jaxlib numpy scipy highspy pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
       - name: In-repo corpus harness
         run: |
