@@ -1149,12 +1149,27 @@ def _run_simplex_engine(arrays, budget, gap, seed):
     It is also an independent check of HiGHS, and the batched search is a design
     of discopt's own. Measured on the 21 confirmation masters the in-repo
     ``minlplib_nl`` corpus produces under ``DISCOPT_CONVEX_ROUTE_OA_MASTER=highs``
-    (4 threads, 60 s, 3 interleaved reps): the sum of the median walls was 20.2 s
-    with the HiGHS search and 2.3 s batched, every master certified by both. The
-    batched search was never slower by more than 0.07 s (tls2: 0.05 -> 0.12 s);
-    the second ``cvxnonsep_psig40r`` master took 19.2 s (652 nodes) against 1.2 s
-    (3 nodes). On ``portfol_classical050_1``'s master (``test_2059_soc_outer``)
-    the two took 212 s and 37 s.
+    (4-core machine, 60 s, 3 interleaved reps per thread count), every master
+    certified by both searches in every rep:
+
+    * 4 threads: sum of median walls 20.2 s (HiGHS search) vs 2.3 s (batched);
+      the worst batched loss was 0.07 s (tls2, 0.05 -> 0.12 s).
+    * 1 thread: 21.5 s vs 3.5 s; the batched search is slower on the small
+      masters by up to 0.27 s (``cvxnonsep_psig40r`` master 1, 0.20 -> 0.47 s).
+    * Either way the second ``cvxnonsep_psig40r`` master dominates: 19.2-20.2 s
+      (652 nodes) against 1.2-1.4 s (3 nodes).
+
+    End to end over the 21 instances, old vs new confirmation (SCIP present at 4
+    and 1 threads, and absent at 4 threads): every instance certified in both
+    arms, no claim withdrawn, the same engine confirmed each claim, and every
+    certified point verified feasible. The one claim the in-house engine cannot
+    confirm within ``_SIMPLEX_BUDGET_BEFORE_SCIP_S`` (``portfol_classical050_1``)
+    falls through to SCIP in both arms. Without SCIP the 21 solves took 279 s
+    (old) and 96 s (new); ``portfol_classical050_1`` alone 255 s and 81 s.
+
+    There is no environment opt-out. ``DISCOPT_HIGHS_MIP_SEARCH=1`` does not put
+    this call back on the HiGHS-design search, because the keyword is fixed here;
+    an A/B edits this call.
     """
     from discopt.solvers import milp_simplex
 
