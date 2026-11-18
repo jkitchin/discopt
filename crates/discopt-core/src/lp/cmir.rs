@@ -1820,6 +1820,7 @@ mod tests {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }

@@ -2441,6 +2441,16 @@ pub struct MilpOptions {
     /// point but the OA lazy master, behind `DISCOPT_OA_MASTER_RELAX_CUT_NOISE`) is
     /// bit-for-bit the unmasked behaviour.
     pub relaxable_rows: Option<Vec<bool>>,
+    /// #2235: run the batched tree search (rayon-parallel node evaluation) even where
+    /// the HiGHS-design search (`DISCOPT_HIGHS_MIP_SEARCH`, default ON) would run.
+    /// That search is a faithful port of HiGHS's default serial search: it evaluates
+    /// one node LP at a time, so a caller whose solve is LP-bound on a multicore
+    /// machine and needs only a valid bound (the #2069 independent confirmation of
+    /// a HiGHS OA master) gives up roughly the core count in node throughput on it.
+    /// Both searches are complete and certify only what they prove; this chooses
+    /// the tree, never the soundness. `false` (every other call site) keeps the
+    /// default route.
+    pub batched_search: bool,
     /// LP solver options.
     pub simplex: SimplexOptions,
 }
@@ -7873,7 +7883,8 @@ fn solve_milp_node_search(
     // domain (HiGHS's design), so a caller who turned propagation off gets the search
     // that honours it rather than a silently ignored option. And the off-root repair
     // dive (`DISCOPT_MILP_DIVE_STRIDE`, opt-in), which only the batched search runs.
-    let mut highs_route = highs_mip_search()
+    let mut highs_route = !opts.batched_search
+        && highs_mip_search()
         && lazy.is_none()
         && node.is_none()
         && opts.node_propagation
@@ -13135,6 +13146,7 @@ mod tests {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -14147,9 +14159,102 @@ mod tests {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
+    }
+
+    /// #2235: `MilpOptions::batched_search` keeps a solve the HiGHS-design search would
+    /// take on the batched search (none of the route's searches run), and it certifies
+    /// the same optimum. Without the option the same problems take the route, which
+    /// proves the population exercises it.
+    #[test]
+    fn batched_search_option_keeps_the_batched_search() {
+        let mut seed = 2235u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut route_runs, mut compared) = (0usize, 0usize);
+        for _ in 0..40 {
+            let ns = rnd(8, 14) as usize;
+            let m = rnd(4, 8) as usize;
+            let c: Vec<f64> = (0..ns).map(|_| -(rnd(1, 9) as f64) - 0.5).collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            for i in 0..m {
+                for col in cols.iter_mut() {
+                    let v = rnd(0, 7);
+                    if v != 0 {
+                        col.push((i, v as f64));
+                    }
+                }
+                b.push(rnd(10, 30) as f64 + 0.5);
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), vec![0.0; ns], vec![4.0; ns]);
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let solve = |batched: bool| {
+                let mut o = opts(ns, (0..ns).collect());
+                o.batched_search = batched;
+                FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(Some(true)));
+                let runs0 = super::highs_env::RUNS.with(|r| r.get());
+                let r = solve_milp_node_search(
+                    csc.clone(),
+                    m,
+                    n,
+                    &cf,
+                    &lf,
+                    &uf,
+                    &b,
+                    0.0,
+                    &o,
+                    None,
+                    None,
+                    None,
+                );
+                let runs = super::highs_env::RUNS.with(|r| r.get()) - runs0;
+                FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(None));
+                (r, runs)
+            };
+            let (h, h_runs) = solve(false);
+            let (bt, bt_runs) = solve(true);
+            assert_eq!(bt_runs, 0, "batched_search ran the HiGHS-design search");
+            route_runs += h_runs;
+            assert_eq!(h.status, MilpStatus::Optimal);
+            assert_eq!(bt.status, MilpStatus::Optimal);
+            let tol = 1e-6 * (1.0 + h.obj.abs());
+            assert!(
+                (h.obj - bt.obj).abs() <= tol,
+                "optima differ: route {} batched {}",
+                h.obj,
+                bt.obj
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, 40);
+        assert!(
+            route_runs > 0,
+            "no problem took the HiGHS-design route: the check above is vacuous"
+        );
     }
 
     /// Stage 1d-5 gate: through the driver's entry point with `DISCOPT_HIGHS_MIP_SEARCH`
@@ -16631,6 +16736,7 @@ mod tests {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         };
@@ -16778,6 +16884,7 @@ pub(crate) mod sparse_milp_diff {
                 node_hook_cut_cap: 0,
                 root_cut_time_s: None,
                 relaxable_rows: None,
+                batched_search: false,
                 root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
@@ -17123,6 +17230,7 @@ pub(crate) mod sparse_milp_diff {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         };
@@ -17443,6 +17551,7 @@ mod lazy_separation {
                 node_hook_cut_cap: 0,
                 root_cut_time_s: None,
                 relaxable_rows: None,
+                batched_search: false,
                 root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
@@ -17753,6 +17862,7 @@ mod node_separation {
                 node_hook_cut_cap: cap,
                 root_cut_time_s: None,
                 relaxable_rows: None,
+                batched_search: false,
                 root_cut_prune: true,
                 simplex: SimplexOptions::default(),
             }
@@ -18046,6 +18156,7 @@ mod lazy_infeasible_node {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -18195,6 +18306,7 @@ mod root_cut_budget_tests {
             node_hook_cut_cap: 0,
             root_cut_time_s,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -18988,6 +19100,7 @@ mod tiny_entry_tests {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -20008,6 +20121,7 @@ mod hook_stop_2223 {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
@@ -20286,6 +20400,7 @@ mod relaxable_rows_2223 {
             node_hook_cut_cap: 0,
             root_cut_time_s: None,
             relaxable_rows: None,
+            batched_search: false,
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }

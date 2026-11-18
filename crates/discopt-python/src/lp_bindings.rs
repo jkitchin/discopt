@@ -1353,7 +1353,8 @@ pub fn ns_safe_bound_csc_py(
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
                     stall_time_s=None, node_selection=None,
                     extend_no_incumbent_s=None, branching_rule=None,
-                    rel_gap_max_abs=false, node_bound_hook=None, node_bound_every=1))]
+                    rel_gap_max_abs=false, node_bound_hook=None, node_bound_every=1,
+                    batched_search=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1400,6 +1401,7 @@ pub fn solve_milp_csc_py<'py>(
     rel_gap_max_abs: bool,
     node_bound_hook: Option<Py<PyAny>>,
     node_bound_every: usize,
+    batched_search: bool,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let selection = parse_node_selection(node_selection.as_deref())?;
     let branch_rule = parse_branching_rule(branching_rule.as_deref())?;
@@ -1482,6 +1484,7 @@ pub fn solve_milp_csc_py<'py>(
             bound_hook: node_bound_hook,
             bound_hook_every: node_bound_every,
             relaxable_rows: None,
+            batched_search,
         },
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
@@ -1833,6 +1836,7 @@ pub fn solve_milp_relu_csc_py<'py>(
             bound_hook: None,
             bound_hook_every: 1,
             relaxable_rows: None,
+            batched_search: false,
         },
     )?;
     Ok((
@@ -2063,6 +2067,8 @@ struct MilpExtra {
     bound_hook_every: usize,
     /// #2223: `MilpOptions::relaxable_rows` (lazy entry only).
     relaxable_rows: Option<Vec<bool>>,
+    /// #2235: `MilpOptions::batched_search`.
+    batched_search: bool,
 }
 
 impl Default for MilpExtra {
@@ -2078,6 +2084,7 @@ impl Default for MilpExtra {
             bound_hook: None,
             bound_hook_every: 1,
             relaxable_rows: None,
+            batched_search: false,
         }
     }
 }
@@ -2201,6 +2208,7 @@ pub(crate) fn milp_options(
         root_cut_time_s: parse_budget_secs(root_cut_time_s)?,
         root_cut_prune,
         relaxable_rows: None,
+        batched_search: false,
         simplex: SimplexOptions {
             tol,
             max_iter: 100_000,
@@ -2344,6 +2352,7 @@ fn run_milp_hooked<'py>(
         branch_rule: extra.branch_rule.unwrap_or(opts.branch_rule),
         rel_gap_max_abs: extra.rel_gap_max_abs || opts.rel_gap_max_abs,
         relaxable_rows: extra.relaxable_rows,
+        batched_search: extra.batched_search,
         ..opts
     };
     if extra.bound_hook_every == 0 {
