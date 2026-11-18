@@ -10613,59 +10613,95 @@ def _convex_minlp_route_enabled() -> bool:
 
 
 def _convex_route_oa_master() -> str:
-    """The MILP engine for the routed OA master: HiGHS, or the in-house lazy master
-    when ``DISCOPT_CONVEX_ROUTE_OA_MASTER=simplex`` (highs-parity P5.1, opt-in).
+    """The MILP engine for the routed OA master: ``"highs"`` or ``"simplex"``.
 
-    HiGHS is discopt's MILP solver. ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` once
-    selected between ``highs`` (default since performance-plan §25.13) and
-    ``auto``, the in-house simplex master the route used from #1141 until then.
-    ``auto`` was **retired** (2026-10-04, owner decision): it lost or tied the
-    HiGHS master on every panel measured (certified / total wall, plain
-    ``solve(time_limit=30)``, arms interleaved):
+    ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` decides when set: ``simplex`` (the in-house
+    lazy master, ``milp_simplex.solve_milp_with_lazy_cuts``) or ``highs`` (the HiGHS
+    separate-and-restart master, ``milp_highs.solve_milp_with_lazy_cuts``; needs
+    ``highspy`` and raises :class:`~discopt._optional_highs.MissingHighsError`
+    without it). Any other value raises: ``auto`` was retired on 2026-10-04 and stays
+    retired, so a typo cannot run an engine nobody asked for.
 
-    ======================================  ===============  ===============
-    panel                                   ``auto``         ``highs``
-    ======================================  ===============  ===============
-    in-repo routed, unscaled (26)           26 / 58.9 s      26 / 66.0 s
-    ...rows scaled 10^U(-3,3)               24 / 84.1 s      25 / 62.0 s
-    ...rows scaled 10^U(-6,6)               20 / 248.8 s     22 / 142.1 s
-    syn/rsyn (51), DISCOPT_CONVEX_KERNEL=0  22 / 893.6 s     31 / 632.0 s
-    syn/rsyn (51), default kernel ON        20 / 1040.0 s    20 / 1040.3 s
-    ======================================  ===============  ===============
+    Unset (or blank, per :func:`_env_selector`), the global engine switch
+    ``DISCOPT_LP_ENGINE`` decides (#2237, owner decision 2026-11-18), the same way it
+    does for the pure LP/MILP/IIS seams (:func:`_engine_default`):
 
-    Setting it to anything but ``highs`` now raises rather than being silently
-    ignored (``auto`` would otherwise run a different engine than asked). A
-    missing ``highspy`` is a broken install (#1229) and raises
-    (:func:`discopt.solvers.lp_milp_highs.require_highspy`); an environment
-    without it (the Pyodide page) turns the route off with
-    ``DISCOPT_CONVEX_MINLP_ROUTE=0`` instead.
+    * ``auto`` (default) -- HiGHS where ``highspy`` imports, else the in-house
+      master, silently: no default path needs HiGHS. Under ``auto`` a routed solve
+      whose HiGHS master *failed* (raised, or ended ``error``) is re-run once on the
+      in-house master before the #1059 fallback to the default path; see
+      :func:`_convex_route_oa_master_falls_back`.
+    * ``highs`` -- HiGHS, no fallback (``MissingHighsError`` without ``highspy``).
+    * ``rust`` -- the in-house master.
+
+    History. HiGHS was the default from performance-plan §25.13 until highs-parity D3
+    (2026-11-07, PR #2196) made the in-house master the default; #2223 then measured
+    it at parity on the P5.1 populations (route 92 = 92, syn/rsyn 30 vs 29). That
+    parity did not include the #2059 Ben-Tal--Nemirovski SOC outer block
+    (``DISCOPT_OA_SOC_OUTER``, default ON), which ``oa.solve_lp_nlp_bb`` builds on
+    the HiGHS master only, so D3 left it dead on the default route. Measured on
+    ``portfol_classical050_1`` (#2237): the in-house master did not certify in
+    203.5 s and the NLP-BB fallback certified (307 s total, ``oa/soc_outer_rows``
+    0); the HiGHS master certified on the route with the block active (249 s in the
+    #2237 report, where the wall is #2235's; 50 s on 2026-11-18). The reversal's panel is
+    recorded in ``docs/dev/highs-parity-plan.md`` (D3, "Reversed 2026-11-18").
 
     The master's bound is HiGHS's ``mip_dual_bound``, never its incumbent
-    (``milp_highs``), and OA reads only ``master_result.bound``.
+    (``milp_highs``), and OA reads only ``master_result.bound``. Re-read on every
+    call so tests and panels can flip it in-process.
     """
-    raw = os.environ.get("DISCOPT_CONVEX_ROUTE_OA_MASTER")
-    val = None if raw is None else raw.strip().lower()
-    # highs-parity D3, owner decision 2026-11-07 ("the point is to eliminate HiGHS"):
-    # the in-house lazy master is the DEFAULT, with the three D3 levers on
-    # (`DISCOPT_MILP_NODE_GMI_LAZY`, `DISCOPT_MILP_LAZY_ROOT_CUTS`,
-    # `DISCOPT_MILP_LAZY_ROW_EQUILIBRATE`). P5.1 panels (data
-    # `docs/dev/data/highs-parity/p5.1/d3_up_*`), cert-clean, 0 violations, 0 errors:
-    # syn/rsyn 26 vs HiGHS 29 at 1.03x wall; route 89 vs 92 at 1.42x. The residual
-    # (6 instances) is an owner-ACCEPTED gap, tracked in the plan's D3 status.
-    # `=highs` keeps the HiGHS master as an opt-out.
-    if val is None or val == "simplex":
+    val = _env_selector("DISCOPT_CONVEX_ROUTE_OA_MASTER")
+    if val is None:
+        if _engine_default() == "rust":
+            return "simplex"
+        # ``auto`` with highspy importable, or an explicit DISCOPT_LP_ENGINE=highs
+        # (which must raise without highspy, as on every other seam).
+        val = "highs"
+    if val == "simplex":
         return "simplex"
     if val != "highs":
         raise ValueError(
-            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={raw!r}: the routed OA master is 'simplex' "
-            "(default, the in-house lazy master) or 'highs' (opt-out); 'auto' stays "
-            "retired. To keep a convex MINLP off this route, set "
+            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={val!r}: the routed OA master is 'highs' "
+            "or 'simplex' (the in-house lazy master); unset, DISCOPT_LP_ENGINE decides. "
+            "'auto' stays retired. To keep a convex MINLP off this route, set "
             "DISCOPT_CONVEX_MINLP_ROUTE=0."
         )
     from discopt.solvers.lp_milp_highs import require_highspy
 
     require_highspy()
     return "highs"
+
+
+def _convex_route_oa_master_falls_back() -> bool:
+    """Whether a failed HiGHS OA master is retried on the in-house master (#2237).
+
+    The engine-switch convention (:func:`_engine_fallback_applies`): only under
+    ``DISCOPT_LP_ENGINE=auto``, with ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` unset, and no
+    ``highs_options`` (a request for HiGHS, whose failure is reported rather than
+    answered by an engine that never saw the options). The caller additionally
+    checks that the route, not the caller's ``milp_solver=``, picked HiGHS.
+    """
+    return _lp_engine_falls_back("DISCOPT_CONVEX_ROUTE_OA_MASTER") and (
+        not _highs_options_requested()
+    )
+
+
+def _route_master_failed(result: Any, raised: Optional[BaseException]) -> bool:
+    """Did a routed MIP-NLP solve's master *fail* (raise, or end ``error``)?
+
+    The trigger of the #2237 engine fallback, mirroring the seams' "the HiGHS route
+    returned ``error``": a master that stopped on the clock, proved infeasibility or
+    left a gap open is not a failure and is never retried.
+    """
+    if raised is not None:
+        return True
+    trace = getattr(result, "mip_nlp_trace", None)
+    if not isinstance(trace, Mapping):
+        return False
+    return any(
+        isinstance(it, Mapping) and it.get("master_status") == "error"
+        for it in trace.get("iterations") or ()
+    )
 
 
 def _convex_route_requires_syntactic_objective() -> bool:
@@ -16167,6 +16203,9 @@ def solve_model(
     # Only when the caller expressed no preference -- neither an explicit
     # solver= (including solver="bb"), nor any option this family would drop.
     _auto_route_reason: Optional[str] = None
+    # #2237: the router (not the caller's ``milp_solver=``) put this route on the
+    # HiGHS master, so a HiGHS master failure may be retried on the in-house one.
+    _route_picked_highs_master = False
     if _solver is None:
         # "No preference" is stronger than ``solver is None``. ``nlp_bb=True``
         # names an engine; ``node_callback=`` asks to watch that engine's nodes;
@@ -16199,6 +16238,9 @@ def solve_model(
             kwargs.setdefault("mip_nlp_method", _auto_route_method)
             # setdefault, not assignment: an explicit milp_solver= from the caller
             # outranks the route's pick.
+            _route_picked_highs_master = (
+                "milp_solver" not in kwargs and _auto_route_options.get("milp_solver") == "highs"
+            )
             for _route_opt, _route_val in _auto_route_options.items():
                 kwargs.setdefault(_route_opt, _route_val)
 
@@ -16353,6 +16395,8 @@ def solve_model(
         # fixed split stands exactly as before.
         _route_budget = time_limit
         _route_guard: Optional[_RouteProgressGuard] = None
+        # The caller's options, before the guard's hook is added (#2237 re-run).
+        _route_caller_options = mip_nlp_options
         if _auto_route_reason is not None:
             mip_nlp_options, _route_guard = _route_progress_guard_options(
                 mip_nlp_options,
@@ -16366,51 +16410,98 @@ def solve_model(
                 )
         _route_t0 = time.perf_counter()
         _route_raised: Optional[BaseException] = None
-        try:
-            _mip_nlp_result = solve_mip_nlp(
-                model,
-                method=mip_nlp_method,
-                mip_nlp_options=mip_nlp_options,
-                time_limit=_route_budget,
-                gap_tolerance=gap_tolerance,
-                max_iterations=max_nodes,
-                nlp_solver=nlp_solver,
-                initial_point=_mip_nlp_x0,
-                **mip_nlp_kwargs,
-            )
-        except Exception as _route_exc:  # noqa: BLE001 - see below
-            # #1066: a route the *router* chose is a decision, not a promise. The
-            # decomposition can refuse a model outright -- the HiGHS master
-            # rejects a lazy cut whose coefficients it cannot represent on an
-            # unbounded column, and raises rather than silently dropping terms
-            # (which is right: CLAUDE.md §3). But an auto-routed refusal must not
-            # become the caller's answer when the default path solves the model:
-            # ``st_test1`` and ``st_test5`` are ``optimal`` on the default path
-            # and raised ``HiGHS rejected the master model`` once the retarget
-            # sent them to the single-tree master (measured on the 104-instance
-            # route panel, 2026-08-29). Treat it exactly like a route that did
-            # not certify and spend the rest of the budget on the fallback.
-            #
-            # Narrow by construction, not by exception type: this arm is reached
-            # only when ``_auto_route_reason is not None``. An explicit
-            # ``solver="mip-nlp"`` re-raises, because the caller chose the
-            # algorithm and there is no fallback to reserve for.
-            if _auto_route_reason is None:
-                raise
-            _route_raised = _route_exc
-            _mip_nlp_result = None
-            logger.info(
-                "Convex MINLP auto-route raised %s: %s; falling back to the default path",
-                type(_route_exc).__name__,
-                _route_exc,
-            )
+        _route_attempt_budget = _route_budget
+        _route_engine_fell_back = False
+        while True:
+            try:
+                _mip_nlp_result = solve_mip_nlp(
+                    model,
+                    method=mip_nlp_method,
+                    mip_nlp_options=mip_nlp_options,
+                    time_limit=_route_attempt_budget,
+                    gap_tolerance=gap_tolerance,
+                    max_iterations=max_nodes,
+                    nlp_solver=nlp_solver,
+                    initial_point=_mip_nlp_x0,
+                    **mip_nlp_kwargs,
+                )
+            except Exception as _route_exc:  # noqa: BLE001 - see below
+                # #1066: a route the *router* chose is a decision, not a promise. The
+                # decomposition can refuse a model outright -- the HiGHS master
+                # rejects a lazy cut whose coefficients it cannot represent on an
+                # unbounded column, and raises rather than silently dropping terms
+                # (which is right: CLAUDE.md §3). But an auto-routed refusal must not
+                # become the caller's answer when the default path solves the model:
+                # ``st_test1`` and ``st_test5`` are ``optimal`` on the default path
+                # and raised ``HiGHS rejected the master model`` once the retarget
+                # sent them to the single-tree master (measured on the 104-instance
+                # route panel, 2026-08-29). Treat it exactly like a route that did
+                # not certify and spend the rest of the budget on the fallback.
+                #
+                # Narrow by construction, not by exception type: this arm is reached
+                # only when ``_auto_route_reason is not None``. An explicit
+                # ``solver="mip-nlp"`` re-raises, because the caller chose the
+                # algorithm and there is no fallback to reserve for.
+                if _auto_route_reason is None:
+                    raise
+                _route_raised = _route_exc
+                _mip_nlp_result = None
+                logger.info(
+                    "Convex MINLP auto-route raised %s: %s",
+                    type(_route_exc).__name__,
+                    _route_exc,
+                )
+            # #2237: the engine-switch convention. Under DISCOPT_LP_ENGINE=auto a
+            # HiGHS master the router picked that FAILED (raised, or ended
+            # ``error``) is re-run once on the in-house master with what is left
+            # of the route budget, before the #1059 fallback below. Never from a
+            # result that merely did not certify, so it cannot add a certificate
+            # the in-house master would not itself have produced.
+            if (
+                _auto_route_reason is not None
+                and not _route_engine_fell_back
+                and _route_picked_highs_master
+                and mip_nlp_kwargs.get("milp_solver") == "highs"
+                and _convex_route_oa_master_falls_back()
+                and _route_master_failed(_mip_nlp_result, _route_raised)
+            ):
+                _route_spent = time.perf_counter() - _route_t0
+                if _route_budget - _route_spent > 0.0:
+                    _route_engine_fell_back = True
+                    _why = (
+                        f"raised {type(_route_raised).__name__}"
+                        if _route_raised is not None
+                        else "returned error"
+                    )
+                    logger.info(
+                        "convex route engine auto: the HiGHS OA master %s; re-running "
+                        "the route on the in-house master",
+                        _why,
+                    )
+                    _auto_route_reason = (
+                        f"{_auto_route_reason} [engine fallback: HiGHS OA master {_why}; "
+                        "route re-run on the in-house master]"
+                    )
+                    mip_nlp_kwargs["milp_solver"] = "simplex"
+                    _route_attempt_budget = _route_budget - _route_spent
+                    if _route_guard is not None:
+                        mip_nlp_options, _route_guard = _route_progress_guard_options(
+                            _route_caller_options,
+                            method_key=mip_nlp_method_key,
+                            time_limit=_route_attempt_budget,
+                        )
+                    _route_raised = None
+                    continue
+            break
+        if _route_raised is not None:
             # #1614 E-01(c): an engine *failure* is not the designed "did not
             # certify" hand-over. The fallback is still the sound answer, but the
             # caller must hear that the routed engine broke, not only find it in
             # ``algorithm_route`` after the fact.
+            logger.info("Convex MINLP auto-route raised; falling back to the default path")
             warnings.warn(
                 f"{_auto_route_reason}: the routed solve raised "
-                f"{type(_route_exc).__name__}: {_route_exc}; falling back to the "
+                f"{type(_route_raised).__name__}: {_route_raised}; falling back to the "
                 "default path (see SolveResult.algorithm_route)",
                 RuntimeWarning,
                 stacklevel=2,
@@ -37372,9 +37463,11 @@ def _lp_engine() -> str:
     One switch over the pure-LP, pure-MILP and IIS seams (``DISCOPT_LP_ENGINE``). The
     per-seam variables (``DISCOPT_LP_BACKEND``, ``DISCOPT_LP_MILP_BACKEND``,
     ``DISCOPT_IIS_ENGINE``) and the ``milp_backend=`` keyword still override it, so every
-    existing A/B run keeps its meaning. Decomposition masters and the per-node MINLP LP
-    are not governed by it: both stay on the in-house simplex (masters since P5.2; the
-    node LP is the Rust engine by design).
+    existing A/B run keeps its meaning. It also picks the convex-MINLP route's OA master
+    (:func:`_convex_route_oa_master`, #2237), where ``DISCOPT_CONVEX_ROUTE_OA_MASTER``
+    is the per-seam override. Decomposition masters and the per-node MINLP LP are not
+    governed by it: both stay on the in-house simplex (masters since P5.2; the node LP
+    is the Rust engine by design).
 
     * ``auto`` -- HiGHS when ``highspy`` is importable, with the in-house Rust engine as
       an automatic fallback whenever the HiGHS route returns ``error`` (it refused the

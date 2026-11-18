@@ -22,9 +22,10 @@ from discopt.solver import _convex_minlp_auto_route, _convex_minlp_route_enabled
 
 @pytest.fixture(autouse=True)
 def _pin_highs_oa_master(monkeypatch):
-    """These tests cover the HiGHS OA master, an opt-out since highs-parity D3 flipped
-    the default to the in-house master (2026-11-07). Pin it, as a test that sets the
-    variable itself still overrides."""
+    """These tests cover the HiGHS OA master, the default again under
+    ``DISCOPT_LP_ENGINE=auto`` since #2237 (2026-11-18). Pin it anyway, so a run under
+    ``DISCOPT_LP_ENGINE=rust`` (CI's Rust-engine lane) still tests what it says; a test
+    that sets the variable itself still overrides."""
     monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
 
 
@@ -291,12 +292,17 @@ class TestRoutedMasterEngine:
         assert len(calls) > 0
 
 
-def test_default_oa_master_is_the_in_house_engine(monkeypatch):
-    """highs-parity D3 (owner, 2026-11-07): the routed OA master defaults to the in-house
-    lazy master; ``=highs`` is the opt-out."""
+def test_default_oa_master_follows_the_engine_switch(monkeypatch):
+    """#2237 (owner, 2026-11-18), reversing highs-parity D3: unset, the routed OA master
+    follows ``DISCOPT_LP_ENGINE``; ``=simplex`` / ``=highs`` override it. The full
+    matrix is in ``test_2237_route_oa_master_engine.py``."""
+    pytest.importorskip("highspy")
     from discopt.solver import _convex_route_oa_master
 
     monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", raising=False)
+    monkeypatch.delenv("DISCOPT_LP_ENGINE", raising=False)
+    assert _convex_route_oa_master() == "highs"
+    monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
     assert _convex_route_oa_master() == "simplex"
     monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
     assert _convex_route_oa_master() == "highs"
