@@ -121,7 +121,6 @@ def raise_callback_error(h: Any) -> None:
     if errors:
         exc = errors[0]
         errors.clear()
-        import highspy
-
+        highspy = require_highspy("re-raising a HiGHS callback's exception")
         if h.getModelStatus() == highspy.HighsModelStatus.kSolveError:
             raise exc
