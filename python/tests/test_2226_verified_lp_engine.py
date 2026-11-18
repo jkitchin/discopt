@@ -96,15 +96,53 @@ def test_explicit_engine_choices_have_no_fallback(monkeypatch):
     assert M._verified_lp_engines() == (None,)
 
 
-def test_highs_options_suppress_the_rust_fallback(monkeypatch):
-    """``highs_options`` are a request for HiGHS: as in ``_engine_fallback_applies``, a
-    HiGHS error under them is reported, not answered by the Rust engine (``None``
-    lets ``solve_lp_std`` pick HiGHS for the options)."""
+def _engines_used(monkeypatch):
+    """Record the engine each ``solve_lp_std`` outcome came from (its stats keys)."""
+    from discopt.solvers import lp_milp_highs as H
+
+    real = H.solve_lp_std
+    used = []
+
+    def spy(sf, *, time_limit=None, engine=None):
+        out = real(sf, time_limit=time_limit, engine=engine)
+        used.append("highs" if "route/lp_milp_backend" in out.stats else "rust")
+        return out
+
+    monkeypatch.setattr(H, "solve_lp_std", spy)
+    return used
+
+
+@pytest.mark.requires_highs
+def test_highs_options_on_a_minlp_do_not_move_the_route(monkeypatch):
+    """#2226 re-review: an MINLP solve given ``highs_options`` (they never reach this
+    route; the solve warns they were unused) keeps the HiGHS-first order. Checked on
+    the engine ``solve_lp_std`` actually used, not only the returned tuple."""
     _clear(monkeypatch)
     import discopt.solver as S
 
-    monkeypatch.setattr(S, "_highs_options_requested", lambda: True)
-    assert M._verified_lp_engines() == (None,)
+    token = S._HIGHS_OPTIONS_REQUEST.set(((("presolve", "off"),), {"used": False}))
+    try:
+        assert S._highs_options_requested()
+        used = _engines_used(monkeypatch)
+        bound, _x = M._verified_free_column_bound(_milp(), 60.0)
+    finally:
+        S._HIGHS_OPTIONS_REQUEST.reset(token)
+    assert used == ["highs"], used
+    assert bound == pytest.approx(NODE_OPT, abs=1e-7)
+
+
+@pytest.mark.requires_highs
+def test_options_in_scope_leave_the_engine_to_solve_lp_std(monkeypatch):
+    """Inside the HiGHS route's ``user_options`` scope the options do reach HiGHS:
+    ``engine=None`` lets ``solve_lp_std`` pick HiGHS for them, with no Rust fallback."""
+    _clear(monkeypatch)
+    from discopt.solvers import lp_milp_highs as H
+
+    with H.user_options((("presolve", "off"),)):
+        assert M._verified_lp_engines() == (None,)
+        used = _engines_used(monkeypatch)
+        M._verified_free_column_bound(_milp(), 60.0)
+    assert used == ["highs"], used
 
 
 def test_without_highspy_auto_is_rust(monkeypatch):

@@ -545,23 +545,22 @@ def _verified_lp_engines() -> tuple[Optional[str], ...]:
     re-verified against the LP by ``solve_lp_std``, so the order never decides
     soundness.
 
-    The fallback decision is the shared one (``solver._lp_engine_falls_back`` plus
-    ``_highs_options_requested``, as in ``_engine_fallback_applies``): under ``auto``
-    with ``highs_options`` a HiGHS error is reported, not answered by Rust. Every case
-    that is not the ``auto`` fallback or an explicit ``DISCOPT_LP_ENGINE=highs`` passes
-    ``engine=None``, so ``solve_lp_std``'s own rules still apply (its seam variable,
-    ``highs_options``, the HiGHS-MILP route).
+    The fallback decision is the shared one (``solver._lp_engine_falls_back``). User
+    HiGHS options suppress it only where they actually reach HiGHS: inside the pure
+    LP/MILP route's ``user_options`` scope (``lp_milp_highs._USER_OPTIONS``), where
+    ``engine=None`` makes ``solve_lp_std`` pick HiGHS and a HiGHS error is reported,
+    as in ``_engine_fallback_applies``. On an MINLP ``highs_options`` never reach this
+    route (the solve warns they were not used), so they do not move it to Rust
+    (#2226 re-review). Every case that is not the ``auto`` fallback or an explicit
+    ``DISCOPT_LP_ENGINE=highs`` passes ``engine=None``, so ``solve_lp_std``'s own
+    rules still apply (its seam variable, the options scope, the HiGHS-MILP route).
     """
     from discopt._optional_highs import highs_available
-    from discopt.solver import (
-        _env_selector,
-        _highs_options_requested,
-        _lp_engine,
-        _lp_engine_falls_back,
-    )
+    from discopt.solver import _env_selector, _lp_engine, _lp_engine_falls_back
+    from discopt.solvers.lp_milp_highs import _USER_OPTIONS
 
     if _lp_engine_falls_back("DISCOPT_LP_STD_ENGINE"):
-        if highs_available() and not _highs_options_requested():
+        if highs_available() and not _USER_OPTIONS.get():
             return ("highs", "rust")
         return (None,)
     if _env_selector("DISCOPT_LP_STD_ENGINE") is None and _lp_engine() == "highs":

@@ -133,7 +133,7 @@ def test_engine_no_incumbent_exit_returns_its_valid_bound(monkeypatch):
 
     Its status reads ``time_limit`` although the node cap stopped it: the driver's
     ``NodeLimit`` means "budget spent" for nodes and clock alike, so the label is not
-    asserted here.
+    asserted here. Tracked by #2239; assert ``node_limit`` once it is fixed.
     """
     monkeypatch.setenv("DISCOPT_MILP_PREINC_SCORE", "0")
     fixture = os.path.join(DATA, "issue_2224", "enlight8_perm3.mps.gz")
