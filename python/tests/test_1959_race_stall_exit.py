@@ -119,3 +119,28 @@ def test_dense_qp_race_ends_its_lift_slice_on_the_stall_and_certifies(monkeypatc
     # must say so.
     if slices[0][2] is None:
         assert STALL_ROUTE in slices[0][1], slices
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_engine_no_incumbent_exit_returns_its_valid_bound(monkeypatch):
+    """#2226 review: the dense-QP lift slice above now finds an incumbent, so its
+    no-incumbent branch no longer fires there. This forces the same engine exit with a
+    work budget (no clock): #2224's permuted Lights-Out fixture has no incumbent after
+    20 nodes with ``DISCOPT_MILP_PREINC_SCORE=0`` (measured 2026-11-18: bound 27.0, the
+    optimum, deterministic over repeated runs, ~1.6 s). The exit must carry the route
+    marker, no point, and a bound that is valid (never above the optimum 27).
+
+    Its status reads ``time_limit`` although the node cap stopped it: the driver's
+    ``NodeLimit`` means "budget spent" for nodes and clock alike, so the label is not
+    asserted here.
+    """
+    monkeypatch.setenv("DISCOPT_MILP_PREINC_SCORE", "0")
+    fixture = os.path.join(DATA, "issue_2224", "enlight8_perm3.mps.gz")
+    r = dm.from_mps(fixture).solve(
+        nlp_solver="simplex", max_nodes=20, deterministic=True, time_limit=600
+    )
+    assert STALL_ROUTE in (r.algorithm_route or ""), r.algorithm_route
+    assert r.objective is None and not r.gap_certified, r
+    assert r.status in ("node_limit", "time_limit"), r.status
+    assert r.bound is not None and r.bound <= 27.0 + 1e-6, r.bound

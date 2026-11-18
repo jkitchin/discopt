@@ -81,19 +81,36 @@ def test_highs_error_falls_back_to_rust(monkeypatch):
 
 
 def test_explicit_engine_choices_have_no_fallback(monkeypatch):
+    """Only ``auto`` falls back. An explicit HiGHS is HiGHS alone; everything else is
+    ``None``, which leaves ``solve_lp_std``'s own rules in charge (its seam variable,
+    ``highs_options``, the HiGHS-MILP route)."""
     _clear(monkeypatch)
     monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
-    assert M._verified_lp_engines() == ("rust",)
+    assert M._verified_lp_engines() == (None,)
     monkeypatch.setenv("DISCOPT_LP_ENGINE", "highs")
     assert M._verified_lp_engines() == ("highs",)
     # The seam's own variable wins and is left to ``solve_lp_std`` to read.
     monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "rust")
     assert M._verified_lp_engines() == (None,)
+    monkeypatch.delenv("DISCOPT_LP_ENGINE")
+    assert M._verified_lp_engines() == (None,)
+
+
+def test_highs_options_suppress_the_rust_fallback(monkeypatch):
+    """``highs_options`` are a request for HiGHS: as in ``_engine_fallback_applies``, a
+    HiGHS error under them is reported, not answered by the Rust engine (``None``
+    lets ``solve_lp_std`` pick HiGHS for the options)."""
+    _clear(monkeypatch)
+    import discopt.solver as S
+
+    monkeypatch.setattr(S, "_highs_options_requested", lambda: True)
+    assert M._verified_lp_engines() == (None,)
 
 
 def test_without_highspy_auto_is_rust(monkeypatch):
+    """Without ``highspy`` the route is ``solve_lp_std``'s default, the Rust engine."""
     _clear(monkeypatch)
     import discopt._optional_highs as OH
 
     monkeypatch.setattr(OH, "highs_available", lambda: False)
-    assert M._verified_lp_engines() == ("rust",)
+    assert M._verified_lp_engines() == (None,)

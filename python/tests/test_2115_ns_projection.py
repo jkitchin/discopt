@@ -30,6 +30,7 @@ Each arm runs in its own process: the flag is read once per process (a Rust
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
@@ -69,8 +70,14 @@ print("RESULT " + json.dumps({
 """
 
 
+@functools.lru_cache(maxsize=None)
 def _solve(flag: str | None, time_limit: float) -> dict:
-    """``flag=None`` leaves ``DISCOPT_NS_PROJECT`` unset: the shipped default."""
+    """``flag=None`` leaves ``DISCOPT_NS_PROJECT`` unset: the shipped default.
+
+    Cached per ``(flag, time_limit)``: both tests read the OFF arm, which is
+    deterministic (#2226 review), so it runs once per session. Callers must not mutate
+    the returned dict.
+    """
     env = {**os.environ, "DISCOPT_PROFILE": "1"}
     env.pop("DISCOPT_NS_PROJECT", None)
     if flag is not None:

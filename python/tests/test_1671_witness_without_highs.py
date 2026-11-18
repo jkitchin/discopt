@@ -80,11 +80,12 @@ def test_the_1671_witness_is_certified_without_highs():
     # Soundness: no incumbent below the optimum, no bound above it.
     assert obj_f >= UC_OPT - tol, obj
     assert bound_f <= UC_OPT + tol, bound
-    # The certificate a plain solve promises: incumbent within the default relative
-    # gap_tolerance (1e-4) of its own bound. #2226: this used to pin the objective to
-    # 1e-6 of UC_OPT, stricter than the solve's contract; since #2196 the engine stops
-    # at 450643.769 (bound 450605.869, gap 8.4e-5) -- a valid certificate the pin read
-    # as a failure.
-    assert obj_f - bound_f <= 1e-4 * abs(obj_f) + tol, (obj, bound)
+    # The certificate a plain solve promises: the MILP driver's own default test,
+    # ``(incumbent - bound) / max(|incumbent|, 1) <= gap_tolerance`` (1e-4;
+    # ``TreeManager::gap`` / ``gap_closed`` in the Rust driver). #2226: this used to
+    # pin the objective to 1e-6 of UC_OPT, stricter than the solve's contract; since
+    # #2196 the engine stops at 450643.769 (bound 450605.869, gap 8.4e-5) -- a valid
+    # certificate the pin read as a failure.
+    assert (obj_f - bound_f) / max(abs(obj_f), 1.0) <= 1e-4, (obj, bound)
     assert out["CERT"].split()[0] == "True" and out["CERT"].split()[2] == "False", out["CERT"]
     assert out["ROUTE"].startswith("native-milp") and "highspy is not installed" in out["ROUTE"]

@@ -544,16 +544,29 @@ def _verified_lp_engines() -> tuple[Optional[str], ...]:
     ``DISCOPT_LP_ENGINE`` is honoured with no fallback. Every engine's answer is
     re-verified against the LP by ``solve_lp_std``, so the order never decides
     soundness.
-    """
-    if os.environ.get("DISCOPT_LP_STD_ENGINE", "").strip():
-        return (None,)
-    from discopt._optional_highs import highs_available
-    from discopt.solver import _lp_engine
 
-    eng = _lp_engine()
-    if eng == "auto":
-        return ("highs", "rust") if highs_available() else ("rust",)
-    return (eng,)
+    The fallback decision is the shared one (``solver._lp_engine_falls_back`` plus
+    ``_highs_options_requested``, as in ``_engine_fallback_applies``): under ``auto``
+    with ``highs_options`` a HiGHS error is reported, not answered by Rust. Every case
+    that is not the ``auto`` fallback or an explicit ``DISCOPT_LP_ENGINE=highs`` passes
+    ``engine=None``, so ``solve_lp_std``'s own rules still apply (its seam variable,
+    ``highs_options``, the HiGHS-MILP route).
+    """
+    from discopt._optional_highs import highs_available
+    from discopt.solver import (
+        _env_selector,
+        _highs_options_requested,
+        _lp_engine,
+        _lp_engine_falls_back,
+    )
+
+    if _lp_engine_falls_back("DISCOPT_LP_STD_ENGINE"):
+        if highs_available() and not _highs_options_requested():
+            return ("highs", "rust")
+        return (None,)
+    if _env_selector("DISCOPT_LP_STD_ENGINE") is None and _lp_engine() == "highs":
+        return ("highs",)
+    return (None,)
 
 
 def _verified_free_column_bound(milp, time_limit: Optional[float]):
