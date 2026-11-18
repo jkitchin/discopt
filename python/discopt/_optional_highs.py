@@ -72,12 +72,12 @@ def require_highspy(feature: str = "this HiGHS-backed feature") -> ModuleType:
 # Exceptions raised inside a HiGHS callback (#2221)
 # ---------------------------------------------------------------------------
 #: Attribute on a ``highspy.Highs`` instance holding the exceptions its wrapped
-#: callbacks raised that :func:`raise_callback_error` has not re-raised yet.
+#: callbacks raised that :func:`run_checked` has not re-raised yet.
 _CALLBACK_ERRORS_ATTR = "_discopt_callback_errors"
 
 
 def wrap_callback(h: Any, fn: Callable[..., Any]) -> Callable[..., Any]:
-    """``fn`` as a callback of ``h`` whose exception :func:`raise_callback_error` re-raises.
+    """``fn`` as a callback of ``h`` whose exception :func:`run_checked` re-raises.
 
     Up to highspy 1.15 a Python exception raised inside a callback propagated out of
     ``Highs.run()``. From 1.16 ``Highs::run`` wraps the solve in ``try``/``catch
@@ -88,8 +88,8 @@ def wrap_callback(h: Any, fn: Callable[..., Any]) -> Callable[..., Any]:
     ``run``, 1.16.0 returns ``HighsStatus.kError``. A caller that maps ``kSolveError``
     to a status would then report a broken separator as an ordinary solver error
     (CLAUDE.md §7), so every Python callback discopt hands HiGHS goes through this
-    wrapper and every ``run`` that can call one is followed by
-    :func:`raise_callback_error`. The exception is still raised inside the callback,
+    wrapper and every ``run`` that can call one goes through
+    :func:`run_checked`. The exception is still raised inside the callback,
     so HiGHS stops the solve as before on either version.
     """
     errors = getattr(h, _CALLBACK_ERRORS_ATTR, None)
@@ -107,20 +107,30 @@ def wrap_callback(h: Any, fn: Callable[..., Any]) -> Callable[..., Any]:
     return _wrapped
 
 
-def raise_callback_error(h: Any) -> None:
-    """Re-raise the first exception a :func:`wrap_callback` callback of ``h`` raised.
+def run_checked(h: Any) -> Any:
+    """``h.run()``, re-raising the first exception a :func:`wrap_callback` callback raised.
 
-    A no-op when none did. The record is always cleared, so a later ``run`` of the same
-    object starts clean. It is re-raised only when ``h``'s last ``run`` ended in
-    ``kSolveError``, which is how highspy >= 1.16 ends a run whose callback raised. On
-    highspy <= 1.15 the exception already left ``run`` itself, so a record still present
-    after a later run of the same object that did not end in ``kSolveError`` is stale.
-    Re-raising it there would fail a good solve with a past exception.
+    The record is cleared before the run, so an exception from an earlier run of the
+    same object (which on highspy <= 1.15 already left that run) is never re-raised
+    here. After the run, ANY recorded exception is re-raised, whatever status HiGHS
+    ended the run with: highspy 1.16 ends a run whose callback raised in ``kSolveError``
+    (measured, #2221), but the guarantee does not rest on that detail, so an exception
+    from an interrupt-style callback that a later release ended in, say,
+    ``kInterrupt`` is not dropped either. On highspy <= 1.15 the exception leaves
+    ``run`` itself and propagates unchanged; the record is cleared on the way out.
+    Returns ``run``'s :class:`HighsStatus`.
     """
     errors = getattr(h, _CALLBACK_ERRORS_ATTR, None)
+    if errors is not None:
+        errors.clear()
+    try:
+        status = h.run()
+    except BaseException:
+        if errors is not None:
+            errors.clear()
+        raise
     if errors:
         exc = errors[0]
         errors.clear()
-        highspy = require_highspy("re-raising a HiGHS callback's exception")
-        if h.getModelStatus() == highspy.HighsModelStatus.kSolveError:
-            raise exc
+        raise exc
+    return status

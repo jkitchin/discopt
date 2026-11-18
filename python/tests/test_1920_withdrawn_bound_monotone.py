@@ -355,6 +355,61 @@ def test_root_lp_tolerance_vertex_never_refutes_or_publishes(monkeypatch):
     assert shift == pytest.approx(20.0)
 
 
+def test_root_lp_vertex_is_dropped_when_it_cannot_be_rederived(monkeypatch):
+    """#2221 review: when the fixed-integer LP over the root vertex's integers gives no
+    point (no time left, or no verified point), the raw vertex must not stand in for it.
+
+    Before the fix ``_rederived_point`` returned the raw vertex in that case, and the
+    #1509 check refuted the correct bound 31 with it and published objective 11, a point
+    violating the model by 8. Here the vertex is injected as the root LP's answer, and the
+    fixed-integer LP is made to fail for that vertex only. The incumbent's own-integers
+    LP still runs normally.
+    """
+    import dataclasses
+
+    real_lp = lp_milp_highs.solve_lp_std
+    real_fx = lp_milp_highs._fixed_integer_lp
+    vertex = np.array(ROOT_VERTEX_1E10)
+    injected: list = []
+    failed: list = []
+
+    def root_vertex(sf, **kw):
+        out = real_lp(sf, **kw)
+        n = sf.n - sf.m
+        relaxation = bool(np.all(sf.xu[:n] > sf.xl[:n]))
+        if sf.n == len(vertex) and relaxation and out.status == "optimal":
+            out.x = vertex.copy()
+            injected.append(1)
+        return out
+
+    def failing_fx(sf, x, time_limit):
+        out = real_fx(sf, x, time_limit)
+        if sf.n == len(vertex) and np.allclose(np.asarray(x, float), vertex, rtol=0, atol=1e-9):
+            failed.append(1)
+            return dataclasses.replace(out, status="error", x=None)
+        return out
+
+    monkeypatch.setattr(lp_milp_highs, "solve_lp_std", root_vertex)
+    monkeypatch.setattr(lp_milp_highs, "_fixed_integer_lp", failing_fx)
+    m = _sequencing(0, 1e10)
+    r = m.solve(time_limit=60)
+    from discopt.warm_start import check_feasibility
+
+    assert injected, "MEASURED NOTHING: the root LP vertex was never injected"
+    if not failed:
+        assert r.solver_stats.get("highs/version", 0.0) < 11200.0, (
+            "MEASURED NOTHING: the vertex's fixed-integer LP was never called"
+        )
+        pytest.skip("highspy 1.11 does not reach the #1509 check with the vertex in hand")
+    assert r.objective is None or r.objective > 11.0 + 1e-6, (r.status, r.objective)
+    assert r.objective == pytest.approx(31.0, abs=1e-6), (r.status, r.objective)
+    assert r.bound is None or r.bound <= 31.0 + 1e-6
+    assert r.solver_stats.get("milp/root_point_dropped") == 1.0
+    x = np.concatenate([np.atleast_1d(np.asarray(r.x[v.name], float)) for v in m._variables])
+    ok, why = check_feasibility(m, x, tol=1e-5)
+    assert ok, why
+
+
 # ── The fix-and-propagate start ──
 
 

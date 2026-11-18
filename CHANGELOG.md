@@ -38,11 +38,22 @@ The release procedure that produces these entries is documented in
   alias extra). discopt's pounce-facing tests pass on 0.17.0 (432); see the PR for the
   full-suite run.
 
-- **`discopt[highs]` excludes highspy 1.16.0** (`highspy>=1.11,!=1.12.0,!=1.16.0`). On
-  `main`, the affected test files pass with 1.15.1 and fail 90 tests with 1.16.0: HiGHS
-  fixed defects some falsifier tests rely on, its LP-reader and IIS output changed, and
-  two changes may be regressions (the banner prints with logging off; a raising
-  separator no longer aborts the solve). Adopting 1.16 is tracked in #2221.
+- **highspy 1.16.0 is supported again** (`highspy>=1.11,!=1.12.0`; #2221). 1.16 swallows
+  an exception raised in a HiGHS callback and ends the run in `kSolveError`; every
+  discopt callback is now wrapped and every such run goes through `run_checked`, which
+  re-raises it, so a broken separator or stop rule still crashes the solve on every
+  release. An LP that 1.16 labels `kUnknown` with feasible primal and dual solutions is
+  handed to the usual re-verification instead of failing. CI tests 1.11.0, 1.15.1 and
+  the latest release.
+
+- **The LP-file reader (`from_lp`, `discopt._lpfile.read_lp`) now follows HiGHS
+  1.16.0's rewritten reader** (it was a port of 1.15.1's), so some files now read as a
+  different model. Measured against highspy 1.15.1 / 1.16.0 on the same files: a column
+  given more than one objective cost (`2 x + 3 x`) gets the costs **summed** (5; the
+  last one used to win, 3); sections are parsed in **file order**; and a quadratic
+  objective `[ 2 x^2 ]` written without the trailing `/ 2`, which used to be refused,
+  is now accepted with Hessian entry 4, **twice** the `[ 2 x^2 ] / 2` reading (2). A
+  file that repeats no cost and writes `/ 2` is unaffected by the first and last change.
 
 - **HiGHS is an optional extra (`pip install 'discopt[highs]'`).** Without `highspy`
   every default path runs on discopt's in-house Rust engine: pure LPs and pure MILPs

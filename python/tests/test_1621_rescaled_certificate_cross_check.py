@@ -217,22 +217,24 @@ def _inject_issue_1621_certificate(monkeypatch, M):  # noqa: N803
     """Make every solve of a rescaled form return the issue's false certificate.
 
     A rescaled form is recognised by identity: it is whatever ``_scale_logicals``
-    returned. The optimal claim is the issue's ``x = z = n = 0`` point (objective 0),
+    returned. The forms themselves are kept (not their ``id()``), so a freed form's id
+    reused by an unrelated ``StdForm`` cannot inject a false certificate into it.
+    The optimal claim is the issue's ``x = z = n = 0`` point (objective 0),
     with the route's logicals completed from it, so it passes the rescaled path's own
     point re-verification and only the #1621 cross-check can refute it. Returns the
     list of injected statuses (empty when the seam was never reached)."""
-    scaled_ids: set[int] = set()
+    scaled: list = []
     real_scale, real_solve = L._scale_logicals, L._solve_milp_std
     injected: list[str] = []
 
     def scale(sf, f):
         out = real_scale(sf, f)
-        scaled_ids.add(id(out))
+        scaled.append(out)
         return out
 
     def solve(sf, **kw):
         out = real_solve(sf, **kw)
-        if id(sf) not in scaled_ids:
+        if not any(sf is s for s in scaled):
             return out
         out.gap_certified = True
         if M < 5e9:

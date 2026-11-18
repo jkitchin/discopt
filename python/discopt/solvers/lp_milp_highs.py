@@ -123,7 +123,7 @@ _LIMIT_STATUSES = ("kTimeLimit", "kIterationLimit", "kSolutionLimit", "kInterrup
 
 
 from discopt._optional_highs import MissingHighsError as HighsUnavailable  # noqa: E402, F401
-from discopt._optional_highs import raise_callback_error, wrap_callback  # noqa: E402
+from discopt._optional_highs import run_checked, wrap_callback  # noqa: E402
 
 
 def require_highspy():
@@ -4309,8 +4309,7 @@ def _solve_milp_std(
 
     if stop is not None:
         stop.attach(h, highspy)
-    run_st = h.run()
-    raise_callback_error(h)  # #2221: highspy >= 1.16 swallows a callback's exception
+    run_st = run_checked(h)  # #2221: highspy >= 1.16 swallows a callback's exception
     name = _status_name(h)
     info = h.getInfo()
     if seeded and name == "kOptimal" and not np.isfinite(float(info.mip_dual_bound)):
@@ -4526,12 +4525,22 @@ def _solve_milp_std(
         # 11.0 on ``sf`` -- the verifier's row tolerance is relative, and the 1e10 rows
         # absorb a violation of 8 in the model -- while the LP over its integers gives
         # the true optimum 31.0. Taken raw it refuted HiGHS's correct bound 31, declined
-        # the #1654 certificate and was published as the incumbent.
-        root_pt = (
-            _rederived_point(sf, lp.x, remaining(), stats, stat_prefix="milp/root_point")
-            if lp.status == "optimal"
-            else None
-        )
+        # the #1654 certificate and was published as the incumbent. Only the RE-DERIVED
+        # point counts: when the fixed-integer LP gives none (no time left, or no
+        # verified point) the raw vertex is dropped, not kept, since it is the same
+        # tolerance point that would refute the bound and be published.
+        root_pt = None
+        if lp.status == "optimal":
+            root_rederived: list = []
+            raw_root = _rederived_point(
+                sf, lp.x, remaining(), stats, root_rederived, stat_prefix="milp/root_point"
+            )
+            if not sf.int_idx.size:
+                root_pt = raw_root  # no integers to re-derive: the vertex is the point
+            elif root_rederived:
+                root_pt = root_rederived[0]
+            else:
+                stats["milp/root_point_dropped"] = 1.0
         if root_pt is not None:
             cands.append(root_pt)
             kinds.append("root-lp")

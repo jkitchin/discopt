@@ -126,7 +126,13 @@ def _slack_round_off(sf, out) -> bool:
     at its bound 0, open above) price below zero -- relative violation 1.0. Measured on
     seed 2: slack column 87, row 27, ``y = 2.40e-14``; seed 7: column 84, row 24,
     ``y = -2.02e-13`` (that slack basic at 0.0286). highspy 1.16 returns clean duals
-    (relative violation 1.1e-16 / 9.6e-16), so this injects the 1.15.1 round-off."""
+    (relative violation 1.1e-16 / 9.6e-16), so this injects the 1.15.1 round-off.
+
+    Seed 2 is replayed (same size and sign, on the first nonbasic slack at its lower
+    bound, which is the measured column). Seed 7 is APPROXIMATED, not replayed: its
+    measured round-off (-2.02e-13) sat on a BASIC slack, while this puts the fixed
+    2.4e-14 on the first slack at its lower bound. What both reproduce is the property
+    under test: a dual whose per-column check fails while the NS-safe bound holds."""
     n = sf.n - sf.m
     A = sp.csc_matrix(sf.A)  # noqa: N806
     y = np.array(out.row_dual, dtype=float)

@@ -735,9 +735,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The floor and the latest release; ">=1.16.0" keeps "latest" from silently
-        # resolving below the first release whose behaviour changes were adopted (#2221).
-        highspy: ["==1.11.0", ">=1.16.0"]
+        # The floor, the last pre-1.16 release, and the latest. ">=1.16.0" keeps "latest"
+        # from silently resolving below the first release whose behaviour changes were
+        # adopted (#2221). "==1.15.1" covers 1.12-1.15, which the pin still admits: the
+        # #1671 sparsify cycle window, the class-1 injections that are no-ops there, and
+        # the callback exceptions that leave ``run`` itself.
+        highspy: ["==1.11.0", "==1.15.1", ">=1.16.0"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

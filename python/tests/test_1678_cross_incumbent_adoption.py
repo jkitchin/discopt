@@ -150,6 +150,7 @@ def test_tolerance_level_gain_is_not_adopted(monkeypatch):
     seen: list = []
     real = L._weaker_bound
     injected: list = []
+    natural: list = []
 
     def spy(sf, out, cross, kw):
         if sf.n == len(TOLERANCE_CROSS_X) and np.array_equal(cross.x, out.x):
@@ -158,6 +159,8 @@ def test_tolerance_level_gain_is_not_adopted(monkeypatch):
             cross.x = np.array(TOLERANCE_CROSS_X)
             cross.objective, cross.bound = TOLERANCE_CROSS_OBJ, TOLERANCE_CROSS_BOUND
             injected.append(1)
+        elif sf.n == len(TOLERANCE_CROSS_X):
+            natural.append(1)
         pt = L._verified_mip_point(sf, cross.x)
         mine = L._verified_mip_point(sf, out.x)
         res = real(sf, out, cross, kw)
@@ -168,9 +171,9 @@ def test_tolerance_level_gain_is_not_adopted(monkeypatch):
     m, truth = _log_max()
     r = m.solve(time_limit=30)
     assert len(seen) == 1
-    # Natural (highspy <= 1.15) or injected (1.16): the assert below proves the judge saw
-    # a tolerance-level gain either way.
-    print("injected 1.15.1 cross answer:", bool(injected))
+    # Natural (highspy <= 1.15) or injected (1.16): the ``0 < mine - pt`` assert below
+    # proves the judge saw a tolerance-level gain either way.
+    assert injected or natural, "MEASURED NOTHING: the cross-check never saw this model"
     pt, mine, stats = seen[0]
     assert pt is not None and mine is not None
     assert 0.0 < mine[1] - pt[1] <= L.CERT_ABS  # the cross point IS marginally better

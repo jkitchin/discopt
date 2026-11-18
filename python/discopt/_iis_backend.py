@@ -31,7 +31,7 @@ from typing import Any, Iterator, Optional
 
 import numpy as np
 
-from discopt._optional_highs import raise_callback_error, wrap_callback
+from discopt._optional_highs import run_checked, wrap_callback
 
 OPTIMAL = "optimal"
 INFEASIBLE = "infeasible"
@@ -150,8 +150,7 @@ class HighsBackend:
             h.setOptionValue("mip_max_nodes", int(max_nodes))
         self._stop = stop + GRACE_S
         try:
-            h.run()
-            raise_callback_error(h)
+            run_checked(h)
         finally:
             self._stop = math.inf
             if max_nodes is not None:

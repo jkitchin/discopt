@@ -40,7 +40,7 @@ from typing import Optional
 
 import numpy as np
 
-from discopt._optional_highs import raise_callback_error, wrap_callback
+from discopt._optional_highs import run_checked, wrap_callback
 
 _T_LAUNCH = time.perf_counter()  # earliest point this process can see
 
@@ -346,8 +346,7 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
             A.indices[s:e].astype(np.int32),
             A.data[s:e],
         )
-    run = h.run()
-    raise_callback_error(h)
+    run = run_checked(h)
     if run not in (highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning):
         raise RuntimeError(f"HiGHS failed on the checker-settings solve: {run}")
     if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
