@@ -34371,7 +34371,7 @@ def _rows_to_retest(viol, thresh, row_scale) -> np.ndarray:
     """
     viol = np.asarray(viol, dtype=np.float64)
     cleared = (viol <= thresh) & np.isfinite(row_scale)
-    return np.nonzero(~cleared)[0]
+    return np.asarray(np.nonzero(~cleared)[0], dtype=np.intp)
 
 
 def _row_truly_violated_exact(a_i, x, b_i: float, thresh_i: float, *, signed: bool) -> bool:
