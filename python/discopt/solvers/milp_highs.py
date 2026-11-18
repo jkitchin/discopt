@@ -1140,10 +1140,27 @@ _SIMPLEX_BUDGET_BEFORE_SCIP_S = 1.0
 
 
 def _run_simplex_engine(arrays, budget, gap, seed):
-    """The in-house Rust B&B on *arrays*: ``(status, bound or None, nodes)``."""
+    """The in-house Rust B&B on *arrays*: ``(status, bound or None, nodes)``.
+
+    #2235: on the driver's batched search (``batched_search=True``), which
+    evaluates node LPs in parallel, not the HiGHS-design search the driver runs
+    by default since #2196. That search is a port of HiGHS's serial default search,
+    and this call only needs a valid bound on a fixed MILP as fast as possible.
+    It is also an independent check of HiGHS, and the batched search is a design
+    of discopt's own. Measured on the 21 confirmation masters the in-repo
+    ``minlplib_nl`` corpus produces under ``DISCOPT_CONVEX_ROUTE_OA_MASTER=highs``
+    (4 threads, 60 s, 3 interleaved reps): the sum of the median walls was 20.2 s
+    with the HiGHS search and 2.3 s batched, every master certified by both. The
+    batched search was never slower by more than 0.07 s (tls2: 0.05 -> 0.12 s);
+    the second ``cvxnonsep_psig40r`` master took 19.2 s (652 nodes) against 1.2 s
+    (3 nodes). On ``portfol_classical050_1``'s master (``test_2059_soc_outer``)
+    the two took 212 s and 37 s.
+    """
     from discopt.solvers import milp_simplex
 
-    res = milp_simplex.solve_milp(**arrays, time_limit=budget, gap_tolerance=gap, mip_start=seed)
+    res = milp_simplex.solve_milp(
+        **arrays, time_limit=budget, gap_tolerance=gap, mip_start=seed, batched_search=True
+    )
     ebound = None if res.bound is None or not np.isfinite(res.bound) else float(res.bound)
     return res.status, ebound, int(res.node_count)
 

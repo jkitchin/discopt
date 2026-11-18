@@ -1354,6 +1354,7 @@ def solve_milp(
     gap_tolerance: float = 1e-4,
     max_nodes: int = 1_000_000,
     mip_start: Optional[np.ndarray] = None,
+    batched_search: bool = False,
 ) -> MILPResult:
     """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq, bounds, integrality``
     with the Rust warm-started-simplex B&B.
@@ -1367,6 +1368,13 @@ def solve_milp(
 
     ``time_limit`` counts from this call: marshaling the rows into CSC is charged
     to it (#2079, measured 6 s past the limit on a 7909 x 57828 GDP master).
+
+    ``batched_search`` (#2235) runs the driver's batched tree search, which
+    evaluates node LPs in parallel, where the default would run the HiGHS-design
+    search (``DISCOPT_HIGHS_MIP_SEARCH``, a faithful port of HiGHS's serial default
+    search). Both are complete and sound; it changes which tree is explored, so
+    use it where only the bound matters and throughput on a multicore machine
+    does (:func:`discopt.solvers.milp_highs._run_simplex_engine`).
     """
     t_enter = time.perf_counter()
     try:
@@ -1427,6 +1435,7 @@ def solve_milp(
             time_limit_s=None if budget is None else max(0.0, float(budget)),
             initial_incumbent=seed,
             debug_hook=_debug.rust_hook(),
+            batched_search=bool(batched_search),
             **cut_kwargs,
         )
 
