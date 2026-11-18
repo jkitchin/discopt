@@ -356,6 +356,42 @@ def test_suite_finder_skips_on_conflict(macos):
     assert finder.find_spec("torch") is None
 
 
+def test_suite_finder_absent_guarded_package_is_not_found(macos, monkeypatch):
+    """#2243: a guarded name that is not installed must raise ModuleNotFoundError.
+
+    The check's ``_package_binaries`` falls back to ``importlib.util.find_spec``
+    when the distribution lists no binaries (always, for an absent package),
+    which re-entered the finder and recursed to ``RecursionError``, so
+    ``pytest.importorskip`` errored instead of skipping. Runs the real
+    ``package_omp_runtimes`` path, uncached, with the finder on ``sys.meta_path``.
+    """
+    import _openmp_isolation
+
+    name = "nonexistent_pkg_2243"
+    monkeypatch.setattr(_openmp_isolation, "_GUARDED", (*_openmp_isolation._GUARDED, name))
+    monkeypatch.setitem(guard._DISTRIBUTIONS, name, name)
+    monkeypatch.setattr(guard, "loaded_omp_runtimes", lambda: {CYIPOPT_OMP})
+    calls = []
+    real_binaries = guard._package_binaries
+
+    def counting_binaries(distribution, module):
+        calls.append(module)
+        return real_binaries(distribution, module)
+
+    monkeypatch.setattr(guard, "_package_binaries", counting_binaries)
+    monkeypatch.setattr(guard, "package_omp_runtimes", guard.package_omp_runtimes.__wrapped__)
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    finder = _openmp_isolation._OpenMPGuardFinder()
+    monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
+
+    with pytest.raises(ModuleNotFoundError):
+        __import__(name)
+    # The check ran exactly once (the probe fired, and did not re-enter itself).
+    assert calls == [name]
+    with pytest.raises(pytest.skip.Exception):
+        pytest.importorskip(name)
+
+
 # ── Mach-O dependency walk (the torch-then-cyipopt direction) ──────────────
 #
 # Measured on the issue's macOS arm64 machine: cyipopt's RECORD ships no libomp;

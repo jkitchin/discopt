@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.abc
 import sys
+import threading
 
 import pytest
 
@@ -35,17 +36,36 @@ _HINT = (
 class _OpenMPGuardFinder(importlib.abc.MetaPathFinder):
     """Check the OpenMP runtimes before a guarded top-level import is resolved."""
 
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname in _GUARDED:
-            from discopt._openmp_guard import (
-                OpenMPRuntimeConflictError,
-                check_openmp_compatible,
-            )
+    def __init__(self) -> None:
+        # Names whose check is running on this thread. The check may itself call
+        # ``importlib.util.find_spec(name)`` (``_openmp_guard._package_binaries``'s
+        # fallback when the distribution's RECORD lists no binaries, which is
+        # always the case for an absent package); that walks ``sys.meta_path``
+        # back into this finder. Without this guard the re-entry repeated the
+        # check and recursed until ``RecursionError`` (#2243). On re-entry we
+        # step aside so the regular finders answer the inner lookup.
+        self._active = threading.local()
 
-            try:
-                check_openmp_compatible(fullname, feature="a test")
-            except OpenMPRuntimeConflictError as exc:
-                raise pytest.skip.Exception(str(exc) + _HINT, allow_module_level=True) from exc
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname not in _GUARDED:
+            return None
+        active = getattr(self._active, "names", None)
+        if active is None:
+            active = self._active.names = set()
+        if fullname in active:
+            return None  # re-entered from our own check: defer to the regular finders
+        from discopt._openmp_guard import (
+            OpenMPRuntimeConflictError,
+            check_openmp_compatible,
+        )
+
+        active.add(fullname)
+        try:
+            check_openmp_compatible(fullname, feature="a test")
+        except OpenMPRuntimeConflictError as exc:
+            raise pytest.skip.Exception(str(exc) + _HINT, allow_module_level=True) from exc
+        finally:
+            active.discard(fullname)
         return None  # let the regular finders locate the module
 
 
