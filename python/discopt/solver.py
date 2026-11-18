@@ -34300,7 +34300,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         viol = A_ub @ x - np.asarray(b_ub, dtype=np.float64)
         row_scale = np.asarray(abs(A_ub) @ absx, dtype=np.float64).ravel()
         thresh = _matrix_row_threshold(A_ub, row_scale, tol, rtol)
-        bad = np.nonzero(viol > thresh)[0]
+        bad = _rows_to_retest(viol, thresh, row_scale)
         if bad.size and _any_row_truly_violated(A_ub, x, b_ub, bad, thresh, signed=True):
             return False
     if A_eq is not None and b_eq is not None and len(b_eq):
@@ -34308,7 +34308,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         viol = np.abs(A_eq @ x - np.asarray(b_eq, dtype=np.float64))
         row_scale = np.asarray(abs(A_eq) @ absx, dtype=np.float64).ravel()
         thresh = _matrix_row_threshold(A_eq, row_scale, tol, rtol)
-        bad = np.nonzero(viol > thresh)[0]
+        bad = _rows_to_retest(viol, thresh, row_scale)
         if bad.size and _any_row_truly_violated(A_eq, x, b_eq, bad, thresh, signed=False):
             return False
     if bounds is not None:
@@ -34360,6 +34360,69 @@ def _row_representability_floor(a_row, x) -> float:
         return 0.0
     grains = a[nz] * (_FEAS_SUM_FLOOR * np.abs(np.asarray(x, dtype=np.float64))[nz])
     return float(np.min(grains))
+
+
+def _rows_to_retest(viol, thresh, row_scale) -> np.ndarray:
+    """Rows the cheap pass cannot clear: over threshold, or not computed reliably.
+
+    ``viol > thresh`` alone silently clears a row whose float activity is ``nan``
+    (``inf - inf`` from overflowing terms), and trusts an overflowed ``-inf`` that
+    may hide cancellation -- terms ``[-M, -M, M, M]`` at ``M = finfo.max`` can sum
+    to ``-inf`` in BLAS order while the true activity is ``0`` (#2245). A row is
+    therefore cleared only when its term magnitudes summed without overflow (so no
+    partial sum of ``A @ x`` can have overflowed) AND its residual compares at or
+    under the threshold (``nan`` never does); every other row goes to the exact
+    re-test. With a finite ``row_scale`` a ``-inf`` residual can only come from a
+    ``+inf`` right-hand side, which a ``<=`` row genuinely satisfies.
+    """
+    viol = np.asarray(viol, dtype=np.float64)
+    cleared = (viol <= thresh) & np.isfinite(row_scale)
+    return np.asarray(np.nonzero(~cleared)[0], dtype=np.intp)
+
+
+def _row_truly_violated_exact(a_i, x, b_i: float, thresh_i: float, *, signed: bool) -> bool:
+    """Exact-rational re-test of one row whose float evaluation overflows (#2245).
+
+    Every ``f64`` is a dyadic rational, so ``fractions.Fraction`` evaluates the
+    residual, the threshold and the representability floor with no rounding and no
+    overflow. The float route compared ``+inf > +inf`` (activity and floor both
+    overflowed) and accepted a point violating ``2**900 * x <= 1`` by ~1e600. Only
+    reached for rows whose products or exact sum leave the ``f64`` range, so the
+    cost (a Python-level ``Fraction`` sum) is never paid on an ordinary point.
+
+    Decided before any arithmetic: a non-finite coefficient is a violation (the
+    arbiter must return a verdict, not raise), a non-finite ``b`` follows its
+    sense, and a non-finite threshold settles the row on its own.
+    """
+    from fractions import Fraction
+
+    a_i = np.asarray(a_i, dtype=np.float64)
+    nz = np.nonzero(a_i)[0]
+    if not np.all(np.isfinite(a_i[nz])):
+        # A finite point cannot be certified against an infinite or NaN
+        # coefficient (``inf·0`` and ``nan·x`` have no value), and ``Fraction``
+        # refuses them anyway: decide the row as violated rather than raise.
+        return True
+    if not np.isfinite(b_i):
+        # ``a x <= +inf`` holds for every finite x; any other non-finite right-hand
+        # side (``<= -inf``, ``= ±inf``, ``nan``) cannot be met by a finite point.
+        # The Rust LP layer's ``±1e20`` sentinel is finite and never lands here.
+        return not (signed and b_i == np.inf)
+    t = float(thresh_i)
+    if np.isnan(t):
+        return True
+    if t == np.inf:
+        return False
+    act = sum((Fraction(float(a_i[j])) * Fraction(float(x[j])) for j in nz), Fraction(0))
+    resid = act - Fraction(float(b_i))
+    if not signed:
+        resid = abs(resid)
+    eps2 = Fraction(_FEAS_SUM_FLOOR)
+    floor = min(
+        (abs(Fraction(float(a_i[j]))) * eps2 * abs(Fraction(float(x[j]))) for j in nz),
+        default=Fraction(0),
+    )
+    return resid > max(Fraction(t), floor)
 
 
 def _matrix_row_threshold(A, row_scale, tol: float, rtol: float) -> np.ndarray:
@@ -34430,11 +34493,29 @@ def _any_row_truly_violated(A, x, b, rows, thresh, *, signed: bool) -> bool:
     for i in rows:
         # Only flagged rows are densified, one at a time (#1619): O(n) per row.
         a_i = np.asarray(A[[i]].toarray(), dtype=np.float64).ravel() if sparse else A[i]
-        resid = math.fsum(a_i * x) - b[i]
+        # ``fsum`` over the products AND ``-b`` is exact and raises OverflowError
+        # (or returns non-finite) only when a product or the true sum leaves the f64
+        # range; those rows are decided in exact rationals instead, because
+        # comparing an overflowed residual against an overflowed floor is
+        # ``inf > inf`` -- False -- and accepted a grossly infeasible point (#2245).
+        resid = math.nan
+        if np.isfinite(b[i]):
+            with np.errstate(over="ignore", invalid="ignore"):
+                prods = a_i * x
+            if np.all(np.isfinite(prods)):
+                try:
+                    resid = math.fsum([*prods.tolist(), -float(b[i])])
+                except OverflowError:
+                    resid = math.nan
+        if not math.isfinite(resid):
+            if _row_truly_violated_exact(a_i, x, float(b[i]), float(thresh[i]), signed=signed):
+                return True
+            continue
         if not signed:
             resid = abs(resid)
         # The representability floor is charged HERE, so it costs nothing on a
-        # feasible point and is computed from the row's own columns (#1335).
+        # feasible point and is computed from the row's own columns (#1335). With
+        # every product finite, each grain ``|a_ij|·2ε·|x_j|`` is finite too.
         if resid > max(float(thresh[i]), _row_representability_floor(a_i, x)):
             return True
     return False
