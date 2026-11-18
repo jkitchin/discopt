@@ -10619,54 +10619,54 @@ def _convex_minlp_route_enabled() -> bool:
 
 
 def _convex_route_oa_master() -> str:
-    """The MILP engine for the routed OA master: HiGHS, or the in-house lazy master
-    when ``DISCOPT_CONVEX_ROUTE_OA_MASTER=simplex`` (highs-parity P5.1, opt-in).
+    """The MILP engine for the routed OA master: ``"simplex"`` (default) or ``"highs"``.
 
-    HiGHS is discopt's MILP solver. ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` once
-    selected between ``highs`` (default since performance-plan §25.13) and
-    ``auto``, the in-house simplex master the route used from #1141 until then.
-    ``auto`` was **retired** (2026-10-04, owner decision): it lost or tied the
-    HiGHS master on every panel measured (certified / total wall, plain
-    ``solve(time_limit=30)``, arms interleaved):
+    ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` decides: unset (or blank, per
+    :func:`_env_selector`) or ``simplex`` is the in-house lazy master
+    (``milp_simplex.solve_milp_with_lazy_cuts``); ``highs`` is the HiGHS
+    separate-and-restart master (``milp_highs.solve_milp_with_lazy_cuts``; needs
+    ``highspy`` and raises :class:`~discopt._optional_highs.MissingHighsError`
+    without it). Any other value raises: ``auto`` was retired on 2026-10-04 and stays
+    retired, so a typo cannot run an engine nobody asked for. ``DISCOPT_LP_ENGINE``
+    does not govern this master, as it does not govern the decomposition masters.
 
-    ======================================  ===============  ===============
-    panel                                   ``auto``         ``highs``
-    ======================================  ===============  ===============
-    in-repo routed, unscaled (26)           26 / 58.9 s      26 / 66.0 s
-    ...rows scaled 10^U(-3,3)               24 / 84.1 s      25 / 62.0 s
-    ...rows scaled 10^U(-6,6)               20 / 248.8 s     22 / 142.1 s
-    syn/rsyn (51), DISCOPT_CONVEX_KERNEL=0  22 / 893.6 s     31 / 632.0 s
-    syn/rsyn (51), default kernel ON        20 / 1040.0 s    20 / 1040.3 s
-    ======================================  ===============  ===============
+    **``=highs`` is a documented opt-in (CLAUDE.md §5), not a stalled graduation.**
+    Why it is not the default: #2237 measured a HiGHS default against the in-house
+    master on the 47 routed syn/rsyn MINLPLib instances (30 s, three arms rotated per
+    instance, load 5-10; 156 bound checks, 0 violations) and it failed bar 2:
+    certified 31 (in-house) / 32 (HiGHS with SCIP) / 30 (HiGHS without SCIP), total
+    wall 537 / 624 / 640 s; without SCIP it loses the certificate on
+    ``rsyn0805m02m`` (in-house 13.4 s, HiGHS uncertified at 30 s, reproduced), and
+    the HiGHS master is 2-4x slower on small certifying instances (``syn40m03m``
+    20.2 s vs 8.2 s, ``syn40m02m`` 10.8 vs 2.7). Why the opt-in exists: the #2059
+    Ben-Tal--Nemirovski SOC outer block (``DISCOPT_OA_SOC_OUTER``) is built on the
+    HiGHS master only, and on ``portfol_classical050_1`` that is the difference
+    between certifying on the route (38.2 s with SCIP, 52.7 s without, after #2247)
+    and the in-house master's NLP-BB fallback (307 s). What would change the default:
+    a panel where the HiGHS master is at or ahead of the in-house one on syn/rsyn
+    (or the SOC block ported to the in-house master, which removes the reason for the
+    opt-in instead). The record is ``docs/dev/highs-parity-plan.md`` (D3, #2237) and
+    ``docs/dev/flag-retirement-audit.md``.
 
-    Setting it to anything but ``highs`` now raises rather than being silently
-    ignored (``auto`` would otherwise run a different engine than asked). A
-    missing ``highspy`` is a broken install (#1229) and raises
-    (:func:`discopt.solvers.lp_milp_highs.require_highspy`); an environment
-    without it (the Pyodide page) turns the route off with
-    ``DISCOPT_CONVEX_MINLP_ROUTE=0`` instead.
+    History: HiGHS was the default from performance-plan §25.13 (``auto``, the
+    in-house master of #1141, retired 2026-10-04 after losing or tying HiGHS on every
+    panel then measured) until highs-parity D3 (2026-11-07, PR #2196) made the
+    in-house master the default with the three D3 levers on (P5.1 panels in
+    ``docs/dev/data/highs-parity/p5.1/d3_up_*``). #2237 re-measured a HiGHS default
+    with the SOC block in play and kept D3 (numbers above).
 
     The master's bound is HiGHS's ``mip_dual_bound``, never its incumbent
-    (``milp_highs``), and OA reads only ``master_result.bound``.
+    (``milp_highs``), and OA reads only ``master_result.bound``. Re-read on every
+    call so tests and panels can flip it in-process.
     """
-    raw = os.environ.get("DISCOPT_CONVEX_ROUTE_OA_MASTER")
-    val = None if raw is None else raw.strip().lower()
-    # highs-parity D3, owner decision 2026-11-07 ("the point is to eliminate HiGHS"):
-    # the in-house lazy master is the DEFAULT, with the three D3 levers on
-    # (`DISCOPT_MILP_NODE_GMI_LAZY`, `DISCOPT_MILP_LAZY_ROOT_CUTS`,
-    # `DISCOPT_MILP_LAZY_ROW_EQUILIBRATE`). P5.1 panels (data
-    # `docs/dev/data/highs-parity/p5.1/d3_up_*`), cert-clean, 0 violations, 0 errors:
-    # syn/rsyn 26 vs HiGHS 29 at 1.03x wall; route 89 vs 92 at 1.42x. The residual
-    # (6 instances) is an owner-ACCEPTED gap, tracked in the plan's D3 status.
-    # `=highs` keeps the HiGHS master as an opt-out.
+    val = _env_selector("DISCOPT_CONVEX_ROUTE_OA_MASTER")
     if val is None or val == "simplex":
         return "simplex"
     if val != "highs":
         raise ValueError(
-            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={raw!r}: the routed OA master is 'simplex' "
-            "(default, the in-house lazy master) or 'highs' (opt-out); 'auto' stays "
-            "retired. To keep a convex MINLP off this route, set "
-            "DISCOPT_CONVEX_MINLP_ROUTE=0."
+            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={val!r}: the routed OA master is 'simplex' "
+            "(the in-house lazy master, the default) or 'highs'. 'auto' stays retired. "
+            "To keep a convex MINLP off this route, set DISCOPT_CONVEX_MINLP_ROUTE=0."
         )
     from discopt.solvers.lp_milp_highs import require_highspy
 
@@ -37459,9 +37459,10 @@ def _lp_engine() -> str:
     One switch over the pure-LP, pure-MILP and IIS seams (``DISCOPT_LP_ENGINE``). The
     per-seam variables (``DISCOPT_LP_BACKEND``, ``DISCOPT_LP_MILP_BACKEND``,
     ``DISCOPT_IIS_ENGINE``) and the ``milp_backend=`` keyword still override it, so every
-    existing A/B run keeps its meaning. Decomposition masters and the per-node MINLP LP
-    are not governed by it: both stay on the in-house simplex (masters since P5.2; the
-    node LP is the Rust engine by design).
+    existing A/B run keeps its meaning. Decomposition masters, the convex-MINLP route's OA
+    master (:func:`_convex_route_oa_master`, #2237) and the per-node MINLP LP are not
+    governed by it: all stay on the in-house simplex (masters since P5.2; the route
+    master per #2237's panel; the node LP is the Rust engine by design).
 
     * ``auto`` -- HiGHS when ``highspy`` is importable, with the in-house Rust engine as
       an automatic fallback whenever the HiGHS route returns ``error`` (it refused the
