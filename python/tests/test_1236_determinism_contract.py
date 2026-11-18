@@ -10,9 +10,10 @@ number is comparing noise.
 
 The contract this pins:
 
-* A solve that CERTIFIES (`status == "optimal"`) explores the same tree every
-  time, because nothing in it was cut short by a clock. That is what makes a
-  bound-neutrality check (CLAUDE.md §5 regime 1) meaningful at all.
+* A solve that CERTIFIES (`status == "optimal"`) under ``deterministic=True``
+  explores the same tree every time. (Not in the default mode: clock-bounded steps
+  inside a route can steer a certifying solve to a different tree, #2240.) That is
+  what makes a bound-neutrality check (CLAUDE.md §5 regime 1) meaningful at all.
 * A solve that exits on its BUDGET (`time_limit` / `feasible` at the limit)
   carries no such guarantee, and the suite must not assert one.
 
@@ -37,8 +38,10 @@ CERTIFYING = ("nvs02", "nvs14", "nvs13")
 REPEATS = 3
 
 
-def _solve(name, time_limit=60.0):
-    return from_nl(os.path.join(DATA, f"{name}.nl")).solve(time_limit=time_limit)
+def _solve(name, time_limit=60.0, deterministic=False):
+    return from_nl(os.path.join(DATA, f"{name}.nl")).solve(
+        time_limit=time_limit, deterministic=deterministic
+    )
 
 
 def _solve_profiled(name, time_limit):
@@ -84,7 +87,19 @@ def _divergence_report(runs, counters):
 @pytest.mark.smoke
 @pytest.mark.parametrize("name", CERTIFYING)
 def test_a_certifying_solve_explores_the_same_tree_every_time(name):
-    runs = [_solve(name) for _ in range(REPEATS)]
+    """Under ``deterministic=True``, the mode that promises it.
+
+    #2240: "nothing in a certifying solve was cut short by a clock" is false in the
+    default mode. Clock-bounded steps inside the route (the native MILP's
+    ``root_cut_time_s`` sub-budget and capped sub-MIPs, the #1940 lift race's
+    slices) can end early on a loaded machine and steer a different tree to the
+    same certificate. Measured on nvs02, one core shared with 3 busy loops: default
+    mode 2 / 258 nodes across runs on both ``main`` 340a4f43 and PR #2238, and CI
+    fast shard 3 saw ``[38, 6, 38]`` and ``[38, 11, 38]``; ``deterministic=True``
+    gives 38 on every run, loaded or not. A bound-neutrality A/B that compares node
+    counts must therefore run deterministic, which is the contract pinned here.
+    """
+    runs = [_solve(name, deterministic=True) for _ in range(REPEATS)]
 
     # The probe is only meaningful on a certifying exit (CLAUDE.md §6): a
     # budgeted run would make the assertion below a statement about the clock.
