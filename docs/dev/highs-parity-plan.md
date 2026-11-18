@@ -2132,11 +2132,17 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    - `rust` gives the in-house master.
 
    `=simplex|highs` still overrides, and is the documented opt-out. Under `auto`, a
-   HiGHS master that raises or ends `error` is re-run once on the in-house master with
-   the remaining route budget, and the re-run is recorded as `[engine fallback: ...]`.
-   This is the seams' convention. It does not apply when the variable is set or
-   `highs_options` are passed. The re-run is triggered only by failure, never by an
-   uncertified status.
+   routed solve whose HiGHS master raised, or recorded an `error` master call *and did
+   not finish the model* (`_route_result_is_certified`), is re-run once on the
+   in-house master, if at least `_CONVEX_ROUTE_FALLBACK_FLOOR_S` of the route budget is
+   left. The re-run is recorded as `[engine fallback: ...]`. This is the seams'
+   convention. It does not apply when the variable is set, `highs_options` are passed,
+   or the caller passed `milp_solver=`. It is triggered only by failure: never by an
+   uncertified status alone, and never over a result that closed its gap after an
+   `error` call (OA can, via `converged_early`). A raise the re-run recovers from is
+   still reported, as a `RuntimeWarning` carrying the message and in the route note.
+   When the re-run does not finish the model either, the two attempts are combined by
+   the #1059 merge rules, so the first attempt's incumbent and bound are not dropped.
 
    *Why.* #2223's parity was measured without the #2059 SOC outer block, which
    `oa.solve_lp_nlp_bb` builds on the HiGHS master only. D3 therefore left the block
@@ -2145,38 +2151,58 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    `oa/soc_outer_rows` 0. On the new default, `test_2059_soc_outer` now runs unpinned
    and certifies on the route with the block active and no fallback (50 s, 2026-11-18).
 
-   *Panel* (`p51_route_master_panel.py --off-arm default`, 30 s, arms interleaved, on a
-   loaded dev machine with load average 12-18, so wall times are indicative only;
-   0 bound violations and 0 errors in every arm):
-
-   | population | new default (HiGHS, `auto`) | `=simplex` |
-   |---|---|---|
-   | route, 94 models | **93**, 224.8 s; SOC block fired on 9, engine fallback on 1 | 92, 273.8 s; SOC 0 |
-   | syn/rsyn routed MINLPLib, 47 | 30, 655.4 s; SOC 0, engine fallback 0 | 30, 571.5 s (0 lost either way) |
-
-   Route differences:
+   *Route panel* (`p51_route_master_panel.py --off-arm default`, 30 s, arms
+   interleaved, one repetition, pre-#2247 build, pyscipopt installed, load average
+   12-31, so wall times are indicative only; 0 bound violations over 336 checks):
+   default (HiGHS) **93** certified, 224.8 s, SOC block fired on 9, engine fallback on
+   1; `=simplex` 92, 273.8 s, SOC 0.
    - Lost on the in-house master: `clay0303hfsg@6` (HiGHS-only in #2223 as well) and
      `flay03m@6`.
    - Gained on the in-house master: `cvxnonsep_psig40r@6` (in-house-only in #2223).
    - `portfol_roundlot@6`, the other instance that was in-house-only in #2223,
      certifies on the default through the engine fallback.
 
-   *Dependency on #2235.* The HiGHS master's bound is checked by the #2069 independent
-   confirmation. That check runs in-house simplex first and hands over to SCIP after
-   1 s when `pyscipopt` is installed. Since #2196 the in-house confirmation MILP runs
-   the serial `DISCOPT_HIGHS_MIP_SEARCH` path, which is the #2235 slowdown. Measured
-   impact (the panels above ran with pyscipopt 6.2.1 installed):
+   *syn/rsyn panel* (post-#2247 build, the 47 routed syn/rsyn MINLPLib instances,
+   30 s, three arms rotated per instance: `=simplex`, default HiGHS with SCIP, and
+   default HiGHS with `_scip_available` patched off (a plain install); load average
+   5-10 on 14 cores; 156 bound checks, 0 violations):
 
-   - *Route population (94), new default, with SCIP vs without SCIP (interleaved):*
-     93 vs 93 certified, 220.5 s vs 229.8 s total. There were 88 confirmation calls,
-     totalling 5.8 s vs 11.0 s.
-   - *`portfol_classical050_1` with SCIP:* certifies on the route in 41.4 s, with
-     SOC rows 1 and 12.5 s spent in the confirmation.
-   - *`portfol_classical050_1` without SCIP:* the confirmation runs 273.9 s to
-     `ITERATION_LIMIT`, the route does not certify in 301.8 s, and the NLP-BB fallback
-     certifies at 355.8 s total.
+   | arm | certified | total wall | at the 30 s limit | master time | #2069 confirmation |
+   |---|---|---|---|---|---|
+   | `=simplex` | 31 | 537.4 s | 16 | 292.9 s | none |
+   | HiGHS, SCIP | **32** | 624.0 s | 15 | 404.7 s | 32 calls, 17.5 s |
+   | HiGHS, no SCIP | 30 | 639.8 s | 17 | 411.8 s | 32 calls, 26.4 s |
 
-   On a SCIP-less install this default therefore depends on fixing #2235.
+   Repeat runs of 5 instances (all 3 arms) differed from the first run by at most
+   8.4% wall per solve. Findings:
+   - HiGHS + SCIP gains `rsyn0815m02m` and loses nothing against `=simplex`.
+   - HiGHS without SCIP **loses `rsyn0805m02m`**, in both repetitions (30.2 / 30.3 s,
+     uncertified; `=simplex` certifies in 13.4 / 13.2 s, HiGHS + SCIP in 27.9 / 28.8 s).
+     The loss is the HiGHS master's speed on this instance (29.8 s of master time),
+     not the confirmation (5.7-6.0 s).
+   - The wall excess, +86.6 s (1.16x) for HiGHS + SCIP, is concentrated in small
+     certifying instances where the HiGHS master is 2-4x slower than the in-house one:
+     `syn40m03m` 20.2 s vs 8.2 s, `syn30m03m` 12.9 vs 4.1, `syn40m02m` 10.8 vs 2.7,
+     `rsyn0840m` 6.4 vs 2.1, `rsyn0820m` 5.9 vs 2.2. The confirmation accounts for
+     17.5 s of it; the rest is master time (+111.8 s), partly offset elsewhere.
+     This is beyond the spread: a measured wall regression on this population.
+   - The SOC block and the engine fallback fired on none of the 47 instances; the
+     difference is engine cost alone.
+
+   *Bar 2.* The syn population fails "not harmful" on wall (1.16x, beyond spread) and
+   on certification in the SCIP-less arm (one instance lost). The route population
+   gains one certificate at lower wall. The reason this default is taken anyway is the
+   owner decision of 2026-11-18, not a neutral-component exemption: HiGHS is the
+   reference engine itself, and the SOC block that certifies `portfol_classical050_1`
+   exists only on it. The syn regression is recorded here as an open cost of that
+   decision.
+
+   *#2235 is fixed (#2247), so SCIP is no longer required for `portfol_classical050_1`.*
+   Measured on the post-#2247 build, TL=120, load ~6: with SCIP it certifies on the
+   route in 38.2 s (confirmation 11.0 s, by SCIP); without SCIP it certifies on the
+   route in 52.7 s (confirmation 25.5 s, in-house, OPTIMAL), SOC rows 1 in both.
+   Before #2247 the SCIP-less confirmation ran 273.9 s to `ITERATION_LIMIT` and the
+   route fell back (355.8 s total).
 
    Running the route without the block under `rust` is the documented cost of that
    development switch. Porting the block to the in-house master is the bound-changing
