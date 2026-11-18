@@ -363,7 +363,8 @@ def test_suite_finder_absent_guarded_package_is_not_found(macos, monkeypatch):
     when the distribution lists no binaries (always, for an absent package),
     which re-entered the finder and recursed to ``RecursionError``, so
     ``pytest.importorskip`` errored instead of skipping. Runs the real
-    ``package_omp_runtimes`` path, uncached, with the finder on ``sys.meta_path``.
+    ``package_omp_runtimes`` path, uncached, with two finders on ``sys.meta_path``
+    (macOS already has conftest's one), so the check must still run exactly once.
     """
     import _openmp_isolation
 
@@ -372,22 +373,35 @@ def test_suite_finder_absent_guarded_package_is_not_found(macos, monkeypatch):
     monkeypatch.setitem(guard._DISTRIBUTIONS, name, name)
     monkeypatch.setattr(guard, "loaded_omp_runtimes", lambda: {CYIPOPT_OMP})
     calls = []
+    depth = [0, 0]  # current, max nesting of the check inside itself
     real_binaries = guard._package_binaries
 
     def counting_binaries(distribution, module):
         calls.append(module)
-        return real_binaries(distribution, module)
+        depth[0] += 1
+        depth[1] = max(depth)
+        try:
+            return real_binaries(distribution, module)
+        finally:
+            depth[0] -= 1
 
     monkeypatch.setattr(guard, "_package_binaries", counting_binaries)
     monkeypatch.setattr(guard, "package_omp_runtimes", guard.package_omp_runtimes.__wrapped__)
     monkeypatch.delitem(sys.modules, name, raising=False)
-    finder = _openmp_isolation._OpenMPGuardFinder()
-    monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
+    # Two finders, as on macOS where conftest's configure() already installed one:
+    # the re-entry guard must be shared, or each finder re-runs the check.
+    finders = [_openmp_isolation._OpenMPGuardFinder() for _ in range(2)]
+    monkeypatch.setattr(sys, "meta_path", [*finders, *sys.meta_path])
+    n_finders = sum(isinstance(f, _openmp_isolation._OpenMPGuardFinder) for f in sys.meta_path)
+    assert n_finders >= 2, n_finders
 
     with pytest.raises(ModuleNotFoundError):
         __import__(name)
-    # The check ran exactly once (the probe fired, and did not re-enter itself).
-    assert calls == [name]
+    # The probe fired, and the check never ran inside itself: each finder checks once,
+    # in turn (a later finder is consulted only after the earlier one returned None).
+    # A per-instance guard gave 4 nested calls here; no guard, RecursionError.
+    assert depth[1] == 1, (depth, calls)
+    assert calls == [name] * n_finders, calls
     with pytest.raises(pytest.skip.Exception):
         pytest.importorskip(name)
 

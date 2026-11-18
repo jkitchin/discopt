@@ -33,25 +33,27 @@ _HINT = (
 )
 
 
+# Names whose check is running on this thread, shared by every finder instance.
+# The check may itself call ``importlib.util.find_spec(name)``
+# (``_openmp_guard._package_binaries``'s fallback when the distribution's RECORD
+# lists no binaries, which is always the case for an absent package); that walks
+# ``sys.meta_path`` back into the finder(s). Without this guard the re-entry
+# repeated the check and recursed until ``RecursionError`` (#2243). Module-level,
+# not per instance: with two finders on ``sys.meta_path`` (a second
+# ``configure()``, or a test inserting its own) a per-instance guard let each
+# finder re-run the check before tripping, multiplying the work.
+_ACTIVE = threading.local()
+
+
 class _OpenMPGuardFinder(importlib.abc.MetaPathFinder):
     """Check the OpenMP runtimes before a guarded top-level import is resolved."""
-
-    def __init__(self) -> None:
-        # Names whose check is running on this thread. The check may itself call
-        # ``importlib.util.find_spec(name)`` (``_openmp_guard._package_binaries``'s
-        # fallback when the distribution's RECORD lists no binaries, which is
-        # always the case for an absent package); that walks ``sys.meta_path``
-        # back into this finder. Without this guard the re-entry repeated the
-        # check and recursed until ``RecursionError`` (#2243). On re-entry we
-        # step aside so the regular finders answer the inner lookup.
-        self._active = threading.local()
 
     def find_spec(self, fullname, path=None, target=None):
         if fullname not in _GUARDED:
             return None
-        active = getattr(self._active, "names", None)
+        active = getattr(_ACTIVE, "names", None)
         if active is None:
-            active = self._active.names = set()
+            active = _ACTIVE.names = set()
         if fullname in active:
             return None  # re-entered from our own check: defer to the regular finders
         from discopt._openmp_guard import (
