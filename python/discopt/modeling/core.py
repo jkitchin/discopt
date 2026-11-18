@@ -487,8 +487,10 @@ class VarType(Enum):
     BINARY : str
         Binary variable restricted to ``{0, 1}``.
     INTEGER : str
-        General integer variable. A user-supplied ``lb``/``ub`` is honored
-        exactly; an *unspecified* bound falls back to the finite defaults
+        General integer variable. A user-supplied ``lb``/``ub`` is never
+        replaced by a default; a fractional one is stored as the integer range
+        it admits (#2252, see :meth:`Model.integer`). An *unspecified* bound
+        falls back to the finite defaults
         ``[0, 1e6]`` and emits a ``UserWarning`` (see :meth:`Model.integer`),
         because a silent default box can cut a true optimum that lies below 0
         or above 1e6 (correctness issue C-6).
