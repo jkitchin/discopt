@@ -5364,6 +5364,12 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     n_check = min(len(cons), len(cl))
     if n_check == 0:
         return True
+    # #2244: a non-finite activity has not passed the row check. NaN slips past
+    # ``max_viol > tol`` (every NaN comparison is False) and +/-inf against an
+    # infinite bound gives a NaN violation, so either would reach the gradient
+    # screen, whose no-gradient fallback returns True. Reject before that.
+    if not np.all(np.isfinite(cons[:n_check])):
+        return False
     viol = np.maximum(np.maximum(cons[:n_check] - cu[:n_check], cl[:n_check] - cons[:n_check]), 0.0)
     max_viol = float(np.max(viol))
     if max_viol > tol:
