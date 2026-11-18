@@ -38673,7 +38673,11 @@ _MILP_ENGINE_UNCAPPED_NODES = min(1 << 62, sys.maxsize)
 #: driver's ``NodeLimit`` status covers every budget; this names the one that ran
 #: out. Read only where the driver returned ``NodeLimit``: there ``"none"`` means no
 #: budget stopped it, so the status came from a subtree removed without proof
-#: (``decide_status``'s ``tree_unresolved``). ``"hook_failed"`` maps to nothing.
+#: (``decide_status``'s ``tree_unresolved``). ``"hook_failed"`` is deliberately
+#: absent: it cannot reach a result through the bindings. Every ``Failed`` verdict
+#: from a Python lazy, node or bound hook stores its ``PyErr`` and the binding raises
+#: it instead of returning (``lp_bindings.rs``, the ``pending`` checks after the
+#: solve), so a failed hook surfaces as that exception, never as a label.
 _MILP_STOP_TERMINATION = {
     "none": "unresolved",
     "nodes": "node_limit",

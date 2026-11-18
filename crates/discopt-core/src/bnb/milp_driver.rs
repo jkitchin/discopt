@@ -20505,7 +20505,11 @@ mod stop_reason_2239 {
             assert_eq!(r.stop, MilpStop::Nodes, "{tag}: node-cap stop");
             checked += 1;
 
-            // The wall clock, already spent; no node cap.
+            // The wall clock, already spent; no node cap. `Some(0.0)` stops before the
+            // first node only because both routes test the clock with `>=`
+            // (`t_start.elapsed() >= tl` in the batched loop, `now >= deadline` in
+            // `HighsEnv::check_limits`); a strict `>` would turn this arm into a
+            // search that runs to `None`.
             let mut o = base();
             o.time_limit_s = Some(0.0);
             let r = solve(&o, highs_route);
@@ -20520,8 +20524,24 @@ mod stop_reason_2239 {
             assert_eq!(r.status, MilpStatus::NodeLimit, "{tag}: stall status");
             assert_eq!(r.stop, MilpStop::Stall, "{tag}: stall stop");
             checked += 1;
+
+            // The frontier cap (Python reads it as `node_limit`).
+            let mut o = base();
+            o.max_open_nodes = Some(1);
+            let r = solve(&o, highs_route);
+            assert_eq!(r.status, MilpStatus::NodeLimit, "{tag}: frontier status");
+            assert_eq!(r.stop, MilpStop::OpenNodes, "{tag}: frontier stop");
+            checked += 1;
+
+            // A deterministic work budget (Python reads it as `iteration_limit`).
+            let mut o = base();
+            o.max_work = Some(1);
+            let r = solve(&o, highs_route);
+            assert_eq!(r.status, MilpStatus::NodeLimit, "{tag}: work status");
+            assert_eq!(r.stop, MilpStop::Work, "{tag}: work stop");
+            checked += 1;
         }
-        assert_eq!(checked, 8, "every arm ran");
+        assert_eq!(checked, 12, "every arm ran");
     }
 }
 

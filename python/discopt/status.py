@@ -131,7 +131,8 @@ TERMINATION_NODE_LIMIT = "node_limit"
 TERMINATION_TIME_LIMIT = "time_limit"
 #: An iteration cap stopped the solve.
 TERMINATION_ITERATION_LIMIT = "iteration_limit"
-#: The user stopped the search (the interactive debugger's ``quit``).
+#: The user stopped the search (the interactive debugger's ``quit``, or a
+#: ``node_callback`` that asked the native MILP engine to stop, #2239).
 TERMINATION_INTERRUPTED = "interrupted"
 #: A local NLP solve stopped on Ipopt/POUNCE's ``Diverging_Iterates``: the iterate
 #: norm ran past the divergence threshold. That *suggests* an objective unbounded
