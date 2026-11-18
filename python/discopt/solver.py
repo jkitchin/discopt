@@ -38668,6 +38668,24 @@ _MILP_ENGINE_FRONTIER_BYTES = 2 << 30
 #: on wasm32 (Pyodide): ``1 << 62`` raised ``OverflowError`` there on every MILP.
 _MILP_ENGINE_UNCAPPED_NODES = min(1 << 62, sys.maxsize)
 
+#: #2239: the native MILP driver's stop reason (``MilpStop::as_str``, read from
+#: ``milp_last_solve_stats()["stop_reason"]``) as a ``SolveResult.termination``. The
+#: driver's ``NodeLimit`` status covers every budget; this names the one that ran
+#: out. Read only where the driver returned ``NodeLimit``: there ``"none"`` means no
+#: budget stopped it, so the status came from a subtree removed without proof
+#: (``decide_status``'s ``tree_unresolved``). ``"hook_failed"`` maps to nothing.
+_MILP_STOP_TERMINATION = {
+    "none": "unresolved",
+    "nodes": "node_limit",
+    "open_nodes": "node_limit",
+    "time": "time_limit",
+    "stall": "time_limit",
+    "work": "iteration_limit",
+    "interrupted": "interrupted",
+}
+#: The terminations above that are also a ``SolveResult.status`` (a budget name).
+_MILP_STOP_STATUSES = frozenset({"node_limit", "time_limit", "iteration_limit"})
+
 
 #: Least wall (seconds) worth a re-entry under ``DISCOPT_MILP_REENTRY_SPEND``: below
 #: it a restarted search re-solves little more than its root.
@@ -39163,6 +39181,11 @@ def _solve_milp_simplex(
         "bound_hook_calls": 0,
         "bound_hook_raised": 0,
     }
+    # #2239: which budget stopped the last search (the driver's ``MilpStop``):
+    # ``"none"``, ``"nodes"``, ``"open_nodes"``, ``"time"``, ``"stall"``, ``"work"``,
+    # ``"interrupted"``, ``"hook_failed"``; ``None`` before any search or under a
+    # stubbed driver. The status ``"node_limit"`` is returned for every budget alike.
+    _last_stop: list[Optional[str]] = [None]
     _solve_uncounted = solve_milp_csc_py
 
     def _solve_counted(*a: Any, **kw: Any) -> Any:
@@ -39175,6 +39198,7 @@ def _solve_milp_simplex(
         if st is not None and len(a) > 9 and len(a[9]) > 0:  # a search, not the LP probe
             for k in _search_counts:
                 _search_counts[k] += int(st[k])
+            _last_stop[0] = st.get("stop_reason")
         return out
 
     solve_milp_csc_py = _solve_counted  # the same driver, counted
@@ -39903,8 +39927,16 @@ def _solve_milp_simplex(
                 _bv_ns = float(-bound if maximize else bound)
             _ns_stats = _driver_stats()
             _ns_stats["route/no_stall_tree"] = 1.0  # the continuation ran; no tree
+            # #2239: the driver names the budget that stopped it. A node cap or the
+            # frontier cap is a node budget; the clock or the #291 stall slice is
+            # time; a deterministic work budget is an iteration budget. Only run 1
+            # reaches here (run 2 needs an incumbent), so ``_last_stop`` is its stop.
+            # A stop with no budget name (an unresolved drain, a user stop) keeps the
+            # pre-#2239 status ``time_limit``; ``termination`` says what happened.
+            _ns_term = _MILP_STOP_TERMINATION.get(_last_stop[0] or "")
             return SolveResult(
-                status="node_limit" if _stopped_on_nodes else "time_limit",
+                status=_ns_term if _ns_term in _MILP_STOP_STATUSES else "time_limit",
+                termination=_ns_term,
                 algorithm_route=(
                     "native-milp: discopt monolithic Rust MILP engine (no incumbent; searched "
                     "the whole budget, no Python MILP tree)"

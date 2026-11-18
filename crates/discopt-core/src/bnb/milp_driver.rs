@@ -98,8 +98,54 @@ pub enum MilpStatus {
     Infeasible,
     /// The relaxation is unbounded.
     Unbounded,
-    /// Node limit reached without proving optimality.
+    /// A budget stopped the search without proving optimality. Despite the name it
+    /// covers every budget (node cap, wall clock, the #291 stall guard, work and
+    /// frontier caps, a debugger stop); [`MilpResult::stop`] says which (#2239).
     NodeLimit,
+}
+
+/// Which budget, if any, stopped a MILP search (#2239).
+///
+/// [`MilpStatus`] says what was proven; this says why the loop ended, so a caller
+/// can tell a node-capped search from a clock-stopped one. `NodeLimit` carries no
+/// such distinction: it is returned for every budget alike. Purely descriptive --
+/// nothing in the driver reads it, so it can never affect a bound or a status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MilpStop {
+    /// No budget stopped the search: the tree drained, the gap closed, or the solve
+    /// ended before any search ran (a presolve verdict, an unbounded relaxation).
+    None,
+    /// `MilpOptions::max_nodes`.
+    Nodes,
+    /// `MilpOptions::max_open_nodes` (the frontier cap).
+    OpenNodes,
+    /// The wall clock (`time_limit_s`, or a node deferred at the deadline).
+    Time,
+    /// The #291 stall guard (`stall_time_s`): no incumbent by the stall slice.
+    Stall,
+    /// A deterministic work budget: `max_work`, or a HiGHS sub-MIP's leaf /
+    /// stall-node limit.
+    Work,
+    /// The attached debugger or node callback asked the search to stop.
+    Interrupted,
+    /// A lazy separator or node hook failed; the search stopped uncertified.
+    HookFailed,
+}
+
+impl MilpStop {
+    /// Stable lower-case name, as the Python bindings report it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MilpStop::None => "none",
+            MilpStop::Nodes => "nodes",
+            MilpStop::OpenNodes => "open_nodes",
+            MilpStop::Time => "time",
+            MilpStop::Stall => "stall",
+            MilpStop::Work => "work",
+            MilpStop::Interrupted => "interrupted",
+            MilpStop::HookFailed => "hook_failed",
+        }
+    }
 }
 
 /// Result of a Rust-internal MILP solve.
@@ -107,6 +153,8 @@ pub enum MilpStatus {
 pub struct MilpResult {
     /// Terminal status.
     pub status: MilpStatus,
+    /// Which budget, if any, stopped the search (#2239).
+    pub stop: MilpStop,
     /// Best incumbent over the structural variables (length `n_struct`).
     pub x: Vec<f64>,
     /// Incumbent objective `cᵀx + obj_const` (when an incumbent exists).
@@ -6085,6 +6133,7 @@ fn solve_milp_node_search(
     let Some(rb) = root_box(&csc_w, m, n, l, u, b, opts, &is_int, &is_int_full) else {
         return MilpResult {
             status: MilpStatus::Infeasible,
+            stop: MilpStop::None,
             x: vec![0.0; ns],
             obj: f64::INFINITY,
             bound: f64::INFINITY,
@@ -7874,6 +7923,8 @@ fn solve_milp_node_search(
     let mut nonroot_dives: usize = 0;
     let mut frontier_capped = false;
     let mut work_capped = false;
+    // #2239: which budget ended the loop (descriptive only; see [`MilpStop`]).
+    let mut stop = MilpStop::None;
 
     // Stage 1d-5: the HiGHS-design search runs once, at the first batch, from the
     // root working LP; its outcome replaces the batched search's.
@@ -7897,6 +7948,7 @@ fn solve_milp_node_search(
             // #2223: a hook stop is a limit, never an emptiness proof.
             gap_certified = false;
             search_incomplete = true;
+            stop = MilpStop::Interrupted;
             break;
         }
         // #2163: stop on the caller's gap test or a drained tree, never on
@@ -7906,6 +7958,7 @@ fn solve_milp_node_search(
         }
         if tm.stats().total_nodes >= opts.max_nodes {
             gap_certified = false;
+            stop = MilpStop::Nodes;
             break;
         }
         if opts
@@ -7914,6 +7967,7 @@ fn solve_milp_node_search(
         {
             gap_certified = false;
             work_capped = true;
+            stop = MilpStop::Work;
             break;
         }
         if opts
@@ -7922,6 +7976,7 @@ fn solve_milp_node_search(
         {
             gap_certified = false;
             frontier_capped = true;
+            stop = MilpStop::OpenNodes;
             break;
         }
         if let Some(tl) = eff_time_limit {
@@ -7940,6 +7995,7 @@ fn solve_milp_node_search(
                     }
                     _ => {
                         gap_certified = false;
+                        stop = MilpStop::Time;
                         break;
                     }
                 }
@@ -7952,6 +8008,7 @@ fn solve_milp_node_search(
             if !has_inc && t_start.elapsed().as_secs_f64() >= st {
                 crate::profile::incr(crate::profile::Ctr::MilpStallGuardStop);
                 gap_certified = false;
+                stop = MilpStop::Stall;
                 break;
             }
         }
@@ -8033,6 +8090,7 @@ fn solve_milp_node_search(
                 }
                 gap_certified = false;
                 search_incomplete = true;
+                stop = MilpStop::Interrupted;
                 break 'search;
             }
         }
@@ -8587,6 +8645,12 @@ fn solve_milp_node_search(
                 // so the no-incumbent status resolves to a limit status instead.
                 gap_certified = false;
                 search_incomplete = true;
+                // #2239: the loop-top clock check normally records this on the next
+                // iteration; a batch that drains the tree otherwise ends with no
+                // reason although the deadline cut it short.
+                if stop == MilpStop::None {
+                    stop = MilpStop::Time;
+                }
                 continue;
             }
             if out.unbounded {
@@ -8929,6 +8993,7 @@ fn solve_milp_node_search(
             // ask for. Stop, uncertified (CLAUDE.md §7).
             gap_certified = false;
             search_incomplete = true;
+            stop = MilpStop::HookFailed;
             tm.import_results_with_point_values(&results, &point_values)
                 .expect("one point value per node result");
             tm.process_evaluated();
@@ -9245,6 +9310,7 @@ fn solve_milp_node_search(
                 if fire_dbg!(MilpCheckpoint::IncumbentFound) {
                     gap_certified = false;
                     search_incomplete = true;
+                    stop = MilpStop::Interrupted;
                     break 'search;
                 }
             }
@@ -9284,6 +9350,7 @@ fn solve_milp_node_search(
             // #2223: a hook stop is a limit, never an emptiness proof.
             gap_certified = false;
             search_incomplete = true;
+            stop = MilpStop::Interrupted;
             break 'search;
         }
         dbg_iter += 1;
@@ -9520,6 +9587,7 @@ fn solve_milp_node_search(
     }
     let mut res = MilpResult {
         status,
+        stop,
         x,
         obj,
         bound,
@@ -9614,6 +9682,17 @@ fn highs_search_result(
     );
     let mut res = MilpResult {
         status,
+        stop: match o.stop {
+            None => MilpStop::None,
+            Some(highs_env::Stop::Nodes) => MilpStop::Nodes,
+            Some(highs_env::Stop::OpenNodes) => MilpStop::OpenNodes,
+            Some(highs_env::Stop::Time) => MilpStop::Time,
+            Some(highs_env::Stop::Stall) => MilpStop::Stall,
+            Some(highs_env::Stop::Debugger) => MilpStop::Interrupted,
+            Some(highs_env::Stop::StallNodes | highs_env::Stop::Leaves | highs_env::Stop::Work) => {
+                MilpStop::Work
+            }
+        },
         x,
         obj,
         bound: o.bound,
@@ -20082,7 +20161,7 @@ mod hook_stop_2223 {
     use crate::lp::simplex::sparse::SparseCols;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {
+    pub(super) fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {
         MilpOptions {
             n_struct: ns,
             integer_cols: int_cols,
@@ -20248,6 +20327,8 @@ mod hook_stop_2223 {
                 continue;
             }
             stops += 1;
+            // #2239: the result names the debugger stop.
+            assert_eq!(r.stop, MilpStop::Interrupted, "k={k}: stop reason");
             assert_ne!(
                 r.status,
                 MilpStatus::Infeasible,
@@ -20349,6 +20430,98 @@ mod hook_stop_2223 {
             without_inc > 0,
             "no stop without an incumbent was exercised"
         );
+    }
+}
+
+/// #2239: `MilpResult::stop` names the budget that ended the search, on both the
+/// HiGHS-design route and the batched search. `MilpStatus::NodeLimit` is returned for
+/// every budget alike, so a caller labelling a no-incumbent exit had nothing else to go
+/// on and called a node-capped run `time_limit`.
+#[cfg(test)]
+mod stop_reason_2239 {
+    use super::hook_stop_2223::opts;
+    use super::*;
+    use crate::lp::simplex::sparse::SparseCols;
+
+    /// An infeasible market split: `sum a_i x_i = 357`, `x` binary. No subset of `A`
+    /// sums to 357 (checked by enumerating subset sums), but the LP relaxation is
+    /// feasible everywhere near the root, so the search holds no incumbent and needs
+    /// many nodes to prove infeasibility.
+    const A: [f64; 12] = [
+        37.0, 41.0, 43.0, 47.0, 53.0, 59.0, 61.0, 67.0, 71.0, 73.0, 79.0, 83.0,
+    ];
+
+    fn solve(o: &MilpOptions, highs_route: bool) -> MilpResult {
+        let n = A.len();
+        let c: Vec<f64> = (0..n).map(|j| (j % 3) as f64 - 1.0).collect();
+        let l = vec![0.0; n];
+        let u = vec![1.0; n];
+        let mut o = o.clone();
+        o.batched_search = !highs_route;
+        FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(Some(highs_route)));
+        let r = solve_milp_node_hooked(
+            SparseCols::from_dense(&A, 1, n),
+            1,
+            n,
+            &c,
+            &l,
+            &u,
+            &[357.0],
+            0.0,
+            &o,
+            None,
+            None,
+            None,
+        );
+        FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(None));
+        r
+    }
+
+    fn base() -> MilpOptions {
+        opts(A.len(), (0..A.len()).collect())
+    }
+
+    #[test]
+    fn each_budget_is_named() {
+        let mut checked = 0usize;
+        for highs_route in [true, false] {
+            let tag = if highs_route { "highs" } else { "batched" };
+            // Control: unlimited, the search proves infeasibility with no budget hit.
+            let r = solve(&base(), highs_route);
+            assert_eq!(r.status, MilpStatus::Infeasible, "{tag}: control status");
+            assert_eq!(r.stop, MilpStop::None, "{tag}: control stop");
+            assert!(
+                r.nodes > 3,
+                "{tag}: control needs a tree ({} nodes)",
+                r.nodes
+            );
+            checked += 1;
+
+            // The node cap.
+            let mut o = base();
+            o.max_nodes = 3;
+            let r = solve(&o, highs_route);
+            assert_eq!(r.status, MilpStatus::NodeLimit, "{tag}: node-cap status");
+            assert_eq!(r.stop, MilpStop::Nodes, "{tag}: node-cap stop");
+            checked += 1;
+
+            // The wall clock, already spent; no node cap.
+            let mut o = base();
+            o.time_limit_s = Some(0.0);
+            let r = solve(&o, highs_route);
+            assert_eq!(r.status, MilpStatus::NodeLimit, "{tag}: clock status");
+            assert_eq!(r.stop, MilpStop::Time, "{tag}: clock stop");
+            checked += 1;
+
+            // The #291 stall guard with no incumbent.
+            let mut o = base();
+            o.stall_time_s = Some(0.0);
+            let r = solve(&o, highs_route);
+            assert_eq!(r.status, MilpStatus::NodeLimit, "{tag}: stall status");
+            assert_eq!(r.stop, MilpStop::Stall, "{tag}: stall stop");
+            checked += 1;
+        }
+        assert_eq!(checked, 8, "every arm ran");
     }
 }
 
