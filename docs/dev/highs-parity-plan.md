@@ -2123,6 +2123,65 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    well-scaled variables): 92 bound comparisons, 0 above the optimum, 0 wrong
    certificates. Pinned by `test_2223_hook_row_noise_bound.py`; no fix was needed.
 
+   **Reversed 2026-11-18 (#2237, owner decision).** The routed OA master no longer
+   defaults to the in-house engine. With `DISCOPT_CONVEX_ROUTE_OA_MASTER` unset it now
+   follows `DISCOPT_LP_ENGINE`, like the pure LP/MILP/IIS seams since the 2026-11-17
+   engine switch:
+   - `auto` gives HiGHS where `highspy` imports, otherwise the in-house master.
+   - `highs` gives HiGHS.
+   - `rust` gives the in-house master.
+
+   `=simplex|highs` still overrides, and is the documented opt-out. Under `auto`, a
+   HiGHS master that raises or ends `error` is re-run once on the in-house master with
+   the remaining route budget, and the re-run is recorded as `[engine fallback: ...]`.
+   This is the seams' convention. It does not apply when the variable is set or
+   `highs_options` are passed. The re-run is triggered only by failure, never by an
+   uncertified status.
+
+   *Why.* #2223's parity was measured without the #2059 SOC outer block, which
+   `oa.solve_lp_nlp_bb` builds on the HiGHS master only. D3 therefore left the block
+   dead on the default route. On `portfol_classical050_1` under D3, the in-house master
+   did not certify in 203.5 s, and the NLP-BB fallback certified in 307 s total with
+   `oa/soc_outer_rows` 0. On the new default, `test_2059_soc_outer` now runs unpinned
+   and certifies on the route with the block active and no fallback (50 s, 2026-11-18).
+
+   *Panel* (`p51_route_master_panel.py --off-arm default`, 30 s, arms interleaved, on a
+   loaded dev machine with load average 12-18, so wall times are indicative only;
+   0 bound violations and 0 errors in every arm):
+
+   | population | new default (HiGHS, `auto`) | `=simplex` |
+   |---|---|---|
+   | route, 94 models | **93**, 224.8 s; SOC block fired on 9, engine fallback on 1 | 92, 273.8 s; SOC 0 |
+   | syn/rsyn routed MINLPLib, 47 | 30, 655.4 s; SOC 0, engine fallback 0 | 30, 571.5 s (0 lost either way) |
+
+   Route differences:
+   - Lost on the in-house master: `clay0303hfsg@6` (HiGHS-only in #2223 as well) and
+     `flay03m@6`.
+   - Gained on the in-house master: `cvxnonsep_psig40r@6` (in-house-only in #2223).
+   - `portfol_roundlot@6`, the other instance that was in-house-only in #2223,
+     certifies on the default through the engine fallback.
+
+   *Dependency on #2235.* The HiGHS master's bound is checked by the #2069 independent
+   confirmation. That check runs in-house simplex first and hands over to SCIP after
+   1 s when `pyscipopt` is installed. Since #2196 the in-house confirmation MILP runs
+   the serial `DISCOPT_HIGHS_MIP_SEARCH` path, which is the #2235 slowdown. Measured
+   impact (the panels above ran with pyscipopt 6.2.1 installed):
+
+   - *Route population (94), new default, with SCIP vs without SCIP (interleaved):*
+     93 vs 93 certified, 220.5 s vs 229.8 s total. There were 88 confirmation calls,
+     totalling 5.8 s vs 11.0 s.
+   - *`portfol_classical050_1` with SCIP:* certifies on the route in 41.4 s, with
+     SOC rows 1 and 12.5 s spent in the confirmation.
+   - *`portfol_classical050_1` without SCIP:* the confirmation runs 273.9 s to
+     `ITERATION_LIMIT`, the route does not certify in 301.8 s, and the NLP-BB fallback
+     certifies at 355.8 s total.
+
+   On a SCIP-less install this default therefore depends on fixing #2235.
+
+   Running the route without the block under `rust` is the documented cost of that
+   development switch. Porting the block to the in-house master is the bound-changing
+   work #2237 originally asked for; it needs its own flag and panel.
+
 3. **The `solve_lp_std` seam default** (`DISCOPT_LP_STD_ENGINE=highs`): 5 corpus
    instances reach HiGHS only through it. R1-LP parity is met, so this is the cheapest
    remaining removal (a flip + the P1.x identity checks).

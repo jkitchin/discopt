@@ -242,7 +242,10 @@ def test_issue_2059_portfol_classical050_1_certifies(monkeypatch):
     # ``oa/soc_outer_rows == 0`` and the anti-vacuity check below fired, so #2226
     # pinned ``DISCOPT_CONVEX_ROUTE_OA_MASTER=highs``. #2237 made the master
     # follow ``DISCOPT_LP_ENGINE`` (HiGHS under ``auto``), so the pin is gone and
-    # this measures the default again.
+    # this measures the default again. It relies on ``pyscipopt`` (in the ``dev``
+    # extra, so in every CI lane): the #2069 confirmation of the HiGHS master hands
+    # over to SCIP after 1 s. Without SCIP the in-house confirmation MILP ran 273.9 s
+    # to ITERATION_LIMIT on this model (#2235) and the route fell back.
     for var in ("DISCOPT_CONVEX_ROUTE_OA_MASTER", "DISCOPT_LP_ENGINE"):
         monkeypatch.delenv(var, raising=False)
     nl = DATA / "portfol_classical050_1.nl"
