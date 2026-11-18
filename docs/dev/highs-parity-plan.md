@@ -2136,16 +2136,11 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    route in 203.5 s and the NLP-BB fallback certified in 307 s total with
    `oa/soc_outer_rows` 0; `test_2059_soc_outer` therefore keeps its `=highs` pin.
 
-   #2241 also ships the fallback policy a HiGHS default would need (the seams'
-   convention), reachable on no shipped configuration today and tested by simulating
-   such a default: a router-picked HiGHS master that raised, or recorded an `error`
-   master call *and did not finish the model* (`_route_result_is_certified`), is re-run
-   once on the in-house master if at least `_CONVEX_ROUTE_FALLBACK_FLOOR_S` of the
-   route budget is left, recorded as `[engine fallback: ...]`. Never under an explicit
-   `=highs`, `highs_options` or the caller's `milp_solver=`; never on an uncertified
-   status alone or over a result that closed its gap after an `error` call. A
-   recovered raise is reported as a `RuntimeWarning` with its message; a re-run that
-   does not finish either is merged with the first attempt by the #1059 rules.
+   `=highs` never falls back to the in-house master: a failed HiGHS master is answered
+   by the #1059 fallback to the default path. (#2241 first carried an in-house re-run
+   for a router-picked HiGHS master; with the in-house default it could not run on any
+   configuration and was removed before merge.) A blank value of the variable now
+   means unset, as on the other selectors (it raised before).
 
    *Route panel* (`p51_route_master_panel.py --off-arm default`, 30 s, arms
    interleaved, one repetition, pre-#2247 build, pyscipopt installed, load average
@@ -2156,7 +2151,7 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
      `flay03m@6`.
    - Gained on the in-house master: `cvxnonsep_psig40r@6` (in-house-only in #2223).
    - `portfol_roundlot@6`, the other instance that was in-house-only in #2223,
-     certifies in the HiGHS-default arm through the engine fallback.
+     certified in the HiGHS-default arm through that (since removed) in-house re-run.
 
    *syn/rsyn panel* (post-#2247 build, the 47 routed syn/rsyn MINLPLib instances,
    30 s, three arms rotated per instance: `=simplex`, the HiGHS default with SCIP, and
