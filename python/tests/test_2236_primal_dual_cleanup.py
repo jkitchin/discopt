@@ -5,9 +5,10 @@ the primal simplex reaches ``Optimal``, then its final audit finds a basic colum
 outside its bound and downgrades the verdict to ``numerical``; the equilibrated retry
 does the same. HiGHS solves it to ``optimal`` -0.06756047745692995.
 
-``DISCOPT_LP_PRIMAL_DUAL_CLEANUP=1`` re-optimizes such a refusal warm with the dual
-simplex from the refused basis and keeps only an audited ``Optimal``. The flag is read
-once per process (a ``OnceLock`` in Rust), so each arm runs in a subprocess.
+``DISCOPT_LP_PRIMAL_DUAL_CLEANUP`` (default ON since its §5 panel; ``=0`` opts out)
+re-optimizes such a refusal warm with the dual simplex from the refused basis and keeps
+only an audited ``Optimal``. The flag is read once per process (a ``OnceLock`` in Rust),
+so each arm runs in a subprocess.
 """
 
 from __future__ import annotations
@@ -43,14 +44,14 @@ print("RESULT " + json.dumps({{
 """
 
 
-def _run(flag: str) -> dict:
+def _run(flag: str | None) -> dict:
+    """Run the route in a fresh process; ``flag=None`` leaves the variable unset."""
     env = dict(os.environ)
-    env.update(
-        DISCOPT_LP_ENGINE="rust",
-        DISCOPT_LP_PRIMAL_DUAL_CLEANUP=flag,
-        DISCOPT_PROFILE="1",
-    )
+    env.update(DISCOPT_LP_ENGINE="rust", DISCOPT_PROFILE="1")
     env.pop("DISCOPT_LP_STD_ENGINE", None)
+    env.pop("DISCOPT_LP_PRIMAL_DUAL_CLEANUP", None)
+    if flag is not None:
+        env["DISCOPT_LP_PRIMAL_DUAL_CLEANUP"] = flag
     cp = subprocess.run(
         [sys.executable, "-c", _PROBE.format(here=HERE)],
         capture_output=True,
@@ -68,18 +69,19 @@ def _run(flag: str) -> dict:
     return out
 
 
-def test_flag_off_still_refuses_the_fixture():
-    """The captured defect: with the flag OFF the Rust route returns no bound, and the
-    clean-up never runs. If this starts passing a bound, the premise of #2236 changed."""
+def test_opt_out_still_refuses_the_fixture():
+    """The captured defect: with ``=0`` the Rust route returns no bound, and the clean-up
+    never runs. If this starts passing a bound, the premise of #2236 changed."""
     out = _run("0")
     assert out["attempts"] == 0
     assert out["bound"] is None
 
 
-def test_flag_on_decides_the_fixture_at_the_highs_optimum():
-    """Fails before #2236: the refused basis was discarded. With the flag ON the warm
-    dual decides the LP and ``solve_lp_std`` verifies the bound."""
-    out = _run("1")
+@pytest.mark.parametrize("flag", [None, "1"], ids=["default", "explicit_on"])
+def test_clean_up_decides_the_fixture_at_the_highs_optimum(flag):
+    """Fails before #2236: the refused basis was discarded. By default (and with ``=1``)
+    the warm dual decides the LP and ``solve_lp_std`` verifies the bound."""
+    out = _run(flag)
     assert out["attempts"] >= 1 and out["rescues"] >= 1, out
     assert out["bound"] == pytest.approx(NODE_OPT, abs=1e-9)
 

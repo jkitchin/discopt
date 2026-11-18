@@ -140,7 +140,7 @@ pub fn solve_lp_cols(
     // in-family), and nothing extra with the route OFF (default).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
     // #2236: the dual clean-up needs the matrix after `run` has consumed it. O(nnz),
-    // paid only with the flag ON and never inside the clean-up's own solves.
+    // paid unless the flag is `=0`, and never inside the clean-up's own solves.
     let cleanup_cols =
         (primal_dual_cleanup_enabled() && !IN_PRIMAL_DUAL_CLEANUP.get()).then(|| cols.clone());
     crate::profile::incr(crate::profile::Ctr::EntryCols);
@@ -179,7 +179,8 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
-/// `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` (#2236, **default OFF**, `=1` opts in; read once):
+/// `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` (#2236, **default ON** since its panel, `=0` opts out;
+/// read once):
 /// when a cold primal solve reaches `Optimal` and the final audit in
 /// [`Simplex::assemble`] refuses it because a column sits outside its bound,
 /// re-optimize with the **dual** simplex warm from the basis the primal stopped on,
@@ -202,8 +203,18 @@ thread_local! {
 /// refusals on 20 of 74 in-repo instances, all on a basic column, 99.5% not repaired
 /// by refinement.
 ///
-/// Default OFF because it changes LP verdicts; it graduates only on the §5
-/// corpus differential panel (row in `docs/dev/flag-retirement-audit.md`).
+/// **Graduated 2026-11-18** on the §5 panel (`issue2115_graduation_panel.py
+/// --deterministic --max-nodes 2000 --time-limit 120 --assert-unfired-identical`, 74
+/// in-repo instances, `main` f3c380b + this change): 806 checks, 0 violations; certified
+/// 59 -> 59; bounds 2 tighter (`beuster` 6411 -> 8398 where it ran), 0 looser;
+/// `bchoco07` gains a bound; nodes 6026 -> 6071, wall 2101 -> 2112 s. It fired on 16
+/// instances (1,252 rescues); the 51 unfired instances below the wall backstop were
+/// bit-identical. `bchoco06` (deterministic) loses its 120 s incumbent ON, reproducibly;
+/// the root feasibility pump's single start point moves with the tighter root OBBT box,
+/// and weakening OBBT the same way in both arms flips it (OFF then finds none, ON
+/// does); on the default, non-deterministic path neither arm finds one. `portfol_roundlot`
+/// via OA (`test_1263`, `test_1658`, where `LP_PERTURB_PRIMAL_CLEANUP` lost a certificate
+/// in 74a2738) certifies in both arms. Row in `docs/dev/flag-retirement-audit.md`.
 pub(crate) fn primal_dual_cleanup_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
@@ -216,8 +227,8 @@ pub(crate) fn primal_dual_cleanup_enabled() -> bool {
 /// The parse table behind [`primal_dual_cleanup_enabled`]; garbage is refused.
 fn parse_primal_dual_cleanup(raw: &str) -> bool {
     match raw.trim() {
-        "" | "0" | "false" | "off" => false,
-        "1" | "true" | "on" => true,
+        "0" | "false" | "off" => false,
+        "" | "1" | "true" | "on" => true,
         other => panic!(
             "DISCOPT_LP_PRIMAL_DUAL_CLEANUP={other:?} is not a recognized value; use 1/on or \
              0/off"
@@ -4148,6 +4159,22 @@ impl<'a> Simplex<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// #2236: `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` graduated default ON; `=0` opts out and a
+    /// value outside the table is refused rather than read as either.
+    #[test]
+    fn primal_dual_cleanup_parse_table_2236() {
+        for on in ["", " ", "1", "true", "on"] {
+            assert!(super::parse_primal_dual_cleanup(on), "{on:?} must mean ON");
+        }
+        for off in ["0", "false", "off", " 0 "] {
+            assert!(
+                !super::parse_primal_dual_cleanup(off),
+                "{off:?} must mean OFF"
+            );
+        }
+        assert!(std::panic::catch_unwind(|| super::parse_primal_dual_cleanup("yes")).is_err());
+    }
+
     /// PR #2196 review item 2: the logical-dual rescue's value audit accepts a dual
     /// that certifies the verified objective, and refuses one that does not, an open
     /// side the dual needs, or a value below the dual bound's tolerance window.
