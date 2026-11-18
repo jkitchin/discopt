@@ -1448,6 +1448,7 @@ def _dec_bound_stack_entry(entry, index: int, shape, name: str, var_type: VarTyp
                     shape,
                     var_type=var_type,
                     what=f"{where} {side}",
+                    side=side,
                 )
             )
         except SerializationError:
