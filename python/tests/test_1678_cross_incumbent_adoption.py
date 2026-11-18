@@ -126,6 +126,18 @@ def test_unverifiable_cross_point_is_not_adopted(monkeypatch):
     assert not r.gap_certified
 
 
+#: The presolve-free (cross) solve's answer on the #1640 piecewise case in the slack
+#: form, measured on highspy 1.15.1 (#2221): ``x_1 = 7.33e-7`` where the primary has 0,
+#: verifying at -7.3e-7 against the exact optimum 0, with bound -1.5e-6. highspy 1.16
+#: returns the primary's exact point, so the test injects this answer there.
+TOLERANCE_CROSS_X = [
+    10001.5, 7.333337283393915e-07, 0.0, 0.4999998666668641, 0.4999998, 0.0,
+    1.3333313593488771e-07, 0.0, 1.0, 0.0, 0.5, 0.5000002, -1.3333313597652108e-07,
+]  # fmt: skip
+TOLERANCE_CROSS_OBJ = -7.333337283393915e-07
+TOLERANCE_CROSS_BOUND = -1.5000014798038919e-06
+
+
 def test_tolerance_level_gain_is_not_adopted(monkeypatch):
     """A gain within the equality yardstick is verifier tolerance, not a better point:
     on the #1640 piecewise case the cross point verifies at -7.3e-7 against the exact
@@ -137,8 +149,15 @@ def test_tolerance_level_gain_is_not_adopted(monkeypatch):
 
     seen: list = []
     real = L._weaker_bound
+    injected: list = []
 
     def spy(sf, out, cross, kw):
+        if sf.n == len(TOLERANCE_CROSS_X) and np.array_equal(cross.x, out.x):
+            # #2221: highspy 1.16 returns the primary's exact point from the
+            # presolve-free solve; hand the judge the answer 1.15.1 returned.
+            cross.x = np.array(TOLERANCE_CROSS_X)
+            cross.objective, cross.bound = TOLERANCE_CROSS_OBJ, TOLERANCE_CROSS_BOUND
+            injected.append(1)
         pt = L._verified_mip_point(sf, cross.x)
         mine = L._verified_mip_point(sf, out.x)
         res = real(sf, out, cross, kw)
@@ -149,6 +168,9 @@ def test_tolerance_level_gain_is_not_adopted(monkeypatch):
     m, truth = _log_max()
     r = m.solve(time_limit=30)
     assert len(seen) == 1
+    # Natural (highspy <= 1.15) or injected (1.16): the assert below proves the judge saw
+    # a tolerance-level gain either way.
+    print("injected 1.15.1 cross answer:", bool(injected))
     pt, mine, stats = seen[0]
     assert pt is not None and mine is not None
     assert 0.0 < mine[1] - pt[1] <= L.CERT_ABS  # the cross point IS marginally better

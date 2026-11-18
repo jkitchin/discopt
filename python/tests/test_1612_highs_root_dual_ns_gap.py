@@ -102,11 +102,54 @@ def _knapsack_truth() -> float:
     return max(dp([j for j in range(30) if j != 1]), dp([j for j in range(30) if j != 0]))
 
 
+def _root_check_spy(monkeypatch, rewrite):
+    """Pass every LP-relaxation answer of ``solve_lp_std`` (no structural column fixed:
+    not the fixed-integer LP) through ``rewrite(sf, out)``. Returns the call log."""
+    real = H.solve_lp_std
+    fired: list = []
+
+    def spy(sf, **kw):
+        out = real(sf, **kw)
+        n = sf.n - sf.m
+        if out.x is not None and out.row_dual is not None and np.all(sf.xu[:n] > sf.xl[:n]):
+            if rewrite(sf, out):
+                fired.append(1)
+        return out
+
+    monkeypatch.setattr(H, "solve_lp_std", spy)
+    return fired
+
+
+def _slack_round_off(sf, out) -> bool:
+    """The round-off highspy 1.15.1 left in the root pair of these set covers (#2221):
+    a zero row dual of size ~2e-14 with the sign that makes the row's own slack (cost 0,
+    at its bound 0, open above) price below zero -- relative violation 1.0. Measured on
+    seed 2: slack column 87, row 27, ``y = 2.40e-14``; seed 7: column 84, row 24,
+    ``y = -2.02e-13`` (that slack basic at 0.0286). highspy 1.16 returns clean duals
+    (relative violation 1.1e-16 / 9.6e-16), so this injects the 1.15.1 round-off."""
+    n = sf.n - sf.m
+    A = sp.csc_matrix(sf.A)  # noqa: N806
+    y = np.array(out.row_dual, dtype=float)
+    for j in range(n, sf.n):
+        lo, hi = A.indptr[j], A.indptr[j + 1]
+        if hi - lo != 1 or sf.c[j] != 0.0 or sf.xu[j] < H.INF or out.x[j] > sf.xl[j] + 1e-9:
+            continue
+        i, a = int(A.indices[lo]), float(A.data[lo])
+        if abs(y[i]) > 1e-12:
+            continue
+        y[i] = 2.4e-14 * np.sign(a)  # d_j = -a y_i < 0 at the lower bound
+        out.row_dual = y
+        return True
+    return False
+
+
 @pytest.mark.parametrize("seed", [2, 7])
-def test_set_cover_witness_certifies_with_a_valid_bound(seed: int) -> None:
+def test_set_cover_witness_certifies_with_a_valid_bound(seed: int, monkeypatch) -> None:
     m, cover, w = _set_cover(seed)
     truth = _set_cover_truth(cover, w)
+    fired = _root_check_spy(monkeypatch, _slack_round_off)
     r = m.solve()
+    assert fired, "MEASURED NOTHING: no root LP pair carried the injected round-off"
     st = r.solver_stats
     # The witness still trips the per-column test -- that is the case under test.
     assert st["milp/root_dual_violation"] > H._DUAL_CERT_SAFETY * 4 * np.finfo(float).eps
@@ -244,13 +287,26 @@ def test_route_refuses_when_root_duals_are_perturbed(monkeypatch) -> None:
     assert r.bound is None or r.bound <= truth + 1e-6
 
 
-def test_1410_matrix_is_still_refused() -> None:
+def test_1410_matrix_is_still_refused(monkeypatch) -> None:
     """The class #1410 guards: HiGHS mis-solves the LP, and the NS gap says so."""
     from test_1410_highs_dual_certificate import _build, _enumerated_optimum
 
     truth = _enumerated_optimum()
+    from test_1410_highs_dual_certificate import MISSOLVED_ROOT_X, MISSOLVED_ROOT_Y
+
+    def missolve(sf, out) -> bool:
+        # #2221: highspy 1.16 solves this root LP correctly; hand the guard the pair
+        # 1.15.1 returned (the live NS-safe bound is kept: only the pair is judged).
+        if sf.n != len(MISSOLVED_ROOT_X):
+            return False
+        out.x, out.row_dual = np.array(MISSOLVED_ROOT_X), np.array(MISSOLVED_ROOT_Y)
+        out.col_dual = sf.c - sf.A.T @ out.row_dual
+        return True
+
+    fired = _root_check_spy(monkeypatch, missolve)
     r = _build().solve(time_limit=120)
     st = r.solver_stats
+    assert fired, "MEASURED NOTHING: the root LP was never intercepted"
     assert st.get("milp/root_dual_unverified") == 1.0, st
     assert st["milp/root_dual_ns_gap"] > 1e-3
     assert not r.gap_certified

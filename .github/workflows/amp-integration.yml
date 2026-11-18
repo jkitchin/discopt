@@ -97,7 +97,7 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install maturin
-          pip install jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt pytest pytest-timeout pytest-xdist
+          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout pytest-xdist
           maturin develop --release
       - name: Verify cyipopt is importable
         run: |

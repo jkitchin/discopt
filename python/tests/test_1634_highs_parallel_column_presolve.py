@@ -213,10 +213,50 @@ def test_cross_check_alone_refutes_the_witness(name, monkeypatch):
     monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     monkeypatch.setattr(lp_milp_highs, "MILP_PRESOLVE_RULE_OFF", 0)
     c, A, b, ub, truth = WITNESSES[name]  # noqa: N806
+    # #2221: highspy 1.16 no longer prunes these witnesses with rule 13 on (see
+    # ``test_mechanism_is_the_parallel_column_rule``), so the primary solve is now right
+    # and the cross-check had nothing to refute. The fault is injected at the seam: the
+    # certified primary handed to the judge is replaced by what highspy 1.15.1 returned.
+    injected = _inject_false_primary(monkeypatch, name)
     r = _model(c, A, b, ub).solve()
+    assert injected, "the presolve cross-check never judged a primary: no fault injected"
+    assert injected[0] > truth + 1e-9 * (1.0 + abs(truth)), "the injected claim is not false"
     assert not _false_certificate(r, truth), (r.status, r.bound, truth)
     assert r.solver_stats.get("milp/presolve_certificate_refuted") == 1.0
     assert r.objective == pytest.approx(truth, rel=1e-9, abs=1e-12)
+
+
+#: The structural point the presolve-on primary certified ``optimal`` (with
+#: ``bound == objective``) on each witness, rule 13 on, ``DISCOPT_MILP_ROW_FORM=0``.
+#: Measured on highspy 1.15.1 (#2221); 1.16.0 certifies the enumerated optimum instead.
+FALSE_PRIMARY_115 = {
+    "seed151_cost1e-3": [0.0, 4.0, 2.0, 0.0, 0.0],  # -0.0035926 vs -0.0058531
+    "seed181_cost1e-3": [0.0, 0.0, 3.0, 0.0, 1.0],  # 0.0208207 vs 0.0080148
+    "seed265_cost1": [0.0, 3.0, 3.0, 3.0, 0.0],  # -1382.2045 vs -1382.2229
+}
+
+
+def _inject_false_primary(monkeypatch, name):
+    """Hand ``_judge_presolve_cross`` the false certificate highspy 1.15.1 produced:
+    a feasible, suboptimal point (logicals completed from it) certified ``optimal``
+    at its own objective. The cross-solve itself still runs for real. Returns the
+    injected claims."""
+    real = lp_milp_highs._judge_presolve_cross
+    claims: list[float] = []
+
+    def judge(sf, out, cross, kw):
+        xs = np.asarray(FALSE_PRIMARY_115[name], dtype=np.float64)
+        x = lp_milp_highs.complete_seed(sf, xs, xs.size)
+        assert x is not None, "the 1.15.1 point has no logical completion"
+        assert lp_milp_highs._verified_mip_point(sf, x) is not None, "1.15.1 point infeasible"
+        obj = float(sf.c @ x) + sf.obj_const
+        out.status, out.x, out.objective, out.bound = "optimal", x, obj, obj
+        out.gap_certified = True
+        claims.append(obj)
+        return real(sf, out, cross, kw)
+
+    monkeypatch.setattr(lp_milp_highs, "_judge_presolve_cross", judge)
+    return claims
 
 
 @pytest.mark.parametrize("status", ["optimal", "infeasible"])

@@ -39,6 +39,33 @@ def _log_max(offset: float = 1e4, h: float = 1.0, frac: float = 1.5):
     return m, float(np.interp(offset + frac * h, b, _SHAPE))
 
 
+#: The presolve-free cross-solve's bound per unit of ``mip_feasibility_tolerance`` on
+#: this fixture (internal minimize sense, optimum 0), measured on highspy 1.15.1: -1.5e-6
+#: at the default 1e-6 and -1.5e-8 at :data:`L.CROSS_TIGHT_FEAS_TOL` = 1e-8.
+_ARTIFACT_PER_TOL = -1.5
+
+
+def _tolerance_artifact(monkeypatch):
+    """Reproduce the #1640 tolerance artifact on the presolve-free solves.
+
+    #2221: highspy 1.16 returns the exact bound 0 from the presolve-free cross-solve
+    (measured), so the bound never reopens the gap and the tight re-ask this file pins
+    never runs. The artifact is therefore injected at the seam, at the size and
+    tolerance scaling 1.15.1 produced: ``bound = min(bound, -1.5 * tol)``. It is a
+    no-op where HiGHS already shows it (1.15.1 returns -1.50000148e-6 / -1.50001e-8).
+    Call it before any other patch of ``_solve_milp_scaled`` so theirs wrap it."""
+    real = L._solve_milp_scaled
+
+    def artifact(sf, *, presolve=True, **kw):
+        out = real(sf, presolve=presolve, **kw)
+        if not presolve and out.bound is not None:
+            tol = kw.get("feasibility_tolerance", 1e-6)
+            out.bound = min(float(out.bound), _ARTIFACT_PER_TOL * tol)
+        return out
+
+    monkeypatch.setattr(L, "_solve_milp_scaled", artifact)
+
+
 def _spy(monkeypatch):
     seen: list = []
     real = L._weaker_bound
@@ -56,6 +83,7 @@ def test_tight_cross_solve_restores_the_certificate(monkeypatch):
     # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
     # this model right; the falsifier under test only fires on the slack form.
     monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
+    _tolerance_artifact(monkeypatch)
     seen = _spy(monkeypatch)
     m, truth = _log_max()
     r = m.solve(time_limit=30)
@@ -77,6 +105,7 @@ def test_untightened_cross_solve_still_declines(monkeypatch):
     # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
     # this model right; the falsifier under test only fires on the slack form.
     monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
+    _tolerance_artifact(monkeypatch)
     monkeypatch.setattr(L, "CROSS_TIGHT_FEAS_TOL", 1e-6)
     seen = _spy(monkeypatch)
     m, truth = _log_max()
@@ -93,6 +122,7 @@ def test_tight_cross_without_a_verdict_keeps_the_decline(monkeypatch):
     # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
     # this model right; the falsifier under test only fires on the slack form.
     monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
+    _tolerance_artifact(monkeypatch)
     real = L._solve_milp_scaled
 
     def no_verdict(sf, *, presolve=True, **kw):
@@ -114,6 +144,7 @@ def test_tight_cross_point_refutes_the_claim(monkeypatch):
     # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
     # this model right; the falsifier under test only fires on the slack form.
     monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
+    _tolerance_artifact(monkeypatch)
     real = L._solve_milp_scaled
 
     def lifted(sf, *, presolve=True, **kw):
@@ -148,6 +179,7 @@ def test_tight_bound_far_above_the_cross_bound_keeps_the_decline(monkeypatch):
     # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
     # this model right; the falsifier under test only fires on the slack form.
     monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
+    _tolerance_artifact(monkeypatch)
     real = L._solve_milp_scaled
 
     def jumped(sf, *, presolve=True, **kw):

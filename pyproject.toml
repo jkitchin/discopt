@@ -37,7 +37,7 @@ dependencies = [
     # HiGHS is the default LP/MILP/IIS engine again (DISCOPT_LP_ENGINE=auto, 2026-11-17),
     # so it is a core dependency; see the `highs` extra below for the version pins.
     # Pyodide installs discopt with deps=false and runs the Rust engine (no wheel).
-    "highspy>=1.11,!=1.12.0,!=1.16.0",
+    "highspy>=1.11,!=1.12.0",
 ]
 
 [project.urls]
@@ -71,13 +71,11 @@ ipopt = ["cyipopt>=1.4"]
 # MissingHighsError (`discopt._optional_highs`).
 # >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
 # which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
-# 1.16.0 is excluded until its behaviour changes are adopted (banner with logging off,
-# a raising separator no longer aborting the solve, LP-reader/IIS output): issue #2221.
 # >=1.11: the lp_nlp_bb HiGHS master needs Highs.clearCallbacks, an ndarray
 # mip_solution in its callback and the mip_heuristic_run_rins/_rens options,
 # none of which 1.10.0 has. !=1.12.0: it alone returns kSolveError on
 # test_1654's MILP. Measured 2026-10-28 (test_2021_highs_floor.py).
-highs = ["highspy>=1.11,!=1.12.0,!=1.16.0"]
+highs = ["highspy>=1.11,!=1.12.0"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
 # GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.
@@ -127,7 +125,7 @@ sympy = ["sympy>=1.12"]
 dev = [
     # The full test suite exercises the HiGHS routes too; a HiGHS-less tree runs with
     # those tests skipped (`requires_highs` / `pytest.importorskip("highspy")`).
-    "highspy>=1.11,!=1.12.0,!=1.16.0",
+    "highspy>=1.11,!=1.12.0",
     # The full test suite exercises the JAX-only features; a JAX-less tree runs
     # with those tests skipped (`requires_jax` / `pytest.importorskip("jax")`).
     "jax>=0.4",

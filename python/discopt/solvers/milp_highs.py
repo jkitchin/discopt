@@ -89,6 +89,7 @@ def _drop_negligible_enabled() -> bool:
 
 
 from discopt._optional_highs import MissingHighsError as HighsBackendUnavailable  # noqa: E402, F401
+from discopt._optional_highs import raise_callback_error, wrap_callback  # noqa: E402
 
 
 def _require_highspy():
@@ -995,9 +996,10 @@ def _cross_check_lazy_master(
             else:
                 data_in.user_interrupt = False
 
-        g.setCallback(_stop_at_claim, None)
+        g.setCallback(wrap_callback(g, _stop_at_claim), None)
         g.startCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
     g.run()
+    raise_callback_error(g)  # #2221: highspy >= 1.16 swallows a callback's exception
     if not infeasible:
         g.stopCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
         g.clearCallbacks()
@@ -1723,6 +1725,7 @@ def solve_milp_with_lazy_cuts(
                 if h.setOptionValue(key, val) != highspy.HighsStatus.kOk:
                     raise RuntimeError(f"HiGHS rejected option {key}={val!r}")
             h.run()
+            raise_callback_error(h)
             if h.setOptionValue("solve_relaxation", False) != highspy.HighsStatus.kOk:
                 raise RuntimeError("HiGHS rejected option solve_relaxation=False")
             counts["mipnode_calls"] += 1
@@ -1754,7 +1757,10 @@ def solve_milp_with_lazy_cuts(
             if added == 0:
                 return
 
-    h.setCallback(_callback, None)
+    # #2221: highspy >= 1.16 swallows an exception raised in a callback (``run``
+    # returns kError); the wrapper records it and ``raise_callback_error`` re-raises it
+    # after every ``run`` below, so a raising separator still crashes the solve.
+    h.setCallback(wrap_callback(h, _callback), None)
     h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution)
     if terminate_callback is not None:
         h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
@@ -1776,6 +1782,7 @@ def solve_milp_with_lazy_cuts(
         if node_callback is not None:
             _lp_relaxation_rounds()
         h.run()
+        raise_callback_error(h)
 
         info = h.getInfo()
         nodes += int(info.mip_node_count)

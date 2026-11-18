@@ -31,6 +31,8 @@ from typing import Any, Iterator, Optional
 
 import numpy as np
 
+from discopt._optional_highs import raise_callback_error, wrap_callback
+
 OPTIMAL = "optimal"
 INFEASIBLE = "infeasible"
 UNBOUNDED_OR_INFEASIBLE = "unbounded_or_infeasible"
@@ -106,9 +108,12 @@ class HighsBackend:
             # Set the flag both ways: HiGHS keeps a raised interrupt across runs.
             event.interrupt(time.perf_counter() > self._stop)
 
-        h.cbMipInterrupt.subscribe(_guard)
-        h.cbSimplexInterrupt.subscribe(_guard)
-        h.cbIpmInterrupt.subscribe(_guard)
+        # #2221: wrapped so an exception in the guard is re-raised after ``run``
+        # (highspy >= 1.16 swallows it).
+        guard = wrap_callback(h, _guard)
+        h.cbMipInterrupt.subscribe(guard)
+        h.cbSimplexInterrupt.subscribe(guard)
+        h.cbIpmInterrupt.subscribe(guard)
 
     def configure(self, rlo, rhi, lb, ub, integ) -> None:
         h, n, m = self.h, self.n, self.m
@@ -146,6 +151,7 @@ class HighsBackend:
         self._stop = stop + GRACE_S
         try:
             h.run()
+            raise_callback_error(h)
         finally:
             self._stop = math.inf
             if max_nodes is not None:

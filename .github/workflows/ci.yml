@@ -306,7 +306,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt openpyxl scikit-learn pyyaml sympy \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pyscipopt \
             pytest pytest-timeout pytest-xdist hypothesis mcp
@@ -480,7 +480,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt openpyxl scikit-learn pyyaml sympy \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
@@ -576,7 +576,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt openpyxl scikit-learn pyyaml sympy \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
@@ -701,7 +701,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy "highspy!=1.16.0" openpyxl scikit-learn pyyaml sympy \
+            jax jaxlib numpy scipy highspy openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
@@ -735,8 +735,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # "latest" excludes 1.16.0 until it is adopted (see pyproject.toml's `highs` extra).
-        highspy: ["==1.11.0", "!=1.16.0"]
+        # The floor and the latest release; ">=1.16.0" keeps "latest" from silently
+        # resolving below the first release whose behaviour changes were adopted (#2221).
+        highspy: ["==1.11.0", ">=1.16.0"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -811,7 +812,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            numpy scipy "highspy!=1.16.0" openpyxl scikit-learn pyyaml sympy \
+            numpy scipy highspy openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pyscipopt \
             pytest pytest-timeout pytest-xdist hypothesis
@@ -917,7 +918,7 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy openpyxl scikit-learn pyyaml sympy \
-            "highspy>=1.11,!=1.12.0,!=1.16.0" \
+            "highspy>=1.11,!=1.12.0" \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pyscipopt \
             pytest pytest-timeout pytest-xdist hypothesis
@@ -988,7 +989,7 @@ jobs:
           source .venv/bin/activate
           uv pip install maturin
           uv pip install \
-            jax jaxlib numpy scipy "highspy!=1.16.0" cyipopt openpyxl scikit-learn pyyaml \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             sympy pyomo litellm onnx onnxruntime xgboost lightgbm pyscipopt \
             pytest pytest-timeout pytest-xdist pytest-cov hypothesis mcp
@@ -1125,7 +1126,7 @@ jobs:
           # ModuleNotFoundError. discopt now degrades to the JAX evaluator when
           # POUNCE is absent, so this lane would pass either way — but it should
           # exercise the same backend as everything else, not the fallback.
-          pip install jax jaxlib numpy scipy "highspy!=1.16.0" pytest pytest-timeout "ruff==0.14.6" \
+          pip install jax jaxlib numpy scipy highspy pytest pytest-timeout "ruff==0.14.6" \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python"
           maturin develop --release
       - name: Test AMP fast battery
