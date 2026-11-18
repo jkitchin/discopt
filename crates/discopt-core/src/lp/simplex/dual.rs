@@ -5486,56 +5486,63 @@ mod tests {
             basic_vars,
         };
 
-        let mut compared = 0usize;
-        for (label, base) in [("legacy", legacy_warm_opts()), ("shipped", opts())] {
-            let mut off = base.clone();
-            off.bank_deadline_duals = true;
-            off.recover_unstable_pivot = false;
-            assert!(off.deadline.is_none(), "no arm may carry a deadline");
-            reset();
-            set_enabled(true);
-            let without = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
-            let (bails_off, recov_off) = (
-                counter(Ctr::DualUnstablePivotBails),
-                counter(Ctr::DualUnstablePivotRecoveries),
-            );
-
-            let mut on = off.clone();
-            on.recover_unstable_pivot = true;
-            reset();
-            let with = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &on);
-            let (bails_on, recov_on) = (
-                counter(Ctr::DualUnstablePivotBails),
-                counter(Ctr::DualUnstablePivotRecoveries),
-            );
-            set_enabled(false);
-
-            // The same pivot goes one way or the other, proven by counter (§6).
-            assert_eq!(
-                (bails_off, recov_off),
-                (1, 0),
-                "{label}: OFF must bail on exactly one unstable pivot"
-            );
-            assert_eq!(
-                (bails_on, recov_on),
-                (0, 1),
-                "{label}: ON must recover from exactly one unstable pivot"
-            );
-            assert_eq!(
-                without.status, with.status,
-                "{label}: the recovery must not change the verdict on this LP"
-            );
-            if with.status == LpStatus::Optimal {
-                assert!(
-                    (with.obj - without.obj).abs() <= 1e-6 * (1.0 + with.obj.abs()),
-                    "{label}: obj {} vs {}",
-                    with.obj,
-                    without.obj
+        // #2236: the legacy arm's bail hands the LP to the cold primal, whose bounds
+        // refusal the dual clean-up would re-optimize warm, hitting the same unstable
+        // pivot a second time. This test pins the warm dual's own pivot, so it runs with
+        // the clean-up suppressed.
+        super::super::primal::without_primal_dual_cleanup(|| {
+            let mut compared = 0usize;
+            for (label, base) in [("legacy", legacy_warm_opts()), ("shipped", opts())] {
+                let mut off = base.clone();
+                off.bank_deadline_duals = true;
+                off.recover_unstable_pivot = false;
+                assert!(off.deadline.is_none(), "no arm may carry a deadline");
+                reset();
+                set_enabled(true);
+                let without =
+                    solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
+                let (bails_off, recov_off) = (
+                    counter(Ctr::DualUnstablePivotBails),
+                    counter(Ctr::DualUnstablePivotRecoveries),
                 );
+
+                let mut on = off.clone();
+                on.recover_unstable_pivot = true;
+                reset();
+                let with = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &on);
+                let (bails_on, recov_on) = (
+                    counter(Ctr::DualUnstablePivotBails),
+                    counter(Ctr::DualUnstablePivotRecoveries),
+                );
+                set_enabled(false);
+
+                // The same pivot goes one way or the other, proven by counter (§6).
+                assert_eq!(
+                    (bails_off, recov_off),
+                    (1, 0),
+                    "{label}: OFF must bail on exactly one unstable pivot"
+                );
+                assert_eq!(
+                    (bails_on, recov_on),
+                    (0, 1),
+                    "{label}: ON must recover from exactly one unstable pivot"
+                );
+                assert_eq!(
+                    without.status, with.status,
+                    "{label}: the recovery must not change the verdict on this LP"
+                );
+                if with.status == LpStatus::Optimal {
+                    assert!(
+                        (with.obj - without.obj).abs() <= 1e-6 * (1.0 + with.obj.abs()),
+                        "{label}: obj {} vs {}",
+                        with.obj,
+                        without.obj
+                    );
+                }
+                compared += 1;
             }
-            compared += 1;
-        }
-        assert_eq!(compared, 2, "both option sets must have been exercised");
+            assert_eq!(compared, 2, "both option sets must have been exercised");
+        });
     }
 
     // #1008: the cold primal must not CLAIM `Unbounded` on a bounded LP.

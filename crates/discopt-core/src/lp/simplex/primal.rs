@@ -224,6 +224,17 @@ pub(crate) fn primal_dual_cleanup_enabled() -> bool {
     })
 }
 
+/// Run `f` with the #2236 clean-up suppressed on this thread (the re-entry guard,
+/// restored afterwards). For tests that pin another mechanism on an LP the clean-up
+/// would otherwise decide first; the env flag is a `OnceLock` they cannot toggle.
+#[cfg(test)]
+pub(crate) fn without_primal_dual_cleanup<T>(f: impl FnOnce() -> T) -> T {
+    let outer = IN_PRIMAL_DUAL_CLEANUP.replace(true);
+    let out = f();
+    IN_PRIMAL_DUAL_CLEANUP.set(outer);
+    out
+}
+
 /// The parse table behind [`primal_dual_cleanup_enabled`]; garbage is refused.
 fn parse_primal_dual_cleanup(raw: &str) -> bool {
     match raw.trim() {
