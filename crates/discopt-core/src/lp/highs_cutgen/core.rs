@@ -118,6 +118,9 @@ pub struct CutGenCore {
     initial_scale: f64,
     integerinds: Vec<usize>,
     deltas: Vec<f64>,
+    /// Step budget of the mixed-integer cover lifting (`MAX_LIFT_WORK`; tests lower
+    /// it to drive the refusal branch).
+    lift_work_limit: u64,
 }
 
 /// `2^52`: every `f64` at or above it in magnitude is already an integer.
@@ -132,7 +135,9 @@ const EXACT_I64_BOUND: f64 = 4_611_686_018_427_387_904.0; // 2^62
 /// The cast `x as i64` saturates at `|x| >= 2^63` and maps NaN to 0, and the old
 /// unconditional form then computed `i64::MIN - 1`: a panic under overflow checks
 /// and a sign-flipped floor (`fast_floor(-1e20) = +9.2e18`) in a release build
-/// (#2232). Below `2^52` the result is bit-identical to the old code.
+/// (#2232). Below `2^52` the result is bit-identical to the old code. `NaN` now
+/// stays `NaN` (the old code returned 0): in `cmir_efficacy` every comparison
+/// with it is false, so the candidate scale is dropped, which is the sound outcome.
 #[inline(always)]
 fn fast_floor(x: f64) -> f64 {
     if !(x.abs() < TWO_POW_52) {
@@ -153,6 +158,36 @@ fn exact_i64(x: f64) -> Option<i64> {
     } else {
         None
     }
+}
+
+/// Step budget for evaluating the lifted mixed-integer cover's lifting functions
+/// over one row. HiGHS's `gamma_l` walks `h = 0..=upper` of each cover variable,
+/// which with `exact_i64` can now be ~2^62 steps (the old saturating `i32` cast
+/// capped it near 2^31, then overflowed). A work limit HiGHS lacks: past it the cut
+/// is refused, which is sound. Measured: a 200k-row random search at
+/// `feastol = 1e-30` reached no row past it, and the 38-instance in-repo MILP panel
+/// is unchanged with it (#2232 review). The test lowers it to drive the branch.
+const MAX_LIFT_WORK: u64 = 1 << 24;
+
+/// Which cover-lifting refusal fired, for tests that must prove a refusal branch
+/// actually ran (CLAUDE.md §6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiftRefusal {
+    KnapsackRange,
+    MixedIntegerRange,
+    MixedIntegerWork,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIFT_REFUSALS: std::cell::RefCell<Vec<LiftRefusal>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[inline(always)]
+fn note_refusal(_kind: LiftRefusal) {
+    #[cfg(test)]
+    LIFT_REFUSALS.with(|r| r.borrow_mut().push(_kind));
 }
 
 impl CutGenCore {
@@ -178,6 +213,7 @@ impl CutGenCore {
             initial_scale: 1.0,
             integerinds: Vec::new(),
             deltas: Vec::new(),
+            lift_work_limit: MAX_LIFT_WORK,
         }
     }
 
@@ -551,6 +587,7 @@ impl CutGenCore {
         // be untouched on refusal because the c-MIR fallback reads it.
         self.vals = newvals;
         if out_of_range {
+            note_refusal(LiftRefusal::KnapsackRange);
             return false;
         }
         self.rhs = CDouble::new((coversize as i64 - 1) as f64);
@@ -740,11 +777,13 @@ impl CutGenCore {
         // saturating `as` casts this replaces computed the lifting function at the
         // wrong integer and could overflow `k - 1` / `p - 1`. Every conversion below
         // goes through `exact_i64`, and an out-of-range one refuses the cut (#2232).
-        // In range the values are identical to the old `i32`/`i64` casts.
+        // The values are identical to the old casts wherever those did not saturate
+        // (|value| < 2^31 for the old `i32` ones).
         let (Some(kmin), Some(kmax)) = (
             exact_i64((eta - upperl - 0.5).floor()),
             exact_i64((upperl - eta + 0.5).floor()),
         ) else {
+            note_refusal(LiftRefusal::MixedIntegerRange);
             return false;
         };
         let out_of_range = std::cell::Cell::new(false);
@@ -754,6 +793,13 @@ impl CutGenCore {
                 0
             })
         };
+        // Steps taken by the lifting loops; past `MAX_LIFT_WORK` the cut is refused.
+        let work = std::cell::Cell::new(0u64);
+        let work_limit = self.lift_work_limit;
+        let over_budget = || {
+            work.set(work.get() + 1);
+            work.get() > work_limit
+        };
 
         let phi_l = |av: f64| -> f64 {
             let mut k: i64 = trunc_i64(av / al.to_f64()).min(-1);
@@ -761,6 +807,9 @@ impl CutGenCore {
                 return 0.0;
             }
             while k >= kmin {
+                if over_budget() {
+                    return 0.0;
+                }
                 if av >= (k as f64) * al + r {
                     return (av - ((k + 1) as f64) * r).to_f64();
                 }
@@ -782,6 +831,9 @@ impl CutGenCore {
                 }
                 let mut h: i64 = 0;
                 while h <= upperi {
+                    if over_budget() {
+                        return 0.0;
+                    }
                     let mih = m[i] + (h as f64) * a[i];
                     let uih = u[i] + h as f64;
                     let mihplusdeltai = mih + a[i] - cplusthreshold;
@@ -793,6 +845,9 @@ impl CutGenCore {
                         return 0.0;
                     }
                     while k <= kmax {
+                        if over_budget() {
+                            return 0.0;
+                        }
                         if z <= mihplusdeltai + (k as f64) * al + r {
                             return ((uih * ulminusetaplusone + k as f64) * (al - r)).to_f64();
                         }
@@ -812,6 +867,9 @@ impl CutGenCore {
                 return 0.0;
             }
             loop {
+                if over_budget() {
+                    return 0.0;
+                }
                 if z <= m[cplussize] + (p as f64) * al + r {
                     return ((u[cplussize] * ulminusetaplusone + p as f64) * (al - r)).to_f64();
                 }
@@ -848,8 +906,13 @@ impl CutGenCore {
             }
         }
         self.vals = newvals;
+        // `rhs` is untouched on refusal; `try_generate_cut` restores `vals`.
         if out_of_range.get() {
-            // `rhs` is untouched; `try_generate_cut` restores `vals` from its copy.
+            note_refusal(LiftRefusal::MixedIntegerRange);
+            return false;
+        }
+        if work.get() > work_limit {
+            note_refusal(LiftRefusal::MixedIntegerWork);
             return false;
         }
         self.rhs = rhs;
@@ -1525,10 +1588,178 @@ mod tests {
             }
         }
         eprintln!("rows {rows_tried} cuts {cuts} points {points_checked} paths {paths:?}");
+        assert_eq!(paths.len(), 4, "not every cut path was reached: {paths:?}");
         assert!(cuts > 500, "only {cuts} cuts generated");
         assert!(
             points_checked > 5000,
             "only {points_checked} points checked"
         );
+    }
+
+    /// Runs the cut generator on one integer row and returns the cut, the path it
+    /// took and the cover-lifting refusals recorded on the way.
+    fn cut_of(
+        feastol: f64,
+        vals: &[f64],
+        rhs: f64,
+        upper: &[f64],
+        solval: &[f64],
+        lift_work_limit: u64,
+    ) -> (Option<CoreCut>, CutPath, Vec<LiftRefusal>) {
+        let n = vals.len();
+        let row = BaseRow {
+            inds: (0..n as i32).collect(),
+            vals: vals.to_vec(),
+            rhs,
+            upper: upper.to_vec(),
+            solval: solval.to_vec(),
+            col_integral: vec![true; n],
+            ints_positive: false,
+        };
+        let p = CutGenParams {
+            feastol,
+            epsilon: feastol * 1e-3,
+            num_cols: 8,
+        };
+        LIFT_REFUSALS.with(|r| r.borrow_mut().clear());
+        let mut g = CutGenCore::new(p, HighsRandom::new(7));
+        g.lift_work_limit = lift_work_limit;
+        let cut = g.generate_cut_core(&row, false);
+        let refusals = LIFT_REFUSALS.with(|r| r.borrow().clone());
+        (cut, g.last_path(), refusals)
+    }
+
+    /// Asserts `cut` keeps every point of `grid` (one list of values per variable)
+    /// that satisfies the base row; returns how many feasible points were checked.
+    fn assert_keeps_feasible_points(
+        cut: &CoreCut,
+        vals: &[f64],
+        rhs: f64,
+        grid: &[Vec<f64>],
+    ) -> usize {
+        let n = vals.len();
+        let crhs = cut.rhs.to_f64();
+        let mut idx = vec![0usize; n];
+        let mut checked = 0usize;
+        loop {
+            let x: Vec<f64> = (0..n).map(|i| grid[i][idx[i]]).collect();
+            let act: f64 = (0..n).map(|i| vals[i] * x[i]).sum();
+            if act <= rhs {
+                let (mut cact, mut cscale) = (0.0f64, crhs.abs() + 1.0);
+                for (k, &j) in cut.inds.iter().enumerate() {
+                    let t = cut.vals[k] * x[j as usize];
+                    cact += t;
+                    cscale += t.abs();
+                }
+                assert!(cact <= crhs + 1e-9 * cscale, "{cut:?} cuts off x = {x:?}");
+                checked += 1;
+            }
+            let mut i = 0;
+            while i < n {
+                idx[i] += 1;
+                if idx[i] < grid[i].len() {
+                    break;
+                }
+                idx[i] = 0;
+                i += 1;
+            }
+            if i == n {
+                return checked;
+            }
+        }
+    }
+
+    /// #2232 review: the knapsack-cover refusal must actually run. After the row is
+    /// scaled (largest |coefficient| in [0.5, 1)) only coefficients above
+    /// `10 * feastol` count as integral, so `z / abar <= 1 / (10 * feastol)`: about
+    /// 1e5 at `feastol = 1e-6`, far below 2^62. The refusal (like the old `i32`
+    /// saturation it replaces) is reachable only with a tiny `feastol`, used here.
+    #[test]
+    fn knapsack_cover_refuses_out_of_range_lifting() {
+        let vals = [1.0, 1.0, 1.0, 1e19];
+        let (cut, path, refusals) = cut_of(
+            1e-30,
+            &vals,
+            2.5,
+            &[1.0; 4],
+            &[0.9, 0.9, 0.7, 0.0],
+            MAX_LIFT_WORK,
+        );
+        assert_eq!(refusals, vec![LiftRefusal::KnapsackRange]);
+        assert_ne!(path, CutPath::KnapsackCover);
+        let cut = cut.expect("the c-MIR fallback still produces a cut on this row");
+        assert_eq!(path, CutPath::Cmir);
+        let binary = vec![0.0, 1.0];
+        let checked = assert_keeps_feasible_points(&cut, &vals, 2.5, &vec![binary; 4]);
+        assert_eq!(
+            checked, 7,
+            "x3 = 0 and at most two of x0..x2 at 1: 1 + 3 + 3"
+        );
+
+        // Control: the same row at the ordinary tolerance never reaches the lifting.
+        let (_, _, refusals) = cut_of(
+            1e-6,
+            &vals,
+            2.5,
+            &[1.0; 4],
+            &[0.9, 0.9, 0.7, 0.0],
+            MAX_LIFT_WORK,
+        );
+        assert!(refusals.is_empty(), "{refusals:?}");
+    }
+
+    /// #2232 review: a general-integer cover variable with an upper bound >= 2^62
+    /// (here 1e19, at the ordinary `feastol`) makes the mixed-integer cover refuse;
+    /// the old `as i32` cast saturated it to 2^31 - 1. The c-MIR cut that replaces it
+    /// must keep every feasible point.
+    #[test]
+    fn mixed_integer_cover_refuses_out_of_range_upper_bound() {
+        let vals = [1.0, 1.0, 1.0];
+        let upper = [1e19, 3.0, 3.0];
+        let solval = [1.5, 1.4, 0.0];
+        let (cut, path, refusals) = cut_of(1e-6, &vals, 2.5, &upper, &solval, MAX_LIFT_WORK);
+        assert_eq!(refusals, vec![LiftRefusal::MixedIntegerRange]);
+        assert_eq!(path, CutPath::Cmir);
+        let cut = cut.expect("the c-MIR fallback still produces a cut on this row");
+        let mut x0: Vec<f64> = (0..=5).map(f64::from).collect();
+        x0.extend([1e18, 1e19]);
+        let small: Vec<f64> = (0..=3).map(f64::from).collect();
+        let checked = assert_keeps_feasible_points(&cut, &vals, 2.5, &[x0, small.clone(), small]);
+        assert_eq!(checked, 10, "integer points with x0 + x1 + x2 <= 2");
+
+        // Control: with a small upper bound the same row is lifted, not refused.
+        let (_, path, refusals) =
+            cut_of(1e-6, &vals, 2.5, &[3.0, 3.0, 3.0], &solval, MAX_LIFT_WORK);
+        assert!(refusals.is_empty(), "{refusals:?}");
+        assert_ne!(path, CutPath::None);
+    }
+
+    /// #2232 review: the lifting-work budget. A 200k-row random search at
+    /// `feastol = 1e-30` found no row that exceeds `MAX_LIFT_WORK`, so the budget is
+    /// lowered here to drive the branch: the refusal must fire, and the cut that
+    /// replaces the lifted one must stay valid.
+    #[test]
+    fn mixed_integer_cover_refuses_past_the_work_budget() {
+        let vals = [1.0, 1.0, 1.0];
+        let upper = [2.0, 2.0, 2.0];
+        let solval = [0.9, 0.9, 0.7];
+        let grid: Vec<Vec<f64>> = vec![(0..=2).map(f64::from).collect(); 3];
+
+        let (cut, path, refusals) = cut_of(1e-6, &vals, 2.5, &upper, &solval, MAX_LIFT_WORK);
+        assert!(refusals.is_empty(), "{refusals:?}");
+        assert_eq!(
+            path,
+            CutPath::MixedIntegerCover,
+            "control must take the lifted path"
+        );
+        let checked = assert_keeps_feasible_points(&cut.unwrap(), &vals, 2.5, &grid);
+        assert_eq!(checked, 10);
+
+        let (cut, path, refusals) = cut_of(1e-6, &vals, 2.5, &upper, &solval, 0);
+        assert_eq!(refusals, vec![LiftRefusal::MixedIntegerWork]);
+        assert_ne!(path, CutPath::MixedIntegerCover);
+        if let Some(cut) = cut {
+            assert_eq!(assert_keeps_feasible_points(&cut, &vals, 2.5, &grid), 10);
+        }
     }
 }
