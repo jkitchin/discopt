@@ -54,10 +54,12 @@ def test_overflowing_but_satisfied_inequality_accepted():
 
 
 def test_nan_activity_from_cancelling_overflow_is_retested():
-    # Terms (-M, -M, M, M): BLAS gives nan or -inf, the true activity is 0.
-    x = [M, M, M, M]
-    A = [[-1.0, -1.0, 1.0, 1.0]]
-    bounds = np.array([[-np.inf, np.inf]] * 4)
+    # Terms (-M, -M, M, M): BLAS gives nan or -inf, the true activity is 0. The
+    # last column sits at 0, so the row can be nudged arbitrarily finely and the
+    # #937 representability floor is 0 -- a residual of 1 is a real violation.
+    x = [M, M, M, M, 0.0]
+    A = [[-1.0, -1.0, 1.0, 1.0, 1.0]]
+    bounds = np.array([[-np.inf, np.inf]] * 5)
     assert _feas(x, A_ub=A, b_ub=[-1.0], bounds=bounds) is False  # 0 <= -1 false
     assert _feas(x, A_ub=A, b_ub=[1.0], bounds=bounds) is True  # 0 <= 1 true
     assert _feas(x, A_eq=A, b_eq=[0.0], bounds=bounds) is True
@@ -65,12 +67,25 @@ def test_nan_activity_from_cancelling_overflow_is_retested():
 
 
 def test_nan_activity_from_infinite_products_is_retested():
-    # Products BIG*M and -BIG*M are each +-inf in f64; their exact sum is 0.
-    x = [M, M]
-    A = [[BIG, -BIG]]
-    bounds = np.array([[-np.inf, np.inf]] * 2)
-    assert _feas(x, A_ub=A, b_ub=[-1.0], bounds=bounds) is False
+    # Products BIG*M and -BIG*M are each +-inf in f64; their exact sum is 0. With
+    # ||A_i||_inf = 2**900 a residual of 1 is ~1e-271 away in variable space and is
+    # forgiven by the #1335 distance cap; a residual of M (~1e38 away) is not.
+    x = [M, M, 0.0]
+    A = [[BIG, -BIG, 1.0]]
+    bounds = np.array([[-np.inf, np.inf]] * 3)
+    assert _feas(x, A_ub=A, b_ub=[-M], bounds=bounds) is False
     assert _feas(x, A_ub=A, b_ub=[1.0], bounds=bounds) is True
+
+
+def test_representability_floor_still_forgives_unresolvable_residual():
+    # Every column at M: the finest step the row can take is 2*eps*M ~ 8e292, so a
+    # residual of 1 is below resolution (#937) and stays forgiven on the exact path.
+    x = [M, M, M, M]
+    A = [[-1.0, -1.0, 1.0, 1.0]]
+    bounds = np.array([[-np.inf, np.inf]] * 4)
+    assert _feas(x, A_ub=A, b_ub=[-1.0], bounds=bounds) is True
+    # ...but a residual of M is not.
+    assert _feas(x, A_ub=A, b_ub=[-M], bounds=bounds) is False
 
 
 def test_exact_path_decides_row_directly():
