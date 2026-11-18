@@ -12,8 +12,11 @@ The contract this pins:
 
 * A solve that CERTIFIES (`status == "optimal"`) under ``deterministic=True``
   explores the same tree every time. (Not in the default mode: clock-bounded steps
-  inside a route can steer a certifying solve to a different tree, #2240.) That is
-  what makes a bound-neutrality check (CLAUDE.md §5 regime 1) meaningful at all.
+  inside a route can steer a certifying solve to a different tree, #2240. There a
+  certifying solve promises the certificate -- the same optimum, soundly bounded --
+  and not the node count.) That is what makes a bound-neutrality check
+  (CLAUDE.md §5 regime 1) meaningful at all, and why such a check must run with
+  ``deterministic=True``.
 * A solve that exits on its BUDGET (`time_limit` / `feasible` at the limit)
   carries no such guarantee, and the suite must not assert one.
 
@@ -60,7 +63,11 @@ def _solve_profiled(name, time_limit):
 
 
 def _divergence_report(runs, counters):
-    """What differs between two certifying runs that explored different trees.
+    """What differs between two certifying runs that disagree.
+
+    Used when two default-mode certificates of `tls2` disagree on the optimum (a
+    soundness failure). It was added for differing node counts, which #2240 showed
+    the default mode does not promise.
 
     #2234's CI run certified `tls2` twice in one worker with 104 then 70 nodes, and
     nothing in the failure said why; 70+ local runs (contention, clock scaling,
@@ -162,9 +169,9 @@ def test_the_suite_does_not_claim_determinism_for_a_budgeted_exit(monkeypatch):
                 f"{r.status} exit reports bound {r.bound!r} above incumbent {r.objective!r}"
             )
         if r.status == "optimal":
-            # The solver got fast enough. #1236's determinism claim now APPLIES
-            # to this instance, so hold it to that instead of to the budgeted
-            # contract -- and a certified exit must actually be certified.
+            # The solver got fast enough (it does today, ~1 s unloaded). Hold it
+            # to the certifying contract of the default mode instead of the
+            # budgeted one -- a certified exit must actually be certified.
             assert r.gap_certified is True, (
                 "an `optimal` exit that is not gap_certified is the #1262 defect"
             )
@@ -175,11 +182,20 @@ def test_the_suite_does_not_claim_determinism_for_a_budgeted_exit(monkeypatch):
             budgeted += 1
     assert budgeted + certified == 2, "both repetitions must be inspected"
     if certified == 2:
-        # Both runs certified: the determinism contract is in force, so pin it.
-        assert runs[0].node_count == runs[1].node_count, (
-            f"tls2 now certifies at 5 s but explored {runs[0].node_count} then "
-            f"{runs[1].node_count} nodes -- a certifying solve must be deterministic\n"
-            + _divergence_report(runs, counters)
+        # Both runs certified. In the DEFAULT mode that pins the certificate, not
+        # the tree (#2240): role-2 wall budgets steer which tree reaches it, so
+        # equal node counts are promised only under ``deterministic=True`` (pinned
+        # by test_a_certifying_solve_explores_the_same_tree_every_time). This test
+        # cannot run tls2 in that mode: it certifies there in 51 s / 209 nodes,
+        # against ~1 s / 82 nodes in the default mode. Measured on tls2 at 5 s, one
+        # core shared with 2 busy loops, 8 runs: one certified (82 nodes, 3.0 s),
+        # seven took a slower path and hit the budget at 47-71 nodes; #2234's CI
+        # worker certified it twice at 104 then 70 nodes. Two certificates of one
+        # instance must still agree, and when they do not the report says why.
+        tol = 1e-6 * max(1.0, abs(runs[0].objective))
+        assert abs(runs[0].objective - runs[1].objective) <= tol, (
+            f"tls2 certified two different optima, {runs[0].objective!r} then "
+            f"{runs[1].objective!r}\n" + _divergence_report(runs, counters)
         )
 
 
