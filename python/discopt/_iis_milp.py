@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 import numpy as np
 
 from discopt import _iis_backend as _bk
+from discopt._optional_highs import wrap_callback
 
 if TYPE_CHECKING:
     from discopt.modeling.core import Model
@@ -516,9 +517,11 @@ class _Engine:
             def _g(event) -> None:
                 event.interrupt(time.perf_counter() > s + _GRACE_S)
 
-            h.cbMipInterrupt.subscribe(_g)
-            h.cbSimplexInterrupt.subscribe(_g)
-            h.cbIpmInterrupt.subscribe(_g)
+            # #2221: ``_iis_reduce`` re-raises an exception from it after ``run``.
+            g = wrap_callback(h, _g)
+            h.cbMipInterrupt.subscribe(g)
+            h.cbSimplexInterrupt.subscribe(g)
+            h.cbIpmInterrupt.subscribe(g)
 
         self.n_reduced += 1
         verdict = reduced_infeasible(

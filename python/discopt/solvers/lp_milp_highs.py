@@ -107,11 +107,14 @@ _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS = 1 << 13
 #: Sparsify is the one taken: it only re-expresses rows to cut fill, while 9 and 12
 #: eliminate columns. On 23 HiGHS check instances in this route's standard form, sparsify
 #: on and off gave the same status and objective on every instance (panel in the #1667 PR).
-#: The upstream bug is tracked in #1671. Through highspy 1.15.1 it still cycles. HiGHS's
-#: unreleased ``latest`` branch does not: it stops at ERGO-Code/HiGHS PR 2962 (bisected).
-#: ``test_1671_highs_presolve_cycle_canary.py`` fails once the installed HiGHS stops
-#: cycling on the hand-off. Then re-measure the panel and drop this bit or keep it as a
-#: documented opt-out.
+#: The upstream bug is tracked in #1671. It is a regression window, not a floor: measured
+#: 2026-11-18 (#2221) with the canary's ``presolve()`` probe on the hand-off, highspy
+#: 1.12.0, 1.13.0, 1.13.1, 1.14.0, 1.15.0 and 1.15.1 cycle, and 1.11.0 and 1.16.0 return.
+#: The fix is ERGO-Code/HiGHS PR 2962 (bisected on ``latest``), first released in 1.16.0,
+#: where sparsify on and off both reach ``Optimal`` 450623.7692 (2.2 s / 1.5 s). The bit is
+#: kept as a documented opt-out because ``highspy>=1.11`` still admits the cycling
+#: releases; it can go once the floor is >= 1.16 and the #1667 panel is re-measured.
+#: ``test_1671_highs_presolve_cycle_canary.py`` enforces both halves.
 _PRESOLVE_RULE_SPARSIFY = 1 << 14
 #: Every ``presolve_rule_off`` bit the MILP route sets.
 MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS | _PRESOLVE_RULE_SPARSIFY
@@ -120,6 +123,7 @@ _LIMIT_STATUSES = ("kTimeLimit", "kIterationLimit", "kSolutionLimit", "kInterrup
 
 
 from discopt._optional_highs import MissingHighsError as HighsUnavailable  # noqa: E402, F401
+from discopt._optional_highs import run_checked, wrap_callback  # noqa: E402
 
 
 def require_highspy():
@@ -2312,6 +2316,7 @@ def _rederived_point(
     time_limit: Optional[float],
     stats: dict,
     rederived: Optional[list] = None,
+    stat_prefix: str = "milp/cross_point",
 ) -> Optional[tuple[np.ndarray, float]]:
     """A verified point carrying ``x``'s integers, re-derived by the fixed-integer LP.
 
@@ -2330,6 +2335,9 @@ def _rederived_point(
     #2187: ``rederived``, when given, receives the LP point only when the LP produced
     one, so a caller that must not use a raw point (#1678 adoption) can tell the two
     outcomes apart without solving the LP again.
+
+    #2221: the #1509 check's root-LP candidate goes through here too
+    (``stat_prefix="milp/root_point"``), for the same reason.
     """
     pt = _verified_mip_point(sf, x)
     if pt is None or not sf.int_idx.size:
@@ -2339,9 +2347,9 @@ def _rederived_point(
     fx = _fixed_integer_lp(sf, pt[0], time_limit)
     lp_pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
     if lp_pt is None:
-        stats["milp/cross_point_rederive_failed"] = 1.0
+        stats[f"{stat_prefix}_rederive_failed"] = 1.0
         return pt
-    stats["milp/cross_point_rederived_shift"] = float(lp_pt[1] - pt[1])
+    stats[f"{stat_prefix}_rederived_shift"] = float(lp_pt[1] - pt[1])
     if rederived is not None:
         rederived.append(lp_pt)
     return lp_pt
@@ -3011,7 +3019,7 @@ class _CrossStop:
         def _interrupt(callback_type, message, data_out, data_in, user_data):  # noqa: ARG001
             data_in.user_interrupt = self.should_stop()
 
-        h.setCallback(_interrupt, None)
+        h.setCallback(wrap_callback(h, _interrupt), None)
         h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
 
 
@@ -3310,7 +3318,7 @@ def _tight_resolve_refuted(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) -
     if (
         why is not None
         and not again.gap_certified
-        and again.refuted_by == "own-integers"
+        and _refuted_by_presolve(again)
         and _refuted_presolve_free_enabled()
     ):
         # #2187: the tight re-solve was refuted over its OWN integers again, so the
@@ -3371,6 +3379,24 @@ def _tight_resolve_refuted(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) -
     return again
 
 
+def _refuted_by_presolve(again: HighsOutcome) -> bool:
+    """#2187/#2221: was the tight re-solve refuted in a way that points at HiGHS's presolve?
+
+    Two refutations do. One is a refutation over its OWN integers again (#2187): the
+    tolerance was not the cause. The other is the #1634 cross-check: a presolve-free solve
+    of the same model found a verified point below the presolved certificate. That is
+    direct evidence against presolve. Measured on the #2187 ``s413_p1`` net with highspy
+    1.16.0: the tight re-solve at 1e-9 certified -53.1465305 with presolve on. Its
+    presolve-free cross-solve certified -54.5248664 (bound 3.4e-13 from its point) and
+    refuted it. The re-solve then carried no ``refuted_by``, so the presolve-free stage
+    never ran and the route stayed ``feasible`` with gap 0.915. On 1.15.1 the same
+    re-solve is refuted over its own integers instead.
+    """
+    return again.refuted_by == "own-integers" or bool(
+        again.stats.get("milp/presolve_certificate_refuted")
+    )
+
+
 def _tight_adoption_problem(
     sf: StdForm,
     again: HighsOutcome,
@@ -3407,7 +3433,8 @@ def _refuted_presolve_free_enabled() -> bool:
     refuted #2151 tight re-solve declined, as before #2187).
 
     Gates the presolve-free stage of :func:`_tight_resolve_refuted`, which runs only
-    after the tight re-solve was itself refuted over its own integers. The panel is
+    after the tight re-solve was itself refuted over its own integers or by its #1634
+    presolve-free cross-check (:func:`_refuted_by_presolve`, #2221). The panel is
     recorded in ``docs/dev/flag-retirement-audit.md``. The opt-out keeps the
     pre-#2187 route reachable for A/B measurement.
     """
@@ -4282,7 +4309,7 @@ def _solve_milp_std(
 
     if stop is not None:
         stop.attach(h, highspy)
-    run_st = h.run()
+    run_st = run_checked(h)  # #2221: highspy >= 1.16 swallows a callback's exception
     name = _status_name(h)
     info = h.getInfo()
     if seeded and name == "kOptimal" and not np.isfinite(float(info.mip_dual_bound)):
@@ -4492,7 +4519,28 @@ def _solve_milp_std(
         # #2151: where each candidate came from; "own-integers" is the LP over the
         # incumbent's own integer assignment (read by :func:`_reseed_refuted`).
         kinds: list[str] = []
-        root_pt = _verified_mip_point(sf, lp.x) if lp.status == "optimal" else None
+        # #2221: the root LP point is re-derived over its own integers before it counts,
+        # as the cross point is (#1733). Raw, it is a tolerance, not a point: on a big-M
+        # 1e10 sequencing model (test_1920) highspy 1.16's root LP vertex verifies at
+        # 11.0 on ``sf`` -- the verifier's row tolerance is relative, and the 1e10 rows
+        # absorb a violation of 8 in the model -- while the LP over its integers gives
+        # the true optimum 31.0. Taken raw it refuted HiGHS's correct bound 31, declined
+        # the #1654 certificate and was published as the incumbent. Only the RE-DERIVED
+        # point counts: when the fixed-integer LP gives none (no time left, or no
+        # verified point) the raw vertex is dropped, not kept, since it is the same
+        # tolerance point that would refute the bound and be published.
+        root_pt = None
+        if lp.status == "optimal":
+            root_rederived: list = []
+            raw_root = _rederived_point(
+                sf, lp.x, remaining(), stats, root_rederived, stat_prefix="milp/root_point"
+            )
+            if not sf.int_idx.size:
+                root_pt = raw_root  # no integers to re-derive: the vertex is the point
+            elif root_rederived:
+                root_pt = root_rederived[0]
+            else:
+                stats["milp/root_point_dropped"] = 1.0
         if root_pt is not None:
             cands.append(root_pt)
             kinds.append("root-lp")

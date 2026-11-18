@@ -129,7 +129,25 @@ class HighsEngine:
             _dual_ray=lambda: _ray(h.getDualRay),
             _primal_ray=lambda: _ray(h.getPrimalRay),
         )
-        if name == "kOptimal":
+        if name == "kUnknown" and _both_solutions_feasible(info, highspy):
+            # #2221: highspy 1.16 reports kUnknown where 1.15 reported kOptimal for the
+            # same primal/dual pair. Measured on the root LP of
+            # ``test_sweep_rust_presolve_fbbt_rounding`` (``x0 + z + sum y == 2^40``,
+            # ``y_i <= 2^-14``): both versions return primal and dual solution status
+            # feasible with max primal/dual infeasibility 0.0 and objective 1.0, under
+            # every presolve/tolerance setting; 1.15.1 labels it kOptimal, 1.16.0
+            # kUnknown. The label was never the certificate: every consumer of an
+            # "optimal" raw answer re-verifies the point against ``sf``
+            # (``readback_problem``/``feasibility_problem``), takes its bound from the
+            # NS-safe bound of the duals, which is valid for ANY dual vector, and
+            # certifies only when that bound meets the objective. So the pair is handed
+            # to the same checks; ``name`` keeps "kUnknown" for the diagnostics. A
+            # kUnknown without both solutions stays an error.
+            status = "optimal"
+        else:
+            status = _HIGHS_STATUS.get(name, "error")
+        raw.status = status
+        if status == "optimal":
             sol = h.getSolution()
             raw.x = np.asarray(sol.col_value, dtype=np.float64)
             raw.y = np.asarray(sol.row_dual, dtype=np.float64)
@@ -138,6 +156,12 @@ class HighsEngine:
             if info.primal_solution_status == highspy.SolutionStatus.kSolutionStatusFeasible:
                 raw.x_primal = np.asarray(h.getSolution().col_value, dtype=np.float64)
         return raw
+
+
+def _both_solutions_feasible(info: Any, highspy: Any) -> bool:
+    """Whether HiGHS holds a primal AND a dual solution it calls feasible."""
+    feasible = highspy.SolutionStatus.kSolutionStatusFeasible
+    return bool(info.primal_solution_status == feasible and info.dual_solution_status == feasible)
 
 
 class RustEngine:

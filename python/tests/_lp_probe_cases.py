@@ -1,11 +1,14 @@
-"""Synthetic LP-format cases whose HiGHS 1.15.1 reading is pinned by the exact
+"""Synthetic LP-format cases whose HiGHS 1.16.0 reading is pinned by the exact
 differential (``test_lp_reader.py``, ``docs/dev/data/highs-parity/lp_reader/``).
 
-Each case is ``(tag, text)``; the text is written as UTF-8. Most were confirmed
-against highspy while the reader's specification was derived from
-``ref/HiGHS/highs/io/filereaderlp/reader.cpp``; the rest probe the quirks the port
-reproduces (comment token parity, ``strtod`` prefixes, the aliased Hessian gather).
-The expected outcome is whatever HiGHS does, kError included.
+Each case is ``(tag, text)``; the text is written as UTF-8. They were written against
+HiGHS 1.15.1's staged reader (``highs/io/filereaderlp/reader.cpp``), probing its
+quirks (comment token parity, ``strtod`` prefixes, the aliased Hessian gather); since
+#2221 discopt ports 1.16.0's rewritten reader (``highs/io/LpReader.cpp``), which reads
+81 of them differently, and the expected outcome is whatever HiGHS 1.16.0 does,
+kError included. 1.16.0's readings are frozen in
+``data/lp_reader/highs_1_16_0_readings.json.gz``; editing or adding a case requires
+re-running ``_regen_lp_reader_fixture.py`` with highspy 1.16.0.
 """
 
 # ruff: noqa: E501

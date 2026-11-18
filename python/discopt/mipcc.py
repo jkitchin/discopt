@@ -40,6 +40,8 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._optional_highs import run_checked, wrap_callback
+
 _T_LAUNCH = time.perf_counter()  # earliest point this process can see
 
 # Portfolio wait: the library default, "fast" (see _iis_milp.PORTFOLIO_WAITS:
@@ -320,9 +322,12 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
     def _guard(event) -> None:
         event.interrupt(time.perf_counter() > stop)
 
-    h.cbMipInterrupt.subscribe(_guard)
-    h.cbSimplexInterrupt.subscribe(_guard)
-    h.cbIpmInterrupt.subscribe(_guard)
+    # #2221: wrapped so an exception in the guard is re-raised after ``run`` (highspy
+    # >= 1.16 swallows it).
+    guard = wrap_callback(h, _guard)
+    h.cbMipInterrupt.subscribe(guard)
+    h.cbSimplexInterrupt.subscribe(guard)
+    h.cbIpmInterrupt.subscribe(guard)
     h.addVars(n, lb, ub)
     vt = highspy.HighsVarType
     h.changeColsIntegrality(
@@ -341,7 +346,7 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
             A.indices[s:e].astype(np.int32),
             A.data[s:e],
         )
-    run = h.run()
+    run = run_checked(h)
     if run not in (highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning):
         raise RuntimeError(f"HiGHS failed on the checker-settings solve: {run}")
     if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:

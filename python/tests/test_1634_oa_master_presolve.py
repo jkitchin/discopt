@@ -211,16 +211,28 @@ def test_claim_is_withdrawn_without_budget():
     assert "withdrawn" in r.callback_stats["presolve_cross_check"]
 
 
+#: Demand of :func:`_early_exit_model` and its optimum (see its docstring, #2221).
+EARLY_EXIT_DEMAND = 6.0
+EARLY_EXIT_OPT = 0.508
+
+
 def _early_exit_model():
     """Convex MINLP whose LP/NLP-BB separator keeps cutting after the gap closes, so
     the driver's check-in (``callback_terminate``) stops the HiGHS master early
-    (the #1066 ``_separator_outlives_the_certificate`` fixture)."""
+    (the #1066 ``_separator_outlives_the_certificate`` fixture, with the demand raised).
+
+    #2221: at the #1066 demand 4.0, highspy 1.16's master finishes on its own after
+    29 incumbent offers and the early exit never fires (``termination_reason ==
+    "optimal"``), so every early-exit test below tested nothing. Measured at gap 1e-2,
+    two runs each, 8 units: demand 3.0/4.0 never exit early on 1.16.0 and 4.5 never on
+    1.15.1; demand 6.0 exits early (``gap_tolerance``) on both, 71 offers on 1.16.0 and
+    139 on 1.15.1, certifying the same 0.508 (all eight units on at x = 0.75)."""
     m = Model("oa1634_early_exit")
     xs = [m.continuous(f"x{i}", lb=0.0, ub=3.0) for i in range(8)]
     ys = [m.binary(f"y{i}") for i in range(8)]
     for xi, yi in zip(xs, ys):
         m.subject_to(xi <= 3.0 * yi)
-    m.subject_to(sum(xs) >= 4.0)
+    m.subject_to(sum(xs) >= EARLY_EXIT_DEMAND)
     m.minimize(sum((xi - 0.5) ** 2 for xi in xs) + 0.001 * sum(ys))
     return m
 
@@ -232,7 +244,7 @@ def _early_exit_model():
 #: run to ``optimal`` (470) and never exit early -- so on an AVX2 CI runner the
 #: unconfirmed-bound test failed and its siblings passed without testing anything. At
 #: 1e-2 every one of those five kernels exits early (350-357 offers, against ~470 for a
-#: run to completion) and certifies the same 0.008.
+#: run to completion) and certifies the same optimum (measured at the #1066 demand 4.0).
 _EARLY_EXIT_GAP = 1e-2
 
 
@@ -316,7 +328,7 @@ def test_lp_nlp_bb_early_exit_confirmed_by_a_bound_a_hair_lower(monkeypatch):
     assert stats["early_exit_unconfirmed"] is False, stats
     assert r.gap_certified
     assert r.bound is not None and r.bound <= fired[-1] + 1e-12, (r.bound, fired)
-    assert r.objective == pytest.approx(0.008, abs=1e-6)
+    assert r.objective == pytest.approx(EARLY_EXIT_OPT, abs=1e-6)
 
 
 def test_lp_nlp_bb_early_exit_still_certifies_when_confirmed():
@@ -328,7 +340,7 @@ def test_lp_nlp_bb_early_exit_still_certifies_when_confirmed():
     assert stats["converged_early"] is True, stats  # the early exit fired (CLAUDE.md §6)
     assert stats["early_exit_unconfirmed"] is False
     assert r.gap_certified
-    assert r.objective == pytest.approx(0.008, abs=1e-6)
+    assert r.objective == pytest.approx(EARLY_EXIT_OPT, abs=1e-6)
 
 
 def test_lazy_cross_check_keeps_optimal_inside_the_gap():

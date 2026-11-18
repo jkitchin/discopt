@@ -40,6 +40,8 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._optional_highs import run_checked
+
 
 class Infeasible(Exception):
     pass
@@ -603,7 +605,7 @@ def _highs_reduced(Ar, rl, rh, lo, hi, hd, left, stop_at, guard) -> bool | None:
             Ar.indices[s:e].astype(np.int32),
             Ar.data[s:e],
         )
-    run = h.run()
+    run = run_checked(h)  # #2221: the guard's exception, which highspy >= 1.16 swallows
     if run not in (highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning):
         raise RuntimeError(f"HiGHS failed on the reduced model: {run}")
     return True if h.getModelStatus() == highspy.HighsModelStatus.kInfeasible else None
