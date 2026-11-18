@@ -34382,16 +34382,31 @@ def _row_truly_violated_exact(a_i, x, b_i: float, thresh_i: float, *, signed: bo
     overflow. The float route compared ``+inf > +inf`` (activity and floor both
     overflowed) and accepted a point violating ``2**900 * x <= 1`` by ~1e600. Only
     reached for rows whose products or exact sum leave the ``f64`` range, so the
-    cost is never paid on an ordinary point.
+    cost (a Python-level ``Fraction`` sum) is never paid on an ordinary point.
+
+    Decided before any arithmetic: a non-finite coefficient is a violation (the
+    arbiter must return a verdict, not raise), a non-finite ``b`` follows its
+    sense, and a non-finite threshold settles the row on its own.
     """
     from fractions import Fraction
 
+    a_i = np.asarray(a_i, dtype=np.float64)
+    nz = np.nonzero(a_i)[0]
+    if not np.all(np.isfinite(a_i[nz])):
+        # A finite point cannot be certified against an infinite or NaN
+        # coefficient (``inf·0`` and ``nan·x`` have no value), and ``Fraction``
+        # refuses them anyway: decide the row as violated rather than raise.
+        return True
     if not np.isfinite(b_i):
         # ``a x <= +inf`` holds for every finite x; any other non-finite right-hand
         # side (``<= -inf``, ``= ±inf``, ``nan``) cannot be met by a finite point.
+        # The Rust LP layer's ``±1e20`` sentinel is finite and never lands here.
         return not (signed and b_i == np.inf)
-    a_i = np.asarray(a_i, dtype=np.float64)
-    nz = np.nonzero(a_i)[0]
+    t = float(thresh_i)
+    if np.isnan(t):
+        return True
+    if t == np.inf:
+        return False
     act = sum((Fraction(float(a_i[j])) * Fraction(float(x[j])) for j in nz), Fraction(0))
     resid = act - Fraction(float(b_i))
     if not signed:
@@ -34401,11 +34416,6 @@ def _row_truly_violated_exact(a_i, x, b_i: float, thresh_i: float, *, signed: bo
         (abs(Fraction(float(a_i[j]))) * eps2 * abs(Fraction(float(x[j]))) for j in nz),
         default=Fraction(0),
     )
-    t = float(thresh_i)
-    if np.isnan(t):
-        return True
-    if t == np.inf:
-        return False
     return resid > max(Fraction(t), floor)
 
 

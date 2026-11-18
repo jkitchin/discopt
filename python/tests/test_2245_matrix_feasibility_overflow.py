@@ -97,6 +97,17 @@ def test_exact_path_decides_row_directly():
     assert S._row_truly_violated_exact(a, x, np.inf, 1e-6, signed=False) is True
 
 
+@pytest.mark.parametrize("coef", [np.inf, -np.inf, np.nan])
+@pytest.mark.parametrize("xval", [0.0, 1.0])
+def test_non_finite_coefficient_is_violated_not_raised(coef, xval):
+    # Such a row has a non-finite row_scale, so it always reaches the exact path,
+    # which used to raise building Fraction(inf)/Fraction(nan). It must decide.
+    A = [[coef]]
+    assert _feas([xval], A_ub=A, b_ub=[1.0], bounds=FREE) is False
+    assert _feas([xval], A_eq=A, b_eq=[1.0], bounds=FREE) is False
+    assert S._row_truly_violated_exact(np.array([coef]), np.array([xval]), 1.0, 1e-6, signed=True)
+
+
 def test_sparse_operand_same_verdict():
     sp = pytest.importorskip("scipy.sparse")
     A = sp.csr_matrix(np.array([[BIG]]))
