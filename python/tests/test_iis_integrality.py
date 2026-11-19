@@ -204,6 +204,7 @@ def test_random_milps_iis_is_infeasible_and_certified():
 @pytest.mark.smoke
 def test_every_infeasible_verdict_is_cross_checked_without_presolve(monkeypatch):
     """#1634: a presolve-on ``Infeasible`` drops an element only if presolve-off agrees."""
+    from discopt import _iis_milp
     from discopt._iis_milp import milp_iis
 
     log = []
@@ -217,6 +218,11 @@ def test_every_infeasible_verdict_is_cross_checked_without_presolve(monkeypatch)
         return out
 
     monkeypatch.setattr(highspy.Highs, "run", run)
+    # This guards the solve-based route. ``half`` (2 x0 = 1) is also an exact integer
+    # certificate, which since #2225 decides a probe before any solve; switched off
+    # here so the route under test still runs (certificates: test_iis_parity.py,
+    # test_2225_parity_elimination.py).
+    monkeypatch.setattr(_iis_milp._Engine, "_parity_infeasible", lambda self, rlo, rhi: False)
     m = dm.Model("ex")
     x = m.integer("x", shape=(2,), lb=0, ub=10)
     m.subject_to(x[0] + x[1] <= 1.5, name="c1")

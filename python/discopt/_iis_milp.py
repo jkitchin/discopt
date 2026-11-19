@@ -45,6 +45,7 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import numpy as np
@@ -213,6 +214,17 @@ class _Engine:
         self.n_reduced_confirmed = 0  # ... that proved the set infeasible
         self.n_exact_refuted = 0  # ... that found it feasible
         self.n_artifacts = 0
+        self.n_parity = 0  # probes decided by an exact mod-2 certificate (#2225)
+        # Per equality row with integer data: (odd-coefficient column mask, rhs
+        # parity), built on first use by :meth:`_parity_infeasible`.
+        self._parity_rows: Optional[dict[int, tuple[int, int, np.ndarray]]] = None
+        # Whether the full configuration (every row, every integrality held) has a
+        # certificate once continuous columns are eliminated; ``None`` until asked.
+        # A subset's certificate is also one for the full configuration, so where
+        # the full one finds none the per-probe elimination is skipped (a cost
+        # gate only: a skipped search can only leave a probe to the solver).
+        self._elim_possible: Optional[bool] = None
+        self.n_parity_elim = 0  # ... of which needed continuous columns eliminated
         # Held-integer columns and their declared box in the current configuration.
         self._held = np.zeros(0, dtype=np.int64)
         self._cfg: tuple[np.ndarray, ...] = ()
@@ -377,6 +389,16 @@ class _Engine:
         caller MUST confirm the final subsystem with :meth:`confirm_infeasible`.
         """
         self._configure(active_cons, active_bounds, active_int)
+        if self._parity_infeasible(*self._cfg[:2]):
+            # An exact mod-2 certificate (#2225): a proof in integer arithmetic,
+            # whatever the bounds and whichever engine, so no solve is needed and
+            # it stands for both routes of the #1634 policy (each exists to catch a
+            # floating-point claim; this is not one). Recorded as proven, so the
+            # set's final confirmation asks only the presolve-free route, which
+            # this certificate answers again.
+            self.n_parity += 1
+            self._record_proven(active_cons, active_bounds, active_int)
+            return True, None
         ms = self._solve("choose")
         if ms == _bk.OPTIMAL:
             x = self._witness()
@@ -462,16 +484,16 @@ class _Engine:
         "feasible" status whose point is a tolerance artifact). ``presolve``
         restricts the check to configurations not already proven for this set."""
         self._configure(active_cons, active_bounds, active_int)
+        rlo, rhi, _, _ = self._cfg
+        if self._parity_infeasible(rlo, rhi):
+            # An exact mod-2 certificate proves the set infeasible outright (see
+            # :meth:`probe`); both routes would only re-decide what it settles.
+            self.n_exact += 1
+            self.n_exact_confirmed += 1
+            return True
         all_infeasible = True
         for p in presolve:
             if p == "off":
-                rlo, rhi, _, _ = self._cfg
-                if self._parity_infeasible(rlo, rhi):
-                    # A mod-2 certificate: an exact proof in milliseconds, where
-                    # a presolve-free solve needed 47 s on enlight11's set.
-                    self.n_exact += 1
-                    self.n_exact_confirmed += 1
-                    continue
                 if self._reduced(stop_at) is True:
                     # Exact reduction + presolve-free HiGHS on the reduced model
                     # (:mod:`discopt._iis_reduce`): decides in 0.3-11 s the
@@ -546,27 +568,205 @@ class _Engine:
     def _parity_infeasible(self, rlo, rhi) -> bool:
         """The configured set's equality rows over held integer columns (integer
         data) contain a mod-2 contradiction: an exact proof of infeasibility, in
-        integer arithmetic, whatever the bounds (:func:`_gf2_certificates`)."""
+        integer arithmetic, whatever the bounds (:func:`_gf2_certificates`).
+
+        Eligible: a row that is an equality in this configuration (``rlo == rhi``,
+        the row's own data: a dropped row has infinite sides), whose coefficients
+        and right-hand side are integers, and whose every column is held integer.
+        A combination of such rows summing to ``even . x = odd`` has no integer
+        solution. Built in milliseconds (enlight11's set took a presolve-free
+        solve 47 s, and the Rust engine never decided it)."""
+        if self._parity_rows is None:
+            A = self.A
+            rows: dict[int, tuple[int, int, np.ndarray]] = {}
+            eq = np.isfinite(self.row_lo) & (self.row_lo == self.row_hi)
+            for r in np.flatnonzero(eq):
+                b = float(self.row_lo[r])
+                if b != round(b):
+                    continue
+                s0, e0 = A.indptr[r], A.indptr[r + 1]
+                cols, vals = A.indices[s0:e0], A.data[s0:e0]
+                if cols.size == 0 or not bool(np.all(vals == np.round(vals))):
+                    continue
+                if not bool(np.all(self.is_int[cols])):
+                    continue
+                mask = 0
+                for j, a in zip(cols, vals):
+                    if int(round(float(a))) % 2:
+                        mask |= 1 << int(j)
+                rows[int(r)] = (mask, int(round(b)) % 2, np.asarray(cols))
+            self._parity_rows = rows
+        if not self._parity_rows:
+            return False
         held = np.zeros(self.col_lb.size, dtype=bool)
         held[self._held] = True
-        A = self.A
         bits: list[tuple[int, int]] = []
-        for r in np.flatnonzero(np.isfinite(rlo) & (rlo == rhi)):
-            b = rlo[r]
-            if b != round(b):
+        for pr, (mask, rhs, cols) in self._parity_rows.items():
+            # Still this equality in this configuration (not dropped), and every
+            # column still integer.
+            if rlo[pr] != self.row_lo[pr] or rhi[pr] != self.row_hi[pr]:
                 continue
-            s0, e0 = A.indptr[r], A.indptr[r + 1]
-            cols, vals = A.indices[s0:e0], A.data[s0:e0]
-            if cols.size == 0 or not bool(np.all(held[cols])):
+            if not bool(np.all(held[cols])):
                 continue
-            if not bool(np.all(vals == np.round(vals))):
+            bits.append((mask, rhs))
+        if bits and _gf2_certificates(bits):
+            return True
+        # #2225: the contradiction may hide behind continuous columns that cancel
+        # in a combination of equality rows (MIPcc27 enlight4's probes once an
+        # integrality is relaxed). Eliminate them exactly and look again.
+        if self._elim_possible is None:
+            full = _elimination_certificate(self.A, self.row_lo, self.row_hi, self.is_int)
+            self._elim_possible = full is not None
+        if not self._elim_possible:
+            return False
+        if _elimination_certificate(self.A, rlo, rhi, held) is None:
+            return False
+        self.n_parity_elim += 1
+        return True
+
+
+#: Work cap (coefficient updates) of one :func:`_elimination_certificate` search: a
+#: count, so whether a certificate is found does not depend on machine speed.
+_ELIM_MAX_WORK = 200_000
+
+
+def _elimination_certificate(
+    A, rlo, rhi, held, max_work: int = _ELIM_MAX_WORK
+) -> Optional[dict[int, Fraction]]:
+    """Row multipliers proving ``A x`` in ``[rlo, rhi]`` has no point with the
+    ``held`` columns integer, found by eliminating the other columns exactly; or
+    ``None`` (no certificate found, or the work cap was reached).
+
+    Over the equality rows (``rlo == rhi``) with integer coefficients and right-hand
+    side: each non-held column is eliminated by exact rational row operations (one
+    pivot row per column, which then leaves the system: it only fixes that column).
+    What remains are rows over held columns; each is scaled to a primitive integer
+    row ``d . x = beta``. Integer ``x`` needs ``gcd(d) | beta``; failing that is a
+    certificate on its own, and otherwise the rows' parities go to
+    :func:`_gf2_certificates`. Bounds play no part, so the proof holds whatever
+    they are. A missed certificate (pivot order, scaling, the cap) only leaves the
+    set to the solver; a returned one is re-checked by
+    :func:`_verify_integer_certificate` on the original data before it is used.
+    """
+    A = A.tocsr()
+    lam = _find_elimination_certificate(A, rlo, rhi, held, max_work)
+    if lam is None:
+        return None
+    return lam if _verify_integer_certificate(A, rlo, rhi, held, lam) else None
+
+
+def _find_elimination_certificate(A, rlo, rhi, held, max_work: int):
+    """The search behind :func:`_elimination_certificate` (unverified multipliers)."""
+    Row = tuple[dict[int, Fraction], Fraction, dict[int, Fraction]]
+    rows: dict[int, Row] = {}
+    for ri in np.flatnonzero(np.isfinite(rlo) & (rlo == rhi)):
+        r = int(ri)
+        rhs_f = float(rlo[r])
+        if rhs_f != round(rhs_f):
+            continue
+        s0, e0 = A.indptr[r], A.indptr[r + 1]
+        cols, vals = A.indices[s0:e0], A.data[s0:e0]
+        if cols.size == 0 or not bool(np.all(vals == np.round(vals))):
+            continue
+        rows[r] = (
+            {int(j): Fraction(int(round(float(v)))) for j, v in zip(cols, vals)},
+            Fraction(int(round(rhs_f))),
+            {r: Fraction(1)},
+        )
+    if not rows:
+        return None
+    work = 0
+    cont = sorted({j for c, _, _ in rows.values() for j in c if not held[j]})
+    for j in cont:
+        with_j = [k for k, (c, _, _) in rows.items() if j in c]
+        if not with_j:
+            continue
+        p = min(with_j, key=lambda k: (len(rows[k][0]), k))
+        pc, pb, pm = rows.pop(p)
+        for k in with_j:
+            if k == p:
                 continue
-            mask = 0
-            for j, a in zip(cols, vals):
-                if int(round(a)) % 2:
-                    mask |= 1 << int(j)
-            bits.append((mask, int(round(b)) % 2))
-        return bool(bits) and bool(_gf2_certificates(bits))
+            c, rb, mult = rows[k]
+            f = c[j] / pc[j]
+            c, mult = dict(c), dict(mult)
+            for src, dst in ((pc, c), (pm, mult)):
+                for key, val in src.items():
+                    nv = dst.get(key, Fraction(0)) - f * val
+                    if nv == 0:
+                        dst.pop(key, None)
+                    else:
+                        dst[key] = nv
+                    work += 1
+            rows[k] = (c, rb - f * pb, mult)
+            if work > max_work:
+                return None
+    prim: list[tuple[int, int, dict[int, Fraction]]] = []
+    for c, rb, mult in rows.values():
+        if any(not held[j] for j in c):
+            continue  # a column no row could eliminate
+        if not c:
+            if rb != 0:
+                return mult  # 0 = nonzero
+            continue
+        scale = 1
+        for fv in (*c.values(), rb):
+            scale = math.lcm(scale, fv.denominator)
+        ci = {j: int(fv * scale) for j, fv in c.items()}
+        g = 0
+        for iv in ci.values():
+            g = math.gcd(g, abs(iv))
+        bi = int(rb * scale)
+        if bi % g:
+            return {r: fv * scale for r, fv in mult.items()}  # gcd(d) does not divide beta
+        mask = 0
+        for j, iv in ci.items():
+            if (iv // g) % 2:
+                mask |= 1 << j
+        prim.append((mask, (bi // g) % 2, {r: fv * scale / g for r, fv in mult.items()}))
+    certs = _gf2_certificates([(m, par) for m, par, _ in prim])
+    if not certs:
+        return None
+    best = min(certs, key=lambda cm: bin(cm).count("1"))
+    lam: dict[int, Fraction] = {}
+    for i, (_, _, mult) in enumerate(prim):
+        if best >> i & 1:
+            for r, fv in mult.items():
+                lam[r] = lam.get(r, Fraction(0)) + fv
+    return {r: fv for r, fv in lam.items() if fv != 0}
+
+
+def _verify_integer_certificate(A, rlo, rhi, held, lam: dict[int, Fraction]) -> bool:
+    """Whether ``sum_r lam_r (A x)_r = sum_r lam_r rlo_r`` -- a consequence of the
+    equality rows ``r`` -- has no solution with the ``held`` columns integer: every
+    other column's combined coefficient is exactly zero, and the gcd of the
+    combined (integer-scaled) coefficients does not divide the combined
+    right-hand side. Exact rational arithmetic on the original data, independent
+    of how ``lam`` was found."""
+    if not lam:
+        return False
+    A = A.tocsr()
+    coef: dict[int, Fraction] = {}
+    rhs = Fraction(0)
+    for r, lr in lam.items():
+        if not (np.isfinite(rlo[r]) and rlo[r] == rhi[r]):
+            return False  # only equality rows may carry a free-sign multiplier
+        s0, e0 = A.indptr[r], A.indptr[r + 1]
+        for j, v in zip(A.indices[s0:e0], A.data[s0:e0]):
+            coef[int(j)] = coef.get(int(j), Fraction(0)) + lr * Fraction(float(v))
+        rhs += lr * Fraction(float(rlo[r]))
+    coef = {j: v for j, v in coef.items() if v != 0}
+    if any(not held[j] for j in coef):
+        return False
+    L = 1
+    for v in (*coef.values(), rhs):
+        L = math.lcm(L, v.denominator)
+    g = 0
+    for v in coef.values():
+        g = math.gcd(g, abs(int(v * L)))
+    bi = rhs * L
+    if g == 0:
+        return bi != 0
+    return int(bi) % g != 0
 
 
 def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
