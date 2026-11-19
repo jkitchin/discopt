@@ -455,14 +455,12 @@ def forwarded_budget():
 
 
 def rerun_with_lp_rescue_off(request) -> bool:
-    """Run this test in a subprocess with the engine's own LP rescues off:
-    ``DISCOPT_LP_LOGICAL_DUAL_RESCUE=0`` and ``DISCOPT_LP_PRIMAL_DUAL_CLEANUP=0``.
+    """Run this test in a subprocess with ``DISCOPT_LP_LOGICAL_DUAL_RESCUE=0``.
 
     #2212 made the LP engine decide, by itself, node LPs that two caller-side retries
     (the spatial kernel's #1995 pre-propagation re-solve and #2202 slack retry) were
     written to rescue; with the engine stage on (the default) those retries no longer
-    fire. #2236's dual clean-up of a bounds-refused cold primal decides more of them
-    the same way. Tests that pin the retries as safety nets therefore run with both off.
+    fire. Tests that pin the retries as safety nets therefore run with the stage off.
     The flag is a Rust ``OnceLock`` read once per process, so that needs a fresh
     interpreter. Returns True when this call delegated (the caller returns at once);
     False inside the delegated run.
@@ -471,13 +469,12 @@ def rerun_with_lp_rescue_off(request) -> bool:
     import subprocess
     import sys
 
-    off = {"DISCOPT_LP_LOGICAL_DUAL_RESCUE": "0", "DISCOPT_LP_PRIMAL_DUAL_CLEANUP": "0"}
-    if all(os.environ.get(k) == v for k, v in off.items()):
+    if os.environ.get("DISCOPT_LP_LOGICAL_DUAL_RESCUE") == "0":
         return False
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "",
          request.node.nodeid],
-        env={**os.environ, **off},
+        env={**os.environ, "DISCOPT_LP_LOGICAL_DUAL_RESCUE": "0"},
         cwd=str(request.config.rootpath),
         capture_output=True,
         text=True,

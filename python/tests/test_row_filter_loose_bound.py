@@ -42,17 +42,6 @@ baseline runs — same status and node count, 3). Tightening the certified bound
 under ill-conditioned envelope rows is the recorded interval max-combine
 follow-up, not something this test should pin to a constant that only held for
 one lowering of one operator.
-
-**#2236 moved the premise again.** The row filter fires on a *failed* root LP. With
-``DISCOPT_LP_PRIMAL_DUAL_CLEANUP`` (default ON) the cold primal's bounds-refused
-optimum on this LP is re-optimized by the dual simplex and decided directly, so the
-filter no longer fires. Measured on the raw box: the unfiltered bound goes from
--15,075,999.9 (clean-up OFF) to -7062.951 (ON), while the filtered bound OFF is
--7062.847 -- 0.104 tighter than the ON bound read off the clean-up's duals (both
-sound; the filtered LP is a relaxation). The filter test below therefore runs with
-the clean-up off, as the other pinned-fallback tests do
-(``conftest.rerun_with_lp_rescue_off``), and
-``test_dual_cleanup_decides_the_unfiltered_root_lp`` pins the new default.
 """
 
 from __future__ import annotations
@@ -61,7 +50,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import rerun_with_lp_rescue_off
 from discopt._relax.mccormick_lp import MccormickLPRelaxer
 from discopt.modeling.core import from_nl
 
@@ -82,7 +70,7 @@ def _root_bound():
     return MccormickLPRelaxer(model).solve_at_node(lb, ub)
 
 
-def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch, request):
+def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch):
     """The row filter must FIRE on hda and must tighten the certified root bound.
 
     Relational rather than a constant: what #671 owns is the difference between
@@ -102,8 +90,6 @@ def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch, request):
     ``k*without < without <= with`` for any ``k > 1``. Dividing is the tightening
     direction: ``without / k`` moves TOWARD zero.
     """
-    if rerun_with_lp_rescue_off(request):  # #2236: the filter fires only on a failed LP
-        return
     with_filter = _root_bound()
     assert with_filter.status == "optimal"
     assert with_filter.lower_bound is not None
@@ -126,21 +112,6 @@ def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch, request):
         f"{without.lower_bound!r} -> {with_filter.lower_bound!r} "
         f"(needs > {required!r}, i.e. a {_MIN_FILTER_GAIN:g}x tightening)"
     )
-
-
-# slow + correctness: one hda relaxation build is ~30 s locally, 35.7 s on CI, over the
-# fast lane's 15 s budget; it validates the certified bound against hda's optimum.
-@pytest.mark.slow
-@pytest.mark.correctness
-def test_dual_cleanup_decides_the_unfiltered_root_lp(monkeypatch):
-    """Fails before #2236: with the row filter off, hda's raw-box root LP failed and
-    its certified bound was -15,075,999.9. The default dual clean-up decides the LP,
-    and the bound is within 1% of the row-filtered one (-7062.847), and sound."""
-    monkeypatch.setenv("DISCOPT_RELAX_ROW_FILTER", "0")
-    res = _root_bound()
-    assert res.status == "optimal" and res.lower_bound is not None
-    assert res.lower_bound <= _HDA_OPT, "the certified bound must stay sound"
-    assert res.lower_bound > -7062.847 * 1.01, res.lower_bound
 
 
 @pytest.mark.parametrize(

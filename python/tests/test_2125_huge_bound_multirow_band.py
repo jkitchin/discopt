@@ -257,15 +257,13 @@ def test_opt_out_restores_the_legacy_path(value):
     import sys
 
     tests = str(pathlib.Path(__file__).parent)
-    # #2212 / #2236: the legacy path's counts are measured without the engine's
-    # logical-basis dual stage and its dual clean-up of a bounds-refused cold primal,
-    # each of which otherwise decides one of the LPs the legacy path leaves open.
+    # #2212: the legacy path's counts are measured without the engine's logical-basis
+    # dual stage, which otherwise decides one of the LPs the legacy path leaves open.
     env = dict(
         os.environ,
         DISCOPT_PROFILE="1",
         DISCOPT_LP_HUGE_BOUND_RELAX=value,
         DISCOPT_LP_LOGICAL_DUAL_RESCUE="0",
-        DISCOPT_LP_PRIMAL_DUAL_CLEANUP="0",
     )
     out = subprocess.run(
         [sys.executable, "-c", _OPT_OUT_PROBE.format(tests=tests)],
