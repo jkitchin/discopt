@@ -83,15 +83,37 @@ def test_refine_timeout_is_retried_and_the_certificate_survives(monkeypatch):
     assert r.bound <= r.objective
 
 
-def test_both_attempts_timing_out_still_reports_uncertified(monkeypatch):
+def test_both_attempts_timing_out_never_certifies_an_unverified_incumbent(monkeypatch):
+    """With every refine forced to time out, the unrefined incumbent (row 49 violated
+    by 5.2e-6) must not be certified.
+
+    Two verdicts are sound, and the tree decides which one it reaches. At #1917 the
+    search stopped at 1 node on that incumbent: ``feasible``, uncertified (the
+    pre-fix verdict). Measured on ``98ae95f8b`` the search runs 3 nodes and a node
+    NLP yields its own incumbent (obj 47.00000001091552, bound 46.99999998192344)
+    that passes ``verify_point`` independently: ``optimal``, certified. Either is
+    accepted, provided a certificate rests on a point that verifies and on a bound
+    at or below the known optimum.
+    """
+    import numpy as np
+    from discopt.pyomo.gdp import convert_pyomo_gdp
+    from discopt.validation.feasibility import verify_point
+
     log = _forced(monkeypatch, "all")
     r, stats = _solve(monkeypatch)
     assert any(w > 5.0 for w, _ in log) and all(f for _, f in log), log
     assert stats["retries"] == 1 and stats["recovered"] == 0
-    # The pre-fix verdict: a feasible incumbent, no certificate claimed.
-    assert r.status == "feasible" and not r.gap_certified
     assert r.objective == pytest.approx(OPT, abs=1e-6)
     assert r.bound is None or r.bound <= r.objective
+    if r.status == "feasible":
+        assert not r.gap_certified
+        return
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.gap_certified)
+    assert r.bound <= OPT + 1e-6, r.bound
+    m = convert_pyomo_gdp(cg.builder(NAME)()).model
+    x = np.concatenate([np.ravel(r.x[v.name]) for v in m._variables])
+    vr = verify_point(m, x, with_objective=True)
+    assert vr.ok, vr.reason
 
 
 def test_unforced_solve_never_retries(monkeypatch):
