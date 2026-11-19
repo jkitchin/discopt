@@ -47,6 +47,10 @@ class HandleResult:
     bound: float
     nodes: int
     lp_iters: int
+    #: Which budget stopped the search (``milp_last_solve_stats()["stop_reason"]``,
+    #: #2239): ``"none"``, ``"nodes"``, ``"time"``, ``"stall"``, ... A
+    #: ``"node_limit"`` status is returned for every budget alike; this names it.
+    stop_reason: str = "none"
 
 
 class MilpHandle:
@@ -143,10 +147,24 @@ class MilpHandle:
     ) -> HandleResult:
         """Solve the current problem. ``options`` are ``solve_milp_csc_py``'s keywords
         (``gap_tol``, ``heuristics``, ...), with its defaults."""
+        from discopt._rust import milp_last_solve_stats
+
+        milp_last_solve_stats(take=True)  # clear: what is read below is this call's
         status, x, obj, bound, nodes, iters = self._h.solve(
             max_nodes=int(max_nodes), presolve=bool(presolve), time_limit_s=time_limit, **options
         )
-        return HandleResult(status, np.asarray(x), float(obj), float(bound), int(nodes), int(iters))
+        st = milp_last_solve_stats(take=True)
+        if st is None:
+            raise RuntimeError("MilpHandle.solve recorded no driver stats (#2225)")
+        return HandleResult(
+            status,
+            np.asarray(x),
+            float(obj),
+            float(bound),
+            int(nodes),
+            int(iters),
+            str(st["stop_reason"]),
+        )
 
     def presolve_only(self) -> bool:
         """``True`` when the driver's root preparation and presolve prove the current

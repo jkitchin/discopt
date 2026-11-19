@@ -87,6 +87,7 @@ fn bits(v: &BigRational) -> u64 {
 
 /// `(Aᵀy)_j` exactly.
 fn reduced(cols: &SparseCols, j: usize, y: &[BigRational]) -> BigRational {
+    let _t = crate::profile::Timer::new(crate::profile::Phase::FarkasExactReduced);
     let (rows, vals) = cols.col(j);
     let mut s = BigRational::zero();
     let mut units = 0u64;
@@ -99,6 +100,123 @@ fn reduced(cols: &SparseCols, j: usize, y: &[BigRational]) -> BigRational {
     }
     crate::work::add(crate::work::Kind::ExactLimb, units);
     s
+}
+
+/// `y` as floats, or `None` when a value does not convert to a finite, normal-range
+/// float (then every sign is decided exactly).
+fn to_floats(y: &[BigRational]) -> Option<Vec<f64>> {
+    use num_traits::ToPrimitive;
+    y.iter()
+        .map(|v| {
+            if v.is_zero() {
+                return Some(0.0);
+            }
+            v.to_f64()
+                .filter(|f| f.is_finite() && f.abs() >= f64::MIN_POSITIVE * 1e10)
+        })
+        .collect()
+}
+
+/// #2225: the sign of `(Aᵀy)_j` when floating point decides it, else `None`. `yf` is
+/// `y` rounded to floats (each within a relative `2^-53`); the float sum over `k` terms
+/// is then within `(k + 2) eps Σ|a_ij yf_i|` of the exact one (Higham's bound on a
+/// recursive sum, plus the conversion), so a value past four times that has the exact
+/// value's sign. Anything closer is left to the exact evaluation.
+fn float_sign(cols: &SparseCols, j: usize, yf: &[f64]) -> Option<i8> {
+    let (rows, vals) = cols.col(j);
+    let (mut t, mut mag) = (0.0f64, 0.0f64);
+    for (k, &i) in rows.iter().enumerate() {
+        let p = vals[k] * yf[i];
+        t += p;
+        mag += p.abs();
+    }
+    if mag == 0.0 {
+        // Exactly zero only when every term is (a product can underflow to 0).
+        let exact_zero = rows
+            .iter()
+            .enumerate()
+            .all(|(k, &i)| vals[k] == 0.0 || yf[i] == 0.0);
+        return exact_zero.then_some(0);
+    }
+    let bound = 4.0 * (rows.len() as f64 + 2.0) * f64::EPSILON * mag;
+    // Below this, products may have lost bits to gradual underflow: decide exactly.
+    if !t.is_finite() || !mag.is_finite() || mag < 1e-280 || t.abs() <= bound {
+        return None;
+    }
+    Some(if t > 0.0 { 1 } else { -1 })
+}
+
+/// #2225: does floating point already show that the exact Farkas inequality below
+/// FAILS for `yq`? Only ever a refusal (the caller then returns `false`, as the exact
+/// test would); a certificate is issued by the exact arithmetic alone.
+///
+/// `held` columns have an exactly zero reduced cost. Every other column must have its
+/// sign decided by [`float_sign`], else nothing is concluded. Then (a) a column whose
+/// sign selects an open side fails the exact test outright, and (b) the float value of
+/// `g - margin` is within `TOL * S` of the exact one, `S` the sum of the magnitudes of
+/// every term (each term's float error is a few `eps` of its magnitude, and the float
+/// reduced cost's own error is below `1e-12` of `mag` by `float_sign`'s screen), so a
+/// value below `-TOL * S` refutes.
+fn float_refutes(
+    yq: &[BigRational],
+    held: &BTreeSet<usize>,
+    cols: &SparseCols,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    const TOL: f64 = 1e-9;
+    if n + b.len() > 1_000_000 {
+        return false;
+    }
+    let Some(yf) = to_floats(yq) else {
+        return false;
+    };
+    let feas = super::primal::AUDIT_FEAS;
+    let (mut g, mut margin, mut scale) = (0.0f64, 0.0f64, 0.0f64);
+    for (bi, yi) in b.iter().zip(&yf) {
+        g += bi * yi;
+        margin += yi.abs() * feas * (1.0 + bi.abs());
+        scale += (bi * yi).abs();
+    }
+    for j in 0..n {
+        if held.contains(&j) {
+            continue;
+        }
+        let (rows, vals) = cols.col(j);
+        let (mut t, mut mag) = (0.0f64, 0.0f64);
+        for (k, &i) in rows.iter().enumerate() {
+            let p = vals[k] * yf[i];
+            t += p;
+            mag += p.abs();
+        }
+        let Some(sg) = float_sign(cols, j, &yf) else {
+            // Sign unknown, `|rc| <= |t| + mag` for sure. The exact test either fails
+            // on this column (an open side) or charges `-rc * side <= |rc| * |side|`
+            // with `side` finite, and its margin term is `>= 0`: bound `g - margin`
+            // above by that.
+            let fin = [l[j], u[j]]
+                .iter()
+                .filter(|v| v.abs() < INF)
+                .fold(0.0f64, |a, v| a.max(v.abs()));
+            g += (t.abs() + mag) * fin;
+            scale += mag * (1.0 + fin);
+            continue;
+        };
+        if sg == 0 {
+            continue;
+        }
+        let side = if sg > 0 { u[j] } else { l[j] };
+        if side.abs() >= INF {
+            return true; // selects an open side: the exact test refuses
+        }
+        g -= t * side;
+        margin += t.abs() * feas * (1.0 + side.abs());
+        scale += mag * (1.0 + side.abs());
+    }
+    let (v, s) = (g - margin, scale + margin);
+    v.is_finite() && s.is_finite() && v < -TOL * s
 }
 
 /// Does a reduced cost of this sign select an open side of column `j`?
@@ -117,6 +235,7 @@ fn solve_rect(
     rhs: &[BigRational],
     spent: &mut u64,
 ) -> Option<BTreeMap<usize, BigRational>> {
+    let _t = crate::profile::Timer::new(crate::profile::Phase::FarkasExactSolve);
     // Equations as maps row-unknown -> coefficient, with the rhs alongside.
     let mut eqs: Vec<(BTreeMap<usize, BigRational>, BigRational)> = cols_s
         .iter()
@@ -199,17 +318,53 @@ fn solve_rect(
     Some(sol)
 }
 
-/// One orientation: try to turn `y` into an exact Farkas certificate.
-fn certify_one(y: &[f64], cols: &SparseCols, n: usize, b: &[f64], l: &[f64], u: &[f64]) -> bool {
+/// One orientation: try to turn `y` into an exact Farkas certificate. With `seed`,
+/// the open columns whose float reduced cost is at rounding-noise level are held from
+/// the first round (see [`noise_open_columns`]); the rounds then only pick up what that
+/// missed.
+fn certify_one(
+    y: &[f64],
+    cols: &SparseCols,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    seed: &[usize],
+) -> bool {
     let mut yq: Vec<BigRational> = y.iter().map(|&v| q(v)).collect();
     let open_cols: Vec<usize> = (0..n).filter(|&j| l[j] <= -INF || u[j] >= INF).collect();
-    let mut held: BTreeSet<usize> = BTreeSet::new();
+    let mut held: BTreeSet<usize> = seed.iter().copied().collect();
     let mut spent = 0u64;
+    if !held.is_empty() {
+        if held.len() > MAX_COLUMNS {
+            return false;
+        }
+        let set: Vec<usize> = held.iter().copied().collect();
+        let rhs: Vec<BigRational> = set.iter().map(|&j| -reduced(cols, j, &yq)).collect();
+        let Some(dy) = solve_rect(cols, &set, &rhs, &mut spent) else {
+            return false;
+        };
+        for (i, v) in dy {
+            yq[i] += v;
+        }
+    }
     for round in 0..=MAX_ROUNDS {
+        // #2225: every held column's reduced cost is exactly zero here (the last
+        // solve made it so, and a consistent exact solve satisfies every equation), so
+        // it cannot select an open side and is not re-evaluated. The others are
+        // screened in floating point; only a column the float value cannot sign goes
+        // exact (`float_sign`).
+        let yf = to_floats(&yq);
         let wrong: Vec<usize> = open_cols
             .iter()
             .copied()
-            .filter(|&j| selects_open(&reduced(cols, j, &yq), l[j], u[j]))
+            .filter(|j| !held.contains(j))
+            .filter(
+                |&j| match yf.as_deref().and_then(|yf| float_sign(cols, j, yf)) {
+                    Some(sg) => (sg > 0 && u[j] >= INF) || (sg < 0 && l[j] <= -INF),
+                    None => selects_open(&reduced(cols, j, &yq), l[j], u[j]),
+                },
+            )
             .collect();
         if wrong.is_empty() {
             break;
@@ -217,13 +372,26 @@ fn certify_one(y: &[f64], cols: &SparseCols, n: usize, b: &[f64], l: &[f64], u: 
         if round == MAX_ROUNDS {
             return false;
         }
+        crate::profile::incr(crate::profile::Ctr::FarkasExactRounds);
+        crate::profile::incr_by(crate::profile::Ctr::FarkasExactHeld, wrong.len() as u64);
+        let fresh: BTreeSet<usize> = wrong.iter().copied().collect();
         held.extend(wrong);
         if held.len() > MAX_COLUMNS {
             return false;
         }
         let set: Vec<usize> = held.iter().copied().collect();
-        // Drive every held column's reduced cost to exactly zero: (A_S)ᵀ dy = −(Aᵀy)_S.
-        let rhs: Vec<BigRational> = set.iter().map(|&j| -reduced(cols, j, &yq)).collect();
+        // Drive every held column's reduced cost to exactly zero: (A_S)ᵀ dy = −(Aᵀy)_S,
+        // whose right-hand side is zero on the columns held before this round.
+        let rhs: Vec<BigRational> = set
+            .iter()
+            .map(|&j| {
+                if fresh.contains(&j) {
+                    -reduced(cols, j, &yq)
+                } else {
+                    BigRational::zero()
+                }
+            })
+            .collect();
         let Some(dy) = solve_rect(cols, &set, &rhs, &mut spent) else {
             return false;
         };
@@ -243,6 +411,11 @@ fn certify_one(y: &[f64], cols: &SparseCols, n: usize, b: &[f64], l: &[f64], u: 
     // proves only the EXACT system empty, and certified a #2142 cstr node LP that is
     // infeasible by ~1e-8 but feasible within tolerance (HiGHS solves it): a false
     // `Infeasible` that would fathom a node holding accepted points.
+    let _tf = crate::profile::Timer::new(crate::profile::Phase::FarkasExactFinal);
+    if float_refutes(&yq, &held, cols, n, b, l, u) {
+        crate::profile::incr(crate::profile::Ctr::FarkasExactFloatRefuted);
+        return false;
+    }
     let feas = q(super::primal::AUDIT_FEAS);
     let one = BigRational::one();
     let mut g = BigRational::zero();
@@ -300,14 +473,76 @@ pub(crate) fn farkas_exact_open(
         return false;
     }
     crate::profile::incr(crate::profile::Ctr::FarkasExactAttempt);
+    let _t = crate::profile::Timer::new(crate::profile::Phase::FarkasExactOpen);
+    let seed = noise_open_columns(y, cols, n, l, u);
     for sgn in [1.0f64, -1.0] {
         let ys: Vec<f64> = y.iter().map(|v| sgn * v).collect();
-        if certify_one(&ys, cols, n, b, l, u) {
+        // #2225: hold the noise-level open columns from the start (one elimination
+        // instead of a dozen growing ones); if that system is inconsistent, the
+        // round-by-round correction decides, as before. Either way only the exact
+        // inequality at the end certifies.
+        if !seed.is_empty() && certify_one(&ys, cols, n, b, l, u, &seed) {
+            crate::profile::incr(crate::profile::Ctr::FarkasExactRescue);
+            crate::profile::incr(crate::profile::Ctr::FarkasExactSeeded);
+            return true;
+        }
+        if certify_one(&ys, cols, n, b, l, u, &[]) {
             crate::profile::incr(crate::profile::Ctr::FarkasExactRescue);
             return true;
         }
     }
     false
+}
+
+/// #2225: the open columns of `y`'s support whose float reduced cost `(Aᵀy)_j` is
+/// rounding noise, `|(Aᵀy)_j| <= 1e-9 Σ_i |a_ij y_i|`. A float ray of an infeasible
+/// system with open columns is a rounded certificate whose reduced cost on those
+/// columns is exactly zero, so the correction holds them at zero anyway; the round-by-
+/// round loop found them a few at a time (measured on MIPcc27 `bell3ainf` IIS probes:
+/// ~12 rounds and ~83 held columns per call, each round re-eliminating the whole held
+/// set over the rationals). Only a choice of which columns to correct: the result is
+/// still checked exactly.
+fn noise_open_columns(y: &[f64], cols: &SparseCols, n: usize, l: &[f64], u: &[f64]) -> Vec<usize> {
+    let open: Vec<usize> = (0..n).filter(|&j| l[j] <= -INF || u[j] >= INF).collect();
+    let mut zero = Vec::new();
+    let mut seed = Vec::new();
+    for &j in &open {
+        let (rows, vals) = cols.col(j);
+        let (mut t, mut mag) = (0.0f64, 0.0f64);
+        for (k, &i) in rows.iter().enumerate() {
+            let p = vals[k] * y[i];
+            t += p;
+            mag += p.abs();
+        }
+        if mag > 0.0 && t.abs() <= 1e-9 * mag {
+            seed.push(j);
+        } else if mag == 0.0 {
+            zero.push(j);
+        }
+    }
+    {
+        // Open columns off `y`'s support that share a row with a seed column: the
+        // correction moves `y` on those rows, and would hold them a round later
+        // (measured on the same probes: 1100 rounds -> 190, 1318 eliminations -> 408,
+        // every certificate still found by the seeded attempt).
+        let m = (0..n)
+            .flat_map(|j| cols.col(j).0.iter().copied())
+            .max()
+            .map_or(0, |v| v + 1);
+        let mut touched = vec![false; m];
+        for &j in &seed {
+            for &i in cols.col(j).0 {
+                touched[i] = true;
+            }
+        }
+        for j in zero {
+            if cols.col(j).0.iter().any(|&i| touched[i]) {
+                seed.push(j);
+            }
+        }
+        seed.sort_unstable();
+    }
+    seed
 }
 
 #[cfg(test)]

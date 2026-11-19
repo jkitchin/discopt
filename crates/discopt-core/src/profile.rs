@@ -191,6 +191,11 @@ timed_phases!(
     DualBtran,
     DualPrice,
     DualRatio,
+    // #2225: the exact open-column Farkas check (`farkas_exact::farkas_exact_open`).
+    FarkasExactOpen,
+    FarkasExactSolve,
+    FarkasExactReduced,
+    FarkasExactFinal,
     DualFtran,
     DualUpdate,
     DualLuUpdate,
@@ -441,6 +446,16 @@ counters!(
     // and Farkas rays refused as a fathom because they do not survive the tolerance.
     TolRobustRelaxedSolves,
     TolRobustRelaxedOptimal,
+    // #2225 DISCOPT_MILP_TOL_ROBUST_SIDED: rays proved over the full sided box,
+    // refused there, and relaxed optima whose row slacks were clamped.
+    TolRobustSidedProved,
+    TolRobustSidedRefused,
+    TolRobustSidedClamped,
+    // #2225: correction rounds of the exact Farkas check, and columns held exact.
+    FarkasExactRounds,
+    FarkasExactHeld,
+    FarkasExactSeeded,
+    FarkasExactFloatRefuted,
     TolRobustFarkasRefused,
     // ...and FBBT emptiness verdicts confirmed over the relaxed rows / refused there.
     TolRobustFbbtConfirm,
