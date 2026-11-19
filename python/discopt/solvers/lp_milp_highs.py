@@ -52,6 +52,9 @@ INF = 1e20
 #: value sits exactly on a declared finite bound (the default continuous box is
 #: ``±9.999e19``, and ``min -x`` over it is optimal at that corner -- #850/#937).
 READBACK_LIMIT = 1e15
+#: HiGHS's default ``mip_feasibility_tolerance``, the tolerance its MIP domain
+#: propagation works to; the route passes the same value (``feasibility_tolerance``).
+HIGHS_MIP_FEAS_TOL = 1e-6
 #: Per-row feasibility test ``|viol_i| <= FEAS_TOL + FEAS_RTOL * sum_j |A_ij||x_j|``:
 #: the ``_matrix_solution_feasible`` convention.
 FEAS_TOL = 1e-6
@@ -2749,8 +2752,14 @@ def solve_milp_std(
     initial_point: Optional[np.ndarray] = None,
     n_struct: Optional[int] = None,
     root_check: bool = True,
+    feasibility_tolerance: float = HIGHS_MIP_FEAS_TOL,
 ) -> HighsOutcome:
-    """The HiGHS MILP route; its LP checks run on HiGHS's LP (:func:`_lp_engine`)."""
+    """The HiGHS MILP route; its LP checks run on HiGHS's LP (:func:`_lp_engine`).
+
+    ``feasibility_tolerance`` is HiGHS's ``mip_feasibility_tolerance`` for the
+    primary solve. The caller tightens it only to re-solve a model whose published
+    point the model's own verifier refused (``Model.solve``'s HiGHS MILP route).
+    """
     token = _IN_HIGHS_MILP_ROUTE.set(True)
     try:
         return _solve_milp_std_route(
@@ -2762,6 +2771,7 @@ def solve_milp_std(
             initial_point=initial_point,
             n_struct=n_struct,
             root_check=root_check,
+            feasibility_tolerance=feasibility_tolerance,
         )
     finally:
         _IN_HIGHS_MILP_ROUTE.reset(token)
@@ -2777,6 +2787,7 @@ def _solve_milp_std_route(
     initial_point: Optional[np.ndarray] = None,
     n_struct: Optional[int] = None,
     root_check: bool = True,
+    feasibility_tolerance: float = HIGHS_MIP_FEAS_TOL,
 ) -> HighsOutcome:
     """Solve the MILP ``sf`` under the §3.2 contract, with the route's own
     under-scaled logical columns rescaled exactly first (#1537,
@@ -2792,6 +2803,9 @@ def _solve_milp_std_route(
         n_struct=n_struct,
         root_check=root_check,
     )
+    if feasibility_tolerance != HIGHS_MIP_FEAS_TOL:
+        # Only when tightened: the default call stays exactly the call it was.
+        kw["feasibility_tolerance"] = float(feasibility_tolerance)
     # ``monotonic``, not ``perf_counter``: this clock only budgets the #1612 re-solve,
     # and must not shift the route's own ``perf_counter`` deadline reads.
     t0 = time.monotonic()
@@ -2912,11 +2926,6 @@ def _cross_form_infeasible_check(
         },
         labels=labels,
     )
-
-
-#: HiGHS's default ``mip_feasibility_tolerance``, the tolerance its MIP domain
-#: propagation works to; the route passes the same value (``feasibility_tolerance``).
-HIGHS_MIP_FEAS_TOL = 1e-6
 
 
 def sub_tolerance_columns(sf: StdForm, tol: float = HIGHS_MIP_FEAS_TOL) -> int:

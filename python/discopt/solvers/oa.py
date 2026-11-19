@@ -1693,6 +1693,9 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
         _c_vec, _c_off = obj_coeffs
         obj_coeffs = (-_c_vec, -_c_off)
 
+    lb, ub = _round_single_integer_rows(
+        lb, ub, linear_A_rows, linear_b_rows, linear_senses, integrality
+    )
     return _DecomposedProblem(
         evaluator=evaluator,
         n_vars=n_vars,
@@ -5484,6 +5487,86 @@ def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
 _OA_EXIT_SNAP_DIST = 1e-8
 
 
+def _round_single_integer_rows(lb, ub, rows, rhs, senses, integrality):
+    """``(lb, ub)`` with each linear row over ONE free integer column applied as the
+    integer bound it states (#2252 follow-up).
+
+    A row whose every other column is fixed (``lb == ub``) bounds its one free
+    column, and on an integer column that bound rounds exactly, as in
+    :func:`_round_single_integer_cut`. Unrounded, the master keeps a point inside
+    its own tolerance that the verifier refuses: on ``2x + y >= 2.0000004`` (integer
+    ``x``, ``y`` fixed at 0) it kept x = 1, violated by 4e-7, and the route published
+    it ``feasible``. Rounded, the box is ``x >= 2``. Only tightens. Rows are taken
+    in order against the box as updated so far, so a column an earlier row fixed
+    counts as fixed in later rows (sound: each rounding is exact for integers). A
+    row that empties the box writes ``lb > ub`` as it stands; the master then
+    proves the model infeasible.
+    """
+    lb = np.array(lb, dtype=np.float64, copy=True)
+    ub = np.array(ub, dtype=np.float64, copy=True)
+    integ = np.asarray(integrality)
+    for row, b, sense in zip(rows, rhs, senses):
+        sp_row = row if isinstance(row, _SparseRow) else _SparseRow.from_dense(row)
+        idx, val = sp_row.idx, sp_row.val
+        free = lb[idx] != ub[idx]
+        if int(np.count_nonzero(free)) != 1:
+            continue
+        k = int(np.flatnonzero(free)[0])
+        j, a = int(idx[k]), float(val[k])
+        if not integ[j] or a == 0.0:
+            continue
+        rest = float(np.dot(np.delete(val, k), np.delete(lb[idx], k)))
+        q = (float(b) - rest) / a
+        if not math.isfinite(q):
+            continue
+        noise = 1e-9 * max(1.0, abs(q))
+        # a x_j <sense> b - rest  ->  x_j <= q (a > 0, "<=") or x_j >= q, etc.
+        upper = (sense in ("<=", "==") and a > 0.0) or (sense in (">=", "==") and a < 0.0)
+        lower = (sense in (">=", "==") and a > 0.0) or (sense in ("<=", "==") and a < 0.0)
+        if upper:
+            ub[j] = min(ub[j], float(math.floor(q + noise)))
+        if lower:
+            lb[j] = max(lb[j], float(math.ceil(q - noise)))
+    return lb, ub
+
+
+def _round_single_integer_cut(row, rhs: float, integrality) -> tuple:
+    """``row . x <= rhs`` rounded to the integer bound it states, when its only
+    nonzero is an integer column (#2252 follow-up).
+
+    ``a x_j <= rhs`` with ``x_j`` integer is ``x_j <= floor(rhs / a)`` for ``a > 0``
+    and ``x_j >= ceil(rhs / a)`` for ``a < 0``, exactly: no integer value of ``x_j``
+    is removed. Unrounded, the master cannot enforce it. On integer ``x`` with
+    ``sqrt(x) >= 1.0000002`` the OA cut is ``x >= 1.0000004``. At ``x = 1`` it is
+    violated by 4e-7, inside the master LP's own tolerance, so the master kept
+    proposing x = 1 and pruned x = 2. Every fixed-NLP point there failed
+    ``verify_point``, and the route published one ``feasible``. Rounded, the cut
+    is ``x >= 2``, violated by 1.
+
+    Only a row that is a bound is rounded. A row over several columns is not
+    touched (no lattice argument applies to arbitrary real coefficients), and
+    neither is a row on a continuous column. The rounding allows ``1e-9`` relative
+    float noise, so a cut that rests on an integer (``x >= 2 - 1e-12``) stays at it.
+    """
+    r = np.asarray(row, dtype=np.float64)
+    nz = np.flatnonzero(r)
+    if nz.size != 1:
+        return row, rhs
+    j = int(nz[0])
+    integ = np.asarray(integrality)
+    if j >= integ.size or not integ[j]:
+        return row, rhs
+    a = float(r[j])
+    q = rhs / a
+    noise = 1e-9 * max(1.0, abs(q))
+    out = np.zeros_like(r)
+    if a > 0.0:
+        out[j] = 1.0
+        return out, float(math.floor(q + noise))
+    out[j] = -1.0
+    return out, -float(math.ceil(q - noise))
+
+
 def _published_integral(
     model: Model,
     x_flat: np.ndarray,
@@ -7471,6 +7554,7 @@ def solve_lp_nlp_bb(
                 relaxable=relaxable,
             )
             rhs = float(oa_b_rows[idx])
+            row, rhs = _round_single_integer_cut(row, rhs, master.integrality)
             # #1658: the violation is judged per unit of the row's largest
             # coefficient when that is below 1 (a row scaled by 1e-5 has its
             # violation scaled by 1e-5 too); rows of norm >= 1 are tested exactly
