@@ -1937,6 +1937,11 @@ several causes, measured one instance at a time with a per-probe log:
   model. The reduced stack now comes from the per-column last positions and a chain flag
   kept per entry (same output; a 60,000-node cap stops at the same node, 7.45 -> 1.76 s).
   `enlight4` then returns a confirmed subsystem (31 elements, HiGHS 19).
+- *Where the panel stands* (same settings, all 50 instances): Rust 38 answers (22
+  complete, all certified), 12 whole-model answers, total wall 3,929 s; HiGHS 48 answers
+  (39 complete, 35 certified), 2 whole-model (`neos-1461051`, `no-ip-65059`), 2,336 s.
+  With the deadline fix, re-running Rust on its 12 whole-model instances recovers
+  `enlight4` only (12 -> 11).
 - *Falsified:* "the IIS probes should run the pure-MILP route's root cut budget"
   (`_milp_root_cut_budget`: 1,500 cuts / 150 rounds / c-MIR; the handle runs the
   binding's 16 cuts / 1 round). It decides some probes at the root (`hole9` full model
