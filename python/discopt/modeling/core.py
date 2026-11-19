@@ -4519,13 +4519,13 @@ def _csr_with_exact_duplicates(A):
         for k in np.flatnonzero(ends - starts > 1):
             part = data[starts[k] : ends[k]].tolist()
             if integral:
-                out[k] = float(sum(int(v) for v in part))
+                out[k] = float(builtins_sum(int(v) for v in part))
             elif all(math.isfinite(v) for v in part):
                 # Exact rational sum, rounded once (``math.fsum`` raises on an
                 # intermediate overflow that the exact sum does not have).
-                out[k] = float(sum((Fraction(v) for v in part), Fraction(0)))
+                out[k] = float(builtins_sum((Fraction(v) for v in part), Fraction(0)))
             else:
-                out[k] = sum(part)  # an inf/nan part: no exact sum to keep
+                out[k] = builtins_sum(part)  # an inf/nan part: no exact sum to keep
         rows, cols, data = rows[starts], cols[starts], out
     else:
         data = data.astype(np.float64)
