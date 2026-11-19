@@ -389,11 +389,14 @@ class _RootLP:
         # FBBT over the linear rows yields fractional bounds (``x <= 0.445`` for an
         # integer ``x``), and the separators complement against these: c-MIR's
         # ``u_j - x_j`` is an integer only for an integral ``u_j``. Rounding is
-        # valid (the column is integer); the 1e-6 slack rounds a bound that is an
-        # integer up to FBBT noise outward, which only weakens.
+        # valid (the column is integer); the slack rounds a bound that is an
+        # integer up to FBBT noise outward, which only weakens. Same constant as
+        # ``separate_cmir``'s own rounding, so the two cannot drift apart.
+        from discopt._relax.cmir_cuts import _INT_BOUND_TOL
+
         ii = np.asarray(self.is_int, bool)
-        lb[ii] = np.ceil(lb[ii] - 1e-6)
-        ub[ii] = np.floor(ub[ii] + 1e-6)
+        lb[ii] = np.ceil(lb[ii] - _INT_BOUND_TOL)
+        ub[ii] = np.floor(ub[ii] + _INT_BOUND_TOL)
         self.lb_sep = lb
         self.ub_sep = ub
 
