@@ -1941,6 +1941,13 @@ class Variable(Expression):
             arr = self.__dict__.get(side)
             if arr is not None:
                 self.__dict__[side] = _readonly_bound(arr)
+        # The bounds as written (#2252) decide ``validate`` and are what ``dumps``
+        # writes, so a writable copy would let an in-place write change both
+        # (review of #2257). Frozen like the boxes; no var_type, nothing re-snapped.
+        for side in ("_raw_lb", "_raw_ub"):
+            arr = self.__dict__.get(side)
+            if arr is not None:
+                self.__dict__[side] = _readonly_bound(arr)
         stack = self.__dict__.get("_bound_stack")
         if stack:
             self.__dict__["_bound_stack"] = [

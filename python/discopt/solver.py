@@ -20093,6 +20093,12 @@ def solve_model(
         # point injected is the snapped one, priced where it now sits.
         _x_int, _ = _round_incumbent_integers(x_cand, int_offsets, int_sizes)
         if not np.array_equal(_x_int, np.asarray(x_cand, dtype=np.float64)):
+            # Priced by the search evaluator, which is the LIFTED model's when the
+            # factorable lift ran; its aux columns are not recomputed after the
+            # snap, so they can be stale by up to the 1e-5 the snap moved an integer.
+            # The row test below is unaffected (it reads the pre-lift arbiter's
+            # view); the objective can carry that much aux staleness (review of
+            # #2257).
             _obj_int = float(evaluator.evaluate_objective(_x_int))
             if not np.isfinite(_obj_int):
                 return False
@@ -38444,14 +38450,17 @@ def _highs_milp_verifier_resolve(
     at 1e-6 HiGHS has no reason to look past x = 1.
 
     The re-solve is the whole certified route at the tolerance #2151 uses for a
-    refuted tree (:data:`REFUTED_TIGHT_FEAS_TOL`). It runs cold, on the time
-    left, and only when the published point is refused, so a result that
+    refuted tree (:data:`REFUTED_TIGHT_FEAS_TOL`). It runs cold, capped as
+    #2151's is, and only when the published point is refused, so a result that
     verifies is untouched. It replaces ``out`` only when its own point passes
-    ``verify_point``; otherwise ``out`` stands as before.
+    ``verify_point``, never on an ``infeasible`` (a tighter tolerance can report
+    that on a feasible model); otherwise ``out`` stands as before.
     """
     from discopt._affine_evaluator import post_solve_evaluator
     from discopt.solvers.lp_milp_highs import (
         _DECLINE_LABELS,
+        PRESOLVE_CROSS_BUDGET_FACTOR,
+        PRESOLVE_CROSS_MIN_BUDGET,
         REFUTED_TIGHT_FEAS_TOL,
         _as_history,
         solve_milp_std,
@@ -38472,6 +38481,12 @@ def _highs_milp_verifier_resolve(
     left = float(time_limit) - (time.perf_counter() - t_start)
     out.stats["milp/verifier_refused_published"] = 1.0
     out.labels["milp/verifier_refused_published"] = why
+    # Budgeted like #2151's tight re-solve, not on the whole remaining limit: on a
+    # hard MILP whose point is refused, the re-solve may otherwise double the wall.
+    left = min(
+        left,
+        max(PRESOLVE_CROSS_MIN_BUDGET, PRESOLVE_CROSS_BUDGET_FACTOR * float(out.wall_time)),
+    )
     if left <= 0.0:
         return out
     tight = solve_milp_std(
@@ -38484,7 +38499,13 @@ def _highs_milp_verifier_resolve(
         feasibility_tolerance=REFUTED_TIGHT_FEAS_TOL,
     )
     out.stats["milp/verifier_tight_resolve_ran"] = 1.0
-    if tight.status == "infeasible" or (
+    # Only a VERIFIED point is adopted. An ``infeasible`` from the re-solve is not:
+    # tightening ``mip_feasibility_tolerance`` to 1e-9 shrinks the feasible set
+    # HiGHS searches, so a model whose ``verify_point``-feasible points all use
+    # 1e-7..1e-6 of slack on rows with continuous columns can read infeasible
+    # there while it has feasible points (review of #2257). #2151, whose tolerance
+    # this reuses, never adopts an ``infeasible`` either.
+    if (
         tight.x is not None
         and tight.status in ("optimal", "feasible")
         and _refusal(tight.x) is None
@@ -38504,7 +38525,9 @@ def _highs_milp_verifier_resolve(
         }
         tight.node_count += out.node_count
         return tight
-    out.labels["milp/verifier_tight_resolve_declined"] = f"tight re-solve status {tight.status}"
+    out.labels["milp/verifier_tight_resolve_declined"] = f"tight re-solve status {tight.status}" + (
+        "" if tight.x is None else ", its point refused too"
+    )
     return out
 
 

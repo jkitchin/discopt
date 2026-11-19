@@ -362,3 +362,55 @@ def test_round_single_integer_rows():
     np.testing.assert_array_equal(new_lb, [2.0, 0.0, 0.0])
     np.testing.assert_array_equal(new_ub, [7.0, 0.0, 5.0])
     np.testing.assert_array_equal(lb, [0.0, 0.0, 0.0])  # inputs are not mutated
+
+
+# --- review of #2257 -----------------------------------------------------------
+
+
+def test_highs_verifier_resolve_never_adopts_a_tight_infeasible(monkeypatch):
+    """The 1e-9 re-solve searches a SMALLER feasible set than the 1e-6 semantics
+    ``verify_point`` uses, so its ``infeasible`` is no certificate for this model:
+    the refused primary result must stand, labelled as declined."""
+    import time
+
+    import discopt.solver as S
+    import discopt.solvers.lp_milp_highs as H
+
+    m = dm.Model()
+    x = m.integer("x", lb=0, ub=10)
+    y = m.integer("y", lb=0, ub=0)
+    m.subject_to(2 * x + y >= 2.0000004)
+    m.minimize(x)
+    _, n_orig, sf = S._highs_std_form(m)
+    primary = H.solve_milp_std(
+        sf, time_limit=20.0, gap_tolerance=1e-4, max_nodes=10**6, n_struct=n_orig
+    )
+    assert primary.x is not None and float(primary.x[0]) == 1.0  # the refused point
+
+    calls = []
+
+    def tight_infeasible(*args, **kwargs):
+        calls.append(kwargs.get("feasibility_tolerance"))
+        return H.HighsOutcome("infeasible", gap_certified=True, highs_status="mocked")
+
+    monkeypatch.setattr(H, "solve_milp_std", tight_infeasible)
+    out = S._highs_milp_verifier_resolve(
+        m, sf, primary, n_orig, 20.0, time.perf_counter(), 10**6, 1e-4, None
+    )
+    assert calls == [H.REFUTED_TIGHT_FEAS_TOL]  # the re-solve ran, at 1e-9
+    assert out is primary and out.status != "infeasible"
+    assert "milp/verifier_tight_resolve_declined" in out.labels
+
+
+def test_raw_bounds_are_frozen_after_copy_and_pickle():
+    import copy
+    import pickle
+
+    m = dm.Model()
+    m.integer("y", lb=1.2, ub=1.8)
+    for m2 in (copy.deepcopy(m), pickle.loads(pickle.dumps(m))):
+        v = m2._variables[0]
+        for raw in (v._raw_lb, v._raw_ub):
+            assert raw is not None and not raw.flags.writeable
+            with pytest.raises(ValueError):
+                raw[...] = 0.0

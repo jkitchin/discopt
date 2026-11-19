@@ -5496,8 +5496,11 @@ def _round_single_integer_rows(lb, ub, rows, rhs, senses, integrality):
     :func:`_round_single_integer_cut`. Unrounded, the master keeps a point inside
     its own tolerance that the verifier refuses: on ``2x + y >= 2.0000004`` (integer
     ``x``, ``y`` fixed at 0) it kept x = 1, violated by 4e-7, and the route published
-    it ``feasible``. Rounded, the box is ``x >= 2``. Only tightens; a row that
-    empties the box is left to the master, which then proves the model infeasible.
+    it ``feasible``. Rounded, the box is ``x >= 2``. Only tightens. Rows are taken
+    in order against the box as updated so far, so a column an earlier row fixed
+    counts as fixed in later rows (sound: each rounding is exact for integers). A
+    row that empties the box writes ``lb > ub`` as it stands; the master then
+    proves the model infeasible.
     """
     lb = np.array(lb, dtype=np.float64, copy=True)
     ub = np.array(ub, dtype=np.float64, copy=True)
