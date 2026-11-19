@@ -38031,6 +38031,31 @@ def _highs_std_form(model: Model):
     _default_side = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
     x_l[:n_orig][x_l[:n_orig] <= -_default_side] = -_HIGHS_INF
     x_u[:n_orig][x_u[:n_orig] >= _default_side] = _HIGHS_INF
+    if int_idx and A.shape[0]:
+        # A row over ONE free integer column is that column's integer bound, applied
+        # exactly, as on the Rust route (:func:`_round_single_integer_rows_sparse`).
+        # HiGHS enforces it to its 1e-6 ``mip_feasibility_tolerance`` only; on
+        # ``2x + y >= 2.0000004`` (``y`` fixed at 0) beside the near-inconsistent
+        # ``c == 1``, ``c == 1 + 5e-8`` it published x = 1, and the #2151 tight
+        # re-solve that would find x = 2 is infeasible at 1e-9 on the ``c`` rows.
+        _A_ub_h, _b_ub_h, _A_eq_h, _b_eq_h = _decompose_eq_slack_form(
+            A,
+            np.asarray(lp_data.b_eq, dtype=np.float64),
+            n_orig,
+            A.shape[1] - n_orig,
+            np.asarray(lp_data.x_u, dtype=np.float64),
+            row_sense=_declared_row_senses(lp_data, A),
+        )
+        x_l, x_u, _ = _round_single_integer_rows_sparse(
+            x_l,
+            x_u,
+            n_orig,
+            int_idx,
+            ((_A_ub_h, _b_ub_h, "<="), (_A_eq_h, _b_eq_h, "==")),
+            # A crossed box is refused as ``error`` here, so a row with no integer
+            # solution (``2x == 1``) is left for HiGHS to prove infeasible.
+            keep_crossed=False,
+        )
     sf = StdForm.from_arrays(c, A, lp_data.b_eq, x_l, x_u, float(lp_data.obj_const), int_idx)
     if sf.n < n_orig:
         raise ValueError(f"standard form has {sf.n} columns for {n_orig} model variables")
@@ -39307,6 +39332,82 @@ def _relu_native_engine(
     return _engine
 
 
+def _round_single_integer_rows_sparse(
+    xl: np.ndarray,
+    xu: np.ndarray,
+    n_orig: int,
+    int_idx: Iterable[int],
+    blocks: Iterable[tuple[Any, Optional[np.ndarray], str]],
+    keep_crossed: bool = True,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """``(xl, xu)`` with each row over ONE free integer column applied as the integer
+    bound it states, and the number of bounds that moved (#2252 follow-up).
+
+    The sparse, vectorized form of :func:`discopt.solvers.oa._round_single_integer_rows`
+    for the pure-MILP routes (the Rust engine's box in :func:`_solve_milp_simplex`,
+    HiGHS's in :func:`_highs_std_form`). ``blocks`` holds ``(A, b, sense)`` over the first
+    ``n_orig`` columns, ``sense`` ``"<="`` or ``"=="``. A row whose every other
+    column is fixed (``xl == xu``) bounds its one free column ``j``: ``a x_j <sense>
+    q * a``. On an integer ``x_j`` that bound rounds exactly (no integer value is
+    removed), allowing ``1e-9`` relative float noise so a row resting on an integer
+    stays at it. Rows are judged against the input box in one pass, so a bound one
+    row derives is not used to fix columns for another (sound, just not a fixed
+    point). Only tightens; a row that empties the box leaves ``xl > xu`` for the
+    engine to prove infeasible, unless ``keep_crossed=False``: then that column keeps
+    its input bounds and the engine judges the row itself (the HiGHS route refuses a
+    crossed box with ``error`` instead of proving it infeasible). Columns past
+    ``n_orig`` (slacks) are untouched.
+
+    A row whose bound ``|q|`` is so large that the noise allowance reaches half an
+    integer (``|q| >= 5e8``) is skipped: there the rounding could not be exact, and
+    measured on ``1e-13 y >= 5`` (``q = 5e13``) it set ``y >= 5e13 - 5e4``, a bound
+    that is valid but admits points the row rejects, and changed which route served
+    the model.
+    """
+    import scipy.sparse as _sp
+
+    xl = np.array(xl, dtype=np.float64, copy=True)
+    xu = np.array(xu, dtype=np.float64, copy=True)
+    is_int = np.zeros(n_orig, dtype=bool)
+    ii = np.fromiter((int(j) for j in int_idx), dtype=np.int64)
+    is_int[ii[ii < n_orig]] = True
+    if not is_int.any():
+        return xl, xu, 0
+    lo, hi = xl[:n_orig].copy(), xu[:n_orig].copy()
+    new_lo, new_hi = lo.copy(), hi.copy()
+    fixed = lo == hi
+    for A, b, sense in blocks:
+        if A is None or b is None or A.shape[0] == 0:
+            continue
+        M = _sp.csr_matrix(A)
+        M.eliminate_zeros()
+        rows = np.repeat(np.arange(M.shape[0]), np.diff(M.indptr))
+        cols, vals = M.indices, M.data
+        free = ~fixed[cols]
+        nfree = np.bincount(rows, weights=free, minlength=M.shape[0])
+        rest = np.bincount(rows, weights=np.where(free, 0.0, vals * lo[cols]), minlength=M.shape[0])
+        pick = free & (nfree[rows] == 1) & is_int[cols]
+        if not pick.any():
+            continue
+        r, j, a = rows[pick], cols[pick], vals[pick]
+        with np.errstate(invalid="ignore", over="ignore"):
+            q = (np.asarray(b, dtype=np.float64)[r] - rest[r]) / a
+        noise = 1e-9 * np.maximum(1.0, np.abs(q))
+        ok = np.isfinite(q) & (noise < 0.5)
+        r, j, a, q, noise = r[ok], j[ok], a[ok], q[ok], noise[ok]
+        eq = sense == "=="
+        upper = (a > 0.0) | eq
+        lower = (a < 0.0) | eq
+        np.minimum.at(new_hi, j[upper], np.floor(q[upper] + noise[upper]))
+        np.maximum.at(new_lo, j[lower], np.ceil(q[lower] - noise[lower]))
+    if not keep_crossed:
+        crossed = new_lo > new_hi
+        new_lo[crossed], new_hi[crossed] = lo[crossed], hi[crossed]
+    moved = int(np.count_nonzero(new_lo > lo) + np.count_nonzero(new_hi < hi))
+    xl[:n_orig], xu[:n_orig] = new_lo, new_hi
+    return xl, xu, moved
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -39434,6 +39535,35 @@ def _solve_milp_simplex(
                 x_l=cast(Any, _sf_e2.xl),
                 x_u=cast(Any, _sf_e2.xu),
             )
+    # The row/bound/integrality decomposition of the ORIGINAL rows, independent of
+    # any point: the integer-row rounding below and the feasibility gate after the
+    # search both read it. Sparse straight through; a dense ``A_eq`` still goes via
+    # ``_dense_A`` so this stays byte-identical to the pre-fix behaviour there.
+    _A_gate = lp_data.A_eq if _sp_issparse(lp_data.A_eq) else _dense_A(lp_data.A_eq)
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+        _A_gate,
+        np.asarray(lp_data.b_eq),
+        n_orig,
+        lp_data.A_eq.shape[1] - n_orig,
+        np.asarray(lp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(lp_data, _A_gate),
+    )
+    # A row over ONE free integer column (every other column fixed) is that column's
+    # integer bound, applied exactly (the OA master's rule, #2252 follow-up). The
+    # engine enforces it only to its 1e-6 row tolerance, and ``verify_point`` allows
+    # an integer-only row float noise alone (#1254), so unrounded the engine certified
+    # x = 1 on ``2x + y >= 2.0000004`` (``y`` fixed at 0) and #1561 published it
+    # ``feasible``; the optimum is x = 2. Only the engine's box changes: the gate
+    # below still reads the declared ``lp_data`` bounds.
+    _xl_r, _xu_r, _n_int_rows_rounded = _round_single_integer_rows_sparse(
+        np.asarray(_drv.x_l, dtype=np.float64),
+        np.asarray(_drv.x_u, dtype=np.float64),
+        n_orig,
+        int_idx,
+        ((_A_ub_m, _b_ub_m, "<="), (_A_eq_m, _b_eq_m, "==")),
+    )
+    if _n_int_rows_rounded:
+        _drv = _drv._replace(x_l=cast(Any, _xl_r), x_u=cast(Any, _xu_r))
     _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
     # A MILP with no constraints is solved by the driver itself (each column at the
     # bound its cost selects, integers rounded inward); it used to defer to the Python
@@ -39663,22 +39793,13 @@ def _solve_milp_simplex(
             _d["milp/no_stall_tree"] = 1.0
         if _coef_entry_rewritten:
             _d["milp/rust_coef_entry_rewritten"] = float(_coef_entry_rewritten)
+        if _n_int_rows_rounded:
+            _d["milp/int_row_bounds_rounded"] = float(_n_int_rows_rounded)
         return _d
 
     # Feasibility gate (shared by the return path below and the #698 re-entry
-    # adoption test). The row/bound/integrality decomposition is independent of
-    # the point, so build it once and close over it.
-    # Sparse straight through (the whole point); a dense ``A_eq`` still goes via
-    # ``_dense_A`` so this stays byte-identical to the pre-fix behaviour there.
-    _A_gate = lp_data.A_eq if _sp_issparse(lp_data.A_eq) else _dense_A(lp_data.A_eq)
-    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-        _A_gate,
-        np.asarray(lp_data.b_eq),
-        n_orig,
-        lp_data.A_eq.shape[1] - n_orig,
-        np.asarray(lp_data.x_u, dtype=np.float64),
-        row_sense=_declared_row_senses(lp_data, _A_gate),
-    )
+    # adoption test). The row/bound/integrality decomposition (``_A_ub_m`` ...) is
+    # built before the search, where the integer-row rounding reads it.
     _xl_gate = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
     _xu_gate = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
     _gate_tol = 1e-5

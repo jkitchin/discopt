@@ -381,6 +381,10 @@ def test_highs_verifier_resolve_never_adopts_a_tight_infeasible(monkeypatch):
     y = m.integer("y", lb=0, ub=0)
     m.subject_to(2 * x + y >= 2.0000004)
     m.minimize(x)
+    # Since the #2252 follow-up the HiGHS standard form rounds this single-free-
+    # integer row to x >= 2, so the refused x = 1 no longer arises from it. Switch
+    # that rounding off to reach the verifier re-solve this test guards.
+    monkeypatch.setattr(S, "_round_single_integer_rows_sparse", lambda xl, xu, *a, **k: (xl, xu, 0))
     _, n_orig, sf = S._highs_std_form(m)
     primary = H.solve_milp_std(
         sf, time_limit=20.0, gap_tolerance=1e-4, max_nodes=10**6, n_struct=n_orig
@@ -414,3 +418,25 @@ def test_raw_bounds_are_frozen_after_copy_and_pickle():
             assert raw is not None and not raw.flags.writeable
             with pytest.raises(ValueError):
                 raw[...] = 0.0
+
+
+def test_oa_rounding_skips_a_bound_too_large_to_round_exactly():
+    # 1e-13 y >= 5 states y >= 5e13; with the 1e-9 relative noise allowance (5e4
+    # there) a rounding would give 5e13 - 5e4, not the exact integer bound. Both OA
+    # helpers leave such a row unrounded, as the pure-MILP helper does.
+    from discopt.solvers.oa import (
+        _round_single_integer_cut,
+        _round_single_integer_rows,
+        _SparseRow,
+    )
+
+    integ = np.array([1])
+    lb, ub = _round_single_integer_rows(
+        np.array([0.0]), np.array([1e14]), [_SparseRow.from_dense([1e-13])], [5.0], [">="], integ
+    )
+    assert lb.tolist() == [0.0] and ub.tolist() == [1e14]
+    row, rhs = _round_single_integer_cut(np.array([-1e-13]), -5.0, integ)
+    assert rhs == -5.0 and row.tolist() == [-1e-13]
+    # A small bound still rounds exactly.
+    row, rhs = _round_single_integer_cut(np.array([-1.0]), -2.0000004, integ)
+    assert (row.tolist(), rhs) == ([-1.0], -3.0)
