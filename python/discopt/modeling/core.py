@@ -1306,6 +1306,21 @@ class Expression:
         # re-converting. ``BinaryOp.__init__`` relies on that.
         self._shape = None if value is None else tuple(value)
 
+    @property
+    def ndim(self):
+        """Not defined: always raises :class:`AttributeError` with guidance.
+
+        A discopt expression is not an array, so ``hasattr(expr, "ndim")`` stays
+        False. The property exists for its message. ``scipy_sparse @ expr`` reads
+        ``expr.ndim`` inside scipy's matmul dispatch, and without the property the
+        user saw only ``'Variable' object has no attribute 'ndim'``, which does not
+        say that a scipy sparse matrix cannot multiply a discopt expression.
+        """
+        raise AttributeError(
+            f"{type(self).__name__} has no 'ndim': a discopt expression is not an "
+            f"array. {_SPARSE_OPERAND_HINT}"
+        )
+
     def __len__(self) -> int:
         """Length along the leading axis (``shape[0]``) for array expressions.
 
@@ -2770,7 +2785,24 @@ def _wrap(x) -> Expression:
             f"cannot build a single Constant from an object-dtype array of shape "
             f"{x.shape}; its elements are expressions, not numbers"
         )
+    if type(x).__module__.startswith("scipy.sparse"):
+        # ``x @ A`` / ``x + A`` with a scipy sparse ``A``: ``Constant`` would call
+        # ``np.asarray`` on it, which raises an unrelated ``ValueError`` (or, for
+        # other entry points, builds a 0-d object array). Refuse by name instead.
+        raise TypeError(
+            f"cannot use a scipy sparse {type(x).__name__} as a discopt operand. "
+            f"{_SPARSE_OPERAND_HINT}"
+        )
     return Constant(x)
+
+
+#: How to get a sparse matrix into a model; shared by ``_wrap`` and ``Expression.ndim``.
+_SPARSE_OPERAND_HINT = (
+    "A scipy sparse matrix cannot multiply or combine with a discopt expression "
+    "directly. For linear constraints use Model.add_linear_constraints(A, x, sense, b), "
+    "which reads A sparsely; for a small matrix, A.toarray() @ x builds a dense "
+    "expression."
+)
 
 
 class _ObjectArrayOperand(ValueError):
