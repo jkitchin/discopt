@@ -446,11 +446,10 @@ counters!(
     // and Farkas rays refused as a fathom because they do not survive the tolerance.
     TolRobustRelaxedSolves,
     TolRobustRelaxedOptimal,
-    // #2225 DISCOPT_MILP_TOL_ROBUST_SIDED: rays proved over the full sided box,
-    // refused there, and relaxed optima whose row slacks were clamped.
+    // #2225 DISCOPT_MILP_TOL_ROBUST_SIDED: rays proved over the full sided box, and
+    // refused there.
     TolRobustSidedProved,
     TolRobustSidedRefused,
-    TolRobustSidedClamped,
     // #2225: correction rounds of the exact Farkas check, and columns held exact.
     FarkasExactRounds,
     FarkasExactHeld,

@@ -654,9 +654,13 @@ fn tol_robust_enabled() -> bool {
 /// (what [`row_tolerances`] charges the row, symmetric by construction). Both are
 /// relaxations of the set `point_verified` accepts; the sided one is the tight one.
 /// With it, an LP over that box that is infeasible is a proof that the node holds no
-/// acceptable point (its ray is verified over that box, [`node_lp`]), and an optimum
-/// in it, with its row slacks clamped into their own boxes (the residual moved into
-/// the row, at most the row's acceptance tolerance), is judged by `point_verified`.
+/// acceptable point (its ray is verified over that box, [`node_lp`]); an optimum in it
+/// bounds the node, as before. Which points are ACCEPTED does not change: the
+/// candidate box and `point_verified` are untouched. (A first version also accepted a
+/// full-box optimum with its slacks clamped back into `bounds_hold`; such a point
+/// spends the slack's bound tolerance AND the row's residual tolerance on one row, up
+/// to 1.5e-6 relative on `test_milp_tolerance_feasible_box`'s fixture against the
+/// 1e-6 its callers are promised, so it was dropped.)
 ///
 /// Measured on MIPcc27 `bell3ainf` IIS probes (#2225): a node with every integer
 /// column fixed whose rows are infeasible exactly, and infeasible at the half-
@@ -9975,33 +9979,6 @@ fn farkas_box_infeasible(ctx: &NodeCtx<'_>, y_scaled: &[f64], l: &[f64], u: &[f6
     farkas_robust_csc(&y, ctx.csc_rc, ctx.b_w, &zero, l, u, ctx.m_w, ctx.n_w)
 }
 
-/// #2225: move each row slack of `x` (original units) that lies outside its own box
-/// `l`, `u` back onto it, so the row's residual carries the difference instead. A
-/// point of the node's full tolerance relaxation has its rows exact and its slacks
-/// widened by the row's acceptance tolerance; this is the same point with that
-/// tolerance spent on the row, where `point_verified` allows it. Nothing is assumed:
-/// the result is verified like any other point.
-fn clamp_row_slacks(ctx: &NodeCtx<'_>, l: &[f64], u: &[f64], x: &mut [f64]) -> usize {
-    let audit = crate::lp::simplex::primal::AUDIT_FEAS;
-    // Just inside `bounds_hold`'s edge, so the clamped value passes it after rounding.
-    const IN: f64 = 1.0 - 1e-6;
-    let mut moved = 0;
-    for j in ctx.ns..ctx.n_w.min(x.len()) {
-        let (rows, _) = ctx.csc_rc.col(j);
-        if rows.len() != 1 {
-            continue;
-        }
-        if l[j] > -INF && x[j] < l[j] - audit * (1.0 + l[j].abs()) {
-            x[j] = l[j] - IN * audit * (1.0 + l[j].abs());
-            moved += 1;
-        } else if u[j] < INF && x[j] > u[j] + audit * (1.0 + u[j].abs()) {
-            x[j] = u[j] + IN * audit * (1.0 + u[j].abs());
-            moved += 1;
-        }
-    }
-    moved
-}
-
 /// The node box with each row's own slack (its singleton column past the
 /// structurals) widened. `full = false`: by half the slack's own bound tolerance
 /// `AUDIT_FEAS * (1 + |bound|)`, so an LP point in it still passes `bounds_hold` with
@@ -10029,29 +10006,23 @@ fn relax_row_slacks(
         done[i] = true;
         let audit = crate::lp::simplex::primal::AUDIT_FEAS;
         let a = vals[0].abs();
-        // `full` and sided (#2225): the row's tolerance less what `row_tolerances`
-        // charged it for this slack's bounds (at the larger side's magnitude), plus
-        // this side's own bound tolerance -- the projection of what `point_verified`
-        // accepts (rows within `ROW_VERIFY_TOL`, this slack within `bounds_hold`).
-        if tol_robust_sided_enabled() {
+        if full && tol_robust_sided_enabled() {
             // #2225: the row's tolerance less what `row_tolerances` charged it for
-            // this slack's bounds (at the larger side's magnitude). `full`: that plus
-            // this side's own bound tolerance, the projection of what
-            // `point_verified` accepts (rows within `ROW_VERIFY_TOL`, the slack within
-            // `bounds_hold`). Candidate: the bound tolerance and HALF the row's, so a
-            // point in it, its slack clamped back into `bounds_hold`
-            // ([`clamp_row_slacks`]), misses its row by at most half the tolerance.
+            // this slack's bounds (at the larger side's magnitude), plus this side's
+            // own bound tolerance: the projection of what `point_verified` accepts
+            // (rows within `ROW_VERIFY_TOL`, the slack within `bounds_hold`). Only the
+            // BOUND box changes; the candidate box below is untouched, so no point is
+            // accepted that was not before.
             let mag = [l[j], u[j]]
                 .iter()
                 .filter(|v| v.abs() < INF)
                 .fold(0.0f64, |acc, v| acc.max(v.abs()));
             let rest = (eps[i] / a - audit * (1.0 + mag)).max(0.0);
-            let row_part = if full { rest } else { 0.5 * rest };
             if rl[j] > -INF {
-                rl[j] -= row_part + audit * (1.0 + rl[j].abs());
+                rl[j] -= rest + audit * (1.0 + rl[j].abs());
             }
             if ru[j] < INF {
-                ru[j] += row_part + audit * (1.0 + ru[j].abs());
+                ru[j] += rest + audit * (1.0 + ru[j].abs());
             }
             continue;
         }
@@ -10846,14 +10817,6 @@ fn node_lp(ctx: &NodeCtx<'_>, start: Option<Basis>, full_l: &[f64], full_u: &[f6
         // duals instead, so it unscales its own copy at the call site.
     }
     drop(_t_node);
-    if bound_box.is_some() && sol.status == LpStatus::Optimal && tol_robust_sided_enabled() {
-        // #2225: an optimum of a tolerance-relaxed LP; its row slacks may sit up to the
-        // row's tolerance past their own boxes. Spend that on the row instead, where
-        // the acceptance test allows it; `point_verified` below still decides.
-        if clamp_row_slacks(ctx, &full_l, &full_u, &mut sol.x) > 0 {
-            crate::profile::incr(crate::profile::Ctr::TolRobustSidedClamped);
-        }
-    }
     let sol = sol;
     let mut rc_dual: Vec<f64> = Vec::new();
     let full_l = &full_l[..];
