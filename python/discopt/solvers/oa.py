@@ -5520,6 +5520,10 @@ def _round_single_integer_rows(lb, ub, rows, rhs, senses, integrality):
         if not math.isfinite(q):
             continue
         noise = 1e-9 * max(1.0, abs(q))
+        if noise >= 0.5:
+            # |q| >= 5e8: the noise allowance reaches half an integer, so the rounding
+            # could not be exact (``1e-13 y >= 5`` would give ``y >= 5e13 - 5e4``).
+            continue
         # a x_j <sense> b - rest  ->  x_j <= q (a > 0, "<=") or x_j >= q, etc.
         upper = (sense in ("<=", "==") and a > 0.0) or (sense in (">=", "==") and a < 0.0)
         lower = (sense in (">=", "==") and a > 0.0) or (sense in ("<=", "==") and a < 0.0)
@@ -5559,6 +5563,9 @@ def _round_single_integer_cut(row, rhs: float, integrality) -> tuple:
     a = float(r[j])
     q = rhs / a
     noise = 1e-9 * max(1.0, abs(q))
+    if not math.isfinite(q) or noise >= 0.5:
+        # Too large to round exactly (see ``_round_single_integer_rows``).
+        return row, rhs
     out = np.zeros_like(r)
     if a > 0.0:
         out[j] = 1.0
