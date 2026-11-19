@@ -42,6 +42,18 @@ baseline runs — same status and node count, 3). Tightening the certified bound
 under ill-conditioned envelope rows is the recorded interval max-combine
 follow-up, not something this test should pin to a constant that only held for
 one lowering of one operator.
+
+**#2236 moved the premise again.** The row filter fires on a root LP that produced no
+usable certified bound. With ``DISCOPT_LP_PRIMAL_DUAL_CLEANUP`` (default ON) the cold
+primal's bounds-refused optimum on this LP is re-optimized by the dual simplex and comes
+back ``optimal`` -- with an NS safe bound of -15,075,999.9 read off its duals. The #671
+trigger therefore also fires on an ``optimal`` solve whose safe bound is missing or
+loose against its objective by ``_LOOSE_BOUND_REL_GAP`` (before that change the
+clean-up's root certified only -7062.951, 0.104 looser than the clean-up-OFF arm's
+-7062.847; with it, -7062.846, tighter than both). The filter test below runs with the
+engine's rescues off, as the other pinned-fallback tests do
+(``conftest.rerun_with_lp_rescue_off``); ``test_dual_cleanup_decides_the_unfiltered_root_lp``
+and ``test_cleanup_root_is_not_looser_than_the_failed_lp_path`` pin the new default.
 """
 
 from __future__ import annotations
@@ -50,6 +62,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import rerun_with_lp_rescue_off
 from discopt._relax.mccormick_lp import MccormickLPRelaxer
 from discopt.modeling.core import from_nl
 
@@ -70,7 +83,7 @@ def _root_bound():
     return MccormickLPRelaxer(model).solve_at_node(lb, ub)
 
 
-def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch):
+def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch, request):
     """The row filter must FIRE on hda and must tighten the certified root bound.
 
     Relational rather than a constant: what #671 owns is the difference between
@@ -90,6 +103,8 @@ def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch):
     ``k*without < without <= with`` for any ``k > 1``. Dividing is the tightening
     direction: ``without / k`` moves TOWARD zero.
     """
+    if rerun_with_lp_rescue_off(request):  # #2236: the filter fires only on a failed LP
+        return
     with_filter = _root_bound()
     assert with_filter.status == "optimal"
     assert with_filter.lower_bound is not None
@@ -111,6 +126,42 @@ def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch):
         f"the row-filtered re-solve barely moved the bound: "
         f"{without.lower_bound!r} -> {with_filter.lower_bound!r} "
         f"(needs > {required!r}, i.e. a {_MIN_FILTER_GAIN:g}x tightening)"
+    )
+
+
+# slow + correctness: one hda relaxation build is ~30 s locally, 35.7 s on CI, over the
+# fast lane's 15 s budget; it validates the certified bound against hda's optimum.
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_dual_cleanup_decides_the_unfiltered_root_lp(monkeypatch):
+    """Fails before #2236: with the row filter off, hda's raw-box root LP failed and
+    its certified bound was -15,075,999.9. The default dual clean-up decides the LP,
+    and the bound is within 1% of the row-filtered one (-7062.847), and sound."""
+    monkeypatch.setenv("DISCOPT_RELAX_ROW_FILTER", "0")
+    res = _root_bound()
+    assert res.status == "optimal" and res.lower_bound is not None
+    assert res.lower_bound <= _HDA_OPT, "the certified bound must stay sound"
+    assert res.lower_bound > -7062.847 * 1.01, res.lower_bound
+
+
+#: hda's certified raw-box root with the #2236 clean-up OFF: the cold primal fails, the
+#: #671 filter fires, and the filtered LP certifies this.
+_HDA_ROOT_CLEANUP_OFF = -7062.847167439391
+
+
+# slow + correctness: one hda relaxation build (~30 s); validates against hda's optimum.
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_cleanup_root_is_not_looser_than_the_failed_lp_path():
+    """Fails before #2236's early-trigger change (-7062.951): the clean-up decided hda's
+    root LP ``optimal`` with an unusable NS bound, so the #671 filter did not fire. With
+    the row filter at its default, the certified root is no looser than the clean-up-OFF
+    path's, and sound."""
+    res = _root_bound()
+    assert res.status == "optimal" and res.lower_bound is not None
+    assert res.lower_bound <= _HDA_OPT, "the certified bound must stay sound"
+    assert res.lower_bound >= _HDA_ROOT_CLEANUP_OFF - 1e-9 * abs(_HDA_ROOT_CLEANUP_OFF), (
+        res.lower_bound
     )
 
 

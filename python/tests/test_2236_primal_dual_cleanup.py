@@ -1,6 +1,6 @@
 """#2236: a cold primal solve refused on a bounds excursion is decided by the dual.
 
-``DISCOPT_LP_PRIMAL_DUAL_CLEANUP`` (default OFF, ``=1`` opts in; see its audit row)
+``DISCOPT_LP_PRIMAL_DUAL_CLEANUP`` (default ON since its §5 panel; ``=0`` opts out)
 re-optimizes such a refusal warm with the dual simplex from the refused basis. It keeps
 the answer only when it is ``Optimal``, its point passes the primal's audit, AND its
 value is certified by weak duality on the same data (``dual_value_certifies_cols``, the
@@ -76,20 +76,20 @@ def _run(flag: str | None) -> dict:
     return out
 
 
-@pytest.mark.parametrize("flag", [None, "0"], ids=["default", "explicit_off"])
-def test_off_still_refuses_the_fixture(flag):
-    """The captured defect: OFF (the default) the Rust route returns no bound, and the
-    clean-up never runs. If this starts passing a bound, the premise of #2236 changed."""
-    out = _run(flag)
+def test_opt_out_still_refuses_the_fixture():
+    """The captured defect: with ``=0`` the Rust route returns no bound, and the clean-up
+    never runs. If this starts passing a bound, the premise of #2236 changed."""
+    out = _run("0")
     assert out["attempts"] == 0
     assert out["bound"] is None
 
 
-def test_projected_certificate_decides_the_free_column_fixture():
-    """Fails before #2236 (OFF: no bound). With ``=1`` the clean-up's warm dual answer is
-    certified through the projected dual -- the plain weak-duality check alone refuses
+@pytest.mark.parametrize("flag", [None, "1"], ids=["default", "explicit_on"])
+def test_projected_certificate_decides_the_free_column_fixture(flag):
+    """Fails before #2236 (``=0``: no bound). By default the clean-up's warm dual answer
+    is certified through the projected dual -- the plain weak-duality check alone refuses
     this free-column LP -- and ``solve_lp_std`` verifies the bound at HiGHS's optimum."""
-    out = _run("1")
+    out = _run(flag)
     assert out["attempts"] >= 1 and out["rescues"] >= 1, out
     assert out["projected"] >= 1, out  # the free-column certificate is what decided it
     assert out["bound"] == pytest.approx(NODE_OPT, abs=1e-9)
@@ -135,20 +135,20 @@ def _solve_nvs08(flag: str | None) -> dict:
     return out
 
 
-def test_clean_up_rescues_a_certified_lp_on_nvs08():
-    """Fails before #2236 (OFF: no rescue). With ``=1`` the clean-up turns a bounds
+@pytest.mark.parametrize("flag", [None, "1"], ids=["default", "explicit_on"])
+def test_clean_up_rescues_a_certified_lp_on_nvs08(flag):
+    """Fails before #2236 (``=0``: no rescue). By default the clean-up turns a bounds
     refusal on nvs08 into an ``Optimal`` whose point and value both certify, and the solve
     still certifies the known optimum."""
-    out = _solve_nvs08("1")
+    out = _solve_nvs08(flag)
     assert out["rescues"] >= 1, out
     assert out["status"] == "optimal" and out["certified"], out
     assert out["objective"] == pytest.approx(_NVS08_OPT, rel=1e-6)
     assert out["bound"] <= _NVS08_OPT + 1e-6
 
 
-@pytest.mark.parametrize("flag", [None, "0"], ids=["default", "explicit_off"])
-def test_off_never_rescues_on_nvs08(flag):
-    out = _solve_nvs08(flag)
+def test_opt_out_never_rescues_on_nvs08():
+    out = _solve_nvs08("0")
     assert out["rescues"] == 0 and out["value_rejected"] == 0, out
     assert out["status"] == "optimal" and out["certified"], out
 

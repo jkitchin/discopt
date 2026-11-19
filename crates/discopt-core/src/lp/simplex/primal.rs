@@ -140,7 +140,7 @@ pub fn solve_lp_cols(
     // in-family), and nothing extra with the route OFF (default).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
     // #2236: the dual clean-up needs the matrix after `run` has consumed it. O(nnz),
-    // paid only with the flag ON and never inside the clean-up's own solves.
+    // paid unless the flag is `=0`, and never inside the clean-up's own solves.
     let cleanup_cols =
         (primal_dual_cleanup_enabled() && !IN_PRIMAL_DUAL_CLEANUP.get()).then(|| cols.clone());
     crate::profile::incr(crate::profile::Ctr::EntryCols);
@@ -183,14 +183,17 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
-/// `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` (#2236, **default OFF**, `=1` opts in; read once):
-/// when a cold primal solve reaches `Optimal` and the final audit in
+/// `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` (#2236, **default ON** since its §5 panel, `=0` opts
+/// out; read once): when a cold primal solve reaches `Optimal` and the final audit in
 /// [`Simplex::assemble`] refuses it because a column sits outside its bound,
 /// re-optimize with the **dual** simplex warm from the basis the primal stopped on.
 /// The answer replaces the `Numerical` only if it is `Optimal`, its point passes the
-/// same audit on the matrix this solve was given, AND its value is certified by weak
-/// duality on that data (`dual_value_certifies_cols`, the acceptance the #2212
-/// logical-dual rescue uses; PR #2256 review). Anything else returns the original
+/// same audit on the matrix this solve was given, AND its value is certified on that
+/// data: by weak duality (`dual_value_certifies_cols`, the #2212 logical-dual rescue's
+/// acceptance; PR #2256 review), or, when free columns' rounding-noise reduced costs put
+/// that bound at −∞, by the enclosed Neumaier–Shcherbina bound of the dual projected onto
+/// `{a_jᵀy = c_j}` for those columns (`dual::projected_value_certifies`, the
+/// `DISCOPT_NS_PROJECT` construction in `project.rs`). Anything else returns the original
 /// `Numerical`, so the flag can turn a refusal into a decided `Optimal` but cannot
 /// change a verdict the primal already reached.
 ///
@@ -201,27 +204,22 @@ thread_local! {
 /// `DISCOPT_PRIMAL_EXPAND_RESET` (#2211), it does not re-solve from scratch.
 ///
 /// Entry experiment (#2236 fixture `python/tests/data/lp_2226_ex8_5_3_node.npz`, the
-/// ex8_5_3 node LP HiGHS solves to −0.06756047745693): the cold primal refuses it on
-/// both the scaled and the unscaled matrix; the warm dual from each refused basis
-/// returns `Optimal` in 2 and 10 pivots, at −0.067560477455. Prevalence on `main` (the
-/// issue thread): 3,393 bounds-audit refusals on 20 of 74 in-repo instances, all on a
-/// basic column, 99.5% not repaired by refinement.
+/// ex8_5_3 node LP HiGHS solves to −0.06756047745693): the cold primal refuses it; the
+/// clean-up decides it through the projected certificate, and `solve_lp_std` verifies
+/// −0.06756047745692018. Prevalence on `main` (the issue thread): 3,393 bounds-audit
+/// refusals on 20 of 74 in-repo instances, all on a basic column.
 ///
-/// **Why it is not the default (§5 panel, 2026-11-19, `issue2115_graduation_panel.py
-/// --deterministic --max-nodes 2000 --time-limit 120 --assert-unfired-identical`, 74
-/// in-repo instances).** Cert-clean (806 checks, 0 violations, certified 59 -> 59), but
-/// mixed: `beuster`'s bound tighter (6411 -> 6433), `4stufen`'s looser (21599.04 ->
-/// 21595.19, reproduced at load ~1.7), `bchoco06` loses its deterministic 120 s incumbent
-/// (its single-start root pump moves with the root box), and hda's raw-box root bound is
-/// 0.104 looser because the clean-up pre-empts the #671 row filter. It fired on 13
-/// instances (712 rescues). The value check is what makes it neutral: on the 16
-/// instances where the clean-up runs, it refuses 261 of ~456 audited warm optima, and
-/// it refuses the #2236 fixture itself, whose free columns leave the weak-duality
-/// certificate at −inf unless their reduced costs vanish to within rounding. Without
-/// the check the same panel was helpful (beuster -> 8398, bchoco07 gained a bound, 0
-/// looser), so the check is the price of soundness for `obj`-reading callers.
-/// **What would change it:** a value certificate that handles free columns (so the
-/// fixture and the refused rescues certify), then a re-panel. Row in
+/// **Graduated 2026-11-19** (§5 panel, `issue2115_graduation_panel.py --deterministic
+/// --max-nodes 2000 --time-limit 120 --assert-unfired-identical`, 74 in-repo instances,
+/// on the code that ships, including `mccormick_lp`'s decided-but-loose #671 trigger):
+/// 806 checks, 0 violations; certified 59 -> 59; bounds tighter on `beuster` (6411 ->
+/// 10296) and `4stufen` (21599.04 -> 21600.73), 0 looser (`heatexch_gen2` was reported
+/// looser with the clean-up never firing there, at the wall backstop; an isolated
+/// replicate gives the identical bound 576971.49 in both arms); fired on 15 instances,
+/// 1,164 rescues, 483 of them through the projected certificate, 26 value-refused;
+/// nodes 5894 -> 5910, wall 2135 -> 2150 s. `bchoco06` loses its deterministic 120 s
+/// incumbent: its single-start root pump moves with the root box, and a control that
+/// perturbs the box without the flag flips the outcome. Row in
 /// `docs/dev/flag-retirement-audit.md`.
 pub(crate) fn primal_dual_cleanup_enabled() -> bool {
     use std::sync::OnceLock;
@@ -232,11 +230,22 @@ pub(crate) fn primal_dual_cleanup_enabled() -> bool {
     })
 }
 
+/// Run `f` with the #2236 clean-up suppressed on this thread (the re-entry guard,
+/// restored afterwards). For tests that pin another mechanism on an LP the clean-up
+/// would otherwise decide first; the env flag is a `OnceLock` they cannot toggle.
+#[cfg(test)]
+pub(crate) fn without_primal_dual_cleanup<T>(f: impl FnOnce() -> T) -> T {
+    let outer = IN_PRIMAL_DUAL_CLEANUP.replace(true);
+    let out = f();
+    IN_PRIMAL_DUAL_CLEANUP.set(outer);
+    out
+}
+
 /// The parse table behind [`primal_dual_cleanup_enabled`]; garbage is refused.
 fn parse_primal_dual_cleanup(raw: &str) -> bool {
     match raw.trim() {
-        "" | "0" | "false" | "off" => false,
-        "1" | "true" | "on" => true,
+        "0" | "false" | "off" => false,
+        "" | "1" | "true" | "on" => true,
         other => panic!(
             "DISCOPT_LP_PRIMAL_DUAL_CLEANUP={other:?} is not a recognized value; use 1/on or \
              0/off"
@@ -4167,14 +4176,14 @@ impl<'a> Simplex<'a> {
 
 #[cfg(test)]
 mod tests {
-    /// #2236: `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` is default OFF; `=1` opts in and a value
-    /// outside the table is refused rather than read as either.
+    /// #2236: `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` graduated default ON; `=0` opts out and a
+    /// value outside the table is refused rather than read as either.
     #[test]
     fn primal_dual_cleanup_parse_table_2236() {
-        for on in ["1", "true", "on", " 1 "] {
+        for on in ["", " ", "1", "true", "on"] {
             assert!(super::parse_primal_dual_cleanup(on), "{on:?} must mean ON");
         }
-        for off in ["", " ", "0", "false", "off"] {
+        for off in ["0", "false", "off", " 0 "] {
             assert!(
                 !super::parse_primal_dual_cleanup(off),
                 "{off:?} must mean OFF"
