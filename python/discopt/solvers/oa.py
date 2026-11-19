@@ -5515,14 +5515,18 @@ def _round_single_integer_rows(lb, ub, rows, rhs, senses, integrality):
         j, a = int(idx[k]), float(val[k])
         if not integ[j] or a == 0.0:
             continue
-        rest = float(np.dot(np.delete(val, k), np.delete(lb[idx], k)))
+        terms = np.delete(val, k) * np.delete(lb[idx], k)
+        rest = float(np.sum(terms))
         q = (float(b) - rest) / a
         if not math.isfinite(q):
             continue
-        noise = 1e-9 * max(1.0, abs(q))
-        if noise >= 0.5:
-            # |q| >= 5e8: the noise allowance reaches half an integer, so the rounding
-            # could not be exact (``1e-13 y >= 5`` would give ``y >= 5e13 - 5e4``).
+        # Float noise of ``b - rest`` scales with the operands, not the difference
+        # (cancellation); see ``discopt.solver._round_single_integer_rows_sparse``.
+        scale = (abs(float(b)) + float(np.sum(np.abs(terms)))) / abs(a)
+        noise = 1e-9 * max(1.0, abs(q), scale)
+        if not math.isfinite(noise) or noise >= 0.5:
+            # The noise allowance reaches half an integer, so the rounding could not
+            # be exact (``1e-13 y >= 5`` would give ``y >= 5e13 - 5e4``).
             continue
         # a x_j <sense> b - rest  ->  x_j <= q (a > 0, "<=") or x_j >= q, etc.
         upper = (sense in ("<=", "==") and a > 0.0) or (sense in (">=", "==") and a < 0.0)

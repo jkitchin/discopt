@@ -134,3 +134,72 @@ def test_tiny_coefficient_row_keeps_its_exact_optimum():
     m.minimize(y)
     r = m.solve(time_limit=30)
     assert r.objective is None or r.objective >= 5e13 - 0.5, r.objective
+
+
+# -- cancellation in ``b - rest`` (box-MCP D-gdp false infeasible) ---------------------
+#
+# The GDP big-M lowering of a box-MCP at a fixed point writes ``z + M*w <= 0.5 + M``
+# with ``z`` fixed at 0.5 and M = 1.01e-8. ``w = 1`` satisfies it (to float noise),
+# but ``(0.5000000101 - 0.5) / 1.01e-8 = 0.99999999480``: the subtraction cancels,
+# keeping the operands' absolute error, and an allowance of 1e-9 on ``q`` alone
+# floored it to ``w <= 0``. That removed the disjunct the relation needs and the
+# solve reported ``infeasible`` at a point where the relation holds.
+
+_M = 1.01e-8
+_B = 0.5 + _M
+
+
+def test_sparse_rounding_keeps_the_integer_a_cancelling_row_admits():
+    A = sp.csr_matrix(np.array([[1.0, 1.0, _M]]))
+    assert (_B - 0.5) / _M < 1.0  # the premise: cancellation puts q just below 1
+    xl, xu, moved = _round_single_integer_rows_sparse(
+        np.array([0.5, 0.0, 0.0]), np.array([0.5, 0.0, 1.0]), 3, [2], [(A, np.array([_B]), "<=")]
+    )
+    assert xu[2] == 1.0 and xl[2] == 0.0 and moved == 0, (xl, xu, moved)
+
+
+def test_oa_rounding_keeps_the_integer_a_cancelling_row_admits():
+    from discopt.solvers.oa import _round_single_integer_rows
+
+    lb, ub = _round_single_integer_rows(
+        np.array([0.5, 0.0, 0.0]),
+        np.array([0.5, 0.0, 1.0]),
+        [np.array([1.0, 1.0, _M])],
+        [_B],
+        ["<="],
+        np.array([False, False, True]),
+    )
+    assert ub[2] == 1.0 and lb[2] == 0.0, (lb, ub)
+
+
+def test_rounding_still_removes_an_integer_the_row_forbids():
+    # The #2252 case is unchanged by the operand-scaled allowance: 2x + y >= 2.0000004
+    # with y fixed at 0 still gives x >= 2 on both functions.
+    from discopt.solvers.oa import _round_single_integer_rows
+
+    A = sp.csr_matrix(np.array([[-2.0, -1.0]]))
+    xl, _, moved = _round_single_integer_rows_sparse(
+        np.array([0.0, 0.0]), np.array([10.0, 0.0]), 2, [0], [(A, np.array([-2.0000004]), "<=")]
+    )
+    assert xl[0] == 2.0 and moved == 1, (xl, moved)
+    lb, _ = _round_single_integer_rows(
+        np.array([0.0, 0.0]), np.array([10.0, 0.0]), [np.array([2.0, 1.0])], [2.0000004],
+        [">="], np.array([True, False]),
+    )  # fmt: skip
+    assert lb[0] == 2.0, lb
+
+
+@pytest.mark.parametrize("engine", ["rust", "auto"])
+def test_box_mcp_gdp_point_where_the_relation_holds_solves(monkeypatch, engine):
+    # x - y = 0.5 >= 0 and z = x + y = 0.5 at its lower bound: the relation holds.
+    import discopt.modeling.core as dmc
+
+    monkeypatch.setenv("DISCOPT_LP_ENGINE", engine)
+    m = dmc.Model("box_mcp_d")
+    x = m.continuous("x", lb=0.5, ub=0.5)
+    y = m.continuous("y", lb=0.0, ub=0.0)
+    m.minimize(x + y)
+    m.mcp(x - y, x + y, lb=0.5, ub=1.5, method="gdp")
+    r = m.solve(time_limit=30.0)
+    assert r.status == "optimal", (engine, r.status)
+    assert r.objective == pytest.approx(0.5, abs=1e-9)
