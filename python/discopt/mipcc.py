@@ -60,6 +60,11 @@ CHECKER_SOLVE_CAP_S = 60.0
 _OTHERS_MAX = 0.5 * CHECK_TOL  # every other kept element satisfied within this
 _OWN_MIN = 2.0 * CHECK_TOL  # the certified element violated by more than this
 _INF = 1e20  # the engine's unbounded sentinel
+# Margin on the checker box (:func:`checker_box`) for the checker's own arithmetic.
+_WIDEN_SAFETY = 1.25
+# How far a witness may sit outside the model's own rows and bounds: inside the
+# certificate rule's ``_OTHERS_MAX`` with room for the check's arithmetic.
+_WITNESS_SLACK = 0.8 * _OTHERS_MAX
 
 
 def budget(limit: float) -> tuple[float, float]:
@@ -278,6 +283,41 @@ def main(argv: Optional[list[str]] = None, t_launch: Optional[float] = None) -> 
         finished.set()
 
 
+def _widened(sides: tuple, w: float) -> tuple:
+    """``(row_lo, row_hi, col_lb, col_ub)`` with every finite side moved out by ``w``."""
+    rlo, rhi, clb, cub = sides
+    return (
+        np.where(rlo > -_INF, rlo - w, rlo),
+        np.where(rhi < _INF, rhi + w, rhi),
+        np.where(clb > -_INF, clb - w, clb),
+        np.where(cub < _INF, cub + w, cub),
+    )
+
+
+def checker_box(data: dict, tol: float = CHECK_TOL):
+    """The model's row and column bounds, each finite side moved out by
+    ``_WIDEN_SAFETY * tol`` (#2225): ``(row_lo, row_hi, col_lb, col_ub)``.
+
+    The checker accepts a point when every kept row and bound holds within ``tol``.
+    An exact-integer point it would accept lies inside this box, so a set the
+    engine proves infeasible over it cannot be passed as "feasible within ``tol``"
+    by the checker's solve, and (the box only enlarges the model) it is infeasible
+    exactly as well. Measured: on MIPcc27 dell the Rust engine dropped elements
+    down to a set infeasible by 1.7e-7 on one row, which the checker-settings
+    re-solve then found feasible, so the entry wrote the whole model.
+
+    Not covered: a checker point whose integer columns are off by up to ``tol``,
+    which large coefficients can turn into row slack. Widening each row by
+    ``tol * sum_int |a_rj|`` would cover it, but measured on flugplinf it kept 13
+    elements the checker rejects in practice (24 -> 25 elements, 24 -> 12
+    certified). :func:`checker_rejects`, which re-solves the answer exactly as the
+    checker does, guards that case instead."""
+    return _widened(
+        (data["row_lo"], data["row_hi"], data["col_lb"], data["col_ub"]),
+        _WIDEN_SAFETY * tol,
+    )
+
+
 def checker_rejects(data: dict, res, time_limit: float) -> bool:
     """Whether the official checker would find the kept subsystem feasible:
     one HiGHS solve with presolve on and both feasibility tolerances at
@@ -383,32 +423,54 @@ def _run(
     from discopt._iis_milp import DEFAULT_PORTFOLIO, PORTFOLIO_WAITS, milp_iis_arrays
 
     m = data["row_lo"].size
-    arrays = (
-        data["A"],
-        data["row_lo"],
-        data["row_hi"],
-        {i: np.array([i], dtype=np.int64) for i in range(m)},
-        data["col_lb"],
-        data["col_ub"],
-        data["is_int"],
-    )
-    elapsed = time.perf_counter() - t0
+    groups = {i: np.array([i], dtype=np.int64) for i in range(m)}
+    own = (data["row_lo"], data["row_hi"], data["col_lb"], data["col_ub"])
+    arrays = (data["A"], own[0], own[1], groups, own[2], own[3], data["is_int"])
+    # #2225: decide infeasibility the checker's way. Over the checker box a set is
+    # infeasible only if no point is acceptable under the checker's 1e-5 rule, so
+    # the answer cannot be "feasible within 1e-5" (the Rust engine proved dell's
+    # subsets infeasible exactly by 1.7e-7 on one row, and the checker-settings
+    # re-solve then forced the whole model). Certificates stay on the model's own
+    # sides (``witness_box``).
+    widen = os.environ.get("MIPCC_WIDEN", "1") != "0"
+    if widen:
+        rlo, rhi, clb, cub = checker_box(data)
+        arrays_w = (data["A"], rlo, rhi, groups, clb, cub, data["is_int"])
+        # Witnesses may use the slack a certificate is allowed (every other element
+        # within ``_OTHERS_MAX``), less a margin: a point there is a certificate.
+        own_w = _widened(own, _WITNESS_SLACK)
     # The IIS engine follows DISCOPT_LP_ENGINE (DISCOPT_IIS_ENGINE overrides). The
     # entry's own HiGHS override (#2225) became redundant with the engine switch.
     from discopt._iis_milp import _resolve_iis_engine
 
     engine = _resolve_iis_engine(None)
-    try:
-        res = milp_iis_arrays(
-            arrays,
+
+    def run(arr, witness_box):
+        return milp_iis_arrays(
+            arr,
             iis_engine=engine,
             portfolio=DEFAULT_PORTFOLIO,
             workers=max(1, min(threads, len(DEFAULT_PORTFOLIO))),
-            total_time_limit=max(engine_budget - elapsed, 0.5),
+            total_time_limit=max(engine_budget - (time.perf_counter() - t0), 0.5),
             t_start=time.perf_counter(),
             grace=PORTFOLIO_WAITS[PORTFOLIO_WAIT][0],
             grace_window=PORTFOLIO_WAITS[PORTFOLIO_WAIT][1],
+            witness_box=witness_box,
         )
+
+    try:
+        if widen:
+            try:
+                res = run(arrays_w, own_w)
+            except ValueError as exc:
+                # The widened model is not infeasible (or not provably so): within
+                # the checker's tolerance the instance has a point. Decide on the
+                # model's own sides, as before; the checker-settings re-solve below
+                # still guards the answer.
+                print(f"mipcc: the checker box is not infeasible ({exc}); using the model's sides")
+                res = run(arrays, None)
+        else:
+            res = run(arrays, None)
     except TimeoutError as exc:
         # No subsystem was confirmed in the budget: the whole model (already
         # written) is the answer. Said loudly; it is a valid but poor result.

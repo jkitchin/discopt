@@ -173,6 +173,7 @@ class _Engine:
         deadline: Optional[float] = None,
         reserve_confirm: bool = False,
         engine: str = "rust",
+        witness_box: Optional[tuple] = None,
     ):
         from discopt._iis_backend import make_backend
 
@@ -228,6 +229,13 @@ class _Engine:
         # Held-integer columns and their declared box in the current configuration.
         self._held = np.zeros(0, dtype=np.int64)
         self._cfg: tuple[np.ndarray, ...] = ()
+        # #2225: ``(row_lo, row_hi, col_lb, col_ub)`` a feasible verdict's point must
+        # satisfy, when it differs from the sides that decide infeasibility (the
+        # MIPcc27 entry decides over the checker's widened box and certifies over the
+        # model's own sides). ``_cfg_w`` is the current probe's configuration of it.
+        self._wbox = witness_box
+        self._cfg_w: tuple[np.ndarray, ...] = ()
+        self._integ = np.zeros(0, dtype=bool)
         # highs-parity P3.2: the solver behind every probe (``discopt._iis_backend``):
         # the in-house MILP driver by default, HiGHS as the opt-in.
         self.backend = make_backend(engine, A, row_lo, row_hi, col_lb, col_ub, is_int)
@@ -241,35 +249,49 @@ class _Engine:
         active_int: set[int],
     ) -> None:
         """Load one probe's rows, bounds and integrality into the solver."""
-        inf = self._inf
-        n, m = self.col_lb.size, self.row_lo.size
-        rlo = np.full(m, -inf)
-        rhi = np.full(m, inf)
-        for ci in active_cons:
-            rows = self.row_groups[ci]
-            rlo[rows] = np.where(self.row_lo[rows] <= -_INF, -inf, self.row_lo[rows])
-            rhi[rows] = np.where(self.row_hi[rows] >= _INF, inf, self.row_hi[rows])
-        lb = np.full(n, -inf)
-        ub = np.full(n, inf)
+        n = self.col_lb.size
         integ = np.zeros(n, dtype=bool)
         for j in active_int:
             integ[j] = True
         # A column held integer keeps its declared bounds unconditionally.
         held = np.flatnonzero(integ)
-        lb[held] = self.col_lb[held]
-        ub[held] = self.col_ub[held]
+        sides = (self.row_lo, self.row_hi, self.col_lb, self.col_ub)
+        cfg = self._sides(sides, active_cons, active_bounds, integ, held)
+        self._held = held
+        self._integ = integ
+        self._cfg = cfg  # what this probe imposes
+        self._cfg_w = (
+            cfg
+            if self._wbox is None
+            else self._sides(self._wbox, active_cons, active_bounds, integ, held)
+        )  # what a feasible verdict's point must satisfy
+        self.backend.configure(*cfg, integ)
+
+    def _sides(self, sides, active_cons, active_bounds, integ, held) -> tuple:
+        """``(rlo, rhi, lb, ub)`` of one probe over the given model sides."""
+        row_lo, row_hi, col_lb, col_ub = sides
+        inf = self._inf
+        n, m = col_lb.size, row_lo.size
+        rlo = np.full(m, -inf)
+        rhi = np.full(m, inf)
+        for ci in active_cons:
+            rows = self.row_groups[ci]
+            rlo[rows] = np.where(row_lo[rows] <= -_INF, -inf, row_lo[rows])
+            rhi[rows] = np.where(row_hi[rows] >= _INF, inf, row_hi[rows])
+        lb = np.full(n, -inf)
+        ub = np.full(n, inf)
+        lb[held] = col_lb[held]
+        ub[held] = col_ub[held]
         for j, side in active_bounds:
             if integ[j]:
                 continue
             if side == "lower":
-                lb[j] = self.col_lb[j]
+                lb[j] = col_lb[j]
             else:
-                ub[j] = self.col_ub[j]
+                ub[j] = col_ub[j]
         lb = np.where(lb <= -_INF, -inf, lb)
         ub = np.where(ub >= _INF, inf, ub)
-        self._held = held
-        self._cfg = (rlo, rhi, lb, ub)  # what this probe imposes, for witness checks
-        self.backend.configure(rlo, rhi, lb, ub, integ)
+        return rlo, rhi, lb, ub
 
     def _solve(
         self, presolve: str, stop_at: Optional[float] = None, max_nodes: Optional[int] = None
@@ -347,7 +369,7 @@ class _Engine:
         # presumably through HiGHS's internal scaling.)
         y0 = x.copy()
         y0[held] = xr
-        rlo, rhi, lb, ub = self._cfg
+        rlo, rhi, lb, ub = self._cfg_w
         act = self.A @ y0
         with np.errstate(invalid="ignore"):
             viol = max(
@@ -359,15 +381,23 @@ class _Engine:
         if viol <= mip_tol:
             return y0
         be = self.backend
+        widened = self._cfg_w is not self._cfg
+        if widened:
+            # The repair runs over the witness sides (#2225), then the probe's own
+            # configuration is restored.
+            be.configure(*self._cfg_w, self._integ)
         be.set_cols(held, xr, xr, integer=False)
         try:
             with be.lp_tolerance(mip_tol):
                 ok = self._solve("off", stop_at) == _bk.OPTIMAL
                 y = self._point() if ok else None
         finally:
-            lo = np.where(self.col_lb[held] <= -_INF, -self._inf, self.col_lb[held])
-            hi = np.where(self.col_ub[held] >= _INF, self._inf, self.col_ub[held])
-            be.set_cols(held, lo, hi, integer=True)
+            if widened:
+                be.configure(*self._cfg, self._integ)
+            else:
+                lo = np.where(self.col_lb[held] <= -_INF, -self._inf, self.col_lb[held])
+                hi = np.where(self.col_ub[held] >= _INF, self._inf, self.col_ub[held])
+                be.set_cols(held, lo, hi, integer=True)
         if y is None:
             self.n_artifacts += 1
             return None
@@ -579,11 +609,16 @@ class _Engine:
         if self._parity_rows is None:
             A = self.A
             rows: dict[int, tuple[int, int, np.ndarray]] = {}
-            eq = np.isfinite(self.row_lo) & (self.row_lo == self.row_hi)
-            for r in np.flatnonzero(eq):
-                b = float(self.row_lo[r])
-                if b != round(b):
+            both = (self.row_lo > -_INF) & (self.row_hi < _INF)
+            for r in np.flatnonzero(both):
+                # The row's left-hand side is an integer (integer data over integer
+                # columns, checked below), so the row is ``= b`` when its range
+                # holds exactly one integer ``b``: an equality, or one widened by
+                # less than 1/2 (the MIPcc27 entry's checker box).
+                lo_i = math.ceil(float(self.row_lo[r]))
+                if lo_i != math.floor(float(self.row_hi[r])):
                     continue
+                b = float(lo_i)
                 s0, e0 = A.indptr[r], A.indptr[r + 1]
                 cols, vals = A.indices[s0:e0], A.data[s0:e0]
                 if cols.size == 0 or not bool(np.all(vals == np.round(vals))):
@@ -659,10 +694,14 @@ def _find_elimination_certificate(A, rlo, rhi, held, max_work: int):
     """The search behind :func:`_elimination_certificate` (unverified multipliers)."""
     Row = tuple[dict[int, Fraction], Fraction, dict[int, Fraction]]
     rows: dict[int, Row] = {}
-    for ri in np.flatnonzero(np.isfinite(rlo) & (rlo == rhi)):
+    finite = np.isfinite(rlo) & np.isfinite(rhi) & (rlo > -_INF) & (rhi < _INF)
+    for ri in np.flatnonzero(finite & (rhi - rlo < 0.5)):
         r = int(ri)
-        rhs_f = float(rlo[r])
-        if rhs_f != round(rhs_f):
+        # An equality, or one widened by a sliver: searched as ``= rhs_f`` with
+        # ``rhs_f`` the integer in its range; the verifier then decides with the
+        # row's true range.
+        rhs_f = float(round(0.5 * (float(rlo[r]) + float(rhi[r]))))
+        if not (rlo[r] <= rhs_f <= rhi[r]):
             continue
         s0, e0 = A.indptr[r], A.indptr[r + 1]
         cols, vals = A.indices[s0:e0], A.data[s0:e0]
@@ -736,37 +775,43 @@ def _find_elimination_certificate(A, rlo, rhi, held, max_work: int):
 
 
 def _verify_integer_certificate(A, rlo, rhi, held, lam: dict[int, Fraction]) -> bool:
-    """Whether ``sum_r lam_r (A x)_r = sum_r lam_r rlo_r`` -- a consequence of the
-    equality rows ``r`` -- has no solution with the ``held`` columns integer: every
-    other column's combined coefficient is exactly zero, and the gcd of the
-    combined (integer-scaled) coefficients does not divide the combined
-    right-hand side. Exact rational arithmetic on the original data, independent
-    of how ``lam`` was found."""
+    """Whether the rows ``r`` (each ``rlo_r <= (A x)_r <= rhi_r``, both sides finite)
+    combined with multipliers ``lam_r`` admit no ``x`` with the ``held`` columns
+    integer: every other column's combined coefficient is exactly zero, and no
+    multiple of the gcd of the combined (integer-scaled) coefficients lies in the
+    combined range ``[L, U]`` (``lam_r rlo_r`` or ``lam_r rhi_r`` by the sign of
+    ``lam_r``; an equality row gives one point). Exact rational arithmetic on the
+    original data, independent of how ``lam`` was found."""
     if not lam:
         return False
     A = A.tocsr()
     coef: dict[int, Fraction] = {}
-    rhs = Fraction(0)
+    lo_sum = Fraction(0)
+    hi_sum = Fraction(0)
     for r, lr in lam.items():
-        if not (np.isfinite(rlo[r]) and rlo[r] == rhi[r]):
-            return False  # only equality rows may carry a free-sign multiplier
+        lo_r, hi_r = float(rlo[r]), float(rhi[r])
+        if not (np.isfinite(lo_r) and np.isfinite(hi_r)) or lo_r <= -_INF or hi_r >= _INF:
+            return False  # a free-sign multiplier needs both sides
         s0, e0 = A.indptr[r], A.indptr[r + 1]
         for j, v in zip(A.indices[s0:e0], A.data[s0:e0]):
             coef[int(j)] = coef.get(int(j), Fraction(0)) + lr * Fraction(float(v))
-        rhs += lr * Fraction(float(rlo[r]))
+        a, b = lr * Fraction(lo_r), lr * Fraction(hi_r)
+        lo_sum += min(a, b)
+        hi_sum += max(a, b)
     coef = {j: v for j, v in coef.items() if v != 0}
     if any(not held[j] for j in coef):
         return False
-    L = 1
-    for v in (*coef.values(), rhs):
-        L = math.lcm(L, v.denominator)
+    scale = 1
+    for v in coef.values():
+        scale = math.lcm(scale, v.denominator)
     g = 0
     for v in coef.values():
-        g = math.gcd(g, abs(int(v * L)))
-    bi = rhs * L
+        g = math.gcd(g, abs(int(v * scale)))
+    lo_s, hi_s = lo_sum * scale, hi_sum * scale
     if g == 0:
-        return bi != 0
-    return int(bi) % g != 0
+        return not (lo_s <= 0 <= hi_s)
+    # Integer multiples k*g in [lo_s, hi_s]: none iff floor(hi_s/g) < ceil(lo_s/g).
+    return math.floor(hi_s / g) < math.ceil(lo_s / g)
 
 
 def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
@@ -799,7 +844,12 @@ def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) ->
     O(|IIS|) Python work per certificate: on dijle's 6,282-element anytime set
     that ran past the deadline and a portfolio member's result was discarded.
     """
-    m, n = eng.row_lo.size, eng.col_lb.size
+    # Certificates are judged on the witness sides (#2225): the model's own, also
+    # when the engine decided infeasibility over a widened box.
+    row_lo, row_hi, col_lb, col_ub = (
+        eng._wbox if eng._wbox is not None else (eng.row_lo, eng.row_hi, eng.col_lb, eng.col_ub)
+    )
+    m, n = row_lo.size, col_lb.size
     row_kept = np.zeros(m, dtype=bool)
     for c in cons:
         row_kept[eng.row_groups[c]] = True
@@ -810,19 +860,17 @@ def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) ->
     ubm = held.copy()
     for j, side in bounds:
         (lbm if side == "lower" else ubm)[j] = True
-    lbm &= eng.col_lb > -_INF
-    ubm &= eng.col_ub < _INF
-    lo_f = eng.row_lo > -_INF
-    hi_f = eng.row_hi < _INF
+    lbm &= col_lb > -_INF
+    ubm &= col_ub < _INF
+    lo_f = row_lo > -_INF
+    hi_f = row_hi < _INF
     out = {}
     for key, x in pending.items():
         act = eng.A @ x
-        rv = np.maximum(
-            np.where(lo_f, eng.row_lo - act, 0.0), np.where(hi_f, act - eng.row_hi, 0.0)
-        )
+        rv = np.maximum(np.where(lo_f, row_lo - act, 0.0), np.where(hi_f, act - row_hi, 0.0))
         rv = np.maximum(rv, 0.0)
-        lbv = np.where(lbm, eng.col_lb - x, 0.0)
-        ubv = np.where(ubm, x - eng.col_ub, 0.0)
+        lbv = np.where(lbm, col_lb - x, 0.0)
+        ubv = np.where(ubm, x - col_ub, 0.0)
         iv = np.where(held, np.abs(x - np.round(x)), 0.0)
         kind = key[0]
         rows_ok = row_kept
@@ -839,10 +887,10 @@ def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) ->
             j, side = key[1], key[2]
             if side == "lower":
                 lbv[j] = 0.0
-                e = float(eng.col_lb[j] - x[j])
+                e = float(col_lb[j] - x[j])
             else:
                 ubv[j] = 0.0
-                e = float(x[j] - eng.col_ub[j])
+                e = float(x[j] - col_ub[j])
         rest = max(
             float(np.max(np.where(rows_ok, rv, 0.0), initial=0.0)),
             float(np.max(lbv, initial=0.0)),
@@ -1332,6 +1380,7 @@ def milp_iis_arrays(
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
     iis_engine: Optional[str] = None,
+    witness_box: Optional[tuple] = None,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
@@ -1345,6 +1394,12 @@ def milp_iis_arrays(
     caller spent before the call counts against ``total_time_limit``.
     ``grace`` / ``grace_window`` (portfolio only): see :func:`_portfolio_iis`;
     the default waits for every member.
+
+    ``witness_box`` (#2225): ``(row_lo, row_hi, col_lb, col_ub)`` that every
+    feasible verdict's point must satisfy, when ``arrays`` carry wider sides that
+    decide infeasibility (``discopt.mipcc`` decides over the checker's widened box).
+    A set feasible over ``arrays`` but with no point inside the witness box is left
+    undecided: its element is kept and irreducibility is not claimed.
     """
     iis_engine = _resolve_iis_engine(iis_engine)
     if t_start is None:
@@ -1358,6 +1413,7 @@ def milp_iis_arrays(
         confirm=confirm,
         sat_candidate=sat_candidate,
         engine=iis_engine,
+        witness_box=witness_box,
     )
     from discopt._iis_backend import ENGINES
 
@@ -1418,6 +1474,7 @@ def _milp_iis_arrays(
     total_time_limit: Optional[float],
     t_start: Optional[float] = None,
     engine: str = "rust",
+    witness_box: Optional[tuple] = None,
 ) -> MilpIIS:
     """:func:`milp_iis` on the extracted matrix, with one deletion order."""
     if t_start is None:
@@ -1447,6 +1504,7 @@ def _milp_iis_arrays(
         deadline=deadline,
         reserve_confirm=confirm == "final",
         engine=engine,
+        witness_box=witness_box,
     )
     cons = set(row_groups)
     ints_active = set(int(j) for j in np.flatnonzero(is_int))
