@@ -198,12 +198,45 @@ def test_box_without_an_integer_is_infeasible_not_an_error(label, obj, value_at)
     assert r.objective is None
 
 
-def test_a_genuinely_crossed_integer_box_is_still_refused():
+@pytest.mark.parametrize(
+    ("lb", "ub"),
+    [(5, 2), (3, 2), (1.8, 1.2), ([0, 3], [4, 2])],
+    ids=["by3", "by1", "fractional_by1_after_snap", "array"],
+)
+def test_a_box_the_caller_crossed_is_still_refused(lb, ub):
+    # ``lb=3, ub=2`` and ``lb=1.8, ub=1.2`` are stored crossed by exactly 1, like an
+    # empty integer range; validate decides on the bounds as written (review of
+    # #2255), so these stay modeling errors.
     m = dm.Model()
-    m.integer("x", lb=5, ub=2)
-    m.minimize(m._variables[0])
+    x = m.integer("x", shape=np.shape(lb), lb=lb, ub=ub)
+    m.minimize(dm.sum(x) if np.shape(lb) else x)
     with pytest.raises(ValueError, match="lb > ub"):
         m.validate()
+
+
+def test_a_bound_assigned_later_that_crosses_is_refused():
+    m = dm.Model()
+    x = m.integer("x", lb=0, ub=5)
+    m.minimize(x)
+    x.lb = 6
+    with pytest.raises(ValueError, match="lb > ub"):
+        m.validate()
+
+
+def test_empty_integer_box_round_trips_as_infeasible_not_an_error():
+    import copy
+    import pickle
+
+    from discopt.serialize import dumps, loads
+
+    m = dm.Model()
+    x = m.integer("x", lb=1.2, ub=1.8)
+    m.minimize(x)
+    for m2 in (loads(dumps(m)), pickle.loads(pickle.dumps(m)), copy.deepcopy(m)):
+        v = m2._variables[0]
+        assert float(v.lb) == 2.0 and float(v.ub) == 1.0
+        m2.validate()  # an empty integer range, not a modeling error
+    assert loads(dumps(m)).solve(time_limit=20).status == "infeasible"
 
 
 def test_lp_spatial_engine_refuses_a_point_outside_a_crossed_box():
