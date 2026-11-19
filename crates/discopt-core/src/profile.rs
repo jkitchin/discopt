@@ -957,6 +957,9 @@ counters!(
     PrimalDualCleanupAttempts,
     PrimalDualCleanupPrepRefused,
     PrimalDualCleanupRescues,
+    // ...and the warm `Optimal`s whose point passed the audit but whose value the
+    // weak-duality check (`dual_value_certifies_cols`) did not certify (PR #2256).
+    PrimalDualCleanupValueRejected,
     // #2125: active-huge-bound solves by fixing the column and removing the rows
     // it makes slack (`solve_huge_active_fixed`), and how many it certified.
     HugeBoxFixActiveAttempts,

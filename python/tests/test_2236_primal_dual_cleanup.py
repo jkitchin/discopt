@@ -1,14 +1,19 @@
 """#2236: a cold primal solve refused on a bounds excursion is decided by the dual.
 
-The fixture is the #2226 ex8_5_3 node LP (155 rows x 37 columns). On the Rust engine
-the primal simplex reaches ``Optimal``, then its final audit finds a basic column
-outside its bound and downgrades the verdict to ``numerical``; the equilibrated retry
-does the same. HiGHS solves it to ``optimal`` -0.06756047745692995.
-
 ``DISCOPT_LP_PRIMAL_DUAL_CLEANUP`` (default ON since its §5 panel; ``=0`` opts out)
-re-optimizes such a refusal warm with the dual simplex from the refused basis and keeps
-only an audited ``Optimal``. The flag is read once per process (a ``OnceLock`` in Rust),
-so each arm runs in a subprocess.
+re-optimizes such a refusal warm with the dual simplex from the refused basis. It keeps
+the answer only when it is ``Optimal``, its point passes the primal's audit, AND its
+value is certified by weak duality on the same data (``dual_value_certifies_cols``, the
+check the #2212 logical-dual rescue uses; added on the PR #2256 review). The flag is
+read once per process (a ``OnceLock`` in Rust), so each arm runs in a subprocess.
+
+The #2226 fixture (the ex8_5_3 node LP, 155 rows x 37 columns, HiGHS optimum
+-0.06756047745692995) is the LP the issue was filed on. Its warm dual answer is right
+(``solve_lp_std`` verifies it at HiGHS's optimum to 1e-14), but the LP has free
+columns, and the rigorous weak-duality certificate is minus infinity on a free column
+whose reduced cost does not vanish to within rounding, so the value check refuses it.
+The fixture tests pin that: a free-column-aware certificate would flip them. The
+positive case is a corpus solve (``nvs08``) where the clean-up's answer certifies.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ print("RESULT " + json.dumps({{
     "engines": list(M._verified_lp_engines()),
     "attempts": int(c["PrimalDualCleanupAttempts"]),
     "rescues": int(c["PrimalDualCleanupRescues"]),
+    "value_rejected": int(c["PrimalDualCleanupValueRejected"]),
     "bounds_refusals": int(c["LpAuditBoundsFail"]),
 }}))
 """
@@ -78,12 +84,72 @@ def test_opt_out_still_refuses_the_fixture():
 
 
 @pytest.mark.parametrize("flag", [None, "1"], ids=["default", "explicit_on"])
-def test_clean_up_decides_the_fixture_at_the_highs_optimum(flag):
-    """Fails before #2236: the refused basis was discarded. By default (and with ``=1``)
-    the warm dual decides the LP and ``solve_lp_std`` verifies the bound."""
+def test_value_check_refuses_the_free_column_fixture(flag):
+    """By default (and with ``=1``) the clean-up runs on the fixture, and the value check
+    refuses its answer: the free columns leave the weak-duality certificate open. If this
+    starts returning a bound, a free-column-aware certificate landed and #2236's fixture
+    is decided; flip this test to assert ``NODE_OPT``."""
     out = _run(flag)
-    assert out["attempts"] >= 1 and out["rescues"] >= 1, out
-    assert out["bound"] == pytest.approx(NODE_OPT, abs=1e-9)
+    assert out["attempts"] >= 1 and out["value_rejected"] >= 1, out
+    assert out["rescues"] == 0, out
+    assert out["bound"] is None
+
+
+_NVS08 = os.path.join(HERE, "data", "minlplib_nl", "nvs08.nl")
+#: ``docs/dev/data/cert-optima.json``.
+_NVS08_OPT = 23.449727347566373
+
+_SOLVE = r"""
+import json
+import discopt.modeling as dm
+from discopt import _rust
+_rust.profile_reset_py()
+r = dm.from_nl({path!r}).solve(time_limit=60, deterministic=True, max_nodes=200)
+c = dict(_rust.profile_counters_py())
+print("RESULT " + json.dumps({{
+    "status": r.status, "objective": r.objective, "bound": r.bound,
+    "certified": bool(r.gap_certified),
+    "rescues": int(c["PrimalDualCleanupRescues"]),
+    "value_rejected": int(c["PrimalDualCleanupValueRejected"]),
+    "bounds_refusals": int(c["LpAuditBoundsFail"]),
+}}))
+"""
+
+
+def _solve_nvs08(flag: str | None) -> dict:
+    env = dict(os.environ, DISCOPT_PROFILE="1")
+    env.pop("DISCOPT_LP_PRIMAL_DUAL_CLEANUP", None)
+    if flag is not None:
+        env["DISCOPT_LP_PRIMAL_DUAL_CLEANUP"] = flag
+    cp = subprocess.run(
+        [sys.executable, "-c", _SOLVE.format(path=_NVS08)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=240,
+    )
+    lines = [ln for ln in cp.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert cp.returncode == 0 and lines, cp.stderr[-2000:]
+    out = json.loads(lines[-1][len("RESULT ") :])
+    assert out["bounds_refusals"] >= 1, out  # the class the clean-up repairs occurred (§6)
+    return out
+
+
+def test_clean_up_rescues_a_certified_lp_on_nvs08():
+    """Fails before #2236 (``=0``: no rescue). By default the clean-up turns a bounds
+    refusal on nvs08 into an ``Optimal`` whose point and value both certify, and the solve
+    still certifies the known optimum."""
+    out = _solve_nvs08(None)
+    assert out["rescues"] >= 1, out
+    assert out["status"] == "optimal" and out["certified"], out
+    assert out["objective"] == pytest.approx(_NVS08_OPT, rel=1e-6)
+    assert out["bound"] <= _NVS08_OPT + 1e-6
+
+
+def test_opt_out_never_rescues_on_nvs08():
+    out = _solve_nvs08("0")
+    assert out["rescues"] == 0 and out["value_rejected"] == 0, out
+    assert out["status"] == "optimal" and out["certified"], out
 
 
 def test_unrecognized_flag_value_is_refused():

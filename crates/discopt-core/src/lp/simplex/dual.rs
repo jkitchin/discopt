@@ -1166,9 +1166,20 @@ pub(super) fn bounds_refusal_dual_cleanup(
     let outer = IN_PRIMAL_DUAL_CLEANUP.replace(true);
     let mut warm = warm_dual_armed(&p, sp, m, n, c, l, u, b, &sol.basis, opts);
     IN_PRIMAL_DUAL_CLEANUP.set(outer);
-    if warm.status == LpStatus::Optimal
-        && super::primal::point_passes_original_audit(&warm.x, sp, m, n, b, l, u)
-    {
+    // Point AND value, both on this solve's data, as the #2212 logical-dual rescue
+    // accepts (PR #2196 review item 2, PR #2256 review): the clean-up turns a
+    // `Numerical` into `Optimal` for every caller of `solve_lp_cols`, some of which
+    // read `obj` as a bound without NS verification, so the warm dual's own optimality
+    // claim is checked by weak duality rather than taken on faith.
+    let point_ok = warm.status == LpStatus::Optimal
+        && super::primal::point_passes_original_audit(&warm.x, sp, m, n, b, l, u);
+    if point_ok {
+        let obj_x: f64 = warm.x.iter().zip(c).map(|(xj, cj)| xj * cj).sum();
+        if !super::primal::dual_value_certifies_cols(&warm.dual, sp, n, m, c, b, l, u, obj_x, 1e-6)
+        {
+            crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupValueRejected);
+            return sol;
+        }
         crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupRescues);
         warm.iters += sol.iters;
         return warm;

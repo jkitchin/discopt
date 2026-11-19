@@ -128,6 +128,10 @@ def test_hda_root_bound_is_not_the_loose_safe_bound(monkeypatch, request):
     )
 
 
+# slow + correctness: one hda relaxation build is ~30 s locally, 35.7 s on CI, over the
+# fast lane's 15 s budget; it validates the certified bound against hda's optimum.
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_dual_cleanup_decides_the_unfiltered_root_lp(monkeypatch):
     """Fails before #2236: with the row filter off, hda's raw-box root LP failed and
     its certified bound was -15,075,999.9. The default dual clean-up decides the LP,
