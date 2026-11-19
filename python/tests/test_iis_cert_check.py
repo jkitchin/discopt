@@ -17,6 +17,7 @@ class _Eng:
     def __init__(self, A, row_lo, row_hi, col_lb, col_ub, row_groups):
         self.A, self.row_lo, self.row_hi = A, row_lo, row_hi
         self.col_lb, self.col_ub, self.row_groups = col_lb, col_ub, row_groups
+        self._wbox = None  # no witness box (#2225): certificates on these sides
 
 
 # ---- reference: the per-key implementation this replaced, verbatim ----
