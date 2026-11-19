@@ -148,12 +148,16 @@ pub fn solve_lp_cols(
     sx0.no_expand = expand_suppressed_globally();
     BOUNDS_REFUSAL.set(false);
     let mut sol = sx0.run();
-    let refused_on_bounds = BOUNDS_REFUSAL.replace(false);
+    let mut refused_on_bounds = BOUNDS_REFUSAL.replace(false);
     if let Some(cols2) = retry_cols {
         if dense_retry_wanted(&sol) {
             sol = dense_retry(sol, || {
                 Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts).run()
             });
+            // `dense_retry` returns the retry's own result even when it also fails, so
+            // the #2236 trigger must describe the run that produced `sol` (PR #2256
+            // review): the retry's refusal, not the first run's.
+            refused_on_bounds = BOUNDS_REFUSAL.replace(false);
         }
     }
     if let Some(cc) = cleanup_cols {
