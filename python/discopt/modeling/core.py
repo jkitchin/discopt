@@ -4484,6 +4484,59 @@ def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int
     )
 
 
+def _csr_with_exact_duplicates(A):
+    """``A`` as a float64 CSR matrix whose duplicate entries are summed exactly (#2258).
+
+    Each ``(row, column)`` cell stored more than once becomes one entry holding the
+    correctly rounded exact sum of its parts (a ``Fraction`` sum, rounded once;
+    integer data is added in Python integers), so every consumer of the builder rows
+    reads the same coefficient -- the one ``2**53*x + x - 2**53*x`` gets from the exact like-term
+    pass of #2090. A cell whose parts sum to exactly zero keeps a stored zero, as
+    ``sum_duplicates`` would. A matrix without duplicates is only converted.
+    """
+    import math
+    from fractions import Fraction
+
+    import scipy.sparse as sp
+
+    if sp.isspmatrix_csr(A) and A.has_canonical_format:
+        return A.astype(np.float64)
+    coo = A.tocoo()  # keeps duplicates (``tocsr`` from COO would sum them in floats)
+    rows = np.asarray(coo.row, dtype=np.int64)
+    cols = np.asarray(coo.col, dtype=np.int64)
+    data = np.asarray(coo.data)
+    order = np.lexsort((cols, rows))
+    rows, cols, data = rows[order], cols[order], data[order]
+    if len(rows) > 1:
+        same = (rows[1:] == rows[:-1]) & (cols[1:] == cols[:-1])
+    else:
+        same = np.zeros(0, dtype=bool)
+    if same.any():
+        starts = np.flatnonzero(np.concatenate(([True], ~same)))
+        ends = np.append(starts[1:], len(rows))
+        integral = np.issubdtype(data.dtype, np.integer) or data.dtype == np.bool_
+        out = data[starts].astype(np.float64)
+        for k in np.flatnonzero(ends - starts > 1):
+            part = data[starts[k] : ends[k]].tolist()
+            if integral:
+                out[k] = float(sum(int(v) for v in part))
+            elif all(math.isfinite(v) for v in part):
+                # Exact rational sum, rounded once (``math.fsum`` raises on an
+                # intermediate overflow that the exact sum does not have).
+                out[k] = float(sum((Fraction(v) for v in part), Fraction(0)))
+            else:
+                out[k] = sum(part)  # an inf/nan part: no exact sum to keep
+        rows, cols, data = rows[starts], cols[starts], out
+    else:
+        data = data.astype(np.float64)
+    indptr = np.zeros(A.shape[0] + 1, dtype=np.int64)
+    np.add.at(indptr, rows + 1, 1)
+    np.cumsum(indptr, out=indptr)
+    out_csr = sp.csr_matrix((data, cols, indptr), shape=A.shape)
+    out_csr.has_canonical_format = True
+    return out_csr
+
+
 def _canonicalize_rows_in(item: Any) -> None:
     """Exact like-term collection of every row in ``item`` (#2090).
 
@@ -8713,12 +8766,16 @@ class Model:
         if sense not in ("<=", "==", ">="):
             raise ValueError(f"Invalid sense '{sense}'. Expected '<=', '==', or '>='.")
 
-        # Convert to CSR
+        # Convert to CSR. A sparse input may store several entries for one row and
+        # column; they are summed *exactly* here (#2258), before any path reads the
+        # matrix. ``tocsr``/``sum_duplicates`` add them in binary64, and the LP
+        # reader, the affine evaluator and ``verify_point`` each did it in their own
+        # order: ``2**53, 1, -2**53`` in one cell read as 0 on one path and as 1, 2 or
+        # 0 on others, so a solve certified x = 10 for the row ``x <= 1``.
         if not sp.issparse(A):
             A = sp.csr_matrix(np.asarray(A, dtype=np.float64))
-        elif not sp.isspmatrix_csr(A):
-            A = A.tocsr()
-        A = A.astype(np.float64)
+        else:
+            A = _csr_with_exact_duplicates(A)
 
         if isinstance(x, (list, tuple)):
             x = x[0] if len(x) == 1 else VarBlock(x)
