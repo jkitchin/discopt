@@ -39350,7 +39350,11 @@ def _round_single_integer_rows_sparse(
     column is fixed (``xl == xu``) bounds its one free column ``j``: ``a x_j <sense>
     q * a``. On an integer ``x_j`` that bound rounds exactly (no integer value is
     removed), allowing ``1e-9`` relative float noise so a row resting on an integer
-    stays at it. Rows are judged against the input box in one pass, so a bound one
+    stays at it. That noise is measured on the operands of ``b - rest`` as well as on
+    ``q`` (``1e-9 * max(1, |q|, (|b| + sum |a_k x_k|) / |a|)``): when they cancel, the
+    difference carries their absolute error, and a 1e-9 allowance on ``q`` alone
+    floored ``q = 0.99999999480`` to 0 on a row that admits ``x_j = 1``. Rows are
+    judged against the input box in one pass, so a bound one
     row derives is not used to fix columns for another (sound, just not a fixed
     point). Only tightens; a row that empties the box leaves ``xl > xu`` for the
     engine to prove infeasible, unless ``keep_crossed=False``: then that column keeps
@@ -39359,7 +39363,7 @@ def _round_single_integer_rows_sparse(
     ``n_orig`` (slacks) are untouched.
 
     A row whose bound ``|q|`` is so large that the noise allowance reaches half an
-    integer (``|q| >= 5e8``) is skipped: there the rounding could not be exact, and
+    integer is skipped: there the rounding could not be exact, and
     measured on ``1e-13 y >= 5`` (``q = 5e13``) it set ``y >= 5e13 - 5e4``, a bound
     that is valid but admits points the row rejects, and changed which route served
     the model.
@@ -39385,14 +39389,22 @@ def _round_single_integer_rows_sparse(
         cols, vals = M.indices, M.data
         free = ~fixed[cols]
         nfree = np.bincount(rows, weights=free, minlength=M.shape[0])
-        rest = np.bincount(rows, weights=np.where(free, 0.0, vals * lo[cols]), minlength=M.shape[0])
+        fixed_terms = np.where(free, 0.0, vals * lo[cols])
+        rest = np.bincount(rows, weights=fixed_terms, minlength=M.shape[0])
+        rest_abs = np.bincount(rows, weights=np.abs(fixed_terms), minlength=M.shape[0])
         pick = free & (nfree[rows] == 1) & is_int[cols]
         if not pick.any():
             continue
         r, j, a = rows[pick], cols[pick], vals[pick]
         with np.errstate(invalid="ignore", over="ignore"):
-            q = (np.asarray(b, dtype=np.float64)[r] - rest[r]) / a
-        noise = 1e-9 * np.maximum(1.0, np.abs(q))
+            b_r = np.asarray(b, dtype=np.float64)[r]
+            q = (b_r - rest[r]) / a
+            # The float error of ``b - rest`` scales with the operands, not with the
+            # difference: on a big-M row ``z + M b <= 0.5 + M`` (M = 1.01e-8, z fixed
+            # at 0.5) cancellation left q = 0.99999999480 and floor removed b = 1, a
+            # point the row admits (#2252 follow-up, box-MCP D-gdp).
+            scale = (np.abs(b_r) + rest_abs[r]) / np.abs(a)
+        noise = 1e-9 * np.maximum(np.maximum(1.0, np.abs(q)), scale)
         ok = np.isfinite(q) & (noise < 0.5)
         r, j, a, q, noise = r[ok], j[ok], a[ok], q[ok], noise[ok]
         eq = sense == "=="
