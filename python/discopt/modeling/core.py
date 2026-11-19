@@ -1572,6 +1572,27 @@ _DISCRETE_BOUND_SLACK = 1e-9
 _INTEGER_BOUND_TOL = 1e-6
 
 
+def _raw_unless_snapped(value, stored: np.ndarray, var_type) -> Optional[np.ndarray]:
+    """The caller's bound when the INTEGER snap changed it, else ``None``.
+
+    ``None`` on every path where nothing was snapped -- any other variable type, or
+    a box installed as-is (the no-copy restore path hands back ``stored`` itself) --
+    so the node loop's bound restores pay one identity test.
+    """
+    if var_type is not VarType.INTEGER or value is stored:
+        return None
+    raw = np.array(value, dtype=np.float64)
+    if raw.shape != stored.shape:
+        try:
+            raw = np.array(np.broadcast_to(raw, stored.shape), dtype=np.float64)
+        except ValueError:
+            raw = raw.reshape(stored.shape)
+    if np.array_equal(raw, stored):
+        return None
+    raw.flags.writeable = False
+    return raw
+
+
 def _is_integral_box(arr: np.ndarray) -> bool:
     """Is every entry of *arr* an integer (or +/-inf)?
 
@@ -1870,6 +1891,13 @@ class Variable(Expression):
         self._lb = _readonly_bound(
             value, self.shape, var_type=self.var_type, name=self.name, side="lb"
         )
+        # Inline test first: the node loop's restores (any type, value IS the box)
+        # must not pay a call.
+        self._raw_lb = (
+            None
+            if value is self._lb or self.var_type is not VarType.INTEGER
+            else _raw_unless_snapped(value, self._lb, self.var_type)
+        )
 
     @property
     def ub(self) -> np.ndarray:
@@ -1881,6 +1909,23 @@ class Variable(Expression):
         self._ub = _readonly_bound(
             value, self.shape, var_type=self.var_type, name=self.name, side="ub"
         )
+        # Inline test first: the node loop's restores (any type, value IS the box)
+        # must not pay a call.
+        self._raw_ub = (
+            None
+            if value is self._ub or self.var_type is not VarType.INTEGER
+            else _raw_unless_snapped(value, self._ub, self.var_type)
+        )
+
+    def _declared_bound(self, side: str) -> np.ndarray:
+        """The ``lb``/``ub`` the caller last assigned, before the INTEGER snap.
+
+        The stored box is the integer range it admits (#2252); this is what was
+        written, kept only when the snap changed it. ``validate`` decides a crossed
+        box on it, and the serializer writes it, so a reload re-snaps to the same box.
+        """
+        raw = getattr(self, "_raw_" + side, None)
+        return cast(np.ndarray, getattr(self, "_" + side) if raw is None else raw)
 
     # ── Copying: a copy's boxes must be as read-only as the original's ──
     #
@@ -1893,6 +1938,13 @@ class Variable(Expression):
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
         for side in ("_lb", "_ub"):
+            arr = self.__dict__.get(side)
+            if arr is not None:
+                self.__dict__[side] = _readonly_bound(arr)
+        # The bounds as written (#2252) decide ``validate`` and are what ``dumps``
+        # writes, so a writable copy would let an in-place write change both
+        # (review of #2257). Frozen like the boxes; no var_type, nothing re-snapped.
+        for side in ("_raw_lb", "_raw_ub"):
             arr = self.__dict__.get(side)
             if arr is not None:
                 self.__dict__[side] = _readonly_bound(arr)
@@ -4430,6 +4482,59 @@ def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int
         f"{shown!r}'), or subtract the offset yourself: "
         f"Constraint(body - rhs, '{sense}', 0.0). Reached via {where}."
     )
+
+
+def _csr_with_exact_duplicates(A):
+    """``A`` as a float64 CSR matrix whose duplicate entries are summed exactly (#2258).
+
+    Each ``(row, column)`` cell stored more than once becomes one entry holding the
+    correctly rounded exact sum of its parts (a ``Fraction`` sum, rounded once;
+    integer data is added in Python integers), so every consumer of the builder rows
+    reads the same coefficient -- the one ``2**53*x + x - 2**53*x`` gets from the exact like-term
+    pass of #2090. A cell whose parts sum to exactly zero keeps a stored zero, as
+    ``sum_duplicates`` would. A matrix without duplicates is only converted.
+    """
+    import math
+    from fractions import Fraction
+
+    import scipy.sparse as sp
+
+    if sp.isspmatrix_csr(A) and A.has_canonical_format:
+        return A.astype(np.float64)
+    coo = A.tocoo()  # keeps duplicates (``tocsr`` from COO would sum them in floats)
+    rows = np.asarray(coo.row, dtype=np.int64)
+    cols = np.asarray(coo.col, dtype=np.int64)
+    data = np.asarray(coo.data)
+    order = np.lexsort((cols, rows))
+    rows, cols, data = rows[order], cols[order], data[order]
+    if len(rows) > 1:
+        same = (rows[1:] == rows[:-1]) & (cols[1:] == cols[:-1])
+    else:
+        same = np.zeros(0, dtype=bool)
+    if same.any():
+        starts = np.flatnonzero(np.concatenate(([True], ~same)))
+        ends = np.append(starts[1:], len(rows))
+        integral = np.issubdtype(data.dtype, np.integer) or data.dtype == np.bool_
+        out = data[starts].astype(np.float64)
+        for k in np.flatnonzero(ends - starts > 1):
+            part = data[starts[k] : ends[k]].tolist()
+            if integral:
+                out[k] = float(builtins_sum(int(v) for v in part))
+            elif all(math.isfinite(v) for v in part):
+                # Exact rational sum, rounded once (``math.fsum`` raises on an
+                # intermediate overflow that the exact sum does not have).
+                out[k] = float(builtins_sum((Fraction(v) for v in part), Fraction(0)))
+            else:
+                out[k] = builtins_sum(part)  # an inf/nan part: no exact sum to keep
+        rows, cols, data = rows[starts], cols[starts], out
+    else:
+        data = data.astype(np.float64)
+    indptr = np.zeros(A.shape[0] + 1, dtype=np.int64)
+    np.add.at(indptr, rows + 1, 1)
+    np.cumsum(indptr, out=indptr)
+    out_csr = sp.csr_matrix((data, cols, indptr), shape=A.shape)
+    out_csr.has_canonical_format = True
+    return out_csr
 
 
 def _canonicalize_rows_in(item: Any) -> None:
@@ -8661,12 +8766,16 @@ class Model:
         if sense not in ("<=", "==", ">="):
             raise ValueError(f"Invalid sense '{sense}'. Expected '<=', '==', or '>='.")
 
-        # Convert to CSR
+        # Convert to CSR. A sparse input may store several entries for one row and
+        # column; they are summed *exactly* here (#2258), before any path reads the
+        # matrix. ``tocsr``/``sum_duplicates`` add them in binary64, and the LP
+        # reader, the affine evaluator and ``verify_point`` each did it in their own
+        # order: ``2**53, 1, -2**53`` in one cell read as 0 on one path and as 1, 2 or
+        # 0 on others, so a solve certified x = 10 for the row ``x <= 1``.
         if not sp.issparse(A):
             A = sp.csr_matrix(np.asarray(A, dtype=np.float64))
-        elif not sp.isspmatrix_csr(A):
-            A = A.tocsr()
-        A = A.astype(np.float64)
+        else:
+            A = _csr_with_exact_duplicates(A)
 
         if isinstance(x, (list, tuple)):
             x = x[0] if len(x) == 1 else VarBlock(x)
@@ -13182,10 +13291,13 @@ class Model:
             if var.var_type is VarType.INTEGER:
                 # #2252: an INTEGER box is stored as the integer range it admits,
                 # so a box holding no integer (``lb=1.2, ub=1.8``) is stored as
-                # ``[2, 1]`` -- crossed by exactly 1. That is an infeasible
-                # model, which the solve proves and reports (#844), not a
-                # modeling error.
-                crossed = crossed & (var.lb - var.ub != 1.0)
+                # ``[2, 1]``. That is an infeasible model, which the solve proves
+                # and reports (#844), not a modeling error. A box the CALLER
+                # crossed (``lb=3, ub=2``, or ``lb=1.8, ub=1.2``) still is: the
+                # test is on the bounds as written, before the snap.
+                crossed = np.asarray(var._declared_bound("lb")) > np.asarray(
+                    var._declared_bound("ub")
+                )
             if np.any(crossed):
                 raise ValueError(f"Variable '{var.name}' has lb > ub at some index")
 

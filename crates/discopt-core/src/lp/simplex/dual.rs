@@ -1131,6 +1131,108 @@ fn cold_with_dual_cleanup(
     sol
 }
 
+/// The #2236 clean-up (`DISCOPT_LP_PRIMAL_DUAL_CLEANUP`, see
+/// [`super::primal::primal_dual_cleanup_enabled`]): `sol` is a cold primal solve of
+/// this LP that the final audit refused on a bounds excursion. Re-optimize it warm
+/// with the dual simplex from `sol`'s own basis and return that answer only when it is
+/// `Optimal`, its point passes the audit on `sp`, and its value is certified by weak
+/// duality on the same data; otherwise return `sol` unchanged.
+///
+/// Only the prepared-dual path runs: a basis the dual will not prepare is declined
+/// here rather than handed to the primal-warm / cold fallback, which would re-run
+/// the solve that just failed. The warm dual's own deep fallback may still cold-solve;
+/// [`super::primal::IN_PRIMAL_DUAL_CLEANUP`] keeps that solve from cleaning up again.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn bounds_refusal_dual_cleanup(
+    sol: LpSolve,
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> LpSolve {
+    use super::primal::IN_PRIMAL_DUAL_CLEANUP;
+    crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupAttempts);
+    if sol.basis.basic_vars.len() != m || sol.basis.col_status.len() != n {
+        crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupPrepRefused);
+        return sol;
+    }
+    let Some(p) = PreparedDual::prepare_cols(sp, m, n, c, l, u, &sol.basis, opts) else {
+        crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupPrepRefused);
+        return sol;
+    };
+    let outer = IN_PRIMAL_DUAL_CLEANUP.replace(true);
+    let mut warm = warm_dual_armed(&p, sp, m, n, c, l, u, b, &sol.basis, opts);
+    IN_PRIMAL_DUAL_CLEANUP.set(outer);
+    // Point AND value, both on this solve's data, as the #2212 logical-dual rescue
+    // accepts (PR #2196 review item 2, PR #2256 review): the clean-up turns a
+    // `Numerical` into `Optimal` for every caller of `solve_lp_cols`, some of which
+    // read `obj` as a bound without NS verification, so the warm dual's own optimality
+    // claim is checked by weak duality rather than taken on faith.
+    let point_ok = warm.status == LpStatus::Optimal
+        && super::primal::point_passes_original_audit(&warm.x, sp, m, n, b, l, u);
+    if point_ok {
+        let obj_x: f64 = warm.x.iter().zip(c).map(|(xj, cj)| xj * cj).sum();
+        let certified = if super::primal::dual_value_certifies_cols(
+            &warm.dual, sp, n, m, c, b, l, u, obj_x, 1e-6,
+        ) {
+            true
+        } else if projected_value_certifies(&warm.dual, sp, m, n, c, b, l, u, obj_x, 1e-6) {
+            crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupProjectedAccepts);
+            true
+        } else {
+            false
+        };
+        if !certified {
+            crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupValueRejected);
+            return sol;
+        }
+        crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupRescues);
+        warm.iters += sol.iters;
+        return warm;
+    }
+    sol
+}
+
+/// #2236: whether the duals `y` prove the value `obj` of `min cᵀx, A x = b, l ≤ x ≤ u`
+/// after projecting them onto `{a_jᵀy = c_j}` for the open columns whose reduced cost
+/// is rounding noise (`project::project_dual_closed`, the MILP driver's
+/// `DISCOPT_NS_PROJECT` rung). [`super::primal::dual_value_certifies_cols`] puts the
+/// weak-duality bound at `−∞` as soon as a free column's reduced cost cannot be shown
+/// to vanish, which a dual that is exact in real arithmetic still fails in floating
+/// point. The enclosed Neumaier–Shcherbina bound is rigorous for every dual in the
+/// enclosure, so `obj − g ≤ rel_tol·(1 + |obj|)` with `obj` attained by an audited
+/// point proves `obj` optimal to the same tolerance the unprojected check uses. A
+/// projection that does not verify certifies nothing.
+#[allow(clippy::too_many_arguments)]
+fn projected_value_certifies(
+    y: &[f64],
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    obj: f64,
+    rel_tol: f64,
+) -> bool {
+    use super::project::{ns_bound_enclosed, project_dual_closed};
+    if y.len() != m || !obj.is_finite() || !y.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let Ok(pd) = project_dual_closed(y, c, sp, m, n, l, |j| u[j] >= INF) else {
+        return false;
+    };
+    match ns_bound_enclosed(&pd, c, sp, m, n, b, l, u) {
+        Some(g) if g.is_finite() => obj - g <= rel_tol * (1.0 + obj.abs()),
+        _ => false,
+    }
+}
+
 /// [`solve_lp_warm_csc`] without the #2125 huge-box relaxation: the solve plus
 /// its terminal-verdict count.
 ///
@@ -3616,6 +3718,32 @@ fn assemble(
 #[cfg(test)]
 mod tests {
 
+    /// #2236: on `min x1 s.t. x1 - x2 = 0, x1 free, x2 in [1, 2]` (optimum 1, exact dual
+    /// y = 1), a dual carrying rounding noise leaves the free column's reduced cost
+    /// 1 - y != 0, which puts the plain weak-duality bound at -inf. The projected
+    /// certificate makes that reduced cost exactly 0 and proves the true value, and it
+    /// still refuses a value above the optimum.
+    #[test]
+    fn projected_value_certificate_handles_a_free_column_2236() {
+        let sp = SparseCols::from_csc(vec![0, 1, 2], vec![0, 0], vec![1.0, -1.0]);
+        let (c, b) = (vec![1.0, 0.0], vec![0.0]);
+        let (l, u) = (vec![-INF, 1.0], vec![INF, 2.0]);
+        let y = vec![1.0 + 1e-13];
+        assert!(
+            !super::super::primal::dual_value_certifies_cols(
+                &y, &sp, 2, 1, &c, &b, &l, &u, 1.0, 1e-6
+            ),
+            "premise: the plain check cannot certify through the free column's noise"
+        );
+        assert!(super::projected_value_certifies(
+            &y, &sp, 1, 2, &c, &b, &l, &u, 1.0, 1e-6
+        ));
+        assert!(
+            !super::projected_value_certifies(&y, &sp, 1, 2, &c, &b, &l, &u, 1.1, 1e-6),
+            "a value above the optimum must not certify"
+        );
+    }
+
     #[test]
     fn an_empty_member_switch_counts_as_unset() {
         assert_eq!(parse_member("X", None), None);
@@ -5441,56 +5569,63 @@ mod tests {
             basic_vars,
         };
 
-        let mut compared = 0usize;
-        for (label, base) in [("legacy", legacy_warm_opts()), ("shipped", opts())] {
-            let mut off = base.clone();
-            off.bank_deadline_duals = true;
-            off.recover_unstable_pivot = false;
-            assert!(off.deadline.is_none(), "no arm may carry a deadline");
-            reset();
-            set_enabled(true);
-            let without = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
-            let (bails_off, recov_off) = (
-                counter(Ctr::DualUnstablePivotBails),
-                counter(Ctr::DualUnstablePivotRecoveries),
-            );
-
-            let mut on = off.clone();
-            on.recover_unstable_pivot = true;
-            reset();
-            let with = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &on);
-            let (bails_on, recov_on) = (
-                counter(Ctr::DualUnstablePivotBails),
-                counter(Ctr::DualUnstablePivotRecoveries),
-            );
-            set_enabled(false);
-
-            // The same pivot goes one way or the other, proven by counter (§6).
-            assert_eq!(
-                (bails_off, recov_off),
-                (1, 0),
-                "{label}: OFF must bail on exactly one unstable pivot"
-            );
-            assert_eq!(
-                (bails_on, recov_on),
-                (0, 1),
-                "{label}: ON must recover from exactly one unstable pivot"
-            );
-            assert_eq!(
-                without.status, with.status,
-                "{label}: the recovery must not change the verdict on this LP"
-            );
-            if with.status == LpStatus::Optimal {
-                assert!(
-                    (with.obj - without.obj).abs() <= 1e-6 * (1.0 + with.obj.abs()),
-                    "{label}: obj {} vs {}",
-                    with.obj,
-                    without.obj
+        // #2236: the legacy arm's bail hands the LP to the cold primal, whose bounds
+        // refusal the dual clean-up would re-optimize warm, hitting the same unstable
+        // pivot a second time. This test pins the warm dual's own pivot, so it runs with
+        // the clean-up suppressed.
+        super::super::primal::without_primal_dual_cleanup(|| {
+            let mut compared = 0usize;
+            for (label, base) in [("legacy", legacy_warm_opts()), ("shipped", opts())] {
+                let mut off = base.clone();
+                off.bank_deadline_duals = true;
+                off.recover_unstable_pivot = false;
+                assert!(off.deadline.is_none(), "no arm may carry a deadline");
+                reset();
+                set_enabled(true);
+                let without =
+                    solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &off);
+                let (bails_off, recov_off) = (
+                    counter(Ctr::DualUnstablePivotBails),
+                    counter(Ctr::DualUnstablePivotRecoveries),
                 );
+
+                let mut on = off.clone();
+                on.recover_unstable_pivot = true;
+                reset();
+                let with = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &on);
+                let (bails_on, recov_on) = (
+                    counter(Ctr::DualUnstablePivotBails),
+                    counter(Ctr::DualUnstablePivotRecoveries),
+                );
+                set_enabled(false);
+
+                // The same pivot goes one way or the other, proven by counter (§6).
+                assert_eq!(
+                    (bails_off, recov_off),
+                    (1, 0),
+                    "{label}: OFF must bail on exactly one unstable pivot"
+                );
+                assert_eq!(
+                    (bails_on, recov_on),
+                    (0, 1),
+                    "{label}: ON must recover from exactly one unstable pivot"
+                );
+                assert_eq!(
+                    without.status, with.status,
+                    "{label}: the recovery must not change the verdict on this LP"
+                );
+                if with.status == LpStatus::Optimal {
+                    assert!(
+                        (with.obj - without.obj).abs() <= 1e-6 * (1.0 + with.obj.abs()),
+                        "{label}: obj {} vs {}",
+                        with.obj,
+                        without.obj
+                    );
+                }
+                compared += 1;
             }
-            compared += 1;
-        }
-        assert_eq!(compared, 2, "both option sets must have been exercised");
+            assert_eq!(compared, 2, "both option sets must have been exercised");
+        });
     }
 
     // #1008: the cold primal must not CLAIM `Unbounded` on a bounded LP.

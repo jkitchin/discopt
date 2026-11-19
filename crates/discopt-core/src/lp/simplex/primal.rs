@@ -139,15 +139,30 @@ pub fn solve_lp_cols(
     // dual path already clones the CSC per solve — see dual.rs — so this is
     // in-family), and nothing extra with the route OFF (default).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
+    // #2236: the dual clean-up needs the matrix after `run` has consumed it. O(nnz),
+    // paid unless the flag is `=0`, and never inside the clean-up's own solves.
+    let cleanup_cols =
+        (primal_dual_cleanup_enabled() && !IN_PRIMAL_DUAL_CLEANUP.get()).then(|| cols.clone());
     crate::profile::incr(crate::profile::Ctr::EntryCols);
     let mut sx0 = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
     sx0.no_expand = expand_suppressed_globally();
+    BOUNDS_REFUSAL.set(false);
     let mut sol = sx0.run();
+    let mut refused_on_bounds = BOUNDS_REFUSAL.replace(false);
     if let Some(cols2) = retry_cols {
         if dense_retry_wanted(&sol) {
             sol = dense_retry(sol, || {
                 Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts).run()
             });
+            // `dense_retry` returns the retry's own result even when it also fails, so
+            // the #2236 trigger must describe the run that produced `sol` (PR #2256
+            // review): the retry's refusal, not the first run's.
+            refused_on_bounds = BOUNDS_REFUSAL.replace(false);
+        }
+    }
+    if let Some(cc) = cleanup_cols {
+        if refused_on_bounds && sol.status == LpStatus::Numerical {
+            sol = super::dual::bounds_refusal_dual_cleanup(sol, &cc, m, n, c, l, u, b, opts);
         }
     }
     // #956 T2' had an EXPAND-free re-solve here (`DISCOPT_PRIMAL_EXPAND_RESET`),
@@ -155,6 +170,87 @@ pub fn solve_lp_cols(
     // certificates gained, 0 bounds tightened, one bound loosened (`4stufen`, where
     // 1357 retries spent the wall budget). `docs/dev/flag-retirement-audit.md`.
     sol
+}
+
+thread_local! {
+    /// Set by [`Simplex::assemble`] when its final audit downgrades an `Optimal` to
+    /// `Numerical` because a column sits outside its box (#2236). Cleared and read
+    /// by [`solve_lp_cols`] around its own `run`, so a nested solve cannot leak in.
+    static BOUNDS_REFUSAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Re-entry guard for the #2236 clean-up: the warm dual it runs can fall back
+    /// to a cold [`solve_lp_cols`], which must not start a clean-up of its own.
+    pub(super) static IN_PRIMAL_DUAL_CLEANUP: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` (#2236, **default ON** since its §5 panel, `=0` opts
+/// out; read once): when a cold primal solve reaches `Optimal` and the final audit in
+/// [`Simplex::assemble`] refuses it because a column sits outside its bound,
+/// re-optimize with the **dual** simplex warm from the basis the primal stopped on.
+/// The answer replaces the `Numerical` only if it is `Optimal`, its point passes the
+/// same audit on the matrix this solve was given, AND its value is certified on that
+/// data: by weak duality (`dual_value_certifies_cols`, the #2212 logical-dual rescue's
+/// acceptance; PR #2256 review), or, when free columns' rounding-noise reduced costs put
+/// that bound at −∞, by the enclosed Neumaier–Shcherbina bound of the dual projected onto
+/// `{a_jᵀy = c_j}` for those columns (`dual::projected_value_certifies`, the
+/// `DISCOPT_NS_PROJECT` construction in `project.rs`). Anything else returns the original
+/// `Numerical`, so the flag can turn a refusal into a decided `Optimal` but cannot
+/// change a verdict the primal already reached.
+///
+/// Why: the refused basis is dual feasible (phase 2 priced it optimal) and only
+/// slightly primal infeasible, which is the situation the dual simplex starts from.
+/// It is the mechanism #2125's `cold_with_dual_cleanup` already ships for
+/// huge-bound LPs, extended to every cold primal solve. Unlike the retired
+/// `DISCOPT_PRIMAL_EXPAND_RESET` (#2211), it does not re-solve from scratch.
+///
+/// Entry experiment (#2236 fixture `python/tests/data/lp_2226_ex8_5_3_node.npz`, the
+/// ex8_5_3 node LP HiGHS solves to −0.06756047745693): the cold primal refuses it; the
+/// clean-up decides it through the projected certificate, and `solve_lp_std` verifies
+/// −0.06756047745692018. Prevalence on `main` (the issue thread): 3,393 bounds-audit
+/// refusals on 20 of 74 in-repo instances, all on a basic column.
+///
+/// **Graduated 2026-11-19** (§5 panel, `issue2115_graduation_panel.py --deterministic
+/// --max-nodes 2000 --time-limit 120 --assert-unfired-identical`, 74 in-repo instances,
+/// on the code that ships, including `mccormick_lp`'s decided-but-loose #671 trigger):
+/// 806 checks, 0 violations; certified 59 -> 59; bounds tighter on `beuster` (6411 ->
+/// 10296) and `4stufen` (21599.04 -> 21600.73), 0 looser (`heatexch_gen2` was reported
+/// looser with the clean-up never firing there, at the wall backstop; an isolated
+/// replicate gives the identical bound 576971.49 in both arms); fired on 15 instances,
+/// 1,164 rescues, 483 of them through the projected certificate, 26 value-refused;
+/// nodes 5894 -> 5910, wall 2135 -> 2150 s. `bchoco06` loses its deterministic 120 s
+/// incumbent: its single-start root pump moves with the root box, and a control that
+/// perturbs the box without the flag flips the outcome. Row in
+/// `docs/dev/flag-retirement-audit.md`.
+pub(crate) fn primal_dual_cleanup_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_PRIMAL_DUAL_CLEANUP").unwrap_or_default();
+        parse_primal_dual_cleanup(&raw)
+    })
+}
+
+/// Run `f` with the #2236 clean-up suppressed on this thread (the re-entry guard,
+/// restored afterwards). For tests that pin another mechanism on an LP the clean-up
+/// would otherwise decide first; the env flag is a `OnceLock` they cannot toggle.
+#[cfg(test)]
+pub(crate) fn without_primal_dual_cleanup<T>(f: impl FnOnce() -> T) -> T {
+    let outer = IN_PRIMAL_DUAL_CLEANUP.replace(true);
+    let out = f();
+    IN_PRIMAL_DUAL_CLEANUP.set(outer);
+    out
+}
+
+/// The parse table behind [`primal_dual_cleanup_enabled`]; garbage is refused.
+fn parse_primal_dual_cleanup(raw: &str) -> bool {
+    match raw.trim() {
+        "0" | "false" | "off" => false,
+        "" | "1" | "true" | "on" => true,
+        other => panic!(
+            "DISCOPT_LP_PRIMAL_DUAL_CLEANUP={other:?} is not a recognized value; use 1/on or \
+             0/off"
+        ),
+    }
 }
 
 /// Whether EXPAND is suppressed on the **primary** solve, not just the retry
@@ -3840,6 +3936,7 @@ impl<'a> Simplex<'a> {
                 // Bound excursion: refinement can't help — downgrade directly.
                 Feasibility::Bounds => {
                     crate::profile::incr(crate::profile::Ctr::LpAuditBoundsFail);
+                    BOUNDS_REFUSAL.set(true);
                     // #956 T2' diagnostic (profiling-gated, so production pays
                     // nothing): re-test `assemble`'s standing claim that a bounds
                     // excursion is a Harris artefact no sharper `x_B` can repair.
@@ -4079,6 +4176,22 @@ impl<'a> Simplex<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// #2236: `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` graduated default ON; `=0` opts out and a
+    /// value outside the table is refused rather than read as either.
+    #[test]
+    fn primal_dual_cleanup_parse_table_2236() {
+        for on in ["", " ", "1", "true", "on"] {
+            assert!(super::parse_primal_dual_cleanup(on), "{on:?} must mean ON");
+        }
+        for off in ["0", "false", "off", " 0 "] {
+            assert!(
+                !super::parse_primal_dual_cleanup(off),
+                "{off:?} must mean OFF"
+            );
+        }
+        assert!(std::panic::catch_unwind(|| super::parse_primal_dual_cleanup("yes")).is_err());
+    }
+
     /// PR #2196 review item 2: the logical-dual rescue's value audit accepts a dual
     /// that certifies the verified objective, and refuses one that does not, an open
     /// side the dual needs, or a value below the dual bound's tolerance window.

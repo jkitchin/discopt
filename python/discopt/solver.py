@@ -12375,6 +12375,96 @@ def _ipx_continuation_arm(lifted, unlifted, is_maximize: bool) -> str:
     return "unlifted" if tighter else "lift"
 
 
+def _ipx_lift_point_refusal(source_model, result) -> Optional[str]:
+    """Why the lift's incumbent fails ``verify_point`` on the UN-LIFTED model, or None.
+
+    #2252 follow-up. The lift writes each product ``e*v`` of a bit and a bounded
+    column as McCormick rows, and the MILP engine holds every row to its own 1e-6.
+    In the expanded row those per-row residuals are multiplied by the bits' place
+    values and added up: on integer ``x in [1, 10]`` with ``x*x >= 1.00003`` the
+    engine returned the bits at 0 and each product at ~2e-7, and the original row
+    came out violated by 3e-5 at x = 1. Every lifted row passes ``verify_point``
+    (each residual sits on a continuous column), so the lift's own checks cannot
+    see it; only the model the caller wrote can.
+    """
+    from discopt.validation.feasibility import verify_point
+
+    xd = getattr(result, "x", None)
+    if not xd or getattr(result, "status", None) not in ("optimal", "feasible"):
+        return None
+    try:
+        flat = np.concatenate(
+            [
+                np.atleast_1d(np.asarray(xd[v.name], dtype=np.float64)).ravel()
+                for v in source_model._variables
+            ]
+        )
+    except KeyError as exc:
+        return f"the lift's point has no column {exc}"
+    verdict = verify_point(source_model, flat)
+    return None if verdict.ok else (verdict.reason or "refused")
+
+
+def _ipx_strip_unverified(result: "SolveResult", why: str) -> "SolveResult":
+    """``result`` with its incumbent withdrawn; its dual bound is kept.
+
+    The lifted MILP is an exact formulation solved to a 1e-6 row tolerance, which
+    only enlarges the feasible set, so its bound stays a valid bound on the
+    caller's objective. Its incumbent is not a point of that objective.
+    """
+    result.x = None
+    result.objective = None
+    result.gap = None
+    result.gap_certified = False
+    if result.status in ("optimal", "feasible"):
+        # The route's rule for a result without a point (``_solve_milp_highs``:
+        # "feasible" only with one); a limit exit keeps its own status.
+        result.status = "error"
+    result.error = f"integer-bilinear lift: incumbent refused on the un-lifted model ({why})"
+    result.solver_stats = dict(result.solver_stats or {})
+    result.solver_stats["ipx/lift_incumbent_refused"] = 1.0
+    return result
+
+
+def _ipx_lift_checked(entry_args: dict, solve_t0: float, is_maximize: bool) -> "SolveResult":
+    """The legacy lift adoption, with its answer judged on the un-lifted model.
+
+    Runs the lift arm on the whole budget -- the very path the legacy rule takes --
+    and returns it unless its incumbent fails :func:`_ipx_lift_point_refusal`. Then
+    the incumbent is withdrawn and the UN-LIFTED model gets the time left; the two
+    are merged (tightest bound, the un-lifted arm's verified incumbent).
+    """
+    source = entry_args["model"]
+    base = {k: v for k, v in entry_args.items() if k != "kwargs"}
+    extra = dict(entry_args.get("kwargs") or {})
+    time_limit = float(entry_args["time_limit"])
+
+    def _run(arm: str, limit: float) -> "SolveResult":
+        tok = _IPX_RACE_ARM.set(arm)
+        try:
+            return cast("SolveResult", solve_model(**{**base, "time_limit": limit}, **extra))
+        finally:
+            _IPX_RACE_ARM.reset(tok)
+
+    lifted = _run("lift", time_limit - (time.perf_counter() - solve_t0))
+    why = _ipx_lift_point_refusal(source, lifted)
+    if why is None:
+        return lifted
+    logger.warning(
+        "integer-bilinear lift: the lifted MILP's incumbent fails verify_point on the "
+        "un-lifted model (%s); solving the un-lifted model on the time left",
+        why,
+    )
+    lifted = _ipx_strip_unverified(lifted, why)
+    rest = time_limit - (time.perf_counter() - solve_t0)
+    if rest <= 0.0:
+        return lifted
+    unlifted = _run("unlifted", rest)
+    merged = cast("SolveResult", _merge_route_and_fallback(lifted, unlifted, is_maximize))
+    merged.wall_time = time.perf_counter() - solve_t0
+    return merged
+
+
 def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "SolveResult":
     """Run the #1940 lift race (see :func:`_ipx_race_enabled`) and return its answer.
 
@@ -12432,6 +12522,12 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         return max_nodes - spent if callers_node_cap else max_nodes
 
     lifted = _run("lift", min(_IPX_RACE_SLICE_S, _remaining()), max_nodes)
+    _why_lift = _ipx_lift_point_refusal(entry_args["model"], lifted)
+    if _why_lift is not None:
+        # #2252 follow-up: never let the lift "certify" a point the un-lifted
+        # model refuses; the un-lifted slice below then runs as for any lift
+        # that did not certify.
+        lifted = _ipx_strip_unverified(lifted, _why_lift)
     if _result_certifies(lifted):
         return _done(lifted)
     spent = int(getattr(lifted, "node_count", 0) or 0)
@@ -12456,6 +12552,10 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
     if rest <= 0.0 or (callers_node_cap and spent >= max_nodes):
         return _done(merged)
     final = _run(arm, rest, _left(spent), final=True)
+    if arm == "lift":
+        _why_final = _ipx_lift_point_refusal(entry_args["model"], final)
+        if _why_final is not None:
+            final = _ipx_strip_unverified(final, _why_final)
     return _done(_merge_route_and_fallback(merged, final, is_maximize))
 
 
@@ -17962,6 +18062,22 @@ def solve_model(
                 _ipx_entry_args["model"]._objective is not None
                 and _ipx_entry_args["model"]._objective.sense == _IpxObjSense.MAXIMIZE,
             )
+        if (
+            _ipx_adopt
+            and _ipx_race_arm is None
+            and not _ipx_cheap_first_enabled()
+            and not _IPX_CHEAP_FIRST_IN_PROBE.get()
+        ):
+            # The legacy adoption (no race), re-entered as the "lift" arm so its
+            # answer can be judged on the un-lifted model (#2252 follow-up).
+            from discopt.modeling.core import ObjectiveSense as _IpxObjSense
+
+            return _ipx_lift_checked(
+                _ipx_entry_args,
+                _solve_t0,
+                _ipx_entry_args["model"]._objective is not None
+                and _ipx_entry_args["model"]._objective.sense == _IpxObjSense.MAXIMIZE,
+            )
         # #1236 cheap-first (flag-gated, default OFF): the lift is adopted
         # today because it is *possible*, never because it was shown to help,
         # and over the adopted population it is harmful more often than not.
@@ -19942,6 +20058,8 @@ def solve_model(
     # vetoed / cut-off point as the final ``optimal`` incumbent. Reads
     # ``_gap_certified`` at call time so the surfaced ``best_bound`` honors the
     # A1 taint gate exactly like the batch path.
+    _inj_arb: list = [None]  # the #1659 row arbiter, built on first injection
+
     def _inject_incumbent(x_cand, obj_cand):
         # #1316: box feasibility, before anything else. Every non-batch injection
         # on this path funnels through here, so one check covers the warm start,
@@ -19954,6 +20072,53 @@ def solve_model(
                 "Rejected an incumbent candidate that violates the model's variable "
                 "bounds (obj=%.6g). A warm start taken before a bound moved is the "
                 "usual cause; the search continues without it.",
+                obj_cand,
+            )
+            return False
+        # #2252 follow-up: the rows, under the search's own arbiter -- the test the
+        # #1659 exit gate holds the published point to, #1254 cap included. Without
+        # it a heuristic's sub-NLP tolerance decided what became the incumbent:
+        # ``integer_local_search`` returned x = 1 for integer x with
+        # ``x*x >= 1.0000002`` (violated by 2e-7, inside its tolerance but outside
+        # the cap, since an integer-only row has no direction a small move fixes).
+        # The tree pruned and OBBT tightened to ``x <= 1`` against that value, the
+        # exit gate then refused it, and the solve returned ``error`` with the
+        # feasible x = 2 already cut away. A point refused here could never be
+        # certified; refusing it before it prunes keeps the search where it was.
+        #
+        # Judged at the INTEGRAL realisation (#1380), the point the exit path snaps
+        # to and ``verify_point`` tests: a node NLP returned x = 1.000001 for integer
+        # x with ``exp(x) >= e*(1 + 1e-6)``, which holds there and fails at x = 1.
+        # The snap moves only columns within the 1e-5 integrality tolerance, and the
+        # point injected is the snapped one, priced where it now sits.
+        _x_int, _ = _round_incumbent_integers(x_cand, int_offsets, int_sizes)
+        if not np.array_equal(_x_int, np.asarray(x_cand, dtype=np.float64)):
+            # Priced by the search evaluator, which is the LIFTED model's when the
+            # factorable lift ran; its aux columns are not recomputed after the
+            # snap, so they can be stale by up to the 1e-5 the snap moved an integer.
+            # The row test below is unaffected (it reads the pre-lift arbiter's
+            # view); the objective can carry that much aux staleness (review of
+            # #2257).
+            _obj_int = float(evaluator.evaluate_objective(_x_int))
+            if not np.isfinite(_obj_int):
+                return False
+            x_cand, obj_cand = _x_int, _obj_int
+        # The rows judged are the exit gate's own (:func:`_spatial_row_arbiter`): the
+        # PRE-LIFT model's when the factorable lift ran. The lifted aux rows are a
+        # faithful encoding but a poor ruler (#1659): judged on them, the cap refused
+        # nvs09's optimum -43.1343, which ``verify_point`` accepts on the declared
+        # model, and the solve lost its certificate.
+        if _inj_arb[0] is None:
+            _inj_arb[0] = _spatial_row_arbiter(
+                evaluator, cl_list, cu_list, _prereform_model, _prereform_nvars
+            )
+        _ia = _inj_arb[0]
+        if _arb_has_rows(_ia) and not _check_constraint_feasibility(
+            _ia.evaluator, _ia.view(x_cand), _ia.cl, _ia.cu
+        ):
+            logger.debug(
+                "Rejected an incumbent candidate (obj=%.6g) that fails the search's "
+                "row arbiter (#1254 cap); the search continues without it.",
                 obj_cand,
             )
             return False
@@ -37866,6 +38031,31 @@ def _highs_std_form(model: Model):
     _default_side = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
     x_l[:n_orig][x_l[:n_orig] <= -_default_side] = -_HIGHS_INF
     x_u[:n_orig][x_u[:n_orig] >= _default_side] = _HIGHS_INF
+    if int_idx and A.shape[0]:
+        # A row over ONE free integer column is that column's integer bound, applied
+        # exactly, as on the Rust route (:func:`_round_single_integer_rows_sparse`).
+        # HiGHS enforces it to its 1e-6 ``mip_feasibility_tolerance`` only; on
+        # ``2x + y >= 2.0000004`` (``y`` fixed at 0) beside the near-inconsistent
+        # ``c == 1``, ``c == 1 + 5e-8`` it published x = 1, and the #2151 tight
+        # re-solve that would find x = 2 is infeasible at 1e-9 on the ``c`` rows.
+        _A_ub_h, _b_ub_h, _A_eq_h, _b_eq_h = _decompose_eq_slack_form(
+            A,
+            np.asarray(lp_data.b_eq, dtype=np.float64),
+            n_orig,
+            A.shape[1] - n_orig,
+            np.asarray(lp_data.x_u, dtype=np.float64),
+            row_sense=_declared_row_senses(lp_data, A),
+        )
+        x_l, x_u, _ = _round_single_integer_rows_sparse(
+            x_l,
+            x_u,
+            n_orig,
+            int_idx,
+            ((_A_ub_h, _b_ub_h, "<="), (_A_eq_h, _b_eq_h, "==")),
+            # A crossed box is refused as ``error`` here, so a row with no integer
+            # solution (``2x == 1``) is left for HiGHS to prove infeasible.
+            keep_crossed=False,
+        )
     sf = StdForm.from_arrays(c, A, lp_data.b_eq, x_l, x_u, float(lp_data.obj_const), int_idx)
     if sf.n < n_orig:
         raise ValueError(f"standard form has {sf.n} columns for {n_orig} model variables")
@@ -38269,6 +38459,103 @@ def _relu_root_cut_loop(sf, n_orig: int, spec: dict, *, budget: float):
     return _augmented(), stats
 
 
+def _highs_milp_verifier_resolve(
+    model, sf, out, n_orig, time_limit, t_start, max_nodes, gap_tolerance, abs_gap_tolerance
+):
+    """Re-solve at ``mip_feasibility_tolerance=1e-9`` when ``verify_point`` refuses
+    the point HiGHS's route publishes (#2252 follow-up).
+
+    HiGHS accepts a point that violates a row by up to its 1e-6
+    ``mip_feasibility_tolerance``, and so does the route's own standard-form
+    check. ``verify_point`` is stricter on a row whose columns are all integer:
+    no fractional move can absorb the residual, so its feasible-distance cap
+    (#1254) leaves only float noise. On ``2x + y >= 2.0000004`` (``y`` fixed at
+    0, integer ``x``) HiGHS returned x = 1 (violation 4e-7) and the route
+    published it as ``feasible``. The feasible x = 2 was never reached, because
+    at 1e-6 HiGHS has no reason to look past x = 1.
+
+    The re-solve is the whole certified route at the tolerance #2151 uses for a
+    refuted tree (:data:`REFUTED_TIGHT_FEAS_TOL`). It runs cold, capped as
+    #2151's is, and only when the published point is refused, so a result that
+    verifies is untouched. It replaces ``out`` only when its own point passes
+    ``verify_point``, never on an ``infeasible`` (a tighter tolerance can report
+    that on a feasible model); otherwise ``out`` stands as before.
+    """
+    from discopt._affine_evaluator import post_solve_evaluator
+    from discopt.solvers.lp_milp_highs import (
+        _DECLINE_LABELS,
+        PRESOLVE_CROSS_BUDGET_FACTOR,
+        PRESOLVE_CROSS_MIN_BUDGET,
+        REFUTED_TIGHT_FEAS_TOL,
+        _as_history,
+        solve_milp_std,
+    )
+    from discopt.validation.feasibility import verify_point
+
+    if out.x is None or out.status not in ("optimal", "feasible"):
+        return out
+    ev = post_solve_evaluator(model)
+
+    def _refusal(x):
+        verdict = verify_point(model, np.asarray(x, dtype=np.float64)[:n_orig], evaluator=ev)
+        return None if verdict.ok else (verdict.reason or "refused")
+
+    why = _refusal(out.x)
+    if why is None:
+        return out
+    left = float(time_limit) - (time.perf_counter() - t_start)
+    out.stats["milp/verifier_refused_published"] = 1.0
+    out.labels["milp/verifier_refused_published"] = why
+    # Budgeted like #2151's tight re-solve, not on the whole remaining limit: on a
+    # hard MILP whose point is refused, the re-solve may otherwise double the wall.
+    left = min(
+        left,
+        max(PRESOLVE_CROSS_MIN_BUDGET, PRESOLVE_CROSS_BUDGET_FACTOR * float(out.wall_time)),
+    )
+    if left <= 0.0:
+        return out
+    tight = solve_milp_std(
+        sf,
+        time_limit=left,
+        gap_tolerance=float(gap_tolerance),
+        abs_gap_tolerance=abs_gap_tolerance,
+        max_nodes=int(max_nodes),
+        n_struct=n_orig,
+        feasibility_tolerance=REFUTED_TIGHT_FEAS_TOL,
+    )
+    out.stats["milp/verifier_tight_resolve_ran"] = 1.0
+    # Only a VERIFIED point is adopted. An ``infeasible`` from the re-solve is not:
+    # tightening ``mip_feasibility_tolerance`` to 1e-9 shrinks the feasible set
+    # HiGHS searches, so a model whose ``verify_point``-feasible points all use
+    # 1e-7..1e-6 of slack on rows with continuous columns can read infeasible
+    # there while it has feasible points (review of #2257). #2151, whose tolerance
+    # this reuses, never adopts an ``infeasible`` either.
+    if (
+        tight.x is not None
+        and tight.status in ("optimal", "feasible")
+        and _refusal(tight.x) is None
+    ):
+        # The superseded solve's verdicts move to history, as on #2151's adoption.
+        tight.stats = {
+            **_as_history(out.stats, ()),
+            **tight.stats,
+            "milp/verifier_tight_resolve_adopted": 1.0,
+        }
+        tight.labels = {
+            **_as_history(out.labels, _DECLINE_LABELS),
+            **tight.labels,
+            "milp/bound_provenance": f"{tight.labels.get('milp/bound_provenance', 'highs-fp')}, "
+            f"mip_feasibility_tolerance={REFUTED_TIGHT_FEAS_TOL:g} after verify_point "
+            "refused the published point",
+        }
+        tight.node_count += out.node_count
+        return tight
+    out.labels["milp/verifier_tight_resolve_declined"] = f"tight re-solve status {tight.status}" + (
+        "" if tight.x is None else ", its point refused too"
+    )
+    return out
+
+
 def _solve_milp_highs(
     model: Model,
     time_limit: float,
@@ -38342,6 +38629,17 @@ def _solve_milp_highs(
         max_nodes=int(max_nodes),
         initial_point=seed,
         n_struct=n_orig,
+    )
+    out = _highs_milp_verifier_resolve(
+        model,
+        sf_milp,
+        out,
+        n_orig,
+        time_limit,
+        t_start,
+        max_nodes,
+        gap_tolerance,
+        abs_gap_tolerance,
     )
     wall = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
@@ -39034,6 +39332,82 @@ def _relu_native_engine(
     return _engine
 
 
+def _round_single_integer_rows_sparse(
+    xl: np.ndarray,
+    xu: np.ndarray,
+    n_orig: int,
+    int_idx: Iterable[int],
+    blocks: Iterable[tuple[Any, Optional[np.ndarray], str]],
+    keep_crossed: bool = True,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """``(xl, xu)`` with each row over ONE free integer column applied as the integer
+    bound it states, and the number of bounds that moved (#2252 follow-up).
+
+    The sparse, vectorized form of :func:`discopt.solvers.oa._round_single_integer_rows`
+    for the pure-MILP routes (the Rust engine's box in :func:`_solve_milp_simplex`,
+    HiGHS's in :func:`_highs_std_form`). ``blocks`` holds ``(A, b, sense)`` over the first
+    ``n_orig`` columns, ``sense`` ``"<="`` or ``"=="``. A row whose every other
+    column is fixed (``xl == xu``) bounds its one free column ``j``: ``a x_j <sense>
+    q * a``. On an integer ``x_j`` that bound rounds exactly (no integer value is
+    removed), allowing ``1e-9`` relative float noise so a row resting on an integer
+    stays at it. Rows are judged against the input box in one pass, so a bound one
+    row derives is not used to fix columns for another (sound, just not a fixed
+    point). Only tightens; a row that empties the box leaves ``xl > xu`` for the
+    engine to prove infeasible, unless ``keep_crossed=False``: then that column keeps
+    its input bounds and the engine judges the row itself (the HiGHS route refuses a
+    crossed box with ``error`` instead of proving it infeasible). Columns past
+    ``n_orig`` (slacks) are untouched.
+
+    A row whose bound ``|q|`` is so large that the noise allowance reaches half an
+    integer (``|q| >= 5e8``) is skipped: there the rounding could not be exact, and
+    measured on ``1e-13 y >= 5`` (``q = 5e13``) it set ``y >= 5e13 - 5e4``, a bound
+    that is valid but admits points the row rejects, and changed which route served
+    the model.
+    """
+    import scipy.sparse as _sp
+
+    xl = np.array(xl, dtype=np.float64, copy=True)
+    xu = np.array(xu, dtype=np.float64, copy=True)
+    is_int = np.zeros(n_orig, dtype=bool)
+    ii = np.fromiter((int(j) for j in int_idx), dtype=np.int64)
+    is_int[ii[ii < n_orig]] = True
+    if not is_int.any():
+        return xl, xu, 0
+    lo, hi = xl[:n_orig].copy(), xu[:n_orig].copy()
+    new_lo, new_hi = lo.copy(), hi.copy()
+    fixed = lo == hi
+    for A, b, sense in blocks:
+        if A is None or b is None or A.shape[0] == 0:
+            continue
+        M = _sp.csr_matrix(A)
+        M.eliminate_zeros()
+        rows = np.repeat(np.arange(M.shape[0]), np.diff(M.indptr))
+        cols, vals = M.indices, M.data
+        free = ~fixed[cols]
+        nfree = np.bincount(rows, weights=free, minlength=M.shape[0])
+        rest = np.bincount(rows, weights=np.where(free, 0.0, vals * lo[cols]), minlength=M.shape[0])
+        pick = free & (nfree[rows] == 1) & is_int[cols]
+        if not pick.any():
+            continue
+        r, j, a = rows[pick], cols[pick], vals[pick]
+        with np.errstate(invalid="ignore", over="ignore"):
+            q = (np.asarray(b, dtype=np.float64)[r] - rest[r]) / a
+        noise = 1e-9 * np.maximum(1.0, np.abs(q))
+        ok = np.isfinite(q) & (noise < 0.5)
+        r, j, a, q, noise = r[ok], j[ok], a[ok], q[ok], noise[ok]
+        eq = sense == "=="
+        upper = (a > 0.0) | eq
+        lower = (a < 0.0) | eq
+        np.minimum.at(new_hi, j[upper], np.floor(q[upper] + noise[upper]))
+        np.maximum.at(new_lo, j[lower], np.ceil(q[lower] - noise[lower]))
+    if not keep_crossed:
+        crossed = new_lo > new_hi
+        new_lo[crossed], new_hi[crossed] = lo[crossed], hi[crossed]
+    moved = int(np.count_nonzero(new_lo > lo) + np.count_nonzero(new_hi < hi))
+    xl[:n_orig], xu[:n_orig] = new_lo, new_hi
+    return xl, xu, moved
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -39161,6 +39535,35 @@ def _solve_milp_simplex(
                 x_l=cast(Any, _sf_e2.xl),
                 x_u=cast(Any, _sf_e2.xu),
             )
+    # The row/bound/integrality decomposition of the ORIGINAL rows, independent of
+    # any point: the integer-row rounding below and the feasibility gate after the
+    # search both read it. Sparse straight through; a dense ``A_eq`` still goes via
+    # ``_dense_A`` so this stays byte-identical to the pre-fix behaviour there.
+    _A_gate = lp_data.A_eq if _sp_issparse(lp_data.A_eq) else _dense_A(lp_data.A_eq)
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+        _A_gate,
+        np.asarray(lp_data.b_eq),
+        n_orig,
+        lp_data.A_eq.shape[1] - n_orig,
+        np.asarray(lp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(lp_data, _A_gate),
+    )
+    # A row over ONE free integer column (every other column fixed) is that column's
+    # integer bound, applied exactly (the OA master's rule, #2252 follow-up). The
+    # engine enforces it only to its 1e-6 row tolerance, and ``verify_point`` allows
+    # an integer-only row float noise alone (#1254), so unrounded the engine certified
+    # x = 1 on ``2x + y >= 2.0000004`` (``y`` fixed at 0) and #1561 published it
+    # ``feasible``; the optimum is x = 2. Only the engine's box changes: the gate
+    # below still reads the declared ``lp_data`` bounds.
+    _xl_r, _xu_r, _n_int_rows_rounded = _round_single_integer_rows_sparse(
+        np.asarray(_drv.x_l, dtype=np.float64),
+        np.asarray(_drv.x_u, dtype=np.float64),
+        n_orig,
+        int_idx,
+        ((_A_ub_m, _b_ub_m, "<="), (_A_eq_m, _b_eq_m, "==")),
+    )
+    if _n_int_rows_rounded:
+        _drv = _drv._replace(x_l=cast(Any, _xl_r), x_u=cast(Any, _xu_r))
     _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
     # A MILP with no constraints is solved by the driver itself (each column at the
     # bound its cost selects, integers rounded inward); it used to defer to the Python
@@ -39390,22 +39793,13 @@ def _solve_milp_simplex(
             _d["milp/no_stall_tree"] = 1.0
         if _coef_entry_rewritten:
             _d["milp/rust_coef_entry_rewritten"] = float(_coef_entry_rewritten)
+        if _n_int_rows_rounded:
+            _d["milp/int_row_bounds_rounded"] = float(_n_int_rows_rounded)
         return _d
 
     # Feasibility gate (shared by the return path below and the #698 re-entry
-    # adoption test). The row/bound/integrality decomposition is independent of
-    # the point, so build it once and close over it.
-    # Sparse straight through (the whole point); a dense ``A_eq`` still goes via
-    # ``_dense_A`` so this stays byte-identical to the pre-fix behaviour there.
-    _A_gate = lp_data.A_eq if _sp_issparse(lp_data.A_eq) else _dense_A(lp_data.A_eq)
-    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-        _A_gate,
-        np.asarray(lp_data.b_eq),
-        n_orig,
-        lp_data.A_eq.shape[1] - n_orig,
-        np.asarray(lp_data.x_u, dtype=np.float64),
-        row_sense=_declared_row_senses(lp_data, _A_gate),
-    )
+    # adoption test). The row/bound/integrality decomposition (``_A_ub_m`` ...) is
+    # built before the search, where the integer-row rounding reads it.
     _xl_gate = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
     _xu_gate = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
     _gate_tol = 1e-5

@@ -1338,8 +1338,12 @@ def _enc_variable(v: Variable) -> dict:
         "name": v.name,
         "type": v.var_type.value,
         "shape": list(v.shape),
-        "lb": _enc_array(v.lb),
-        "ub": _enc_array(v.ub),
+        # The bounds as written (#2252 follow-up): an INTEGER box is stored
+        # snapped to its integer range, and reloading re-applies the same
+        # (idempotent) snap, so the box round-trips while ``validate`` can still
+        # tell an empty integer range from a box the caller crossed.
+        "lb": _enc_array(v._declared_bound("lb")),
+        "ub": _enc_array(v._declared_bound("ub")),
         "bound_stack": [
             [_enc_array(lb), _enc_array(ub)] for lb, ub in getattr(v, "_bound_stack", [])
         ],
