@@ -585,6 +585,10 @@ pub struct Domain {
     prevboundval: Vec<(f64, i64)>,
     domchgreason: Vec<Reason>,
     branch_pos: Vec<usize>,
+    /// Per stack entry: whether the chain of earlier changes on its column and bound
+    /// (`prevboundval`) holds a branching change. Maintained on push / truncate so
+    /// [`Self::reduced_domain_change_stack`] needs no pass over the stack (#2225).
+    chain_branched: Vec<bool>,
     changedcolsflags: Vec<bool>,
     changedcols: Vec<usize>,
     infeasible: bool,
@@ -640,6 +644,7 @@ impl Domain {
             prevboundval: Vec::new(),
             domchgreason: Vec::new(),
             branch_pos: Vec::new(),
+            chain_branched: Vec::new(),
             changedcolsflags: vec![false; n],
             changedcols: Vec::new(),
             infeasible: false,
@@ -2421,6 +2426,11 @@ impl Domain {
             self.branch_pos.push(self.domchgstack.len());
         }
         let oldbound = self.do_change_bound(chg);
+        let earlier = prev_pos != -1 && {
+            let p = prev_pos as usize;
+            self.domchgreason[p] == Reason::Branching || self.chain_branched[p]
+        };
+        self.chain_branched.push(earlier);
         self.prevboundval.push((oldbound, prev_pos));
         self.domchgstack.push(chg);
         self.domchgreason.push(reason);
@@ -2472,6 +2482,7 @@ impl Domain {
             self.prevboundval.clear();
             self.domchgreason.clear();
             self.branch_pos.clear();
+            self.chain_branched.clear();
             return None;
         }
         let ku = k as usize;
@@ -2479,6 +2490,7 @@ impl Domain {
         self.domchgstack.truncate(ku);
         self.domchgreason.truncate(ku);
         self.prevboundval.truncate(ku);
+        self.chain_branched.truncate(ku);
         Some(chg)
     }
 
@@ -2503,6 +2515,7 @@ impl Domain {
         self.domchgstack.clear();
         self.domchgreason.clear();
         self.branch_pos.clear();
+        self.chain_branched.clear();
         let implied = |d: &Domain, c: &DomainChange| match c.boundtype {
             BoundType::Lower => c.boundval <= d.col_lower[c.column],
             BoundType::Upper => c.boundval >= d.col_upper[c.column],
@@ -2566,35 +2579,56 @@ impl Domain {
     /// and bound, in stack order, with the positions of those that are (or descend from)
     /// branching changes.
     pub fn reduced_domain_change_stack(&self) -> (Vec<DomainChange>, Vec<usize>) {
-        let mut reduced = Vec::with_capacity(self.domchgstack.len());
-        let mut positions = Vec::with_capacity(self.branch_pos.len());
         // HiGHS walks each kept change's chain of earlier changes on its column
         // (`prevboundval`) looking for a branching one: O(stack x chain), which a
-        // deep dive on a wide general-integer column makes quadratic. A change's
-        // previous position is always earlier on the stack, so whether its chain
-        // holds a branching change is known in one forward pass; the output is the
-        // same.
-        let mut branched: Vec<bool> = Vec::with_capacity(self.domchgstack.len());
-        for i in 0..self.domchgstack.len() {
-            let prev = self.prevboundval[i].1;
-            let earlier = prev != -1 && {
-                let p = prev as usize;
-                self.domchgreason[p] == Reason::Branching || branched[p]
-            };
-            branched.push(earlier);
-        }
-        for (i, c) in self.domchgstack.iter().enumerate() {
-            let last = match c.boundtype {
-                BoundType::Lower => self.col_lower_pos[c.column],
-                BoundType::Upper => self.col_upper_pos[c.column],
-            };
-            if last != i as i64 {
-                continue;
-            }
-            if self.domchgreason[i] == Reason::Branching || branched[i] {
+        // deep dive on a wide general-integer column makes quadratic. Whether a
+        // chain holds a branching change is kept per entry as it is pushed
+        // (`chain_branched`), and the kept entries -- the last change per column and
+        // bound -- are exactly the positions `col_lower_pos` / `col_upper_pos` hold.
+        // So the reduced stack costs O(min(stack, 2 ncols log ncols)), not O(stack):
+        // `openNodesToQueue` calls this once per open node of a dive, and a dive of
+        // depth D otherwise costs O(D x stack) there after the deadline (#2225:
+        // MIPcc27 enlight4, a 0.8 s limit returned at 3.5 s and a 30 s limit never).
+        // The output is the same either way, in stack order.
+        let n_stack = self.domchgstack.len();
+        let ncols = self.col_lower_pos.len();
+        let kept: Vec<usize> = if n_stack <= 2 * ncols {
+            (0..n_stack)
+                .filter(|&i| {
+                    let c = &self.domchgstack[i];
+                    let last = match c.boundtype {
+                        BoundType::Lower => self.col_lower_pos[c.column],
+                        BoundType::Upper => self.col_upper_pos[c.column],
+                    };
+                    last == i as i64
+                })
+                .collect()
+        } else {
+            let mut v: Vec<usize> = self
+                .col_lower_pos
+                .iter()
+                .chain(self.col_upper_pos.iter())
+                .filter(|&&p| p >= 0)
+                .map(|&p| p as usize)
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        let mut reduced = Vec::with_capacity(kept.len());
+        let mut positions = Vec::with_capacity(self.branch_pos.len());
+        for i in kept {
+            let c = self.domchgstack[i];
+            debug_assert_eq!(
+                match c.boundtype {
+                    BoundType::Lower => self.col_lower_pos[c.column],
+                    BoundType::Upper => self.col_upper_pos[c.column],
+                },
+                i as i64
+            );
+            if self.domchgreason[i] == Reason::Branching || self.chain_branched[i] {
                 positions.push(reduced.len());
             }
-            reduced.push(*c);
+            reduced.push(c);
         }
         (reduced, positions)
     }
@@ -2641,6 +2675,7 @@ impl Domain {
         self.prevboundval.clear();
         self.domchgreason.clear();
         self.branch_pos.clear();
+        self.chain_branched.clear();
     }
 
     /// Make the current bounds the global baseline: clear the change stack so
@@ -2660,6 +2695,7 @@ impl Domain {
         self.prevboundval.clear();
         self.domchgreason.clear();
         self.branch_pos.clear();
+        self.chain_branched.clear();
     }
 
     /// `propagate()`: true when there was anything to propagate.
@@ -4272,6 +4308,77 @@ mod tests {
             "probe fired too little: checked {checked} objective changes {obj_changes} \
              objective infeasible {obj_infeasible} with partition {with_partition}"
         );
+    }
+
+    /// #2225: the reduced stack built from the per-column last positions and the
+    /// maintained chain flags equals HiGHS's chain walk ([`reduced_reference`]),
+    /// on stacks both shorter
+    /// and much longer than `2 ncols` (the two code paths), through branching,
+    /// non-branching tightenings and backtracks. A dive on an unbounded integer
+    /// column pushes many changes on few columns -- the case the new path serves.
+    #[test]
+    fn reduced_stack_matches_the_chain_walk_on_long_stacks() {
+        let mut r = Lcg(2225);
+        let mut checked = 0usize;
+        let mut long_checked = 0usize;
+        for _ in 0..40 {
+            let n = r.int(1, 4) as usize;
+            let model = Arc::new(DomainModel::from_rows(
+                n,
+                &[],
+                vec![],
+                vec![],
+                vec![true; n],
+            ));
+            let (lb, ub) = (vec![-1e6; n], vec![1e6; n]);
+            let mut d = Domain::new(Arc::clone(&model), &lb, &ub, 1e-6, 1e-9);
+            for _ in 0..r.int(5, 200) {
+                if r.int(0, 9) == 0 {
+                    d.backtrack();
+                } else {
+                    let col = r.int(0, n as i64 - 1) as usize;
+                    let lower = r.int(0, 1) == 0;
+                    let (lo, hi) = (d.col_lower[col], d.col_upper[col]);
+                    if hi - lo < 2.0 {
+                        continue;
+                    }
+                    let step = r.int(1, 3) as f64;
+                    let chg = DomainChange {
+                        boundval: if lower { lo + step } else { hi - step },
+                        column: col,
+                        boundtype: if lower {
+                            BoundType::Lower
+                        } else {
+                            BoundType::Upper
+                        },
+                    };
+                    let reason = if r.int(0, 2) == 0 {
+                        Reason::Branching
+                    } else {
+                        Reason::Unspecified
+                    };
+                    d.change_bound(chg, reason);
+                }
+                assert_eq!(d.chain_branched.len(), d.domchgstack.len());
+                let got = d.reduced_domain_change_stack();
+                let want = reduced_reference(&d);
+                assert_eq!(got.1, want.1);
+                assert_eq!(got.0.len(), want.0.len());
+                for (a, b) in got.0.iter().zip(&want.0) {
+                    assert_eq!(
+                        (a.column, a.boundtype, a.boundval.to_bits()),
+                        (b.column, b.boundtype, b.boundval.to_bits())
+                    );
+                }
+                checked += 1;
+                if d.domchgstack.len() > 2 * n {
+                    long_checked += 1;
+                }
+            }
+        }
+        // Both paths must have run, the long one many times.
+        assert!(checked > 1000, "{checked}");
+        assert!(long_checked > 500, "{long_checked}");
     }
 
     #[test]

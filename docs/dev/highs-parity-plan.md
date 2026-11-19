@@ -1922,6 +1922,53 @@ gate was set to 7, not 4. Arms were interleaved, the relative wall sd was ≤ 0.
 | MIPLIB-38 | **90/114 / 111/114** | **727 / 325 s** | 1.42 | 7 instances only-H, none only-R; nodes on both-certified 26,753 / 3,382 |
 | IIS (53 P0.6) | 53/53 identical | 1.08 / 0.77 s | median 0.94 | #2225: the Rust driver is 1.9-2.6x slower on the MIPcc27 smallset, with probes incomplete |
 
+**#2225 re-measurement, 2026-11-19** (commit `e3b12b4`, Linux, 4 cores, HiGHS 1.16.0;
+`python -m discopt.mipcc` per instance, `MIPCC_TIME_LIMIT=120 MIPCC_THREADS=2`, the two
+engines interleaved per instance; a shorter budget than the issue's 600 s / 6 threads,
+so sizes are not comparable with the issue body's table). The smallset gap is no longer
+the two failure modes of the issue body (both gone since `f3c380b`); it is spread over
+several causes, measured one instance at a time with a per-probe log:
+
+- *Fixed:* a deep dive overran its deadline without bound. `openNodesToQueue` hands each
+  open node to the queue, and each hand-off built its reduced domain stack by a pass
+  over the whole change stack, O(depth x stack) after the stop. On an `enlight4` probe
+  (unbounded integer columns, zero objective) a 0.8 s limit returned at 3.45 s, 3 s at
+  21 s, 30 s never; the portfolio's members were abandoned and the entry wrote the whole
+  model. The reduced stack now comes from the per-column last positions and a chain flag
+  kept per entry (same output; a 60,000-node cap stops at the same node, 7.45 -> 1.76 s).
+  `enlight4` then returns a confirmed subsystem (31 elements, HiGHS 19).
+- *Where the panel stands* (same settings, all 50 instances): Rust 38 answers (22
+  complete, all certified), 12 whole-model answers, total wall 3,929 s; HiGHS 48 answers
+  (39 complete, 35 certified), 2 whole-model (`neos-1461051`, `no-ip-65059`), 2,336 s.
+  With the deadline fix, re-running Rust on its 12 whole-model instances recovers
+  `enlight4` only (12 -> 11).
+- *Falsified:* "the IIS probes should run the pure-MILP route's root cut budget"
+  (`_milp_root_cut_budget`: 1,500 cuts / 150 rounds / c-MIR; the handle runs the
+  binding's 16 cuts / 1 round). It decides some probes at the root (`hole9` full model
+  115 -> 1 node; one `enlight4` probe 10^6 nodes -> 1), but on a single order (ICB,
+  120 s) `dell` completed 60 probes instead of 173 and `bell3binf` went from complete
+  (127) to incomplete (193): the root loop, up to half of each probe's budget, costs more
+  than it saves across hundreds of short probes. Not adopted.
+- *Falsified:* "the exact Farkas rung is reached because open structural columns lack the
+  row-implied bounds the float verifier recovers for slacks". On `bell3binf` the exact
+  rung runs on 4,973 node LPs (36 s of 89 s) and rescues 4,864; generalizing
+  `slack_upper_bounds` to every open column moved `FarkasRejectOpen` 13,788 -> 13,776.
+  The open columns are those whose bound element the IIS probe deleted, and their rows
+  hold other open columns, so no implied bound exists.
+- *Open:* (a) the full model is not proved infeasible within the budget on 7 instances
+  (`enlight11`, `neos-1461051`, `neos-3135526-osun`, `neos-3135947-otra`,
+  `neos-3426895-dijle`, `neos-3426989-dives`, `neos-4558049-warta`): no subsystem at all.
+  On `enlight4`-type probes HiGHS decides in presolve (free continuous columns aggregated
+  out, then a parity contradiction); discopt's presolve reaches the same reduced problem
+  and proves it infeasible, but a reduced-problem verdict is never trusted
+  (`milp_driver.rs`, "reduced problem ... solving the original"), and the original's
+  root separators do not find the parity cut. (b) No probing in the MILP presolve: on
+  `aim-200` (3-SAT) each infeasible probe takes ~470 nodes vs HiGHS's ~1. (c) Per-solve
+  overhead on infeasible probes: on `bell3binf` sub-MIP heuristics take ~45 s of 76 s
+  (switching heuristics off makes the feasible probes 6x slower, net worse) and the exact
+  Farkas rung most of the rest. (d) `dell`'s Rust subsystem was found feasible within
+  1e-5 by the checker-settings re-solve, so the entry wrote the whole model.
+
 **The test suite as a second panel.** The full suite was run with HiGHS forced on every
 seam. 36 tests failed only because of the engine. 27 of those asserted Rust route
 labels or Pyodide behaviour. The remaining **9 were real: the HiGHS route gave up where
