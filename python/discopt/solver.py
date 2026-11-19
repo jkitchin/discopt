@@ -20058,6 +20058,8 @@ def solve_model(
     # vetoed / cut-off point as the final ``optimal`` incumbent. Reads
     # ``_gap_certified`` at call time so the surfaced ``best_bound`` honors the
     # A1 taint gate exactly like the batch path.
+    _inj_arb: list = [None]  # the #1659 row arbiter, built on first injection
+
     def _inject_incumbent(x_cand, obj_cand):
         # #1316: box feasibility, before anything else. Every non-batch injection
         # on this path funnels through here, so one check covers the warm start,
@@ -20095,7 +20097,19 @@ def solve_model(
             if not np.isfinite(_obj_int):
                 return False
             x_cand, obj_cand = _x_int, _obj_int
-        if cl_list and not _check_constraint_feasibility(evaluator, x_cand, cl_list, cu_list):
+        # The rows judged are the exit gate's own (:func:`_spatial_row_arbiter`): the
+        # PRE-LIFT model's when the factorable lift ran. The lifted aux rows are a
+        # faithful encoding but a poor ruler (#1659): judged on them, the cap refused
+        # nvs09's optimum -43.1343, which ``verify_point`` accepts on the declared
+        # model, and the solve lost its certificate.
+        if _inj_arb[0] is None:
+            _inj_arb[0] = _spatial_row_arbiter(
+                evaluator, cl_list, cu_list, _prereform_model, _prereform_nvars
+            )
+        _ia = _inj_arb[0]
+        if _arb_has_rows(_ia) and not _check_constraint_feasibility(
+            _ia.evaluator, _ia.view(x_cand), _ia.cl, _ia.cu
+        ):
             logger.debug(
                 "Rejected an incumbent candidate (obj=%.6g) that fails the search's "
                 "row arbiter (#1254 cap); the search continues without it.",
