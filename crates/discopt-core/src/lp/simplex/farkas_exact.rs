@@ -549,6 +549,271 @@ fn noise_open_columns(y: &[f64], cols: &SparseCols, n: usize, l: &[f64], u: &[f6
 mod tests {
     use super::*;
 
+    /// The pre-#2225 `certify_one`, verbatim: every round re-evaluates every open
+    /// column exactly and re-solves the whole held set. The reference the faster
+    /// routine must agree with.
+    fn certify_one_reference(
+        y: &[f64],
+        cols: &SparseCols,
+        n: usize,
+        b: &[f64],
+        l: &[f64],
+        u: &[f64],
+    ) -> bool {
+        let mut yq: Vec<BigRational> = y.iter().map(|&v| q(v)).collect();
+        let open_cols: Vec<usize> = (0..n).filter(|&j| l[j] <= -INF || u[j] >= INF).collect();
+        let mut held: BTreeSet<usize> = BTreeSet::new();
+        let mut spent = 0u64;
+        for round in 0..=MAX_ROUNDS {
+            let wrong: Vec<usize> = open_cols
+                .iter()
+                .copied()
+                .filter(|&j| selects_open(&reduced(cols, j, &yq), l[j], u[j]))
+                .collect();
+            if wrong.is_empty() {
+                break;
+            }
+            if round == MAX_ROUNDS {
+                return false;
+            }
+            held.extend(wrong);
+            if held.len() > MAX_COLUMNS {
+                return false;
+            }
+            let set: Vec<usize> = held.iter().copied().collect();
+            let rhs: Vec<BigRational> = set.iter().map(|&j| -reduced(cols, j, &yq)).collect();
+            let Some(dy) = solve_rect(cols, &set, &rhs, &mut spent) else {
+                return false;
+            };
+            for (i, v) in dy {
+                yq[i] += v;
+            }
+        }
+        let feas = q(super::super::primal::AUDIT_FEAS);
+        let one = BigRational::one();
+        let mut g = BigRational::zero();
+        let mut margin = BigRational::zero();
+        for (bi, yi) in b.iter().zip(&yq) {
+            if yi.is_zero() {
+                continue;
+            }
+            if *bi != 0.0 {
+                g += q(*bi) * yi;
+            }
+            margin += yi.abs() * &feas * (&one + q(bi.abs()));
+        }
+        for j in 0..n {
+            let rc = reduced(cols, j, &yq);
+            if rc.is_zero() {
+                continue;
+            }
+            let side = if rc.is_positive() {
+                if u[j] >= INF {
+                    return false;
+                }
+                u[j]
+            } else {
+                if l[j] <= -INF {
+                    return false;
+                }
+                l[j]
+            };
+            g -= &rc * q(side);
+            margin += rc.abs() * &feas * (&one + q(side.abs()));
+        }
+        g > margin
+    }
+
+    fn reference(y: &[f64], c: &SparseCols, n: usize, b: &[f64], l: &[f64], u: &[f64]) -> bool {
+        [1.0f64, -1.0].iter().any(|s| {
+            let ys: Vec<f64> = y.iter().map(|v| s * v).collect();
+            certify_one_reference(&ys, c, n, b, l, u)
+        })
+    }
+
+    /// Deterministic LCG (no `rand` dependency in this crate's tests).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % ((hi - lo + 1) as u64)) as i64
+        }
+    }
+
+    /// One random system `A x = b`, `l <= x <= u` with open columns, and a float ray.
+    /// `planted`: an exact certificate `y*` (small integers) exists -- every open
+    /// column's reduced cost is exactly zero under it and `b` beats the box supremum by
+    /// a margin -- and the ray handed over is `y*/3` in floating point, so its reduced
+    /// costs on the open columns are rounding noise, not zero (what the simplex hands
+    /// over). Else `b = A x0` for a point `x0` of the box: feasible.
+    #[allow(clippy::type_complexity)]
+    fn random_case(
+        r: &mut Lcg,
+        planted: bool,
+    ) -> (
+        SparseCols,
+        usize,
+        usize,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        let m = r.int(2, 6) as usize;
+        let n = r.int(3, 10) as usize;
+        let ystar: Vec<f64> = (0..m).map(|_| r.int(-3, 3) as f64).collect();
+        let mut a = vec![0.0; m * n];
+        let (mut l, mut u) = (vec![0.0; n], vec![0.0; n]);
+        for j in 0..n {
+            for i in 0..m {
+                if r.int(0, 2) > 0 {
+                    // Decimal entries make the float ray's reduced costs inexact.
+                    a[i * n + j] = r.int(-9, 9) as f64 * if r.int(0, 1) == 0 { 1.0 } else { 0.1 };
+                }
+            }
+            match r.int(0, 3) {
+                0 => (l[j], u[j]) = (-INF, INF),
+                1 => (l[j], u[j]) = (r.int(-3, 0) as f64, INF),
+                2 => (l[j], u[j]) = (-INF, r.int(0, 3) as f64),
+                _ => (l[j], u[j]) = (r.int(-3, 0) as f64, r.int(0, 3) as f64),
+            }
+            let open = l[j] <= -INF || u[j] >= INF;
+            if planted && open {
+                // Make (A^T y*)_j exactly zero: put an integer entry on a row where
+                // y* is nonzero, chosen to cancel the rest exactly (y* integer).
+                if let Some(k) = (0..m).find(|&i| ystar[i] != 0.0) {
+                    for i in 0..m {
+                        a[i * n + j] = a[i * n + j].round();
+                    }
+                    let rest: f64 = (0..m)
+                        .filter(|&i| i != k)
+                        .map(|i| a[i * n + j] * ystar[i])
+                        .sum();
+                    a[k * n + j] = -rest / ystar[k];
+                    if a[k * n + j] != a[k * n + j].round() {
+                        // Not an exact integer: scale the column so it is.
+                        for i in 0..m {
+                            a[i * n + j] *= ystar[k];
+                        }
+                        a[k * n + j] = -rest;
+                    }
+                } else {
+                    for i in 0..m {
+                        a[i * n + j] = 0.0;
+                    }
+                }
+            }
+        }
+        let c = csc(&a, m, n);
+        let b: Vec<f64> = if planted {
+            // b^T y* = sup over the box of (A^T y*)^T x, plus a clear margin: put it all
+            // on one row where y* is nonzero.
+            let mut sup = 0.0;
+            for j in 0..n {
+                let rc: f64 = (0..m).map(|i| a[i * n + j] * ystar[i]).sum();
+                if rc > 0.0 {
+                    sup += rc * if u[j] >= INF { 0.0 } else { u[j] };
+                } else if rc < 0.0 {
+                    sup += rc * if l[j] <= -INF { 0.0 } else { l[j] };
+                }
+            }
+            let mut b = vec![0.0; m];
+            if let Some(k) = (0..m).find(|&i| ystar[i] != 0.0) {
+                b[k] = (sup + 1.0) / ystar[k];
+            }
+            b
+        } else {
+            let x0: Vec<f64> = (0..n)
+                .map(|j| match (l[j] > -INF, u[j] < INF) {
+                    (true, true) => 0.5 * (l[j] + u[j]),
+                    (true, false) => l[j] + 1.0,
+                    (false, true) => u[j] - 1.0,
+                    (false, false) => r.int(-2, 2) as f64,
+                })
+                .collect();
+            (0..m)
+                .map(|i| (0..n).map(|j| a[i * n + j] * x0[j]).sum())
+                .collect()
+        };
+        let y: Vec<f64> = if planted {
+            ystar.iter().map(|v| v / 3.0).collect()
+        } else {
+            (0..m).map(|_| r.int(-5, 5) as f64 / 7.0).collect()
+        };
+        (c, m, n, b, l, u, y)
+    }
+
+    /// #2225: the faster routine (held columns not re-evaluated, float sign screens, a
+    /// seeded first elimination, a float refutation of the final inequality) certifies
+    /// every ray the reference certifies, and never certifies a feasible system.
+    #[test]
+    fn faster_routine_certifies_whatever_the_reference_does_2225() {
+        let mut r = Lcg(0x2225);
+        let (mut both, mut only_new, mut feasible_checked) = (0usize, 0usize, 0usize);
+        for k in 0..3000 {
+            let planted = k % 2 == 0;
+            let (c, m, n, b, l, u, y) = random_case(&mut r, planted);
+            let new = farkas_exact_open(&y, &c, n, m, &b, &l, &u);
+            if planted {
+                let old = reference(&y, &c, n, &b, &l, &u);
+                assert!(
+                    !old || new,
+                    "case {k}: the reference certifies, the new routine refuses"
+                );
+                both += (old && new) as usize;
+                only_new += (!old && new) as usize;
+            } else {
+                assert!(!new, "case {k}: a feasible system was certified empty");
+                feasible_checked += 1;
+            }
+        }
+        // The probe fired: planted certificates were found, feasible systems checked.
+        assert!(both > 300, "only {both} planted certificates found by both");
+        assert_eq!(feasible_checked, 1500);
+        eprintln!("certified by both {both}, by the new routine only {only_new}");
+    }
+
+    /// #2225: `float_sign` never disagrees with the exact sign.
+    #[test]
+    fn float_sign_agrees_with_the_exact_sign() {
+        let mut r = Lcg(7);
+        let mut decided = 0;
+        for _ in 0..3000 {
+            let m = r.int(1, 8) as usize;
+            let a: Vec<f64> = (0..m)
+                .map(|_| r.int(-9, 9) as f64 * 0.1f64.powi(r.int(0, 3) as i32))
+                .collect();
+            let c = csc(&a, m, 1);
+            // Rays with exactly cancelling and near-cancelling entries.
+            let y: Vec<f64> = (0..m)
+                .map(|_| r.int(-9, 9) as f64 / (r.int(1, 7) as f64))
+                .collect();
+            let yq: Vec<BigRational> = y.iter().map(|&v| q(v)).collect();
+            let exact = reduced(&c, 0, &yq);
+            if let Some(sg) = float_sign(&c, 0, &y) {
+                decided += 1;
+                let want = if exact.is_positive() {
+                    1
+                } else if exact.is_negative() {
+                    -1
+                } else {
+                    0
+                };
+                assert_eq!(sg, want, "a={a:?} y={y:?}");
+            }
+        }
+        assert!(
+            decided > 2000,
+            "only {decided} signs decided in floating point"
+        );
+    }
+
     fn csc(a: &[f64], m: usize, n: usize) -> SparseCols {
         SparseCols::from_dense(a, m, n)
     }

@@ -14178,6 +14178,10 @@ mod tests {
         assert!(parse_tol_robust("1").unwrap() && parse_tol_robust("").unwrap());
         assert!(!parse_tol_robust("0").unwrap());
         assert!(parse_tol_robust("maybe").is_err());
+        // #2225: the sided box's switch, same table.
+        assert!(parse_tol_robust_sided("1").unwrap() && parse_tol_robust_sided("").unwrap());
+        assert!(!parse_tol_robust_sided("0").unwrap() && !parse_tol_robust_sided("no").unwrap());
+        assert!(parse_tol_robust_sided("sided").is_err());
     }
 
     #[test]
