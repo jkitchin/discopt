@@ -383,8 +383,19 @@ class _RootLP:
                         changed = True
             if not changed:
                 break
-        self.lb_sep = np.maximum(lb, self.lb)
-        self.ub_sep = np.minimum(ub, self.ub)
+        lb = np.maximum(lb, self.lb)
+        ub = np.minimum(ub, self.ub)
+        # #2262: an integer column's propagated bound is rounded inward. Interval
+        # FBBT over the linear rows yields fractional bounds (``x <= 0.445`` for an
+        # integer ``x``), and the separators complement against these: c-MIR's
+        # ``u_j - x_j`` is an integer only for an integral ``u_j``. Rounding is
+        # valid (the column is integer); the 1e-6 slack rounds a bound that is an
+        # integer up to FBBT noise outward, which only weakens.
+        ii = np.asarray(self.is_int, bool)
+        lb[ii] = np.ceil(lb[ii] - 1e-6)
+        ub[ii] = np.floor(ub[ii] + 1e-6)
+        self.lb_sep = lb
+        self.ub_sep = ub
 
     def oa_tangent(self, row_idx, x):
         g = self.ev.evaluate_constraints(x)[row_idx]
@@ -997,8 +1008,6 @@ def generate_root_cuts(
     # Flag ON: the round loop is bounded by what is LEFT of the stage budget.
     # Flag OFF: it restarts the clock here, exactly as it always did.
     t0 = t_stage if _deadline_enabled() else _time.perf_counter()
-    lb_s = np.where(np.isfinite(root.lb_sep), root.lb_sep, 0.0)
-    ub_s = np.where(np.isfinite(root.ub_sep), root.ub_sep, 1e5)
 
     for _rnd in range(ROUNDS):
         if _time.perf_counter() - t0 > time_budget_s:
@@ -1010,8 +1019,20 @@ def generate_root_cuts(
 
         cands = []
         try:
+            # #2262: the real root box, infinite where no bound exists. This used to
+            # substitute 0 / 1e5 for a missing bound, so c-MIR complemented against
+            # a bound the column does not have and its cut was valid only inside
+            # that invented box. ``separate_cmir`` now skips a row that needs a
+            # missing bound and rounds integer columns' bounds itself.
             cands += separate_cmir(
-                a_all, b_all, x, lb_s, ub_s, is_int, max_cuts=MAX_CUTS_PER_FAMILY, duals=duals
+                a_all,
+                b_all,
+                x,
+                root.lb_sep,
+                root.ub_sep,
+                is_int,
+                max_cuts=MAX_CUTS_PER_FAMILY,
+                duals=duals,
             )
         except Exception as exc:  # pragma: no cover - separator robustness
             logger.debug("root-cuts: c-MIR separation failed: %s", exc)
@@ -1020,8 +1041,8 @@ def generate_root_cuts(
             # capacity instead of dropped. The bounds are ``root.lb_sep``/``ub_sep``:
             # the declared box tightened by root FBBT over the linear rows, valid
             # at the root and still infinite where no bound exists. Never
-            # ``lb_s``/``ub_s``: those substitute 0 and 1e5 for a missing bound,
-            # which would make the accounting unsound.
+            # placeholder bounds: substituting 0 / 1e5 for a missing bound would
+            # make the accounting unsound (#2262 removed the c-MIR call's use of them).
             for cover, rhs in separate_cover_cuts(
                 a_all, b_all, x, is_bin, max_cuts=32, lb=root.lb_sep, ub=root.ub_sep
             ):

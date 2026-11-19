@@ -34,6 +34,7 @@ _SNAP = 1e-9
 _F0_LO, _F0_HI = 1e-4, 1 - 1e-4
 _VIOL = 1e-5
 _MAX_COEF = 1e7
+_INT_BOUND_TOL = 1e-6
 
 
 def _snap(v: np.ndarray) -> np.ndarray:
@@ -44,14 +45,30 @@ def _snap(v: np.ndarray) -> np.ndarray:
 def _cmir_row(a, b, xstar, lb, ub, is_int) -> Optional[tuple[np.ndarray, float, float]]:
     """Complemented-MIR on one aggregated row ``a·x <= b``. Returns
     ``(coeffs, rhs, violation)`` for a cut ``coeffs·x <= rhs`` violated at
-    ``xstar``, or ``None``. Variables must be bounded (finite lb/ub)."""
+    ``xstar``, or ``None``.
+
+    Every column with a nonzero coefficient is substituted by its distance from a
+    FINITE bound it really has; a row with a nonzero coefficient on a column with
+    no finite bound has no valid substitution and is declined (``None``). The
+    integer columns' bounds must already be integral (``separate_cmir`` rounds
+    them): ``y_j = x_j - l_j`` is integer only when ``l_j`` is (#2262)."""
     a = _snap(np.asarray(a, dtype=np.float64))
+    nz = np.abs(a) > 0.0
+    has_lb = np.isfinite(lb)
+    has_ub = np.isfinite(ub)
+    if np.any(nz & ~has_lb & ~has_ub):
+        return None
     # complement variables sitting nearer their upper bound -> y_j = u_j - x_j >= 0,
-    # else y_j = x_j - l_j >= 0. y* is then small, which strengthens the MIR cut.
-    comp = xstar > 0.5 * (lb + ub)
+    # else y_j = x_j - l_j >= 0. y* is then small, which strengthens the MIR cut. A
+    # column with only one finite bound is substituted against that one (#2262:
+    # never against a bound the column does not have).
+    comp = np.where(has_lb & has_ub, xstar > 0.5 * (lb + ub), has_ub & ~has_lb)
+    comp &= nz
+    lbz = np.where(has_lb, lb, 0.0)  # read only where ``~comp & nz`` (finite there)
+    ubz = np.where(has_ub, ub, 0.0)  # read only where ``comp`` (finite there)
     atil = np.where(comp, -a, a)
-    btil = float(b - np.sum(np.where(comp, a * ub, a * lb)))
-    ystar = np.where(comp, ub - xstar, xstar - lb)
+    btil = float(b - np.sum(np.where(comp, a * ubz, np.where(nz, a * lbz, 0.0))))
+    ystar = np.where(comp, ubz - xstar, np.where(nz, xstar - lbz, 0.0))
 
     deltas = [1.0]
     deltas += sorted(
@@ -84,8 +101,11 @@ def _cmir_row(a, b, xstar, lb, ub, is_int) -> Optional[tuple[np.ndarray, float, 
         return None
     gamma, rhs, viol = best
     # un-complement back to x:  gamma·y = sum( comp? gamma_j(u_j-x_j) : gamma_j(x_j-l_j) )
+    # A column with a zero row coefficient gets gamma_j = 0 (floor(0) for an integer,
+    # min(0, 0) for a continuous), so it contributes nothing and needs no bound.
+    gamma = np.where(nz, gamma, 0.0)
     cx = np.where(comp, -gamma, gamma)
-    const = float(np.sum(np.where(comp, gamma * ub, -gamma * lb)))
+    const = float(np.sum(np.where(comp, gamma * ubz, np.where(nz, -gamma * lbz, 0.0))))
     crhs = rhs - const
     # margin so floating-point error can't cut a feasible integer point
     margin = 1e-7 * (1.0 + float(np.abs(cx).sum()))
@@ -100,7 +120,12 @@ def separate_cmir(
     Aggregations tried: every single row; a dual-weighted aggregation of the rows
     binding at ``xstar`` (if ``duals`` given); and pairwise sums of binding rows.
     Returns a list of ``(coeffs, rhs)`` cuts ``coeffs·x <= rhs`` (most-violated
-    first, de-duplicated), each valid for the integer-feasible set."""
+    first, de-duplicated), each valid for the integer-feasible set.
+
+    ``lb``/``ub`` may be infinite: a row that puts weight on a column with no finite
+    bound is skipped, and a column with one finite bound is complemented against it.
+    Never substitute a placeholder for a missing bound -- the cut is then valid only
+    inside that placeholder box (#2262)."""
     A = np.asarray(A, dtype=np.float64)
     b = np.asarray(b, dtype=np.float64).ravel()
     xstar = np.asarray(xstar, dtype=np.float64).ravel()
@@ -108,7 +133,22 @@ def separate_cmir(
     ub = np.asarray(ub, dtype=np.float64).ravel()
     is_int = np.asarray(is_int, dtype=bool).ravel()
     m = A.shape[0]
-    if not np.all(np.isfinite(lb)) or not np.all(np.isfinite(ub)):
+    # #2262: the MIR step needs ``y_j = x_j - l_j`` (or ``u_j - x_j``) to be an
+    # INTEGER for an integer column, which holds only for an integral bound. A box
+    # tightened by FBBT over linear rows is not integral (the root-cut stage handed
+    # ``x <= 0.445`` for an integer ``x``), and complementing against it produced
+    # cuts that removed the true optimum -- a certified false bound. Rounding an
+    # integer column's bounds inward is valid (the column is integer) and is what
+    # makes the substitution exact. The tolerance rounds a bound within 1e-6 of an
+    # integer OUTWARD, which only weakens. An empty rounded box means no
+    # integer-feasible point; separating nothing is the sound answer there.
+    lb = lb.copy()
+    ub = ub.copy()
+    _ilb = is_int & np.isfinite(lb)
+    _iub = is_int & np.isfinite(ub)
+    lb[_ilb] = np.ceil(lb[_ilb] - _INT_BOUND_TOL)
+    ub[_iub] = np.floor(ub[_iub] + _INT_BOUND_TOL)
+    if np.any(lb > ub):
         return []
 
     rows: list[tuple[np.ndarray, float]] = []
