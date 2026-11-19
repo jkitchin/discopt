@@ -98,3 +98,39 @@ def test_helper_rounds_only_single_free_integer_rows():
     assert moved == 3
     # Inputs are not mutated.
     assert xl.tolist() == [0.0, 0.0, 0.0, 1.0, 0.0]
+
+
+@pytest.mark.smoke
+def test_helper_skips_a_bound_too_large_to_round_exactly():
+    # 1e-13 y >= 5 states y >= 5e13. The 1e-9 relative noise allowance is 5e4 there,
+    # so a rounding would give 5e13 - 5e4: not exact. The row is left to the engine.
+    A = sp.csr_matrix(np.array([[-1e-13]]))
+    lo, hi, moved = _round_single_integer_rows_sparse(
+        np.array([0.0]), np.array([1e14]), 1, [0], ((A, np.array([-5.0]), "<="),)
+    )
+    assert moved == 0 and lo.tolist() == [0.0] and hi.tolist() == [1e14]
+
+
+@pytest.mark.smoke
+def test_helper_keep_crossed_false_leaves_an_emptied_column_alone():
+    # 2x == 1 has no integer solution: x <= 0 and x >= 1. The Rust route keeps the
+    # crossed box (its engine proves infeasibility); HiGHS refuses a crossed box, so
+    # its caller asks for the column's input bounds back.
+    A = sp.csr_matrix(np.array([[2.0]]))
+    blocks = ((A, np.array([1.0]), "=="),)
+    lo, hi, _ = _round_single_integer_rows_sparse(np.array([0.0]), np.array([5.0]), 1, [0], blocks)
+    assert lo[0] > hi[0]
+    lo, hi, moved = _round_single_integer_rows_sparse(
+        np.array([0.0]), np.array([5.0]), 1, [0], blocks, keep_crossed=False
+    )
+    assert moved == 0 and (lo[0], hi[0]) == (0.0, 5.0)
+
+
+@pytest.mark.smoke
+def test_tiny_coefficient_row_keeps_its_exact_optimum():
+    m = dm.Model("tiny_int")
+    y = m.integer("y", lb=0, ub=1e14)
+    m.subject_to(1e-13 * y >= 5.0)
+    m.minimize(y)
+    r = m.solve(time_limit=30)
+    assert r.objective is None or r.objective >= 5e13 - 0.5, r.objective

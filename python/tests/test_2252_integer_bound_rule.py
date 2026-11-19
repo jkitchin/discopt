@@ -381,6 +381,10 @@ def test_highs_verifier_resolve_never_adopts_a_tight_infeasible(monkeypatch):
     y = m.integer("y", lb=0, ub=0)
     m.subject_to(2 * x + y >= 2.0000004)
     m.minimize(x)
+    # Since the #2252 follow-up the HiGHS standard form rounds this single-free-
+    # integer row to x >= 2, so the refused x = 1 no longer arises from it. Switch
+    # that rounding off to reach the verifier re-solve this test guards.
+    monkeypatch.setattr(S, "_round_single_integer_rows_sparse", lambda xl, xu, *a, **k: (xl, xu, 0))
     _, n_orig, sf = S._highs_std_form(m)
     primary = H.solve_milp_std(
         sf, time_limit=20.0, gap_tolerance=1e-4, max_nodes=10**6, n_struct=n_orig

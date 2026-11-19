@@ -38052,6 +38052,9 @@ def _highs_std_form(model: Model):
             n_orig,
             int_idx,
             ((_A_ub_h, _b_ub_h, "<="), (_A_eq_h, _b_eq_h, "==")),
+            # A crossed box is refused as ``error`` here, so a row with no integer
+            # solution (``2x == 1``) is left for HiGHS to prove infeasible.
+            keep_crossed=False,
         )
     sf = StdForm.from_arrays(c, A, lp_data.b_eq, x_l, x_u, float(lp_data.obj_const), int_idx)
     if sf.n < n_orig:
@@ -39335,6 +39338,7 @@ def _round_single_integer_rows_sparse(
     n_orig: int,
     int_idx: Iterable[int],
     blocks: Iterable[tuple[Any, Optional[np.ndarray], str]],
+    keep_crossed: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """``(xl, xu)`` with each row over ONE free integer column applied as the integer
     bound it states, and the number of bounds that moved (#2252 follow-up).
@@ -39349,7 +39353,16 @@ def _round_single_integer_rows_sparse(
     stays at it. Rows are judged against the input box in one pass, so a bound one
     row derives is not used to fix columns for another (sound, just not a fixed
     point). Only tightens; a row that empties the box leaves ``xl > xu`` for the
-    engine to prove infeasible. Columns past ``n_orig`` (slacks) are untouched.
+    engine to prove infeasible, unless ``keep_crossed=False``: then that column keeps
+    its input bounds and the engine judges the row itself (the HiGHS route refuses a
+    crossed box with ``error`` instead of proving it infeasible). Columns past
+    ``n_orig`` (slacks) are untouched.
+
+    A row whose bound ``|q|`` is so large that the noise allowance reaches half an
+    integer (``|q| >= 5e8``) is skipped: there the rounding could not be exact, and
+    measured on ``1e-13 y >= 5`` (``q = 5e13``) it set ``y >= 5e13 - 5e4``, a bound
+    that is valid but admits points the row rejects, and changed which route served
+    the model.
     """
     import scipy.sparse as _sp
 
@@ -39379,14 +39392,17 @@ def _round_single_integer_rows_sparse(
         r, j, a = rows[pick], cols[pick], vals[pick]
         with np.errstate(invalid="ignore", over="ignore"):
             q = (np.asarray(b, dtype=np.float64)[r] - rest[r]) / a
-        ok = np.isfinite(q)
-        r, j, a, q = r[ok], j[ok], a[ok], q[ok]
         noise = 1e-9 * np.maximum(1.0, np.abs(q))
+        ok = np.isfinite(q) & (noise < 0.5)
+        r, j, a, q, noise = r[ok], j[ok], a[ok], q[ok], noise[ok]
         eq = sense == "=="
         upper = (a > 0.0) | eq
         lower = (a < 0.0) | eq
         np.minimum.at(new_hi, j[upper], np.floor(q[upper] + noise[upper]))
         np.maximum.at(new_lo, j[lower], np.ceil(q[lower] - noise[lower]))
+    if not keep_crossed:
+        crossed = new_lo > new_hi
+        new_lo[crossed], new_hi[crossed] = lo[crossed], hi[crossed]
     moved = int(np.count_nonzero(new_lo > lo) + np.count_nonzero(new_hi < hi))
     xl[:n_orig], xu[:n_orig] = new_lo, new_hi
     return xl, xu, moved
