@@ -10619,54 +10619,54 @@ def _convex_minlp_route_enabled() -> bool:
 
 
 def _convex_route_oa_master() -> str:
-    """The MILP engine for the routed OA master: HiGHS, or the in-house lazy master
-    when ``DISCOPT_CONVEX_ROUTE_OA_MASTER=simplex`` (highs-parity P5.1, opt-in).
+    """The MILP engine for the routed OA master: ``"simplex"`` (default) or ``"highs"``.
 
-    HiGHS is discopt's MILP solver. ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` once
-    selected between ``highs`` (default since performance-plan §25.13) and
-    ``auto``, the in-house simplex master the route used from #1141 until then.
-    ``auto`` was **retired** (2026-10-04, owner decision): it lost or tied the
-    HiGHS master on every panel measured (certified / total wall, plain
-    ``solve(time_limit=30)``, arms interleaved):
+    ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` decides: unset (or blank, per
+    :func:`_env_selector`) or ``simplex`` is the in-house lazy master
+    (``milp_simplex.solve_milp_with_lazy_cuts``); ``highs`` is the HiGHS
+    separate-and-restart master (``milp_highs.solve_milp_with_lazy_cuts``; needs
+    ``highspy`` and raises :class:`~discopt._optional_highs.MissingHighsError`
+    without it). Any other value raises: ``auto`` was retired on 2026-10-04 and stays
+    retired, so a typo cannot run an engine nobody asked for. ``DISCOPT_LP_ENGINE``
+    does not govern this master, as it does not govern the decomposition masters.
 
-    ======================================  ===============  ===============
-    panel                                   ``auto``         ``highs``
-    ======================================  ===============  ===============
-    in-repo routed, unscaled (26)           26 / 58.9 s      26 / 66.0 s
-    ...rows scaled 10^U(-3,3)               24 / 84.1 s      25 / 62.0 s
-    ...rows scaled 10^U(-6,6)               20 / 248.8 s     22 / 142.1 s
-    syn/rsyn (51), DISCOPT_CONVEX_KERNEL=0  22 / 893.6 s     31 / 632.0 s
-    syn/rsyn (51), default kernel ON        20 / 1040.0 s    20 / 1040.3 s
-    ======================================  ===============  ===============
+    **``=highs`` is a documented opt-in (CLAUDE.md §5), not a stalled graduation.**
+    Why it is not the default: #2237 measured a HiGHS default against the in-house
+    master on the 47 routed syn/rsyn MINLPLib instances (30 s, three arms rotated per
+    instance, load 5-10; 156 bound checks, 0 violations) and it failed bar 2:
+    certified 31 (in-house) / 32 (HiGHS with SCIP) / 30 (HiGHS without SCIP), total
+    wall 537 / 624 / 640 s; without SCIP it loses the certificate on
+    ``rsyn0805m02m`` (in-house 13.4 s, HiGHS uncertified at 30 s, reproduced), and
+    the HiGHS master is 2-4x slower on small certifying instances (``syn40m03m``
+    20.2 s vs 8.2 s, ``syn40m02m`` 10.8 vs 2.7). Why the opt-in exists: the #2059
+    Ben-Tal--Nemirovski SOC outer block (``DISCOPT_OA_SOC_OUTER``) is built on the
+    HiGHS master only, and on ``portfol_classical050_1`` that is the difference
+    between certifying on the route (38.2 s with SCIP, 52.7 s without, after #2247)
+    and the in-house master's NLP-BB fallback (307 s). What would change the default:
+    a panel where the HiGHS master is at or ahead of the in-house one on syn/rsyn
+    (or the SOC block ported to the in-house master, which removes the reason for the
+    opt-in instead). The record is ``docs/dev/highs-parity-plan.md`` (D3, #2237) and
+    ``docs/dev/flag-retirement-audit.md``.
 
-    Setting it to anything but ``highs`` now raises rather than being silently
-    ignored (``auto`` would otherwise run a different engine than asked). A
-    missing ``highspy`` is a broken install (#1229) and raises
-    (:func:`discopt.solvers.lp_milp_highs.require_highspy`); an environment
-    without it (the Pyodide page) turns the route off with
-    ``DISCOPT_CONVEX_MINLP_ROUTE=0`` instead.
+    History: HiGHS was the default from performance-plan §25.13 (``auto``, the
+    in-house master of #1141, retired 2026-10-04 after losing or tying HiGHS on every
+    panel then measured) until highs-parity D3 (2026-11-07, PR #2196) made the
+    in-house master the default with the three D3 levers on (P5.1 panels in
+    ``docs/dev/data/highs-parity/p5.1/d3_up_*``). #2237 re-measured a HiGHS default
+    with the SOC block in play and kept D3 (numbers above).
 
     The master's bound is HiGHS's ``mip_dual_bound``, never its incumbent
-    (``milp_highs``), and OA reads only ``master_result.bound``.
+    (``milp_highs``), and OA reads only ``master_result.bound``. Re-read on every
+    call so tests and panels can flip it in-process.
     """
-    raw = os.environ.get("DISCOPT_CONVEX_ROUTE_OA_MASTER")
-    val = None if raw is None else raw.strip().lower()
-    # highs-parity D3, owner decision 2026-11-07 ("the point is to eliminate HiGHS"):
-    # the in-house lazy master is the DEFAULT, with the three D3 levers on
-    # (`DISCOPT_MILP_NODE_GMI_LAZY`, `DISCOPT_MILP_LAZY_ROOT_CUTS`,
-    # `DISCOPT_MILP_LAZY_ROW_EQUILIBRATE`). P5.1 panels (data
-    # `docs/dev/data/highs-parity/p5.1/d3_up_*`), cert-clean, 0 violations, 0 errors:
-    # syn/rsyn 26 vs HiGHS 29 at 1.03x wall; route 89 vs 92 at 1.42x. The residual
-    # (6 instances) is an owner-ACCEPTED gap, tracked in the plan's D3 status.
-    # `=highs` keeps the HiGHS master as an opt-out.
+    val = _env_selector("DISCOPT_CONVEX_ROUTE_OA_MASTER")
     if val is None or val == "simplex":
         return "simplex"
     if val != "highs":
         raise ValueError(
-            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={raw!r}: the routed OA master is 'simplex' "
-            "(default, the in-house lazy master) or 'highs' (opt-out); 'auto' stays "
-            "retired. To keep a convex MINLP off this route, set "
-            "DISCOPT_CONVEX_MINLP_ROUTE=0."
+            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={val!r}: the routed OA master is 'simplex' "
+            "(the in-house lazy master, the default) or 'highs'. 'auto' stays retired. "
+            "To keep a convex MINLP off this route, set DISCOPT_CONVEX_MINLP_ROUTE=0."
         )
     from discopt.solvers.lp_milp_highs import require_highspy
 
@@ -12375,6 +12375,96 @@ def _ipx_continuation_arm(lifted, unlifted, is_maximize: bool) -> str:
     return "unlifted" if tighter else "lift"
 
 
+def _ipx_lift_point_refusal(source_model, result) -> Optional[str]:
+    """Why the lift's incumbent fails ``verify_point`` on the UN-LIFTED model, or None.
+
+    #2252 follow-up. The lift writes each product ``e*v`` of a bit and a bounded
+    column as McCormick rows, and the MILP engine holds every row to its own 1e-6.
+    In the expanded row those per-row residuals are multiplied by the bits' place
+    values and added up: on integer ``x in [1, 10]`` with ``x*x >= 1.00003`` the
+    engine returned the bits at 0 and each product at ~2e-7, and the original row
+    came out violated by 3e-5 at x = 1. Every lifted row passes ``verify_point``
+    (each residual sits on a continuous column), so the lift's own checks cannot
+    see it; only the model the caller wrote can.
+    """
+    from discopt.validation.feasibility import verify_point
+
+    xd = getattr(result, "x", None)
+    if not xd or getattr(result, "status", None) not in ("optimal", "feasible"):
+        return None
+    try:
+        flat = np.concatenate(
+            [
+                np.atleast_1d(np.asarray(xd[v.name], dtype=np.float64)).ravel()
+                for v in source_model._variables
+            ]
+        )
+    except KeyError as exc:
+        return f"the lift's point has no column {exc}"
+    verdict = verify_point(source_model, flat)
+    return None if verdict.ok else (verdict.reason or "refused")
+
+
+def _ipx_strip_unverified(result: "SolveResult", why: str) -> "SolveResult":
+    """``result`` with its incumbent withdrawn; its dual bound is kept.
+
+    The lifted MILP is an exact formulation solved to a 1e-6 row tolerance, which
+    only enlarges the feasible set, so its bound stays a valid bound on the
+    caller's objective. Its incumbent is not a point of that objective.
+    """
+    result.x = None
+    result.objective = None
+    result.gap = None
+    result.gap_certified = False
+    if result.status in ("optimal", "feasible"):
+        # The route's rule for a result without a point (``_solve_milp_highs``:
+        # "feasible" only with one); a limit exit keeps its own status.
+        result.status = "error"
+    result.error = f"integer-bilinear lift: incumbent refused on the un-lifted model ({why})"
+    result.solver_stats = dict(result.solver_stats or {})
+    result.solver_stats["ipx/lift_incumbent_refused"] = 1.0
+    return result
+
+
+def _ipx_lift_checked(entry_args: dict, solve_t0: float, is_maximize: bool) -> "SolveResult":
+    """The legacy lift adoption, with its answer judged on the un-lifted model.
+
+    Runs the lift arm on the whole budget -- the very path the legacy rule takes --
+    and returns it unless its incumbent fails :func:`_ipx_lift_point_refusal`. Then
+    the incumbent is withdrawn and the UN-LIFTED model gets the time left; the two
+    are merged (tightest bound, the un-lifted arm's verified incumbent).
+    """
+    source = entry_args["model"]
+    base = {k: v for k, v in entry_args.items() if k != "kwargs"}
+    extra = dict(entry_args.get("kwargs") or {})
+    time_limit = float(entry_args["time_limit"])
+
+    def _run(arm: str, limit: float) -> "SolveResult":
+        tok = _IPX_RACE_ARM.set(arm)
+        try:
+            return cast("SolveResult", solve_model(**{**base, "time_limit": limit}, **extra))
+        finally:
+            _IPX_RACE_ARM.reset(tok)
+
+    lifted = _run("lift", time_limit - (time.perf_counter() - solve_t0))
+    why = _ipx_lift_point_refusal(source, lifted)
+    if why is None:
+        return lifted
+    logger.warning(
+        "integer-bilinear lift: the lifted MILP's incumbent fails verify_point on the "
+        "un-lifted model (%s); solving the un-lifted model on the time left",
+        why,
+    )
+    lifted = _ipx_strip_unverified(lifted, why)
+    rest = time_limit - (time.perf_counter() - solve_t0)
+    if rest <= 0.0:
+        return lifted
+    unlifted = _run("unlifted", rest)
+    merged = cast("SolveResult", _merge_route_and_fallback(lifted, unlifted, is_maximize))
+    merged.wall_time = time.perf_counter() - solve_t0
+    return merged
+
+
 def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "SolveResult":
     """Run the #1940 lift race (see :func:`_ipx_race_enabled`) and return its answer.
 
@@ -12432,6 +12522,12 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         return max_nodes - spent if callers_node_cap else max_nodes
 
     lifted = _run("lift", min(_IPX_RACE_SLICE_S, _remaining()), max_nodes)
+    _why_lift = _ipx_lift_point_refusal(entry_args["model"], lifted)
+    if _why_lift is not None:
+        # #2252 follow-up: never let the lift "certify" a point the un-lifted
+        # model refuses; the un-lifted slice below then runs as for any lift
+        # that did not certify.
+        lifted = _ipx_strip_unverified(lifted, _why_lift)
     if _result_certifies(lifted):
         return _done(lifted)
     spent = int(getattr(lifted, "node_count", 0) or 0)
@@ -12456,6 +12552,10 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
     if rest <= 0.0 or (callers_node_cap and spent >= max_nodes):
         return _done(merged)
     final = _run(arm, rest, _left(spent), final=True)
+    if arm == "lift":
+        _why_final = _ipx_lift_point_refusal(entry_args["model"], final)
+        if _why_final is not None:
+            final = _ipx_strip_unverified(final, _why_final)
     return _done(_merge_route_and_fallback(merged, final, is_maximize))
 
 
@@ -17962,6 +18062,22 @@ def solve_model(
                 _ipx_entry_args["model"]._objective is not None
                 and _ipx_entry_args["model"]._objective.sense == _IpxObjSense.MAXIMIZE,
             )
+        if (
+            _ipx_adopt
+            and _ipx_race_arm is None
+            and not _ipx_cheap_first_enabled()
+            and not _IPX_CHEAP_FIRST_IN_PROBE.get()
+        ):
+            # The legacy adoption (no race), re-entered as the "lift" arm so its
+            # answer can be judged on the un-lifted model (#2252 follow-up).
+            from discopt.modeling.core import ObjectiveSense as _IpxObjSense
+
+            return _ipx_lift_checked(
+                _ipx_entry_args,
+                _solve_t0,
+                _ipx_entry_args["model"]._objective is not None
+                and _ipx_entry_args["model"]._objective.sense == _IpxObjSense.MAXIMIZE,
+            )
         # #1236 cheap-first (flag-gated, default OFF): the lift is adopted
         # today because it is *possible*, never because it was shown to help,
         # and over the adopted population it is harmful more often than not.
@@ -19942,6 +20058,8 @@ def solve_model(
     # vetoed / cut-off point as the final ``optimal`` incumbent. Reads
     # ``_gap_certified`` at call time so the surfaced ``best_bound`` honors the
     # A1 taint gate exactly like the batch path.
+    _inj_arb: list = [None]  # the #1659 row arbiter, built on first injection
+
     def _inject_incumbent(x_cand, obj_cand):
         # #1316: box feasibility, before anything else. Every non-batch injection
         # on this path funnels through here, so one check covers the warm start,
@@ -19954,6 +20072,53 @@ def solve_model(
                 "Rejected an incumbent candidate that violates the model's variable "
                 "bounds (obj=%.6g). A warm start taken before a bound moved is the "
                 "usual cause; the search continues without it.",
+                obj_cand,
+            )
+            return False
+        # #2252 follow-up: the rows, under the search's own arbiter -- the test the
+        # #1659 exit gate holds the published point to, #1254 cap included. Without
+        # it a heuristic's sub-NLP tolerance decided what became the incumbent:
+        # ``integer_local_search`` returned x = 1 for integer x with
+        # ``x*x >= 1.0000002`` (violated by 2e-7, inside its tolerance but outside
+        # the cap, since an integer-only row has no direction a small move fixes).
+        # The tree pruned and OBBT tightened to ``x <= 1`` against that value, the
+        # exit gate then refused it, and the solve returned ``error`` with the
+        # feasible x = 2 already cut away. A point refused here could never be
+        # certified; refusing it before it prunes keeps the search where it was.
+        #
+        # Judged at the INTEGRAL realisation (#1380), the point the exit path snaps
+        # to and ``verify_point`` tests: a node NLP returned x = 1.000001 for integer
+        # x with ``exp(x) >= e*(1 + 1e-6)``, which holds there and fails at x = 1.
+        # The snap moves only columns within the 1e-5 integrality tolerance, and the
+        # point injected is the snapped one, priced where it now sits.
+        _x_int, _ = _round_incumbent_integers(x_cand, int_offsets, int_sizes)
+        if not np.array_equal(_x_int, np.asarray(x_cand, dtype=np.float64)):
+            # Priced by the search evaluator, which is the LIFTED model's when the
+            # factorable lift ran; its aux columns are not recomputed after the
+            # snap, so they can be stale by up to the 1e-5 the snap moved an integer.
+            # The row test below is unaffected (it reads the pre-lift arbiter's
+            # view); the objective can carry that much aux staleness (review of
+            # #2257).
+            _obj_int = float(evaluator.evaluate_objective(_x_int))
+            if not np.isfinite(_obj_int):
+                return False
+            x_cand, obj_cand = _x_int, _obj_int
+        # The rows judged are the exit gate's own (:func:`_spatial_row_arbiter`): the
+        # PRE-LIFT model's when the factorable lift ran. The lifted aux rows are a
+        # faithful encoding but a poor ruler (#1659): judged on them, the cap refused
+        # nvs09's optimum -43.1343, which ``verify_point`` accepts on the declared
+        # model, and the solve lost its certificate.
+        if _inj_arb[0] is None:
+            _inj_arb[0] = _spatial_row_arbiter(
+                evaluator, cl_list, cu_list, _prereform_model, _prereform_nvars
+            )
+        _ia = _inj_arb[0]
+        if _arb_has_rows(_ia) and not _check_constraint_feasibility(
+            _ia.evaluator, _ia.view(x_cand), _ia.cl, _ia.cu
+        ):
+            logger.debug(
+                "Rejected an incumbent candidate (obj=%.6g) that fails the search's "
+                "row arbiter (#1254 cap); the search continues without it.",
                 obj_cand,
             )
             return False
@@ -37459,9 +37624,10 @@ def _lp_engine() -> str:
     One switch over the pure-LP, pure-MILP and IIS seams (``DISCOPT_LP_ENGINE``). The
     per-seam variables (``DISCOPT_LP_BACKEND``, ``DISCOPT_LP_MILP_BACKEND``,
     ``DISCOPT_IIS_ENGINE``) and the ``milp_backend=`` keyword still override it, so every
-    existing A/B run keeps its meaning. Decomposition masters and the per-node MINLP LP
-    are not governed by it: both stay on the in-house simplex (masters since P5.2; the
-    node LP is the Rust engine by design).
+    existing A/B run keeps its meaning. Decomposition masters, the convex-MINLP route's OA
+    master (:func:`_convex_route_oa_master`, #2237) and the per-node MINLP LP are not
+    governed by it: all stay on the in-house simplex (masters since P5.2; the route
+    master per #2237's panel; the node LP is the Rust engine by design).
 
     * ``auto`` -- HiGHS when ``highspy`` is importable, with the in-house Rust engine as
       an automatic fallback whenever the HiGHS route returns ``error`` (it refused the
@@ -38268,6 +38434,103 @@ def _relu_root_cut_loop(sf, n_orig: int, spec: dict, *, budget: float):
     return _augmented(), stats
 
 
+def _highs_milp_verifier_resolve(
+    model, sf, out, n_orig, time_limit, t_start, max_nodes, gap_tolerance, abs_gap_tolerance
+):
+    """Re-solve at ``mip_feasibility_tolerance=1e-9`` when ``verify_point`` refuses
+    the point HiGHS's route publishes (#2252 follow-up).
+
+    HiGHS accepts a point that violates a row by up to its 1e-6
+    ``mip_feasibility_tolerance``, and so does the route's own standard-form
+    check. ``verify_point`` is stricter on a row whose columns are all integer:
+    no fractional move can absorb the residual, so its feasible-distance cap
+    (#1254) leaves only float noise. On ``2x + y >= 2.0000004`` (``y`` fixed at
+    0, integer ``x``) HiGHS returned x = 1 (violation 4e-7) and the route
+    published it as ``feasible``. The feasible x = 2 was never reached, because
+    at 1e-6 HiGHS has no reason to look past x = 1.
+
+    The re-solve is the whole certified route at the tolerance #2151 uses for a
+    refuted tree (:data:`REFUTED_TIGHT_FEAS_TOL`). It runs cold, capped as
+    #2151's is, and only when the published point is refused, so a result that
+    verifies is untouched. It replaces ``out`` only when its own point passes
+    ``verify_point``, never on an ``infeasible`` (a tighter tolerance can report
+    that on a feasible model); otherwise ``out`` stands as before.
+    """
+    from discopt._affine_evaluator import post_solve_evaluator
+    from discopt.solvers.lp_milp_highs import (
+        _DECLINE_LABELS,
+        PRESOLVE_CROSS_BUDGET_FACTOR,
+        PRESOLVE_CROSS_MIN_BUDGET,
+        REFUTED_TIGHT_FEAS_TOL,
+        _as_history,
+        solve_milp_std,
+    )
+    from discopt.validation.feasibility import verify_point
+
+    if out.x is None or out.status not in ("optimal", "feasible"):
+        return out
+    ev = post_solve_evaluator(model)
+
+    def _refusal(x):
+        verdict = verify_point(model, np.asarray(x, dtype=np.float64)[:n_orig], evaluator=ev)
+        return None if verdict.ok else (verdict.reason or "refused")
+
+    why = _refusal(out.x)
+    if why is None:
+        return out
+    left = float(time_limit) - (time.perf_counter() - t_start)
+    out.stats["milp/verifier_refused_published"] = 1.0
+    out.labels["milp/verifier_refused_published"] = why
+    # Budgeted like #2151's tight re-solve, not on the whole remaining limit: on a
+    # hard MILP whose point is refused, the re-solve may otherwise double the wall.
+    left = min(
+        left,
+        max(PRESOLVE_CROSS_MIN_BUDGET, PRESOLVE_CROSS_BUDGET_FACTOR * float(out.wall_time)),
+    )
+    if left <= 0.0:
+        return out
+    tight = solve_milp_std(
+        sf,
+        time_limit=left,
+        gap_tolerance=float(gap_tolerance),
+        abs_gap_tolerance=abs_gap_tolerance,
+        max_nodes=int(max_nodes),
+        n_struct=n_orig,
+        feasibility_tolerance=REFUTED_TIGHT_FEAS_TOL,
+    )
+    out.stats["milp/verifier_tight_resolve_ran"] = 1.0
+    # Only a VERIFIED point is adopted. An ``infeasible`` from the re-solve is not:
+    # tightening ``mip_feasibility_tolerance`` to 1e-9 shrinks the feasible set
+    # HiGHS searches, so a model whose ``verify_point``-feasible points all use
+    # 1e-7..1e-6 of slack on rows with continuous columns can read infeasible
+    # there while it has feasible points (review of #2257). #2151, whose tolerance
+    # this reuses, never adopts an ``infeasible`` either.
+    if (
+        tight.x is not None
+        and tight.status in ("optimal", "feasible")
+        and _refusal(tight.x) is None
+    ):
+        # The superseded solve's verdicts move to history, as on #2151's adoption.
+        tight.stats = {
+            **_as_history(out.stats, ()),
+            **tight.stats,
+            "milp/verifier_tight_resolve_adopted": 1.0,
+        }
+        tight.labels = {
+            **_as_history(out.labels, _DECLINE_LABELS),
+            **tight.labels,
+            "milp/bound_provenance": f"{tight.labels.get('milp/bound_provenance', 'highs-fp')}, "
+            f"mip_feasibility_tolerance={REFUTED_TIGHT_FEAS_TOL:g} after verify_point "
+            "refused the published point",
+        }
+        tight.node_count += out.node_count
+        return tight
+    out.labels["milp/verifier_tight_resolve_declined"] = f"tight re-solve status {tight.status}" + (
+        "" if tight.x is None else ", its point refused too"
+    )
+    return out
+
+
 def _solve_milp_highs(
     model: Model,
     time_limit: float,
@@ -38341,6 +38604,17 @@ def _solve_milp_highs(
         max_nodes=int(max_nodes),
         initial_point=seed,
         n_struct=n_orig,
+    )
+    out = _highs_milp_verifier_resolve(
+        model,
+        sf_milp,
+        out,
+        n_orig,
+        time_limit,
+        t_start,
+        max_nodes,
+        gap_tolerance,
+        abs_gap_tolerance,
     )
     wall = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE

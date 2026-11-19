@@ -455,6 +455,14 @@ def solve_lp_spatial_bb(
         return None
     INT = [i for i in range(n) if is_int[i]]
     _has_cont = bool(np.any(~is_int))
+    if np.any(lb0 > ub0 + 1e-9):
+        # An empty declared box: an INTEGER column whose box holds no integer is
+        # stored crossed (``lb=1.2, ub=1.8`` -> ``[2, 1]``, #2252). Nothing is
+        # feasible, and every primal below would clip a point INTO a box that
+        # does not exist (``min(max(x, lb), ub)`` lands on ``ub < lb``).
+        return LpSpatialResult(
+            status="infeasible", objective=None, bound=None, gap=None, x=None, node_count=0
+        )
     # Minimize-equivalent sign. Both the relaxation builder and ``NLPEvaluator``
     # already negate a MAXIMIZE objective, so every LP bound below is a valid LOWER
     # bound on ``sgn * f``, every verified incumbent is ``sgn * f``, and the whole
@@ -794,6 +802,11 @@ def solve_lp_spatial_bb(
         # [-1.6, -1.07] has no integer value, rounds to -1, clips back to -1.07, and
         # ``_pt_feasible`` checks only the constraints -- so that point was accepted.
         if np.any(np.abs(xr[is_int] - np.round(xr[is_int])) > _INT_TOL):
+            return None
+        # The clip only lands inside a box that is non-empty; a crossed box (an
+        # integer column with no integer in it, #2252) leaves the point outside,
+        # and ``_pt_feasible`` checks only the constraints.
+        if np.any(xr < lb0 - 1e-9) or np.any(xr > ub0 + 1e-9):
             return None
         if not _pt_feasible(xr):
             return None

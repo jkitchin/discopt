@@ -240,7 +240,15 @@ def test_issue_2059_portfol_classical050_1_certifies(monkeypatch):
     # route's default, where the block never runs: CI then certified through the
     # NLP-BB fallback in 325 s with ``oa/soc_outer_rows == 0`` and this test's
     # anti-vacuity check fired. Pin the master the block belongs to; carrying it
-    # to the in-house master is bound-changing work with its own panel.
+    # to the in-house master is bound-changing work with its own panel. #2237
+    # measured a HiGHS default and kept the in-house one (bar 2 failed on
+    # syn/rsyn), so ``=highs`` stays the documented opt-in this test exercises.
+    # It does not need ``pyscipopt``: since #2247 (#2235) the in-house #2069
+    # confirmation certifies this model on its own. Measured 2026-11-18, TL=120,
+    # load ~6: with SCIP 38.2 s (confirmation 11.0 s, SCIP), without SCIP 52.7 s
+    # (confirmation 25.5 s, in-house), both certified on the route with
+    # ``oa/soc_outer_rows`` 1. Before #2247 the SCIP-less confirmation ran 273.9 s
+    # to ITERATION_LIMIT and the route fell back.
     monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
     nl = DATA / "portfol_classical050_1.nl"
     with warnings.catch_warnings():
@@ -265,6 +273,8 @@ def test_issue_2059_portfol_classical050_1_certifies(monkeypatch):
     assert (r.solver_stats or {}).get("oa/soc_outer_rows", 0) >= 1, (
         "certified without the #2059 block -- this test no longer measures it"
     )
+    route = r.algorithm_route or ""
+    assert "master=highs" in route and "fell back" not in route, route
 
 
 def test_a_covered_row_does_not_also_get_the_split_row_epigraph(monkeypatch):

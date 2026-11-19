@@ -515,6 +515,16 @@ def check_variable_bounds(model, x_flat: np.ndarray) -> VerifyResult:
     ULPs off its bound, and on a large-magnitude bound (``tanksize`` x41 lb=536) a
     4e-6 absolute slack is 8e-9 relative, inside the regime the whole solver
     operates in.
+
+    INTEGER/BINARY columns do NOT get that relative slack (#2253). The ULP
+    argument is about a continuous value sitting on a bound; an integer column is
+    claimed at its rounded value (see :func:`snap_integers`), and on a bound of
+    magnitude 1e4 or more ``1e-4 * |bound|`` is a whole integer or more, so the
+    relative test accepted ``x = 99990`` for ``lb = 100000``. An integer column
+    must be within :data:`INT_TOL` of an integer, and that integer must lie in
+    ``[ceil(lb - INT_TOL), floor(ub + INT_TOL)]`` — the integer hull of the
+    declared box, with the same rounding tolerance used for integrality so a
+    bound stored as ``2.0000000001`` still admits ``2``.
     """
     from discopt.modeling.core import VarType
 
@@ -526,13 +536,19 @@ def check_variable_bounds(model, x_flat: np.ndarray) -> VerifyResult:
             return VerifyResult(False, None, f"length mismatch at variable {v.name!r}")
         lb_flat = np.asarray(v.lb, dtype=np.float64).flatten()
         ub_flat = np.asarray(v.ub, dtype=np.float64).flatten()
-        lb_tol = ABS_TOL + BOUND_REL_TOL * np.abs(lb_flat)
-        ub_tol = ABS_TOL + BOUND_REL_TOL * np.abs(ub_flat)
-        if np.any(vals < lb_flat - lb_tol) or np.any(vals > ub_flat + ub_tol):
-            return VerifyResult(False, None, f"variable {v.name!r} out of bounds")
         if v.var_type in (VarType.INTEGER, VarType.BINARY):
-            if np.any(np.abs(vals - np.round(vals)) > INT_TOL):
+            rounded = np.round(vals)
+            if np.any(np.abs(vals - rounded) > INT_TOL):
                 return VerifyResult(False, None, f"variable {v.name!r} not integral")
+            int_lb = np.ceil(lb_flat - INT_TOL)
+            int_ub = np.floor(ub_flat + INT_TOL)
+            if np.any(rounded < int_lb) or np.any(rounded > int_ub):
+                return VerifyResult(False, None, f"variable {v.name!r} out of bounds")
+        else:
+            lb_tol = ABS_TOL + BOUND_REL_TOL * np.abs(lb_flat)
+            ub_tol = ABS_TOL + BOUND_REL_TOL * np.abs(ub_flat)
+            if np.any(vals < lb_flat - lb_tol) or np.any(vals > ub_flat + ub_tol):
+                return VerifyResult(False, None, f"variable {v.name!r} out of bounds")
         off += size
     return VerifyResult(True)
 

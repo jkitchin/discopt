@@ -487,8 +487,10 @@ class VarType(Enum):
     BINARY : str
         Binary variable restricted to ``{0, 1}``.
     INTEGER : str
-        General integer variable. A user-supplied ``lb``/``ub`` is honored
-        exactly; an *unspecified* bound falls back to the finite defaults
+        General integer variable. A user-supplied ``lb``/``ub`` is never
+        replaced by a default; a fractional one is stored as the integer range
+        it admits (#2252, see :meth:`Model.integer`). An *unspecified* bound
+        falls back to the finite defaults
         ``[0, 1e6]`` and emits a ``UserWarning`` (see :meth:`Model.integer`),
         because a silent default box can cut a true optimum that lies below 0
         or above 1e6 (correctness issue C-6).
@@ -1493,9 +1495,13 @@ def _readonly_bound(
         # one the box came from.
         if var_type is VarType.BINARY:
             _refuse_bound_outside_unit_box(value, what, name, side)
-        # `_bound_is_owned_frozen` has just established the ndarray-ness that
-        # `value: Any` cannot carry through.
-        return cast(np.ndarray, value)
+        # An INTEGER box built by this module is already integral (#2252), but
+        # a frozen box can come from a variable of another type; only a
+        # fractional one needs the slow path's snap.
+        if var_type is not VarType.INTEGER or _is_integral_box(value):
+            # `_bound_is_owned_frozen` has just established the ndarray-ness
+            # that `value: Any` cannot carry through.
+            return cast(np.ndarray, value)
 
     if value is None:
         raise ValueError(
@@ -1541,7 +1547,7 @@ def _readonly_bound(
                 ) from exc
             base = np.array(base.reshape(shape), dtype=np.float64)
     if var_type is not None:
-        base = _validated_discrete_bound(base, var_type, _bound_context(what, name, side))
+        base = _validated_discrete_bound(base, var_type, _bound_context(what, name, side), side)
     base.flags.writeable = False
     frozen: np.ndarray = np.broadcast_to(base, base.shape)
     return frozen
@@ -1555,7 +1561,92 @@ def _readonly_bound(
 _DISCRETE_BOUND_SLACK = 1e-9
 
 
-def _validated_discrete_bound(base: np.ndarray, var_type: "VarType", what: str) -> np.ndarray:
+#: How far a bound may sit from an integer and still *be* that integer, for an
+#: INTEGER variable (#2252). It is the absolute feasibility tolerance (1e-6, the
+#: ``abs`` tolerance of the benchmark harness and the absolute part of
+#: :func:`discopt.validation.feasibility.verify_point`'s bound check): a point
+#: that violates the declared bound by no more than this is feasible, so the
+#: integer it rounds to belongs to the variable's range. It also absorbs the
+#: rounding noise that FBBT and the LP engines leave on a derived bound, which a
+#: tighter snap would turn into a cut-off integer (``ceil(2.0000005) = 3``).
+_INTEGER_BOUND_TOL = 1e-6
+
+
+def _raw_unless_snapped(value, stored: np.ndarray, var_type) -> Optional[np.ndarray]:
+    """The caller's bound when the INTEGER snap changed it, else ``None``.
+
+    ``None`` on every path where nothing was snapped -- any other variable type, or
+    a box installed as-is (the no-copy restore path hands back ``stored`` itself) --
+    so the node loop's bound restores pay one identity test.
+    """
+    if var_type is not VarType.INTEGER or value is stored:
+        return None
+    raw = np.array(value, dtype=np.float64)
+    if raw.shape != stored.shape:
+        try:
+            raw = np.array(np.broadcast_to(raw, stored.shape), dtype=np.float64)
+        except ValueError:
+            raw = raw.reshape(stored.shape)
+    if np.array_equal(raw, stored):
+        return None
+    raw.flags.writeable = False
+    return raw
+
+
+def _is_integral_box(arr: np.ndarray) -> bool:
+    """Is every entry of *arr* an integer (or +/-inf)?
+
+    On the node-loop restore path, once per INTEGER variable per node, so a
+    one-element box (the common scalar variable) takes a Python-float test
+    rather than three numpy calls. No NaN reaches here (the setter refuses it),
+    and ``floor(inf) == inf``, so an infinite bound counts as integral.
+    """
+    if arr.size == 1:
+        v = arr.item()
+        return v.is_integer() or v in (_POS_INF, _NEG_INF)
+    return bool((np.floor(arr) == arr).all())
+
+
+_POS_INF = float("inf")
+_NEG_INF = float("-inf")
+
+
+def _snap_integer_bound(base: np.ndarray, side: str) -> np.ndarray:
+    """*base* (writable, owned) snapped in place to the integer range it admits.
+
+    The single rule for an INTEGER variable's range (#2252): a bound within
+    :data:`_INTEGER_BOUND_TOL` of an integer is that integer; otherwise a lower
+    bound rounds up and an upper bound rounds down. Before this, each solve
+    route rounded the raw bound with its own tolerance (``ceil(lb - 1e-9)`` in
+    one place, ``ceil(lb - 1e-6)`` in another, none at all on the NLP route), so
+    ``lb = 1.000001`` admitted ``x = 1`` on one route and excluded it on another,
+    and one route certified a bound above a point ``verify_point`` accepted.
+    Snapping here, where every box is installed, means every route and
+    ``verify_point`` read the same integral box.
+
+    The distance test is ``|b - round(b)|``, not ``ceil(b - tol)``: the latter
+    is decided by the binary64 rounding of the subtraction at the boundary
+    (``1.000001 - 1e-6`` is ``0.9999999999999999``).
+    """
+    if side not in ("lb", "ub"):
+        raise ValueError(f"integer bound side must be 'lb' or 'ub', got {side!r}")
+    finite = np.isfinite(base)
+    if not finite.any():
+        return base
+    vals = base[finite]
+    nearest = np.round(vals)
+    directed = np.ceil(vals) if side == "lb" else np.floor(vals)
+    # A few ulps of slack, so ``k + 1e-6`` and ``k - 1e-6`` both count as within
+    # the tolerance however binary64 rounds the decimal (``0.999999`` sits
+    # 1.00000000003e-6 below 1, ``1.000001`` 9.9999999992e-7 above it).
+    slack = _INTEGER_BOUND_TOL + 4.0 * np.spacing(np.maximum(1.0, np.abs(nearest)))
+    base[finite] = np.where(np.abs(vals - nearest) <= slack, nearest, directed)
+    return base
+
+
+def _validated_discrete_bound(
+    base: np.ndarray, var_type: "VarType", what: str, side: str = "bound"
+) -> np.ndarray:
     """Refuse a box that puts a discrete variable outside its declared domain.
 
     #1332 item 3: ``loads()`` and ``x.ub = ...`` accepted ``ub = 5.0`` on a
@@ -1563,7 +1654,13 @@ def _validated_discrete_bound(base: np.ndarray, var_type: "VarType", what: str) 
     ``gap_certified=True`` -- a certificate for a model the user never wrote.
     The ``.nl`` reader already clipped binaries to [0, 1]; these two doors did
     not.
+
+    An INTEGER box is snapped to the integer range it admits
+    (:func:`_snap_integer_bound`, #2252); *side* (``"lb"``/``"ub"``) says
+    which way a fractional bound rounds.
     """
+    if var_type is VarType.INTEGER:
+        return _snap_integer_bound(base, side)
     if var_type is not VarType.BINARY:
         return base
     _refuse_bound_outside_unit_box(base, what)
@@ -1794,6 +1891,13 @@ class Variable(Expression):
         self._lb = _readonly_bound(
             value, self.shape, var_type=self.var_type, name=self.name, side="lb"
         )
+        # Inline test first: the node loop's restores (any type, value IS the box)
+        # must not pay a call.
+        self._raw_lb = (
+            None
+            if value is self._lb or self.var_type is not VarType.INTEGER
+            else _raw_unless_snapped(value, self._lb, self.var_type)
+        )
 
     @property
     def ub(self) -> np.ndarray:
@@ -1805,6 +1909,23 @@ class Variable(Expression):
         self._ub = _readonly_bound(
             value, self.shape, var_type=self.var_type, name=self.name, side="ub"
         )
+        # Inline test first: the node loop's restores (any type, value IS the box)
+        # must not pay a call.
+        self._raw_ub = (
+            None
+            if value is self._ub or self.var_type is not VarType.INTEGER
+            else _raw_unless_snapped(value, self._ub, self.var_type)
+        )
+
+    def _declared_bound(self, side: str) -> np.ndarray:
+        """The ``lb``/``ub`` the caller last assigned, before the INTEGER snap.
+
+        The stored box is the integer range it admits (#2252); this is what was
+        written, kept only when the snap changed it. ``validate`` decides a crossed
+        box on it, and the serializer writes it, so a reload re-snaps to the same box.
+        """
+        raw = getattr(self, "_raw_" + side, None)
+        return cast(np.ndarray, getattr(self, "_" + side) if raw is None else raw)
 
     # ── Copying: a copy's boxes must be as read-only as the original's ──
     #
@@ -1817,6 +1938,13 @@ class Variable(Expression):
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
         for side in ("_lb", "_ub"):
+            arr = self.__dict__.get(side)
+            if arr is not None:
+                self.__dict__[side] = _readonly_bound(arr)
+        # The bounds as written (#2252) decide ``validate`` and are what ``dumps``
+        # writes, so a writable copy would let an in-place write change both
+        # (review of #2257). Frozen like the boxes; no var_type, nothing re-snapped.
+        for side in ("_raw_lb", "_raw_ub"):
             arr = self.__dict__.get(side)
             if arr is not None:
                 self.__dict__[side] = _readonly_bound(arr)
@@ -7559,12 +7687,20 @@ class Model:
         shape : int or tuple of int, default ()
             Scalar ``()`` or tuple for array variables.
         lb : float or numpy.ndarray, optional
-            Lower bound. Honored **exactly** when supplied. When omitted, the
-            finite fallback ``0`` is used and a ``UserWarning`` is emitted (see
-            below).
+            Lower bound. Honored when supplied (never replaced by the
+            fallback). When omitted, the finite fallback ``0`` is used and a
+            ``UserWarning`` is emitted (see below).
         ub : float or numpy.ndarray, optional
-            Upper bound. Honored **exactly** when supplied. When omitted, the
-            finite fallback ``1e6`` is used and a ``UserWarning`` is emitted.
+            Upper bound. Honored when supplied. When omitted, the finite
+            fallback ``1e6`` is used and a ``UserWarning`` is emitted.
+
+            A fractional bound is stored as the integer range it admits
+            (#2252): a bound within ``1e-6`` of an integer *is* that integer
+            (``lb=1.000001`` stores ``1``), otherwise ``lb`` rounds up and
+            ``ub`` rounds down (``lb=1.5`` stores ``2``). The same rule applies
+            to every later ``x.lb = ...``/``x.ub = ...``, so every solve route
+            and :func:`~discopt.validation.feasibility.verify_point` see one
+            integral box.
 
         Returns
         -------
@@ -13094,7 +13230,18 @@ class Model:
             if var.name in names:
                 raise ValueError(f"Duplicate variable name: '{var.name}'")
             names.add(var.name)
-            if np.any(var.lb > var.ub):
+            crossed = var.lb > var.ub
+            if var.var_type is VarType.INTEGER:
+                # #2252: an INTEGER box is stored as the integer range it admits,
+                # so a box holding no integer (``lb=1.2, ub=1.8``) is stored as
+                # ``[2, 1]``. That is an infeasible model, which the solve proves
+                # and reports (#844), not a modeling error. A box the CALLER
+                # crossed (``lb=3, ub=2``, or ``lb=1.8, ub=1.2``) still is: the
+                # test is on the bounds as written, before the snap.
+                crossed = np.asarray(var._declared_bound("lb")) > np.asarray(
+                    var._declared_bound("ub")
+                )
+            if np.any(crossed):
                 raise ValueError(f"Variable '{var.name}' has lb > ub at some index")
 
         # Duplicate constraint names are a results-integrity hazard (M5):

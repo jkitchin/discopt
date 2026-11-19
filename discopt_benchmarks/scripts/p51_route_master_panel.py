@@ -78,9 +78,16 @@ def solve_one(lab, inst, build, on, a, solu):
     from discopt.modeling.core import ObjectiveSense
     from discopt.validation.feasibility import verify_point
 
-    # Both arms are pinned explicitly: since highs-parity D3 (2026-11-07) the default
-    # master is the in-house one, so an unset variable no longer means HiGHS.
-    os.environ[FLAG] = "simplex" if on else "highs"
+    # The ON arm is pinned to the in-house master. The OFF arm is pinned to HiGHS, or
+    # with ``--off-arm default`` left unset (#2237: the default then follows
+    # ``DISCOPT_LP_ENGINE``, HiGHS under ``auto``), which also exercises the
+    # route's engine fallback a pinned ``=highs`` turns off.
+    if on:
+        os.environ[FLAG] = "simplex"
+    elif a.off_arm == "highs":
+        os.environ[FLAG] = "highs"
+    else:
+        os.environ.pop(FLAG, None)
     try:
         m = build()
         sense = 1.0 if m._objective.sense == ObjectiveSense.MINIMIZE else -1.0
@@ -105,9 +112,13 @@ def solve_one(lab, inst, build, on, a, solu):
     if r.gap_certified and ok is False:
         viol.append(f"{lab} on={on} certified an unverified point")
     route = r.algorithm_route or ""
+    stats = r.solver_stats or {}
     return {"status": str(r.status), "cert": bool(r.gap_certified), "obj": r.objective,
             "bound": r.bound, "wall": w, "feas_ok": ok, "route": route,
             "fired": ("master=simplex" in route) if on else ("master=highs" in route),
+            "nodes": r.node_count, "fell_back": "fell back" in route,
+            "engine_fallback": "engine fallback" in route,
+            "soc_outer_rows": float(stats.get("oa/soc_outer_rows", 0) or 0),
             "checks": checks, "violations": viol}  # fmt: skip
 
 
@@ -289,6 +300,12 @@ def main(argv=None) -> int:
     ap.add_argument("--off", default="0")
     ap.add_argument("--arms", default="", help='e.g. "off=;k3=DISCOPT_MILP_LAZY_RESTARTS=3"')
     ap.add_argument("--resume", action="store_true", help="keep the rows already in --out")
+    ap.add_argument(
+        "--off-arm",
+        choices=("highs", "default"),
+        default="highs",
+        help="two-master mode: OFF pinned to =highs, or the unset default (#2237)",
+    )
     a = ap.parse_args(argv)
     MP._assert_discopt_under_test()
     if a.kernel == "off":
@@ -324,7 +341,9 @@ def main(argv=None) -> int:
         rows.append(rec)
         o, n = rec["off"], rec["on"]
         print(f"[{i}/{len(models)}] {lab:34s} OFF {o['status']}/{o['cert']} {o['wall']:6.2f}s "
-              f"| ON {n['status']}/{n['cert']} {n['wall']:6.2f}s fired={o['fired']}/{n['fired']}",
+              f"| ON {n['status']}/{n['cert']} {n['wall']:6.2f}s fired={o['fired']}/{n['fired']} "
+              f"soc={o['soc_outer_rows']:g}/{n['soc_outer_rows']:g} "
+              f"fb={o['fell_back']:d}/{n['fell_back']:d} efb={o['engine_fallback']:d}",
               flush=True)  # fmt: skip
         Path(a.out).write_text(json.dumps({"header": hdr, "args": vars(a), "rows": rows,
                                            "errors": errors, "skipped": skipped},
@@ -336,6 +355,10 @@ def main(argv=None) -> int:
     gained = [r["model"] for r in rows if r["on"]["cert"] and not r["off"]["cert"]]
     wall = {arm: sum(r[arm]["wall"] for r in rows) for arm in ("off", "on")}
     fired = {arm: sum(r[arm]["fired"] for r in rows) for arm in ("off", "on")}
+    mech = {arm: {"soc_outer_rows": sum(r[arm]["soc_outer_rows"] > 0 for r in rows),
+                  "fell_back": sum(r[arm]["fell_back"] for r in rows),
+                  "engine_fallback": sum(r[arm]["engine_fallback"] for r in rows)}
+            for arm in ("off", "on")}  # fmt: skip
     bars = {
         "cert_clean": not viol and not errors,
         "certified_on_ge_off": cert["on"] >= cert["off"],
@@ -344,7 +367,8 @@ def main(argv=None) -> int:
     }
     verdict = {"certified": cert, "lost": lost, "gained": gained, "wall": wall,
                "wall_ratio": wall["on"] / wall["off"] if wall["off"] else None,
-               "fired": fired, "checks": checks, "violations": viol, "errors": errors,
+               "fired": fired, "mechanisms": mech, "checks": checks, "violations": viol,
+               "errors": errors,
                "bars": bars, "pass": all(bars.values())}  # fmt: skip
     Path(a.out).write_text(json.dumps({"header": hdr, "args": vars(a), "rows": rows,
                                        "skipped": skipped, "verdict": verdict},
