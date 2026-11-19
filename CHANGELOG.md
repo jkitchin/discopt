@@ -336,6 +336,12 @@ The release procedure that produces these entries is documented in
   - New stat `milp/int_row_bounds_rounded`. It fires on 9 of the 38 MIPLIB-38
     instances with statuses and objectives identical; `fiber` on Rust goes from 58
     to 23 nodes.
+  - Follow-up (#2269): the rounding's noise allowance scaled with |q|, but the float
+    error in q = (b - rest)/a scales with |b| and |rest|. On a cancelling row
+    (`z + 1.01e-8*w <= 0.5000000101` with z = 0.5) q came out 0.9999999948, and the
+    floor removed the feasible w = 1. A box-MCP GDP reformulation then returned
+    `infeasible`, a false certificate. The allowance is now
+    `1e-9*max(1, |q|, (|b| + sum|a_k x_k|)/|a|)` in both the sparse and OA forms.
 - **Point-feasibility checks accepted overflowing or NaN rows (#2248, closes #2245;
   #2246, closes #2244).**
   - `_matrix_solution_feasible` accepted points whose row activity overflows f64, e.g.
