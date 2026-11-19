@@ -1497,6 +1497,21 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Record `res`'s counters as the calling thread's last MILP-driver solve, for
+/// [`milp_last_solve_stats_py`]. Every binding that runs the driver calls this
+/// after its solve (`solve_milp_*_csc_py` and `MilpHandle.solve`, #2225).
+pub(crate) fn record_last_milp_stats(res: &discopt_core::bnb::milp_driver::MilpResult) {
+    LAST_MILP_STATS.with(|c| {
+        c.set(Some((
+            res.root_cut_rows,
+            res.strong_probe_lps,
+            res.bound_hook_calls,
+            res.bound_hook_raised,
+            res.stop.as_str(),
+        )));
+    });
+}
+
 /// Counters of the last MILP-driver solve made on the calling thread
 /// (`solve_milp_csc_py` / `solve_milp_relu_csc_py`), as a dict
 /// `{"root_cut_rows", "strong_probe_lps"}`, or `None` before any solve. The solve
@@ -2452,15 +2467,7 @@ fn run_milp_hooked<'py>(
         MilpStatus::Unbounded => "unbounded",
         MilpStatus::NodeLimit => "node_limit",
     };
-    LAST_MILP_STATS.with(|c| {
-        c.set(Some((
-            res.root_cut_rows,
-            res.strong_probe_lps,
-            res.bound_hook_calls,
-            res.bound_hook_raised,
-            res.stop.as_str(),
-        )));
-    });
+    record_last_milp_stats(&res);
     Ok((
         status.to_string(),
         PyArray1::from_vec(py, res.x),

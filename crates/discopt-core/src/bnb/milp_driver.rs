@@ -648,6 +648,48 @@ fn tol_robust_enabled() -> bool {
     })
 }
 
+/// `DISCOPT_MILP_TOL_ROBUST_SIDED` (#2225): the tolerance-robust node LP's bound box
+/// widens each row slack by its OWN side's bound tolerance, `AUDIT_FEAS * (1 + |l_j|)`
+/// below and `AUDIT_FEAS * (1 + |u_j|)` above, instead of the larger side's on both
+/// (what [`row_tolerances`] charges the row, symmetric by construction). Both are
+/// relaxations of the set `point_verified` accepts; the sided one is the tight one.
+/// With it, an LP over that box that is infeasible is a proof that the node holds no
+/// acceptable point (its ray is verified over that box, [`node_lp`]); an optimum in it
+/// bounds the node, as before. Which points are ACCEPTED does not change: the
+/// candidate box and `point_verified` are untouched. (A first version also accepted a
+/// full-box optimum with its slacks clamped back into `bounds_hold`; such a point
+/// spends the slack's bound tolerance AND the row's residual tolerance on one row, up
+/// to 1.5e-6 relative on `test_milp_tolerance_feasible_box`'s fixture against the
+/// 1e-6 its callers are promised, so it was dropped.)
+///
+/// Measured on MIPcc27 `bell3ainf` IIS probes (#2225): a node with every integer
+/// column fixed whose rows are infeasible exactly, and infeasible at the half-
+/// tolerance candidate box, but feasible in the symmetric box only at its edge
+/// (slack `3e-6` above `u = 0`, where acceptance allows `1e-6 + 1e-6`): its point was
+/// never acceptable and its emptiness never provable, so the HiGHS search kept the
+/// node as an `unresolved_floor` and the whole probe came back `node_limit` with no
+/// budget spent. 67 of 371 probes of one IIS run, each an element the filter could
+/// not drop.
+fn tol_robust_sided_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_TOL_ROBUST_SIDED").unwrap_or_default();
+        parse_tol_robust_sided(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`tol_robust_sided_enabled`]; garbage is refused.
+fn parse_tol_robust_sided(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" => Ok(false),
+        "" | "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_TOL_ROBUST_SIDED={other:?} is not recognized (expected 1/true/yes \
+             or 0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
 /// The parse table behind [`tol_robust_enabled`]; garbage is refused.
 fn parse_tol_robust(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -9925,6 +9967,18 @@ fn robust_infeasible(ctx: &NodeCtx<'_>, y_scaled: &[f64], l: &[f64], u: &[f64]) 
     farkas_robust_csc(&y, ctx.csc_rc, ctx.b_w, &eps, l, u, ctx.m_w, ctx.n_w)
 }
 
+/// #2225: an exact Farkas test, in ORIGINAL units, of the ray `y_scaled` (solve
+/// coordinates) over the box `l`, `u` -- the full tolerance relaxation of a node, whose
+/// rows are exact (each row's tolerance is already in its slack's box).
+fn farkas_box_infeasible(ctx: &NodeCtx<'_>, y_scaled: &[f64], l: &[f64], u: &[f64]) -> bool {
+    let mut y = y_scaled.to_vec();
+    if let Some(s) = ctx.scaling {
+        s.unscale_dual(&mut y);
+    }
+    let zero = vec![0.0; ctx.m_w];
+    farkas_robust_csc(&y, ctx.csc_rc, ctx.b_w, &zero, l, u, ctx.m_w, ctx.n_w)
+}
+
 /// The node box with each row's own slack (its singleton column past the
 /// structurals) widened. `full = false`: by half the slack's own bound tolerance
 /// `AUDIT_FEAS * (1 + |bound|)`, so an LP point in it still passes `bounds_hold` with
@@ -9951,16 +10005,37 @@ fn relax_row_slacks(
         let i = rows[0];
         done[i] = true;
         let audit = crate::lp::simplex::primal::AUDIT_FEAS;
+        let a = vals[0].abs();
+        if full && tol_robust_sided_enabled() {
+            // #2225: the row's tolerance less what `row_tolerances` charged it for
+            // this slack's bounds (at the larger side's magnitude), plus this side's
+            // own bound tolerance: the projection of what `point_verified` accepts
+            // (rows within `ROW_VERIFY_TOL`, the slack within `bounds_hold`). Only the
+            // BOUND box changes; the candidate box below is untouched, so no point is
+            // accepted that was not before.
+            let mag = [l[j], u[j]]
+                .iter()
+                .filter(|v| v.abs() < INF)
+                .fold(0.0f64, |acc, v| acc.max(v.abs()));
+            let rest = (eps[i] / a - audit * (1.0 + mag)).max(0.0);
+            if rl[j] > -INF {
+                rl[j] -= rest + audit * (1.0 + rl[j].abs());
+            }
+            if ru[j] < INF {
+                ru[j] += rest + audit * (1.0 + ru[j].abs());
+            }
+            continue;
+        }
         if rl[j] > -INF {
             rl[j] -= if full {
-                eps[i] / vals[0].abs()
+                eps[i] / a
             } else {
                 0.5 * audit * (1.0 + rl[j].abs())
             };
         }
         if ru[j] < INF {
             ru[j] += if full {
-                eps[i] / vals[0].abs()
+                eps[i] / a
             } else {
                 0.5 * audit * (1.0 + ru[j].abs())
             };
@@ -10684,6 +10759,9 @@ fn node_lp(ctx: &NodeCtx<'_>, start: Option<Basis>, full_l: &[f64], full_u: &[f6
     // The box the node's NS bound is taken over: the node box, or (below) its full
     // tolerance relaxation when the LP had to be re-solved there.
     let mut bound_box: Option<(Vec<f64>, Vec<f64>)> = None;
+    // #2225: the full tolerance relaxation, when the LP that came back infeasible was
+    // solved over it (`DISCOPT_MILP_TOL_ROBUST_SIDED`).
+    let mut farkas_box: Option<(Vec<f64>, Vec<f64>)> = None;
     // DISCOPT_MILP_TOL_ROBUST: an LP that is infeasible, but not robustly so, holds
     // no exact point yet may hold an acceptable one. Re-solve it over the rows
     // relaxed by their acceptance tolerance (each row's slack widened); that LP is a
@@ -10720,6 +10798,11 @@ fn node_lp(ctx: &NodeCtx<'_>, start: Option<Basis>, full_l: &[f64], full_u: &[f6
                 sol = alt;
                 bound_box = full_box;
             } else if alt.status == LpStatus::Infeasible {
+                if tol_robust_sided_enabled() {
+                    // #2225: the ray is of the LP over the full (sided) box; that box,
+                    // not the node's, is what it can prove empty.
+                    farkas_box = full_box;
+                }
                 sol = alt;
             }
         }
@@ -10833,7 +10916,19 @@ fn node_lp(ctx: &NodeCtx<'_>, start: Option<Basis>, full_l: &[f64], full_u: &[f6
             // and `sl`/`su`/`ctx.sb` are all in scaled space, as `ctx.sa` was).
             // DISCOPT_MILP_TOL_ROBUST: only a ray that survives every row's acceptance
             // tolerance fathoms (an exact-only one left the node above re-solved).
-            let proved = if tol_robust_enabled() {
+            let proved = if let Some((fl, fu)) = &farkas_box {
+                // #2225: the full box's LP is infeasible. Its rows are exact and every
+                // row's acceptance tolerance is in its slack's box, so a ray verified
+                // over that box proves no acceptable point exists in the node.
+                let r = robust_infeasible(ctx, &sol.dual, full_l, full_u)
+                    || farkas_box_infeasible(ctx, &sol.dual, fl, fu);
+                crate::profile::incr(if r {
+                    crate::profile::Ctr::TolRobustSidedProved
+                } else {
+                    crate::profile::Ctr::TolRobustSidedRefused
+                });
+                r
+            } else if tol_robust_enabled() {
                 let r = robust_infeasible(ctx, &sol.dual, full_l, full_u);
                 if !r {
                     crate::profile::incr(crate::profile::Ctr::TolRobustFarkasRefused);
@@ -14046,6 +14141,10 @@ mod tests {
         assert!(parse_tol_robust("1").unwrap() && parse_tol_robust("").unwrap());
         assert!(!parse_tol_robust("0").unwrap());
         assert!(parse_tol_robust("maybe").is_err());
+        // #2225: the sided box's switch, same table.
+        assert!(parse_tol_robust_sided("1").unwrap() && parse_tol_robust_sided("").unwrap());
+        assert!(!parse_tol_robust_sided("0").unwrap() && !parse_tol_robust_sided("no").unwrap());
+        assert!(parse_tol_robust_sided("sided").is_err());
     }
 
     #[test]

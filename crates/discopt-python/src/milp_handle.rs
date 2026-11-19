@@ -13,7 +13,7 @@ use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::lp_bindings::milp_options;
+use crate::lp_bindings::{milp_options, record_last_milp_stats};
 
 /// `solve_milp_csc_py`'s return: `(status, x, obj, bound, nodes, lp_iters)`.
 type SolveTuple<'py> = (String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize);
@@ -231,6 +231,9 @@ impl PyMilpHandle {
             discopt_core::profile::dump();
             r
         });
+        // #2225: the handle is a driver run like any other, so its counters
+        // (above all #2239's `stop_reason`) are readable the same way.
+        record_last_milp_stats(&res);
         Ok((
             status_str(res.status).to_string(),
             PyArray1::from_vec(py, res.x),
