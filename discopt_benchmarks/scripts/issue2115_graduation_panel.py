@@ -137,6 +137,17 @@ _FLAGS = {
         "leak": lambda off: off["LpStdEquilRetryAttempts"],
         "show": ("LpStdEquilRetryAttempts", "LpStdEquilRetryDecided"),
     },
+    # #2236: a cold primal solve refused by the final audit on a bounds excursion is
+    # re-optimized warm by the dual from the refused basis (``DISCOPT_LP_PRIMAL_DUAL_CLEANUP``,
+    # `lp/simplex/primal.rs` + `dual.rs::bounds_refusal_dual_cleanup`). Only a rescue
+    # (an audited `Optimal` replacing the `Numerical`) can change the search; OFF the
+    # hook never runs, so any attempt OFF is a leak.
+    "DISCOPT_LP_PRIMAL_DUAL_CLEANUP": {
+        "fired": lambda off, on: on["PrimalDualCleanupRescues"],
+        "ran": lambda off, on: on["PrimalDualCleanupAttempts"] > 0,
+        "leak": lambda off: off["PrimalDualCleanupAttempts"],
+        "show": ("PrimalDualCleanupAttempts", "PrimalDualCleanupRescues"),
+    },
     "DISCOPT_NS_PROJECT": {
         "fired": lambda off, on: on["NodeNsProjectRescue"],
         "ran": lambda off, on: on["NodeNsProjectTry"] > 0,
@@ -296,6 +307,12 @@ _CTRS = (
     "PrimalRowPriceDense",
     "PrimalIncrDriftReprice",
     "PrimalIncrExactRecheck",
+    # #2236 DISCOPT_LP_PRIMAL_DUAL_CLEANUP.
+    "PrimalDualCleanupAttempts",
+    "PrimalDualCleanupPrepRefused",
+    "PrimalDualCleanupRescues",
+    "PrimalDualCleanupValueRejected",
+    "PrimalDualCleanupProjectedAccepts",
     # #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE (and the spatial kernel's own retry).
     "LpLogicalRescueAttempts",
     "LpLogicalRescueDecided",

@@ -2231,12 +2231,35 @@ class MccormickLPRelaxer:
         # fires and the node is byte-identical — unlike an always-on build-time
         # filter, which loosened 10/66 in-repo instances (nvs09 lost its `optimal`
         # certificate; #671 differential panel). Default OFF.
+        #
+        # #2236: "breaks down" includes an ``optimal`` solve whose own NS safe bound is
+        # missing or loose against its objective by the #1229 ``_LOOSE_BOUND_REL_GAP``:
+        # the LP was decided, but its duals certify nothing usable. On hda's raw root
+        # the cold primal used to fail here (the filter then certified -7062.847); with
+        # ``DISCOPT_LP_PRIMAL_DUAL_CLEANUP`` the same LP comes back ``optimal`` with an
+        # NS bound of -1.5e7, skipped this filter, and left the later loose-bound
+        # trigger to filter the *separated* LP, which certified only -7062.951. Same
+        # soundness argument: the filtered LP is a superset.
+        _decided_but_loose = (
+            res.status == "optimal"
+            and res.objective is not None
+            and np.isfinite(res.objective)
+            and (
+                res.safe_bound is None
+                or not np.isfinite(res.safe_bound)
+                or res.safe_bound
+                < res.objective - _LOOSE_BOUND_REL_GAP * max(1.0, abs(res.objective))
+            )
+        )
         if (
             _tuning().relax_row_filter
             and not _node_budget_spent()
-            and not (
-                res.status == "optimal"
-                or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+            and (
+                _decided_but_loose
+                or not (
+                    res.status == "optimal"
+                    or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+                )
             )
         ):
             from discopt._relax.milp_relaxation import _filter_unresolvable_rows
