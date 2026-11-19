@@ -220,3 +220,112 @@ def test_lp_spatial_engine_refuses_a_point_outside_a_crossed_box():
     res = solve_lp_spatial_bb(m, time_limit=10.0, gap_tolerance=1e-4)
     assert res is not None
     assert res.status == "infeasible" and res.x is None
+
+
+# --- the same rule on ROWS: a row over integers is held as verify_point holds it ----
+#
+# An integer point that misses a row by a sliver (2e-7 .. 3e-5) sits inside every
+# engine's 1e-6 tolerance but outside ``verify_point``'s, which allows only float
+# noise on a row no fractional move can repair. Each engine adopted that point,
+# pruned the feasible next integer away, and returned ``error`` or a ``feasible``
+# point the verifier refuses. Each case below names the engine it reached.
+
+
+def _row_model(build, lb=0.0):
+    m = dm.Model()
+    x = m.integer("x", lb=lb, ub=10)
+    extra = build(m, x)
+    return m, extra
+
+
+def _y_fixed_linear(obj):
+    def build(m, x):
+        y = m.integer("y", lb=0, ub=0)
+        m.subject_to(2 * x + y >= 2.0000004)
+        m.minimize(obj(x))
+        return [0.0]
+
+    return build
+
+
+def _row(row, rhs, obj):
+    def build(m, x):
+        m.subject_to(row(x) >= rhs)
+        m.minimize(obj(x))
+        return []
+
+    return build
+
+
+_ROW_CASES = [
+    # (id, build, lb, x*, objective at x*)
+    ("spatial_ils_x2", _row(lambda x: x * x, 1.0000002, lambda x: x), 0.0, 2.0, 2.0),
+    ("spatial_node_exp", _row(dm.exp, math.e * (1 + 1e-6), lambda x: x), 0.0, 2.0, 2.0),
+    ("lift_unverified", _row(lambda x: x * x, 1.00003, lambda x: x - 1 / x), 1.0, 2.0, 1.5),
+    ("oa_sqrt_x", _row(dm.sqrt, 1.0000002, lambda x: x), 0.0, 2.0, 2.0),
+    ("oa_sqrt_xx", _row(dm.sqrt, 1.0000002, lambda x: x * x), 0.5, 2.0, 4.0),
+    ("oa_log_xx", _row(dm.log, 2e-7, lambda x: x * x), 0.5, 2.0, 4.0),
+    ("oa_linear_xx", _y_fixed_linear(lambda x: x * x), 0.5, 2.0, 4.0),
+    ("highs_milp", _y_fixed_linear(lambda x: x), 0.0, 2.0, 2.0),
+]
+
+
+@pytest.mark.parametrize(
+    ("build", "lb", "x_star", "f_star"),
+    [c[1:] for c in _ROW_CASES],
+    ids=[c[0] for c in _ROW_CASES],
+)
+def test_integer_point_off_a_row_by_a_sliver_is_not_the_answer(build, lb, x_star, f_star):
+    m, extra = _row_model(build, lb)
+    # The premise: x = 1 is refused by the arbiter, x* is accepted.
+    assert not verify_point(m, [1.0] + extra).ok
+    assert verify_point(m, [x_star] + extra).ok
+    r = m.solve(time_limit=30)
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.algorithm_route)
+    xv = float(np.ravel(r.x["x"])[0])
+    assert xv == x_star, (xv, r.algorithm_route)
+    assert r.objective == pytest.approx(f_star, abs=1e-9)
+    assert verify_point(m, [xv] + extra).ok
+    assert r.bound <= r.objective + 1e-6
+
+
+def test_round_single_integer_cut():
+    from discopt.solvers.oa import _round_single_integer_cut
+
+    integ = np.array([1, 0])
+    # x >= 1.0000004 written as -0.5 x <= -0.5000002 -> x >= 2
+    row, rhs = _round_single_integer_cut(np.array([-0.5, 0.0]), -0.5000002, integ)
+    np.testing.assert_array_equal(row, [-1.0, 0.0])
+    assert rhs == -2.0
+    # x <= 2.7 -> x <= 2
+    row, rhs = _round_single_integer_cut(np.array([2.0, 0.0]), 5.4, integ)
+    np.testing.assert_array_equal(row, [1.0, 0.0])
+    assert rhs == 2.0
+    # resting on an integer up to float noise stays there
+    _, rhs = _round_single_integer_cut(np.array([1.0, 0.0]), 2.0 - 1e-12, integ)
+    assert rhs == 2.0
+    # a continuous column, or two columns, is left alone
+    row, rhs = _round_single_integer_cut(np.array([0.0, 1.0]), 2.5, integ)
+    assert rhs == 2.5
+    row, rhs = _round_single_integer_cut(np.array([1.0, 1.0]), 2.5, integ)
+    assert rhs == 2.5
+
+
+def test_round_single_integer_rows():
+    from discopt.solvers.oa import _round_single_integer_rows, _SparseRow
+
+    integ = np.array([1, 1, 0])
+    lb = np.array([0.0, 0.0, 0.0])
+    ub = np.array([10.0, 0.0, 5.0])  # column 1 fixed at 0
+    rows = [
+        _SparseRow.from_dense([2.0, 1.0, 0.0]),  # 2x + y >= 2.0000004 -> x >= 2
+        _SparseRow.from_dense([1.0, 0.0, 0.0]),  # x <= 7.5 -> x <= 7
+        _SparseRow.from_dense([1.0, 0.0, 1.0]),  # x + c <= 3: two free columns, untouched
+        _SparseRow.from_dense([0.0, 0.0, 1.0]),  # c >= 0.5: continuous, untouched
+    ]
+    new_lb, new_ub = _round_single_integer_rows(
+        lb, ub, rows, [2.0000004, 7.5, 3.0, 0.5], [">=", "<=", "<=", ">="], integ
+    )
+    np.testing.assert_array_equal(new_lb, [2.0, 0.0, 0.0])
+    np.testing.assert_array_equal(new_ub, [7.0, 0.0, 5.0])
+    np.testing.assert_array_equal(lb, [0.0, 0.0, 0.0])  # inputs are not mutated

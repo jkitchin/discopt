@@ -880,15 +880,20 @@ class TestOARobustnessOptions:
 
         m = dm.Model("no_good_option")
         y = m.binary("y")
+        # Two binaries in the row: a row over ONE integer column is applied as the
+        # integer bound it states when OA decomposes the model (#2252 follow-up), so
+        # ``y <= 0.25`` alone would fix ``y = 0`` and leave no assignment for the
+        # mocked master to propose. This row keeps that assignment infeasible.
+        w = m.binary("w")
         m.minimize(y)
-        m.subject_to(y <= 0.25)
+        m.subject_to(y + w <= 0.25)
 
         no_good_calls = []
 
         monkeypatch.setattr(
             oa_module,
             "_solve_nlp_relaxation",
-            lambda *args, **kwargs: (np.array([0.5]), 0.5),
+            lambda *args, **kwargs: (np.array([0.5, 0.0]), 0.5),
         )
         monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
         monkeypatch.setattr(
@@ -896,7 +901,7 @@ class TestOARobustnessOptions:
             "_solve_master_milp",
             lambda *args, **kwargs: MILPResult(
                 status=SolveStatus.OPTIMAL,
-                x=np.array([1.0]),
+                x=np.array([1.0, 0.0]),
                 objective=1.0,
                 bound=0.0,
             ),
