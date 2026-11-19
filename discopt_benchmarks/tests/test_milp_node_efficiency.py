@@ -101,14 +101,22 @@ def test_sparse_cut_profile_is_sound():
     assert abs(prod.obj - profile.obj) <= 1e-6 * (1 + abs(prod.obj))
 
 
-def test_node_cuts_sound_gated_and_reduce_sparse_nodes():
+def test_node_cuts_sound_gated_and_reduce_sparse_nodes(monkeypatch):
     """Node cuts (Step 10): density-gated cover separation at fractional nodes.
 
     * Sound everywhere — same proven optimum with cuts on vs off.
     * Density-gated: on a *dense*-row model the gate suppresses node cuts, so the
       tree (node count) is identical to off — they cannot bloat dense LPs.
     * Effective: on a *sparse*-row model they cut the node count.
+
+    ``node_cuts`` is read by the batched search only. Since the HiGHS-design search
+    became the default (``4495376a3``, ``DISCOPT_HIGHS_MIP_SEARCH``), which separates
+    at nodes by its own rules, the option is inert there: measured on ``98ae95f8b``,
+    sparse 3666 nodes on and off (133273 LP iterations both). So this test pins the
+    batched search, where it measures the separator: sparse 3883 -> 2555 nodes,
+    dense 85 -> 85.
     """
+    monkeypatch.setenv("DISCOPT_HIGHS_MIP_SEARCH", "0")
     base = {
         "root_cuts": 16, "cut_rounds": 1, "max_pool_cuts": 128, "heuristics": True,
         "presolve": True, "strong_branch": True, "reduced_cost_fixing": True,
