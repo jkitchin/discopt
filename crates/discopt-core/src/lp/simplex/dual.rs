@@ -1176,8 +1176,17 @@ pub(super) fn bounds_refusal_dual_cleanup(
         && super::primal::point_passes_original_audit(&warm.x, sp, m, n, b, l, u);
     if point_ok {
         let obj_x: f64 = warm.x.iter().zip(c).map(|(xj, cj)| xj * cj).sum();
-        if !super::primal::dual_value_certifies_cols(&warm.dual, sp, n, m, c, b, l, u, obj_x, 1e-6)
-        {
+        let certified = if super::primal::dual_value_certifies_cols(
+            &warm.dual, sp, n, m, c, b, l, u, obj_x, 1e-6,
+        ) {
+            true
+        } else if projected_value_certifies(&warm.dual, sp, m, n, c, b, l, u, obj_x, 1e-6) {
+            crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupProjectedAccepts);
+            true
+        } else {
+            false
+        };
+        if !certified {
             crate::profile::incr(crate::profile::Ctr::PrimalDualCleanupValueRejected);
             return sol;
         }
@@ -1186,6 +1195,42 @@ pub(super) fn bounds_refusal_dual_cleanup(
         return warm;
     }
     sol
+}
+
+/// #2236: whether the duals `y` prove the value `obj` of `min cᵀx, A x = b, l ≤ x ≤ u`
+/// after projecting them onto `{a_jᵀy = c_j}` for the open columns whose reduced cost
+/// is rounding noise (`project::project_dual_closed`, the MILP driver's
+/// `DISCOPT_NS_PROJECT` rung). [`super::primal::dual_value_certifies_cols`] puts the
+/// weak-duality bound at `−∞` as soon as a free column's reduced cost cannot be shown
+/// to vanish, which a dual that is exact in real arithmetic still fails in floating
+/// point. The enclosed Neumaier–Shcherbina bound is rigorous for every dual in the
+/// enclosure, so `obj − g ≤ rel_tol·(1 + |obj|)` with `obj` attained by an audited
+/// point proves `obj` optimal to the same tolerance the unprojected check uses. A
+/// projection that does not verify certifies nothing.
+#[allow(clippy::too_many_arguments)]
+fn projected_value_certifies(
+    y: &[f64],
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    obj: f64,
+    rel_tol: f64,
+) -> bool {
+    use super::project::{ns_bound_enclosed, project_dual_closed};
+    if y.len() != m || !obj.is_finite() || !y.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let Ok(pd) = project_dual_closed(y, c, sp, m, n, l, |j| u[j] >= INF) else {
+        return false;
+    };
+    match ns_bound_enclosed(&pd, c, sp, m, n, b, l, u) {
+        Some(g) if g.is_finite() => obj - g <= rel_tol * (1.0 + obj.abs()),
+        _ => false,
+    }
 }
 
 /// [`solve_lp_warm_csc`] without the #2125 huge-box relaxation: the solve plus
@@ -3672,6 +3717,32 @@ fn assemble(
 
 #[cfg(test)]
 mod tests {
+
+    /// #2236: on `min x1 s.t. x1 - x2 = 0, x1 free, x2 in [1, 2]` (optimum 1, exact dual
+    /// y = 1), a dual carrying rounding noise leaves the free column's reduced cost
+    /// 1 - y != 0, which puts the plain weak-duality bound at -inf. The projected
+    /// certificate makes that reduced cost exactly 0 and proves the true value, and it
+    /// still refuses a value above the optimum.
+    #[test]
+    fn projected_value_certificate_handles_a_free_column_2236() {
+        let sp = SparseCols::from_csc(vec![0, 1, 2], vec![0, 0], vec![1.0, -1.0]);
+        let (c, b) = (vec![1.0, 0.0], vec![0.0]);
+        let (l, u) = (vec![-INF, 1.0], vec![INF, 2.0]);
+        let y = vec![1.0 + 1e-13];
+        assert!(
+            !super::super::primal::dual_value_certifies_cols(
+                &y, &sp, 2, 1, &c, &b, &l, &u, 1.0, 1e-6
+            ),
+            "premise: the plain check cannot certify through the free column's noise"
+        );
+        assert!(super::projected_value_certifies(
+            &y, &sp, 1, 2, &c, &b, &l, &u, 1.0, 1e-6
+        ));
+        assert!(
+            !super::projected_value_certifies(&y, &sp, 1, 2, &c, &b, &l, &u, 1.1, 1e-6),
+            "a value above the optimum must not certify"
+        );
+    }
 
     #[test]
     fn an_empty_member_switch_counts_as_unset() {

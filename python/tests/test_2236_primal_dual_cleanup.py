@@ -8,12 +8,12 @@ check the #2212 logical-dual rescue uses; added on the PR #2256 review). The fla
 read once per process (a ``OnceLock`` in Rust), so each arm runs in a subprocess.
 
 The #2226 fixture (the ex8_5_3 node LP, 155 rows x 37 columns, HiGHS optimum
--0.06756047745692995) is the LP the issue was filed on. Its warm dual answer is right
-(``solve_lp_std`` verifies it at HiGHS's optimum to 1e-14), but the LP has free
-columns, and the rigorous weak-duality certificate is minus infinity on a free column
-whose reduced cost does not vanish to within rounding, so the value check refuses it.
-The fixture tests pin that: a free-column-aware certificate would flip them. The
-positive case is a corpus solve (``nvs08``) where the clean-up's answer certifies.
+-0.06756047745692995) is the LP the issue was filed on. It has free columns: the plain
+weak-duality certificate is minus infinity on a free column whose reduced cost does not
+vanish to within rounding, so it refuses the fixture. The clean-up then projects the
+dual onto ``{a_j'y = c_j}`` for those columns (``project.rs``, the MILP driver's
+``DISCOPT_NS_PROJECT`` construction) and evaluates the enclosed Neumaier-Shcherbina
+bound, which certifies it. The second positive case is a corpus solve (``nvs08``).
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ print("RESULT " + json.dumps({{
     "attempts": int(c["PrimalDualCleanupAttempts"]),
     "rescues": int(c["PrimalDualCleanupRescues"]),
     "value_rejected": int(c["PrimalDualCleanupValueRejected"]),
+    "projected": int(c["PrimalDualCleanupProjectedAccepts"]),
     "bounds_refusals": int(c["LpAuditBoundsFail"]),
 }}))
 """
@@ -84,15 +85,14 @@ def test_off_still_refuses_the_fixture(flag):
     assert out["bound"] is None
 
 
-def test_value_check_refuses_the_free_column_fixture():
-    """With ``=1`` the clean-up runs on the fixture, and the value check
-    refuses its answer: the free columns leave the weak-duality certificate open. If this
-    starts returning a bound, a free-column-aware certificate landed and #2236's fixture
-    is decided; flip this test to assert ``NODE_OPT``."""
+def test_projected_certificate_decides_the_free_column_fixture():
+    """Fails before #2236 (OFF: no bound). With ``=1`` the clean-up's warm dual answer is
+    certified through the projected dual -- the plain weak-duality check alone refuses
+    this free-column LP -- and ``solve_lp_std`` verifies the bound at HiGHS's optimum."""
     out = _run("1")
-    assert out["attempts"] >= 1 and out["value_rejected"] >= 1, out
-    assert out["rescues"] == 0, out
-    assert out["bound"] is None
+    assert out["attempts"] >= 1 and out["rescues"] >= 1, out
+    assert out["projected"] >= 1, out  # the free-column certificate is what decided it
+    assert out["bound"] == pytest.approx(NODE_OPT, abs=1e-9)
 
 
 _NVS08 = os.path.join(HERE, "data", "minlplib_nl", "nvs08.nl")

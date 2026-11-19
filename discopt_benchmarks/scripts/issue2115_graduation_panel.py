@@ -311,6 +311,8 @@ _CTRS = (
     "PrimalDualCleanupAttempts",
     "PrimalDualCleanupPrepRefused",
     "PrimalDualCleanupRescues",
+    "PrimalDualCleanupValueRejected",
+    "PrimalDualCleanupProjectedAccepts",
     # #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE (and the spatial kernel's own retry).
     "LpLogicalRescueAttempts",
     "LpLogicalRescueDecided",
