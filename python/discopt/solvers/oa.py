@@ -5484,6 +5484,34 @@ def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
 _OA_EXIT_SNAP_DIST = 1e-8
 
 
+def _published_integral(
+    model: Model,
+    x_flat: np.ndarray,
+    head: np.ndarray,
+    obj: float,
+    obj_sign: float,
+    verdict,
+) -> tuple[np.ndarray, float]:
+    """The verified point at its integral realisation, and its objective (#2252).
+
+    ``verify_point`` judges a point at ``snap_integers`` of it (#1380) and
+    reports the objective there, so that integral point is the one it vouched
+    for. Publishing the unsnapped one instead returned an INTEGER variable at
+    ``1.0000000012543357`` on ``lp_nlp_bb`` (the fixed-integer NLP leaves the
+    column a barrier step inside its bound). This is #1750's rule on the HiGHS
+    MILP route, applied to the OA family. A point whose integer columns are
+    already integral is returned unchanged, objective included.
+    """
+    from discopt.validation.feasibility import snap_integers
+
+    snapped = snap_integers(model, head)
+    if np.array_equal(snapped, head) or verdict.objective is None:
+        return x_flat, obj
+    out = np.array(x_flat, dtype=np.float64, copy=True)
+    out[: head.shape[0]] = snapped
+    return out, float(obj_sign * verdict.objective)
+
+
 def _exit_verified_incumbent(
     model: Model,
     x_flat: np.ndarray,
@@ -5563,7 +5591,7 @@ def _exit_verified_incumbent(
 
     verdict = verify_point(model, head, with_objective=True)
     if verdict.ok:
-        return x_flat, obj, None
+        return (*_published_integral(model, x_flat, head, obj, obj_sign, verdict), None)
 
     repaired = head.copy()
     n_snapped = 0
@@ -5593,7 +5621,10 @@ def _exit_verified_incumbent(
             repaired_obj = obj
             if second.objective is not None:
                 repaired_obj = float(obj_sign * second.objective)
-            return out, repaired_obj, None
+            return (
+                *_published_integral(model, out, repaired, repaired_obj, obj_sign, second),
+                None,
+            )
 
     (logger.warning if warn else logger.debug)(
         "OA: the returned incumbent does not verify (%s) and %d near-bound "
