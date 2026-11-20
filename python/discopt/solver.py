@@ -8674,6 +8674,52 @@ def _withhold_stale_certificate(
     return ("feasible" if status == "optimal" else status), honest_gap, False, bound_val
 
 
+def _withdraw_contradicted_tree_certificate(
+    tree_stats: dict,
+    status: str,
+    bound_val: Optional[float],
+    gap_val: Optional[float],
+    gap_certified: bool,
+    bound_source: Optional[str],
+    solver_stats: Optional[dict],
+    where: str,
+) -> tuple[str, Optional[float], Optional[float], bool, Optional[str], Optional[dict]]:
+    """Withdraw the certificate and the bound of a search whose tree reports
+    ``bound_contradicted`` (#1296), as the MILP driver does.
+
+    The tree raises it when an integral node's own value comes in below the bound
+    the node inherited from its ancestors: the node's box is inside every
+    ancestor's, so that point proves an ancestor bound invalid, and nothing derived
+    from the tree's bound -- including a root snapshot taken from the same tree --
+    is a certificate. The MILP driver acts on it (``milp_driver.rs``,
+    ``withdraw_certificate``); the Python drivers never read it, and the binding did
+    not expose it. Measured before this guard: a random convex IQP (seed 32 of
+    ``test_keep_proved_bound._random_convex_iqp``) with its root bound replaced by
+    ``opt + 1e-3`` -- an invalid bound -- had its optimal leaf witness the
+    contradiction, and NLP-BB still returned ``optimal``, ``gap_certified=True``.
+
+    Applied last, after every step that can (re-)earn a certificate. Downgrade-only:
+    ``optimal`` -> ``feasible``, ``infeasible`` -> ``unknown`` (no infeasibility
+    proof either), and the bound is dropped. Returns
+    ``(status, bound, gap, gap_certified, bound_source, solver_stats)``.
+    """
+    if not bool(tree_stats.get("bound_contradicted", False)):
+        return status, bound_val, gap_val, gap_certified, bound_source, solver_stats
+    logger.warning(
+        "%s: the search tree reports a contradicted bound (#1296: a feasible point "
+        "below a bound its ancestors proved), so its dual bound is not a "
+        "certificate; withdrawing the bound and the certificate (status %s).",
+        where,
+        status,
+    )
+    if status == "optimal":
+        status = "feasible"
+    elif status == "infeasible":
+        status = "unknown"
+    solver_stats = {**(solver_stats or {}), "tree/bound_contradicted": 1.0}
+    return status, None, None, False, None, solver_stats
+
+
 def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float) -> Optional[str]:
     """Which of the two convergence criteria the final ``(ub, lb)`` pair meets.
 
@@ -26220,6 +26266,21 @@ def solve_model(
         abs_gap_tol,
         "spatial B&B",
     )
+    # #1296, last: a contradicted tree certifies nothing.
+    status, bound_val, gap_val, _gap_certified, _bound_source, _contra_stats = (
+        _withdraw_contradicted_tree_certificate(
+            stats,
+            status,
+            bound_val,
+            gap_val,
+            _gap_certified,
+            _bound_source,
+            _solver_stats,
+            "spatial B&B",
+        )
+    )
+    if _contra_stats:
+        _solver_stats.update(_contra_stats)
 
     return SolveResult(
         status=status,
@@ -31399,6 +31460,20 @@ def _solve_nlp_bb(
         _gap_certified = False
         _ext_stats = dict(_ext_stats or {})
         _ext_stats["nlpbb/integral_incumbent_unverified"] = 1.0
+
+    # #1296, last: a contradicted tree certifies nothing.
+    status, bound_val, gap_val, _gap_certified, _bound_source, _ext_stats = (
+        _withdraw_contradicted_tree_certificate(
+            stats,
+            status,
+            bound_val,
+            gap_val,
+            _gap_certified,
+            _bound_source,
+            _ext_stats,
+            "NLP-BB",
+        )
+    )
 
     return SolveResult(
         status=status,
@@ -41481,6 +41556,19 @@ def _solve_miqp_bb(
         gap_tolerance,
         abs_gap_tol,
         "MIQP-BB",
+    )
+    # #1296, last: a contradicted tree certifies nothing.
+    status, bound_val, gap_val, _gap_certified, _bound_source, _ext_stats = (
+        _withdraw_contradicted_tree_certificate(
+            stats,
+            status,
+            bound_val,
+            gap_val,
+            _gap_certified,
+            _bound_source,
+            _ext_stats,
+            "MIQP-BB",
+        )
     )
 
     return SolveResult(
