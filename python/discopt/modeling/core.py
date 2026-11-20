@@ -11842,6 +11842,25 @@ class Model:
                     result.gap = _fb.gap
                     # Never claim a certificate the fallback did not actually prove.
                     result.gap_certified = _fb.status == "optimal"
+                    # Say which engine answered. The route used to keep naming the
+                    # primary alone, so a result the LP-per-node engine proved read
+                    # as the primary's (measured: nvs15 under ``nlp_bb=True,
+                    # deterministic=True`` -- NLP-BB returned ``time_limit`` with one
+                    # node, this branch certified in 38, and the route said
+                    # ``nlp-bb``).
+                    # ``_fb`` is an ``LpSpatialResult`` (status, objective, bound,
+                    # gap, x, node_count) with no route of its own, so the engine is
+                    # named here; reading ``_fb.algorithm_route`` raised and the
+                    # ``except`` below reported a "failed" fallback after the primal
+                    # had already been adopted.
+                    result.algorithm_route = (
+                        f"{result.algorithm_route or 'unknown'} [#844 no-incumbent "
+                        "fallback: lp-spatial-bb]"
+                    )
+                    result.solver_stats = {
+                        **(result.solver_stats or {}),
+                        "fallback/lp_spatial_primal": 1.0,
+                    }
             except Exception as _fb_exc:
                 # Never break a solve -- but never swallow silently either. A bare
                 # ``except`` here previously turned a hard TypeError into an invisible

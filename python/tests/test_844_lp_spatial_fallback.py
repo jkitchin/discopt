@@ -240,3 +240,35 @@ def test_engine_budget_clock_starts_at_entry(monkeypatch):
     lsb.solve_lp_spatial_bb(model, time_limit=2.0)
     assert len(seen) == 1 and seen[0] is not None, "the engine never built: nothing measured"
     assert seen[0] <= t_entry + 2.0 + 1e-3
+
+
+def test_the_route_names_the_fallback_when_it_answers(fb, monkeypatch):
+    """When the fallback supplies the primal, ``algorithm_route`` says so. It used to
+    keep naming the primary alone (measured: ``nvs15`` under ``nlp_bb=True,
+    deterministic=True`` -- NLP-BB returned ``time_limit`` with one node, this
+    fallback certified in 37 more, and the route read ``nlp-bb: ...``). The engine's
+    ``LpSpatialResult`` carries no route of its own; reading one raised inside the
+    fallback's ``try`` after the primal was adopted, which reported the fallback as
+    "failed" while its answer was being returned -- hence the no-warning assertion."""
+    import dataclasses
+    import warnings
+
+    import discopt.solver as solver_mod
+
+    fb("1")
+    real_solve_model = solver_mod.solve_model
+
+    def no_incumbent_primary(*args, **kwargs):
+        r = real_solve_model(*args, **kwargs)
+        return dataclasses.replace(r, objective=None, x=None, status="time_limit")
+
+    monkeypatch.setattr(solver_mod, "solve_model", no_incumbent_primary)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        r = _pure_integer_min().solve(time_limit=30)
+    failed = [w for w in caught if "#844 LP-spatial fallback failed" in str(w.message)]
+    assert not failed, [str(w.message) for w in failed]
+    assert r.objective == pytest.approx(6.0)
+    assert r.algorithm_route is not None
+    assert r.algorithm_route.endswith("[#844 no-incumbent fallback: lp-spatial-bb]")
+    assert (r.solver_stats or {}).get("fallback/lp_spatial_primal") == 1.0

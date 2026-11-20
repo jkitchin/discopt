@@ -29469,6 +29469,7 @@ def _solve_nlp_bb(
         from discopt.solvers._root_cuts import RootCutsNotApplicable
 
         try:
+            from discopt.solvers import _root_cuts as _root_cuts_mod
             from discopt.solvers._root_cuts import (
                 flat_column_terms,
                 generate_root_cuts,
@@ -29493,6 +29494,13 @@ def _solve_nlp_bb(
                     _rc_is_int,
                     _rc_is_bin,
                     time_budget_s=_role2_horizon(_rc_budget),
+                    # Under ``deterministic`` the wall budget above is inert, so the
+                    # stage needs a deterministic working terminator of its own.
+                    max_rounds=(
+                        _root_cuts_mod.DETERMINISTIC_ROUNDS
+                        if _tuning().deterministic
+                        else _root_cuts_mod.ROUNDS
+                    ),
                 )
                 jax_time += time.perf_counter() - t_jax_start
                 _rc_cols = flat_column_terms(model)
