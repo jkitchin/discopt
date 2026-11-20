@@ -325,19 +325,21 @@ def test_the_merge_carries_the_losers_claim_with_the_losers_bound():
     )
     assert merged.bound_valid is True
 
-    # And the claim travels in the other direction too: an UNVALIDATED bound
-    # that wins on tightness must not inherit the winner's validity.
+    # And an UNVALIDATED bound must never carry the winner's validity. This half
+    # used to assert that the tighter unclaimed 5.0 was installed with
+    # ``bound_valid=False`` -- consistent, but it discarded the claimed 1.0 for a
+    # number nobody proved, and on a CERTIFIED winner the same swap left
+    # ``gap_certified=True`` beside ``bound_valid=False`` (#2271, measured on
+    # ``tloss``). An unclaimed bound does not displace a claimed one.
     route2 = SolveResult(status="feasible", objective=10.0, gap_certified=False)
     route2._set_bound(1.0, valid=True, source="lp_dual")
     fallback2 = SolveResult(status="feasible", objective=20.0, gap_certified=False)
     fallback2._set_bound(5.0, valid=False)
 
     merged2 = _merge_route_and_fallback(route2, fallback2, is_maximize=False)
-    assert merged2.bound == 5.0
-    assert merged2.bound_valid is False, (
-        "an unvalidated bound inherited the winner's bound_valid=True"
-    )
-    assert merged2.bound_source is None
+    assert merged2.bound == 1.0, "an unclaimed bound displaced the winner's claimed one"
+    assert merged2.bound_valid is True
+    assert merged2.bound_source == "lp_dual"
 
 
 @pytest.mark.unit

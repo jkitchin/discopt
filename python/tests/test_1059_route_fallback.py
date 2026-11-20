@@ -114,11 +114,19 @@ class TestCertifiedPredicate:
         )
 
 
-def _sr(obj=None, bound=None, gap_certified=False, status="feasible", gap=None):
-    """A real ``SolveResult``, so the merge is tested against the real dataclass."""
-    return SolveResult(
+def _sr(obj=None, bound=None, gap_certified=False, status="feasible", gap=None, bound_valid=False):
+    """A real ``SolveResult``, so the merge is tested against the real dataclass.
+
+    ``bound_valid=True`` claims an uncertified bound valid, as a time-limited
+    B&B does for its global dual bound; the merge adopts only a claimed bound
+    over a claimed one (#2271).
+    """
+    r = SolveResult(
         status=status, objective=obj, bound=bound, gap_certified=gap_certified, gap=gap, x={}
     )
+    if bound_valid:
+        r._set_bound(bound, valid=True, source="bnb_tree")
+    return r
 
 
 @pytest.mark.unit
@@ -203,13 +211,13 @@ class TestRouteFallbackMerge:
 
     def test_an_uncertified_fallback_bound_is_adopted_when_tighter(self):
         route = _sr(obj=5.0, bound=10.0, gap_certified=True)
-        fb = _sr(obj=1.0, bound=6.0, gap_certified=False)
+        fb = _sr(obj=1.0, bound=6.0, gap_certified=False, bound_valid=True)
         merged = _merge_route_and_fallback(route, fb, True)
         assert merged is route
         assert merged.bound == pytest.approx(6.0)
 
     def test_an_uncertified_route_bound_is_adopted_when_tighter(self):
-        route = _sr(obj=1.0, bound=6.0, gap_certified=False)
+        route = _sr(obj=1.0, bound=6.0, gap_certified=False, bound_valid=True)
         fb = _sr(obj=5.0, bound=10.0, gap_certified=True)
         merged = _merge_route_and_fallback(route, fb, True)
         assert merged is fb
