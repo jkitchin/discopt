@@ -805,8 +805,9 @@ def _convex_node_safe_bound_enabled() -> bool:
 def _convex_node_keep_proved_bound_enabled() -> bool:
     """Whether a convex node whose proved bound is ABOVE its NLP objective imports
     the proved bound, and NLP-BB re-caps the published bound at the exactly
-    re-valued objective (``DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND``, **default
-    OFF**: bound-changing, CLAUDE.md §5; row in ``docs/dev/flag-retirement-audit.md``).
+    re-valued objective (``DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND``, **default ON**
+    since the §5 panel below; ``=0`` restores the #2067 ``min()`` import and the
+    capped bound, and the legacy path is kept intact).
 
     #2067 imports ``min(objective, proved)``, so where the proved bound is the
     larger (``n_raised``) the node keeps the NLP objective -- the value of a point
@@ -830,8 +831,30 @@ def _convex_node_keep_proved_bound_enabled() -> bool:
     lower bound on the node (as #2067 already relies on whenever it is the
     smaller), anything below a valid bound is one too, and ``min(proved, f(x))``
     with ``x`` the verified returned point is at most the optimum.
+
+    Graduation panel (2026-11-20, commit ``52fd122``; regime 2;
+    ``discopt_benchmarks/scripts/flag_onoff_corpus_panel.py``, the 74 vendored
+    MINLPLib instances, 20 s, arms interleaved, MINLPLib ``.solu`` oracle):
+
+    * ``PANEL_SOLVE_KWARGS='{"nlp_bb": true}'`` (the route the flag acts on; the
+      arm fired on 18 instances): 0 problems, 130 incumbent feasibility checks
+      passed, certified 32 -> 33 (``nvs15`` gained, none lost), bounds tighter on
+      ``fac2``, ``gbd``, ``st_miqp2``, ``st_miqp3``, ``nvs14``, ``tls2``
+      (2.546 -> 2.578 at the time limit), never looser on a certified instance.
+    * Default route: 0 problems, 130 checks passed, certified 56 -> 56, the arm
+      fired on ``cvxnonsep_nsig30`` (via ``lp_nlp_bb``'s NLP-BB); its one ON row
+      at 1117 nodes and a 9.6e-5-relative worse incumbent did not reproduce
+      (re-run twice per arm, interleaved: 1039 nodes and objective 130.62871265
+      both arms, ON bound 1.3e-6 tighter). It solves at 18 of 20 s, so the row is
+      wall-clock spread.
+    * An earlier run of both panels at ``23e2b10`` (before the NLP-BB-side
+      re-cap) was cert-clean too: 56 -> 56 and 32 -> 32; ``cvxnonsep_psig30``
+      under ``nlp_bb`` found the exact optimum ON (78.99885434) where OFF
+      certified a point 3.5e-3 worse within tolerance.
+
+    Cert-clean and helpful: graduated.
     """
-    return _env_flag("DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND", default=False)
+    return _env_flag("DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND", default=True)
 
 
 def _recap_bound_at_objective(

@@ -102,8 +102,10 @@ def test_tree_proved_bound_equals_capped_bound_on_the_legacy_import():
         assert stats["proved_lower_bound"] == stats["global_lower_bound"] == 3.5
 
 
-def test_flag_is_default_off(monkeypatch):
+def test_flag_is_default_on_with_an_opt_out(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
+    assert S._convex_node_keep_proved_bound_enabled()
+    monkeypatch.setenv(FLAG, "0")
     assert not S._convex_node_keep_proved_bound_enabled()
 
 
