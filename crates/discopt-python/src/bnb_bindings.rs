@@ -484,6 +484,8 @@ impl PyTreeManager {
         dict.set_item("bound_unresolved", s.bound_unresolved)?;
         dict.set_item("unresolved_floor", s.unresolved_floor)?;
         dict.set_item("safe_fathom_floor", s.safe_fathom_floor)?;
+        dict.set_item("proved_lower_bound", s.proved_lower_bound)?;
+        dict.set_item("bound_contradicted", s.bound_contradicted)?;
         Ok(dict)
     }
 

@@ -802,6 +802,38 @@ def _convex_node_safe_bound_enabled() -> bool:
     return _env_flag("DISCOPT_CONVEX_NODE_SAFE_BOUND", default=True)
 
 
+def _convex_node_keep_proved_bound_enabled() -> bool:
+    """Whether a convex node whose proved bound is ABOVE its NLP objective imports
+    the proved bound, and NLP-BB re-caps the published bound at the exactly
+    re-valued objective (``DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND``, **default
+    OFF**: bound-changing, CLAUDE.md §5; row in ``docs/dev/flag-retirement-audit.md``).
+
+    #2067 imports ``min(objective, proved)``, so where the proved bound is the
+    larger (``n_raised``) the node keeps the NLP objective -- the value of a point
+    feasible only to the NLP tolerance, which can sit below the box's true minimum.
+    On an integral node that point is also the incumbent, and the tree caps its
+    dual bound at the incumbent value; on an exhausted tree the bound IS that
+    value. ``Model.solve`` then re-values the objective exactly at the integral
+    point, so the published gap is the NLP's error, not the search's. Measured on
+    ``test_2262_cmir_integer_bounds`` (convex IQP, NLP-BB): closing integral node
+    objective -6.72e-7 locally, -1.46e-6 on CI, proved bound -3.78e-10;
+    certification hangs on whether that error clears the 1e-6 absolute tolerance
+    (the optimum is 0, so the relative one adds nothing), and shifting every node
+    objective down by 5e-7 reproduces CI's withheld certificate.
+
+    ON: (1) a raised node imports its proved bound, the NLP objective staying its
+    point value -- the tree reads the #1296 contradiction test against the
+    inherited bound in that case, since the node's own bound is no claim about an
+    ancestor; (2) NLP-BB carries the tree's uncapped ``proved_lower_bound``, and
+    once the objective is re-valued exactly the published bound becomes
+    ``max(bound, min(proved, objective))``. Sound: the proved bound is a valid
+    lower bound on the node (as #2067 already relies on whenever it is the
+    smaller), anything below a valid bound is one too, and ``min(proved, f(x))``
+    with ``x`` the verified returned point is at most the optimum.
+    """
+    return _env_flag("DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND", default=False)
+
+
 def _apply_convex_node_safe_bounds(
     evaluator,
     batch_lb,
@@ -835,7 +867,9 @@ def _apply_convex_node_safe_bounds(
     Returns ``(point_values, n_proved, n_abstained, n_raised)``: ``point_values`` is
     NaN where the bound and the point value coincide; ``n_raised`` counts nodes whose
     proved bound came out above the NLP objective (the objective is then kept, so the
-    count is a measurement, not a bound change).
+    count is a measurement, not a bound change -- unless
+    :func:`_convex_node_keep_proved_bound_enabled`, which imports the proved bound
+    there and returns the objective as the point value).
     """
     from discopt.solvers.convex_node_bound import convex_node_safe_bound
 
@@ -845,6 +879,7 @@ def _apply_convex_node_safe_bounds(
     cl_arr = np.asarray(cl if m else [], dtype=np.float64)
     cu_arr = np.asarray(cu if m else [], dtype=np.float64)
     proved = abstained = raised = 0
+    keep_proved = _convex_node_keep_proved_bound_enabled()
     for i in range(n_batch):
         raw = float(result_lbs[i])
         if not np.isfinite(raw) or raw >= _SENTINEL_THRESHOLD:
@@ -867,6 +902,9 @@ def _apply_convex_node_safe_bounds(
         proved += 1
         if safe >= raw:
             raised += 1
+            if keep_proved and safe > raw:
+                result_lbs[i] = safe
+                points[i] = raw
             continue
         result_lbs[i] = safe
         points[i] = raw
@@ -31291,6 +31329,21 @@ def _solve_nlp_bb(
         _ext_stats = dict(_ext_stats or {})
         _ext_stats["nlpbb/integral_incumbent_unverified"] = 1.0
 
+    # The search's uncapped proved bound, for ``Model._reconcile_objective_with_model``
+    # to re-cap at the exactly re-valued objective. Only from a tree whose bound is
+    # itself valid, uncontradicted (#1296) and resolved.
+    _proved_bound_out: Optional[float] = None
+    if (
+        _convex_node_keep_proved_bound_enabled()
+        and _model_is_convex
+        and _tree_bound_valid
+        and not bool(stats.get("bound_contradicted", False))
+        and not bool(stats.get("bound_unresolved", False))
+    ):
+        _pb = stats.get("proved_lower_bound")
+        if _pb is not None and np.isfinite(_pb):
+            _proved_bound_out = -float(_pb) if _nlpbb_is_max else float(_pb)
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -31306,6 +31359,7 @@ def _solve_nlp_bb(
         root_gap=root_gap_val,
         root_time=_root_time,
         nlp_bb=True,
+        _proved_bound=_proved_bound_out,
         gap_certified=_gap_certified,
         # #1244: every value the branches above publish is a valid global
         # dual bound -- the certified branch reports the certificate itself,
