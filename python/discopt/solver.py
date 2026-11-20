@@ -857,6 +857,36 @@ def _convex_node_keep_proved_bound_enabled() -> bool:
     return _env_flag("DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND", default=True)
 
 
+def _convex_node_clip_point_value_enabled() -> bool:
+    """Whether an integral convex node records its point CLIPPED INTO ITS BOX, valued
+    there, as its incumbent point and value (``DISCOPT_CONVEX_NODE_CLIP_POINT_VALUE``,
+    **default OFF**: it moves incumbent values and so pruning -- bound-changing,
+    CLAUDE.md §5; row in ``docs/dev/flag-retirement-audit.md``).
+
+    The node NLP's interior-point solver relaxes variable bounds (``bound_relax_factor``,
+    ~1e-8), so its point can sit just outside the node box, and a fixed box most of
+    all. Where the objective's gradient is large that is not a rounding matter.
+    Measured on ``nvs15`` (``nlp_bb=True``; NLP-BB's lifted model has 127 columns,
+    410 rows): a node whose box is a single point returned a point 9.87e-9 outside
+    it, with objective gradient up to 3.28e4, valued 0.99778029 -- 2.2e-3 below the
+    true optimum 1.0. The box point itself is valued exactly 1.000000000000 and
+    satisfies every row to 8.9e-16. The tree recorded 0.99778 as the incumbent, pruned
+    against that understated cutoff, and raised #1296 ``bound_contradicted`` (the
+    point sits below a proved ancestor bound), so about half the runs ended
+    ``feasible`` with no bound.
+
+    ON: for a node the tree will treat as integral (``is_feasible`` or every integer
+    column within 1e-5, the tree's own test) whose point is outside its box, the
+    clipped point replaces it -- in ``result_sols`` and as the point value -- when it
+    passes the same constraint gate the node's point did
+    (``_check_constraint_feasibility``) and its objective is finite. The bound import
+    is unchanged. Sound: the box is part of the model, so the clipped point is no
+    less feasible than the original, and a point value is an incumbent claim, never
+    a bound.
+    """
+    return _env_flag("DISCOPT_CONVEX_NODE_CLIP_POINT_VALUE", default=False)
+
+
 def _recap_bound_at_objective(
     bound: Optional[float],
     objective: Optional[float],
@@ -893,6 +923,10 @@ def _apply_convex_node_safe_bounds(
     *,
     deadline: Optional[float],
     budget=None,
+    int_offsets=(),
+    int_sizes=(),
+    result_feas=None,
+    counts: Optional[dict] = None,
 ) -> tuple[np.ndarray, int, int, int]:
     """Replace each convex node's NLP objective by a proved bound (#2067), in place.
 
@@ -918,6 +952,11 @@ def _apply_convex_node_safe_bounds(
     count is a measurement, not a bound change -- unless
     :func:`_convex_node_keep_proved_bound_enabled`, which imports the proved bound
     there and returns the objective as the point value).
+
+    Under :func:`_convex_node_clip_point_value_enabled`, an integral node (per
+    ``int_offsets``/``int_sizes``/``result_feas``, the tree's own test) whose point is
+    outside its box records the clipped point instead, in ``result_sols`` and as its
+    point value; ``counts["clipped"]`` counts those nodes.
     """
     from discopt.solvers.convex_node_bound import convex_node_safe_bound
 
@@ -928,6 +967,7 @@ def _apply_convex_node_safe_bounds(
     cu_arr = np.asarray(cu if m else [], dtype=np.float64)
     proved = abstained = raised = 0
     keep_proved = _convex_node_keep_proved_bound_enabled()
+    clip_points = _convex_node_clip_point_value_enabled()
     for i in range(n_batch):
         raw = float(result_lbs[i])
         if not np.isfinite(raw) or raw >= _SENTINEL_THRESHOLD:
@@ -953,10 +993,46 @@ def _apply_convex_node_safe_bounds(
             if keep_proved and safe > raw:
                 result_lbs[i] = safe
                 points[i] = raw
-            continue
-        result_lbs[i] = safe
-        points[i] = raw
+        else:
+            result_lbs[i] = safe
+            points[i] = raw
+        if clip_points:
+            clipped = _clipped_integral_point(
+                evaluator,
+                result_sols[i],
+                batch_lb[i],
+                batch_ub[i],
+                int_offsets,
+                int_sizes,
+                bool(result_feas[i]) if result_feas is not None else False,
+                cl_arr,
+                cu_arr,
+            )
+            if clipped is not None:
+                result_sols[i] = clipped[0]
+                points[i] = clipped[1]
+                if counts is not None:
+                    counts["clipped"] = counts.get("clipped", 0) + 1
     return points, proved, abstained, raised
+
+
+def _clipped_integral_point(evaluator, x, node_lb, node_ub, int_offsets, int_sizes, feas, cl, cu):
+    """The node point clipped into its box and its objective, for a node the tree will
+    treat as integral whose point is outside the box; ``None`` otherwise, or when the
+    clipped point fails the node constraint gate or its objective is not finite
+    (``_convex_node_clip_point_value_enabled``)."""
+    x = np.asarray(x, dtype=np.float64)
+    if not (feas or _is_integer_feasible_solution(x, int_offsets, int_sizes)):
+        return None
+    xc = np.clip(x, np.asarray(node_lb, dtype=np.float64), np.asarray(node_ub, dtype=np.float64))
+    if np.array_equal(xc, x):
+        return None
+    if len(cl) and not _check_constraint_feasibility(evaluator, xc, list(cl), list(cu)):
+        return None
+    val = float(evaluator.evaluate_objective(xc))
+    if not np.isfinite(val):
+        return None
+    return xc, val
 
 
 def _obbt_topk_enabled() -> bool:
@@ -20146,6 +20222,7 @@ def solve_model(
     # raised], surfaced in ``solver_stats`` so an arm that never fired is visible.
     _sp_safe_bound_on = _convex_node_safe_bound_enabled()
     _sp_safe_counts = [0, 0, 0]
+    _sp_clip_counts: dict = {}
     from discopt.solvers.convex_node_bound import SafeBoundBudget as _SpSafeBoundBudget
 
     _sp_safe_budget = _SpSafeBoundBudget()
@@ -22451,6 +22528,10 @@ def solve_model(
                     _sp_cu,
                     deadline=_deadline,
                     budget=_sp_safe_budget,
+                    int_offsets=int_offsets,
+                    int_sizes=int_sizes,
+                    result_feas=result_feas,
+                    counts=_sp_clip_counts,
                 )
                 _sp_safe_counts[0] += _n_p
                 _sp_safe_counts[1] += _n_a
@@ -22876,17 +22957,25 @@ def solve_model(
                         # #2067: the proved bound replaces the NLP objective, which
                         # becomes the point value (see the batch path above).
                         _one = np.array([float(nlp_lb)])
+                        _one_x = np.array(nlp_result.x, dtype=np.float64).reshape(1, -1)
+                        _clipped_before = _sp_clip_counts.get("clipped", 0)
                         _pt, _n_p, _n_a, _n_r = _apply_convex_node_safe_bounds(
                             _active_evaluator,
                             [node_lb],
                             [node_ub],
                             _one,
-                            np.asarray(nlp_result.x, dtype=np.float64).reshape(1, -1),
+                            _one_x,
                             _sp_cl,
                             _sp_cu,
                             deadline=_deadline,
                             budget=_sp_safe_budget,
+                            int_offsets=int_offsets,
+                            int_sizes=int_sizes,
+                            counts=_sp_clip_counts,
                         )
+                        if _sp_clip_counts.get("clipped", 0) > _clipped_before:
+                            # The point value now belongs to the clipped point.
+                            nlp_result.x = _one_x[0]
                         _sp_safe_counts[0] += _n_p
                         _sp_safe_counts[1] += _n_a
                         _sp_safe_counts[2] += _n_r
@@ -26157,6 +26246,8 @@ def solve_model(
         _solver_stats["spatial/convex_safe_bound_nodes"] = float(_sp_safe_counts[0])
         _solver_stats["spatial/convex_safe_bound_abstained"] = float(_sp_safe_counts[1])
         _solver_stats["spatial/convex_safe_bound_raised"] = float(_sp_safe_counts[2])
+        if _convex_node_clip_point_value_enabled():
+            _solver_stats["spatial/convex_point_clipped"] = float(_sp_clip_counts.get("clipped", 0))
         _solver_stats["spatial/convex_safe_bound_exact_suspended"] = float(
             _sp_safe_budget.suspended
         )
@@ -29494,6 +29585,7 @@ def _solve_nlp_bb(
     # replaces each convex node's objective by a proved bound before import.
     _safe_bound_on = _convex_node_safe_bound_enabled()
     _safe_proved = _safe_abstained = _safe_raised = 0
+    _safe_clip_counts: dict = {}
     from discopt.solvers.convex_node_bound import SafeBoundBudget as _SafeBoundBudget
 
     _safe_budget = _SafeBoundBudget()
@@ -30378,6 +30470,10 @@ def _solve_nlp_bb(
                 cu_list,
                 deadline=t_start + time_limit,
                 budget=_safe_budget,
+                int_offsets=int_offsets,
+                int_sizes=int_sizes,
+                result_feas=result_feas,
+                counts=_safe_clip_counts,
             )
             _safe_proved += _n_p
             _safe_abstained += _n_a
@@ -31405,6 +31501,8 @@ def _solve_nlp_bb(
         _ext_stats["nlpbb/convex_safe_bound_nodes"] = float(_safe_proved)
         _ext_stats["nlpbb/convex_safe_bound_abstained"] = float(_safe_abstained)
         _ext_stats["nlpbb/convex_safe_bound_raised"] = float(_safe_raised)
+        if _convex_node_clip_point_value_enabled():
+            _ext_stats["nlpbb/convex_point_clipped"] = float(_safe_clip_counts.get("clipped", 0))
         _ext_stats["nlpbb/convex_safe_bound_exact_suspended"] = float(_safe_budget.suspended)
         _ext_stats["nlpbb/convex_safe_fathom_floor"] = float(
             stats.get("safe_fathom_floor", float("inf"))
