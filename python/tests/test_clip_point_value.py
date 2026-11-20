@@ -222,3 +222,105 @@ def test_nlpbb_injects_an_abstaining_node_at_its_clipped_point(monkeypatch):
     for x, v in nodes:
         assert x[0] == round(x[0]) and x[0] >= 0.0, x  # inside the box, not 1e-8 below
         assert v == pytest.approx(G * x[0] + (x[1] - 0.5) ** 2, abs=1e-12)
+
+
+# ── batches imported without a proved bound: a nonconvex model (heuristic NLP-BB),
+# or a convex one with DISCOPT_CONVEX_NODE_SAFE_BOUND=0. The node's raw NLP objective
+# went in unchecked as the incumbent value of every integral node. ─────────────────
+
+
+def test_unproved_batch_clips_integral_nodes_only():
+    ev, cl, cu = _steep_model()
+    sols = np.array(
+        [
+            [2.0 - 1e-8, 0.0],  # integral, 1e-8 below its fixed box -> clipped
+            [2.0, 0.5],  # integral, inside its box -> untouched
+            [2.4, 0.0],  # fractional -> untouched
+            [2.0 - 1e-8, 0.0],  # sentinel (infeasible) -> untouched
+            [2.0 - 1e-8, 0.0],  # -inf import -> untouched
+        ]
+    )
+    lbs = np.array(
+        [float(ev.evaluate_objective(s)) for s in sols[:3]] + [S._INFEASIBILITY_SENTINEL, -np.inf]
+    )
+    lbs_before, sols_before = lbs.copy(), sols.copy()
+    lo = [[2.0, 0.0], [2.0, 0.0], [2.0, 0.0], [2.0, 0.0], [2.0, 0.0]]
+    hi = [[2.0, 0.0], [2.0, 1.0], [3.0, 0.0], [2.0, 0.0], [2.0, 0.0]]
+    counts: dict = {}
+    pts = S._clip_unproved_integral_points(
+        ev, lo, hi, lbs, sols, np.zeros(5, bool), (0,), (1,), cl, cu, counts=counts
+    )
+    assert counts == {"clipped": 1}  # rule 6: the arm fired, exactly once
+    assert pts is not None and pts[0] == 2.0 * G and np.isnan(pts[1:]).all()
+    np.testing.assert_array_equal(sols[0], [2.0, 0.0])
+    np.testing.assert_array_equal(sols[1:], sols_before[1:])
+    np.testing.assert_array_equal(lbs, lbs_before)  # no imported bound moves
+
+
+def test_unproved_batch_with_nothing_to_clip_keeps_the_legacy_import():
+    ev, cl, cu = _steep_model()
+    sols = np.array([[2.0, 0.5]])
+    lbs = np.array([float(ev.evaluate_objective(sols[0]))])
+    assert (
+        S._clip_unproved_integral_points(
+            ev, [[2.0, 0.0]], [[2.0, 1.0]], lbs, sols, None, (0,), (1,), cl, cu
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_nonconvex_nlpbb_records_the_exact_incumbent_value(monkeypatch, on):
+    """End to end on a NONCONVEX model under ``nlp_bb=True`` (heuristic mode). Every node
+    NLP returns its point 1e-8 below its box on the integer column -- the interior-point
+    bound relaxation -- valued there, which on this gradient (3.3e4) understates the
+    objective by ~3.3e-4. Before the fix the tree recorded that raw value as the
+    incumbent value, with no box check; with the clip it records the box point, valued
+    exactly. Flag off reproduces the legacy behaviour (the opt-out is honest)."""
+    monkeypatch.setenv(FLAG, "1" if on else "0")
+    trees: list = []
+    orig_tree = S._tree_manager
+
+    def make(*a, **k):
+        trees.append(orig_tree(*a, **k))
+        return trees[-1]
+
+    shifted: list = []
+
+    def shifting(fn, lb_pos):
+        def wrapped(evaluator, *a, **k):
+            r = fn(evaluator, *a, **k)
+            node_lb = np.asarray(a[lb_pos], dtype=np.float64)
+            if r.x is not None and abs(r.x[0] - round(r.x[0])) < 1e-6:
+                x = np.asarray(r.x, dtype=np.float64).copy()
+                x[0] = node_lb[0] - 1e-8  # integral within 1e-5, outside the box
+                r.x, r.objective = x, float(evaluator.evaluate_objective(x))
+                shifted.append(x[0])
+            return r
+
+        return wrapped
+
+    monkeypatch.setattr(S, "_tree_manager", make)
+    # (evaluator, node_lb, ...) for the root; (evaluator, x0, node_lb, ...) after it.
+    monkeypatch.setattr(
+        S, "_solve_root_node_multistart", shifting(S._solve_root_node_multistart, 0)
+    )
+    monkeypatch.setattr(S, "_solve_node_nlp", shifting(S._solve_node_nlp, 1))
+    m = dm.Model("steep_nonconvex")
+    y = m.integer("y", lb=1, ub=5)
+    z = m.continuous("z", lb=0, ub=1)
+    m.minimize(G * y - (z - 0.5) ** 2)  # concave in z: nonconvex
+    m.subject_to(y + z <= 4)
+    r = m.solve(time_limit=10, nlp_bb=True, deterministic=True, max_nodes=8)
+    assert shifted and len(trees) == 1, (shifted, trees)  # rule 6: the shift fired
+    x_inc, v_inc = trees[0].incumbent()
+    x_inc = np.asarray(x_inc, dtype=np.float64)
+    exact = G * x_inc[0] - (x_inc[1] - 0.5) ** 2
+    if on:
+        assert x_inc[0] == round(x_inc[0]) and x_inc[0] >= 1.0, x_inc  # inside the box
+        assert v_inc == pytest.approx(exact, abs=1e-12)
+        stats = r.solver_stats or {}
+        assert stats.get("nlpbb/unproved_point_clipped", 0) >= 1, stats  # rule 6
+    else:
+        assert x_inc[0] < 1.0  # the raw point, outside the box
+        assert v_inc < G * round(x_inc[0]) - (x_inc[1] - 0.5) ** 2 - 1e-4  # understated
