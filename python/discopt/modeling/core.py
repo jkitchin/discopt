@@ -12835,7 +12835,9 @@ class Model:
                 _recapped,
                 result._proved_bound,
             )
-            result.bound = _recapped
+            # Same tree, same proof: the validity claim and provenance carry over
+            # (#1244 -- every bound write goes through ``_set_bound``).
+            result._set_bound(_recapped, valid=result.bound_valid, source=result.bound_source)
             result.gap = _gap_mod.reported_gap(f_declared, _recapped)
 
         # The certificate was granted against the number just replaced. Re-test it
