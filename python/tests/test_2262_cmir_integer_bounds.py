@@ -52,7 +52,18 @@ def test_issue_2262_nlp_bb_certifies_the_true_optimum():
     opt = _oracle()
     assert opt == 0.0
     r = _issue_model().solve(time_limit=20, nlp_bb=True)
-    assert r.status == "optimal"
+    # The certificate here sits near the absolute gap tolerance (1e-6; the optimum
+    # is 0, so the relative one adds nothing): locally bound = -6.72e-7. Report the
+    # numbers, not just the status, so a withheld certificate can be told apart
+    # from a wrong answer.
+    assert r.status == "optimal", (
+        r.status,
+        r.objective,
+        r.bound,
+        r.gap,
+        r.node_count,
+        r.algorithm_route,
+    )
     tol = 1e-6
     # The certificate: the bound may not exceed a feasible objective (min sense).
     assert r.bound is not None and r.bound <= opt + tol, (r.bound, opt)
