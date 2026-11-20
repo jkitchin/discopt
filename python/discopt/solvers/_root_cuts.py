@@ -73,6 +73,15 @@ ROUNDS = 200
 # between, so 2 is well clear of both. 2 rather than 1 because a round's cuts can
 # need the NEXT re-convergence to pay off.
 STALL_ROUNDS = 2
+# The round budget under ``deterministic`` (passed as ``max_rounds`` by NLP-BB). The
+# stage's working terminator is its wall budget, and that budget is role-2: it goes
+# inert under ``deterministic`` (#1371), leaving ``ROUNDS`` -- a runaway backstop --
+# and the stall exit, which never fires while each round gains a little. Measured
+# on the vendored corpus (``nlp_bb=True``, 20 s): deterministic ``nvs07`` ran 169
+# rounds and ``nvs15`` 103, each until the solve's own deadline, so NLP-BB returned
+# ``time_limit`` with ONE node and the #844 fallback answered for it. Value set by
+# measurement, see the constant's PR. TBD.
+DETERMINISTIC_ROUNDS = ROUNDS
 OA_TOL = 1e-6
 OA_MAX_ITERS = 60
 CUT_VIOL_TOL = 1e-6
@@ -875,7 +884,14 @@ def _select_cuts(candidates, x, top_k=SEL_TOP_K, par_max=SEL_PARALLEL_MAX):
 
 
 def generate_root_cuts(
-    model, evaluator, lb, ub, is_int, is_bin, time_budget_s: float = 10.0
+    model,
+    evaluator,
+    lb,
+    ub,
+    is_int,
+    is_bin,
+    time_budget_s: float = 10.0,
+    max_rounds: int = ROUNDS,
 ) -> RootCutResult:
     """Run the root cutting loop; return applied cuts + the final LP bound.
 
@@ -1012,7 +1028,7 @@ def generate_root_cuts(
     # Flag OFF: it restarts the clock here, exactly as it always did.
     t0 = t_stage if _deadline_enabled() else _time.perf_counter()
 
-    for _rnd in range(ROUNDS):
+    for _rnd in range(max_rounds):
         if _time.perf_counter() - t0 > time_budget_s:
             stop_reason = "budget"
             break
