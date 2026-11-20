@@ -342,6 +342,15 @@ The release procedure that produces these entries is documented in
     floor removed the feasible w = 1. A box-MCP GDP reformulation then returned
     `infeasible`, a false certificate. The allowance is now
     `1e-9*max(1, |q|, (|b| + sum|a_k x_k|)/|a|)` in both the sparse and OA forms.
+- **The route/fallback merge certified a bound nobody claimed valid (#2272, closes
+  #2271).**
+  - `_merge_route_and_fallback` kept the tighter dual bound from either side
+    without checking the loser's `bound_valid`, so an unclaimed bound could replace
+    a proved one under a live certificate: `tloss` and `cvxnonsep_nsig30r` (0.12.0)
+    returned `gap_certified=True` with `bound_valid=False`.
+  - A loser's bound is now adopted only when it is claimed valid, or when the
+    winner's own bound is unclaimed too; the #1913 certificate hand-over also
+    requires a claimed bound.
 - **Point-feasibility checks accepted overflowing or NaN rows (#2248, closes #2245;
   #2246, closes #2244).**
   - `_matrix_solution_feasible` accepted points whose row activity overflows f64, e.g.
