@@ -12820,27 +12820,23 @@ class Model:
         # value instead: ``min(proved, f(x))`` (min sense) is at most the optimum,
         # since ``proved`` is a valid bound and ``x`` the returned point. Only ever
         # tightens, and never past the objective.
-        _proved = result._proved_bound
-        if (
-            _proved is not None
-            and result.bound is not None
-            and _np.isfinite(_proved)
-            and _np.isfinite(result.bound)
-        ):
-            _recapped = max(_proved, f_declared) if _is_max else min(_proved, f_declared)
-            if (_recapped < result.bound) if _is_max else (_recapped > result.bound):
-                from discopt.solvers import _gap as _gap_mod
+        from discopt.solver import _recap_bound_at_objective
 
-                _log.info(
-                    "%s: re-capping the bound at the exact objective: %.12g -> %.12g "
-                    "(proved %.12g).",
-                    self.name,
-                    result.bound,
-                    _recapped,
-                    _proved,
-                )
-                result.bound = _recapped
-                result.gap = _gap_mod.reported_gap(f_declared, _recapped)
+        _recapped = _recap_bound_at_objective(
+            result.bound, f_declared, result._proved_bound, _is_max
+        )
+        if _recapped is not None and _recapped != result.bound:
+            from discopt.solvers import _gap as _gap_mod
+
+            _log.info(
+                "%s: re-capping the bound at the exact objective: %.12g -> %.12g (proved %.12g).",
+                self.name,
+                result.bound,
+                _recapped,
+                result._proved_bound,
+            )
+            result.bound = _recapped
+            result.gap = _gap_mod.reported_gap(f_declared, _recapped)
 
         # The certificate was granted against the number just replaced. Re-test it
         # with the same arbiter every other site uses.

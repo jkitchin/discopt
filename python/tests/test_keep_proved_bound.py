@@ -40,6 +40,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 import test_2262_cmir_integer_bounds as T2262  # noqa: E402
 
 FLAG = "DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND"
+# Captured once: ``_shifted_solve`` must wrap THIS, not whatever the attribute is
+# when it runs -- ``monkeypatch`` undoes only at test end, so wrapping the current
+# attribute stacked one shift per solve and compared arms at different shifts.
+_ORIG_APPLY = S._apply_convex_node_safe_bounds
 
 
 # ── the tree contract ────────────────────────────────────────────────────────
@@ -152,7 +156,7 @@ def _shifted_solve(monkeypatch, model: Model, delta: float, on: bool, **kw):
     """Solve with every finite node NLP objective shifted down by ``delta`` before
     the #2067 step. Returns ``(result, n_shifted)``."""
     monkeypatch.setenv(FLAG, "1" if on else "0")
-    orig = S._apply_convex_node_safe_bounds
+    orig = _ORIG_APPLY
     shifted = [0]
 
     def shift(ev, blb, bub, lbs, sols, cl, cu, **k):
@@ -163,7 +167,10 @@ def _shifted_solve(monkeypatch, model: Model, delta: float, on: bool, **kw):
         return orig(ev, blb, bub, lbs, sols, cl, cu, **k)
 
     monkeypatch.setattr(S, "_apply_convex_node_safe_bounds", shift)
-    r = model.solve(nlp_bb=True, **kw)
+    # ``deterministic``: without it the same model solved repeatedly in one process
+    # measured 64, 72 and 43 nodes with two different bounds (wall-clock heuristic
+    # budgets), so an ON/OFF comparison would compare two noisy samples, not the flag.
+    r = model.solve(nlp_bb=True, deterministic=True, **kw)
     return r, shifted[0]
 
 
@@ -195,7 +202,10 @@ def _random_convex_iqp(seed: int, box=None):
     c = rng.normal(size=n) * 3
     A = rng.normal(size=(2, n))
     b = np.abs(rng.normal(size=2)) + 0.3
-    lo, hi = (np.full(n, -2), np.full(n, 2)) if box is None else box
+    # The full box: [-2, 2]^2 (the #2262 shape) or [-1, 1]^3 -- [-2, 2]^3 measured up
+    # to 43 s per ON/OFF pair locally, past the slow lane's per-test budget on CI.
+    full = 2 if n == 2 else 1
+    lo, hi = (np.full(n, -full), np.full(n, full)) if box is None else box
     m = Model(f"iqp{seed}")
     x = m.integer("x", shape=(n,), lb=lo, ub=hi)
     m.minimize(
@@ -212,35 +222,47 @@ def _random_convex_iqp(seed: int, box=None):
     return m, best
 
 
+def _box(seed: int, sub: bool):
+    """The full box, or a random integer sub-box (deterministic per seed)."""
+    if not sub:
+        return None
+    rng = np.random.default_rng([2262, seed])
+    n = 2 if seed % 2 else 3
+    lo = rng.integers(-2, 1, size=n)
+    return lo, lo + rng.integers(1, 3, size=n)
+
+
+# Built at collection, keeping only (seed, box) pairs with a feasible integer point:
+# an infeasible sub-box has nothing to sample and could only ever skip.
+_CASES = [
+    (seed, sub)
+    for seed in range(4)
+    for sub in (False, True)
+    if np.isfinite(_random_convex_iqp(seed, _box(seed, sub))[1])
+]
+
+
 @pytest.mark.slow
 @pytest.mark.correctness
-def test_on_bound_is_between_the_off_bound_and_the_enumerated_optimum(monkeypatch):
+@pytest.mark.parametrize("seed,sub", _CASES)
+def test_on_bound_is_between_the_off_bound_and_the_enumerated_optimum(monkeypatch, seed, sub):
+    box = _box(seed, sub)
     checked = 0
-    rng = np.random.default_rng(2262)
-    for seed in range(8):
-        for sub in range(2):
-            box = None
-            if sub:
-                n = 2 if seed % 2 else 3
-                lo = rng.integers(-2, 1, size=n)
-                box = (lo, lo + rng.integers(1, 3, size=n))
-            for delta in (0.0, 1e-6, 1e-4):
-                m_off, opt = _random_convex_iqp(seed, box)
-                if not np.isfinite(opt):
-                    continue  # an infeasible sub-box: nothing to sample
-                off, n_off = _shifted_solve(monkeypatch, m_off, delta, False, time_limit=30)
-                m_on, _ = _random_convex_iqp(seed, box)
-                on, n_on = _shifted_solve(monkeypatch, m_on, delta, True, time_limit=30)
-                tag = (seed, sub, delta, off.status, on.status, off.bound, on.bound, opt)
-                assert n_off > 0 and n_on > 0, tag
-                assert off.bound is not None and on.bound is not None, tag
-                tol = 1e-9 * (1 + abs(opt))
-                # The enumerated optimum is the minimum over every feasible integer
-                # point: a bound above it would cut a valid point.
-                assert on.bound <= opt + tol, tag
-                assert on.bound >= off.bound - tol, tag
-                assert abs(on.objective - opt) <= 1e-6 * (1 + abs(opt)), tag
-                if off.status == "optimal":
-                    assert on.status == "optimal", tag  # never loses a certificate
-                checked += 1
-    assert checked >= 30, checked  # rule 6: the comparisons actually ran
+    for delta in (0.0, 1e-4):
+        m_off, opt = _random_convex_iqp(seed, box)
+        off, n_off = _shifted_solve(monkeypatch, m_off, delta, False, time_limit=30)
+        m_on, _ = _random_convex_iqp(seed, box)
+        on, n_on = _shifted_solve(monkeypatch, m_on, delta, True, time_limit=30)
+        tag = (seed, sub, delta, off.status, on.status, off.bound, on.bound, opt)
+        assert n_off > 0 and n_on > 0, tag
+        assert off.bound is not None and on.bound is not None, tag
+        tol = 1e-9 * (1 + abs(opt))
+        # The enumerated optimum is the minimum over every feasible integer point
+        # of the box: a bound above it would cut a valid point.
+        assert on.bound <= opt + tol, tag
+        assert on.bound >= off.bound - tol, tag
+        assert abs(on.objective - opt) <= 1e-6 * (1 + abs(opt)), tag
+        if off.status == "optimal":
+            assert on.status == "optimal", tag  # never loses a certificate
+        checked += 1
+    assert checked == 2  # rule 6: both shifts compared

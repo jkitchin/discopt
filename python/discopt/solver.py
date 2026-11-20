@@ -834,6 +834,31 @@ def _convex_node_keep_proved_bound_enabled() -> bool:
     return _env_flag("DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND", default=False)
 
 
+def _recap_bound_at_objective(
+    bound: Optional[float],
+    objective: Optional[float],
+    proved: Optional[float],
+    is_max: bool,
+) -> Optional[float]:
+    """The published bound once ``objective`` has been re-valued: ``max(bound,
+    min(proved, objective))`` for a minimisation (mirrored for a maximisation).
+
+    ``proved`` is a search's uncapped proved dual bound (declared sense), and
+    ``objective`` the value of the point being returned. The tree caps its bound at
+    the incumbent value it converged on; once that value is replaced, the cap
+    belongs at the replacement. Only ever tightens ``bound``, and never past
+    ``objective``. Returns ``bound`` unchanged when any input is missing or not
+    finite (``_convex_node_keep_proved_bound_enabled``).
+    """
+    if bound is None or objective is None or proved is None:
+        return bound
+    if not (np.isfinite(bound) and np.isfinite(objective) and np.isfinite(proved)):
+        return bound
+    if is_max:
+        return min(bound, max(proved, objective))
+    return max(bound, min(proved, objective))
+
+
 def _apply_convex_node_safe_bounds(
     evaluator,
     batch_lb,
@@ -31301,6 +31326,29 @@ def _solve_nlp_bb(
             stats.get("safe_fathom_floor", float("inf"))
         )
 
+    # The search's uncapped proved bound (declared sense). Only from a tree whose
+    # bound is itself valid, uncontradicted (#1296) and resolved. The tree capped
+    # its bound at the incumbent value it converged on; ``obj_val`` above may be a
+    # re-valuation of that point (and ``Model.solve`` re-values it once more), so
+    # the cap is re-applied at each re-valued objective.
+    _proved_bound_out: Optional[float] = None
+    if (
+        _convex_node_keep_proved_bound_enabled()
+        and _model_is_convex
+        and _tree_bound_valid
+        and not bool(stats.get("bound_contradicted", False))
+        and not bool(stats.get("bound_unresolved", False))
+    ):
+        _pb = stats.get("proved_lower_bound")
+        if _pb is not None and np.isfinite(_pb):
+            _proved_bound_out = -float(_pb) if _nlpbb_is_max else float(_pb)
+            _recapped = _recap_bound_at_objective(
+                bound_val, obj_val, _proved_bound_out, _nlpbb_is_max
+            )
+            if _recapped is not None and _recapped != bound_val:
+                bound_val = _recapped
+                gap_val = _gap_mod.reported_gap(obj_val, bound_val)
+
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
@@ -31328,21 +31376,6 @@ def _solve_nlp_bb(
         _gap_certified = False
         _ext_stats = dict(_ext_stats or {})
         _ext_stats["nlpbb/integral_incumbent_unverified"] = 1.0
-
-    # The search's uncapped proved bound, for ``Model._reconcile_objective_with_model``
-    # to re-cap at the exactly re-valued objective. Only from a tree whose bound is
-    # itself valid, uncontradicted (#1296) and resolved.
-    _proved_bound_out: Optional[float] = None
-    if (
-        _convex_node_keep_proved_bound_enabled()
-        and _model_is_convex
-        and _tree_bound_valid
-        and not bool(stats.get("bound_contradicted", False))
-        and not bool(stats.get("bound_unresolved", False))
-    ):
-        _pb = stats.get("proved_lower_bound")
-        if _pb is not None and np.isfinite(_pb):
-            _proved_bound_out = -float(_pb) if _nlpbb_is_max else float(_pb)
 
     return SolveResult(
         status=status,
