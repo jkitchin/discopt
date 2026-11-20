@@ -84,8 +84,10 @@ def test_a_clipped_point_the_constraint_gate_refuses_is_not_used():
     assert out is None
 
 
-def test_flag_is_default_off(monkeypatch):
+def test_flag_is_default_on_with_an_opt_out(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
+    assert S._convex_node_clip_point_value_enabled()
+    monkeypatch.setenv(FLAG, "0")
     assert not S._convex_node_clip_point_value_enabled()
 
 

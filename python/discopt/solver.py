@@ -860,8 +860,8 @@ def _convex_node_keep_proved_bound_enabled() -> bool:
 def _convex_node_clip_point_value_enabled() -> bool:
     """Whether an integral convex node records its point CLIPPED INTO ITS BOX, valued
     there, as its incumbent point and value (``DISCOPT_CONVEX_NODE_CLIP_POINT_VALUE``,
-    **default OFF**: it moves incumbent values and so pruning -- bound-changing,
-    CLAUDE.md §5; row in ``docs/dev/flag-retirement-audit.md``).
+    **default ON** since the §5 panel below; it moves incumbent values and so pruning;
+    ``=0`` restores the unclipped point and value, legacy path intact).
 
     The node NLP's interior-point solver relaxes variable bounds (``bound_relax_factor``,
     ~1e-8), so its point can sit just outside the node box, and a fixed box most of
@@ -883,8 +883,28 @@ def _convex_node_clip_point_value_enabled() -> bool:
     is unchanged. Sound: the box is part of the model, so the clipped point is no
     less feasible than the original, and a point value is an incumbent claim, never
     a bound.
+
+    Graduation panel (2026-11-20, commit ``488371a``; regime 2;
+    ``discopt_benchmarks/scripts/flag_onoff_corpus_panel.py``, 74 vendored MINLPLib
+    instances, 20 s, interleaved arms, MINLPLib ``.solu`` oracle):
+
+    * ``PANEL_SOLVE_KWARGS='{"nlp_bb": true}'``: 0 problems, 131 incumbent
+      feasibility checks passed, certified 32 -> 33 (``nvs15`` gained, none lost),
+      ``nvs15``'s #1296 contradiction gone; the clip fired on 9 instances (``fac2``
+      16 nodes, ``flay03m`` 35, ``m3`` 7, ``flay02m``, ``nvs15``, ``st_miqp2/4/5``,
+      ``st_testgr3``); bounds tighter on ``fac2`` and ``st_miqp4``. The two rows
+      that read worse ON -- ``cvxnonsep_psig40r`` (objective 86.54625 vs 86.54516)
+      and ``tls2`` (no incumbent vs 10.3, time-limited) -- did not reproduce: two
+      interleaved re-runs per arm were identical, and the clip fired 0 times on
+      either instance.
+    * Default route: 0 problems, 130 checks passed, certified 56 -> 56; the clip
+      fired on no instance, so every difference there is run-to-run spread.
+
+    Kill criterion (``nvs15``, ``nlp_bb``, 10 interleaved runs per arm): OFF 5/10
+    certified (5 contradicted), ON 10/10 (0 contradicted, bound <= 1.0). Cert-clean
+    and helpful: graduated.
     """
-    return _env_flag("DISCOPT_CONVEX_NODE_CLIP_POINT_VALUE", default=False)
+    return _env_flag("DISCOPT_CONVEX_NODE_CLIP_POINT_VALUE", default=True)
 
 
 def _recap_bound_at_objective(
