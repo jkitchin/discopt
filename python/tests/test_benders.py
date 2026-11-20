@@ -6,6 +6,7 @@ install.
 """
 
 import itertools
+import sys
 
 import discopt.modeling as dm
 import numpy as np
@@ -237,11 +238,27 @@ def test_pounce_only_no_highspy(monkeypatch):
             raise ImportError("simulated: highspy unavailable")
         return real_import(name, *args, **kwargs)
 
+    import discopt
+    from discopt import _optional_highs
+
     monkeypatch.setattr(builtins, "__import__", _no_highspy)
-    for mod in [m for m in list(__import__("sys").modules) if "highs" in m]:
-        monkeypatch.delitem(__import__("sys").modules, mod, raising=False)
+    # Evict highspy's OWN modules and block the package (``sys.modules[...] = None``,
+    # which ``_optional_highs.highs_available`` reads; it caches nothing). This used to
+    # evict every module with "highs" in its name -- discopt's ``_optional_highs``,
+    # ``lp_milp_highs`` and ``milp_highs`` included. The solve then re-executed
+    # ``_optional_highs``, which rebound ``discopt._optional_highs`` to the new copy;
+    # monkeypatch restored the ``sys.modules`` entries but not that attribute, so a later
+    # test in the same worker saw two ``MissingHighsError`` classes
+    # (``test_highs_parity_p61_optional_highs`` failed on CI, order-dependently).
+    for mod in [m for m in list(sys.modules) if m == "highspy" or m.startswith("highspy.")]:
+        monkeypatch.delitem(sys.modules, mod)
+    monkeypatch.setitem(sys.modules, "highspy", None)
+    assert not _optional_highs.highs_available()  # rule 6: the block bites
 
     r = _two_stage_milp().solve(decomposition="benders", time_limit=30)
+    # No module was re-executed behind the rest of the process's back.
+    assert discopt._optional_highs is _optional_highs
+    assert sys.modules["discopt._optional_highs"] is _optional_highs
     assert r.status == "optimal"
     assert r.objective == pytest.approx(5.0, abs=ABS_TOL)
     assert r.bound is not None and r.bound <= r.objective + 1e-4
