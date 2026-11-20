@@ -381,6 +381,22 @@ Two conventions used throughout:
   column. Bound changes do *not* change it. Version counter bumps on structural
   edits only.
 
+- **Granularity (as built).** `_collect_variables` maps every `x[s, t]` to the
+  whole array `x`, so the vertices of this graph are *arrays*, not scalars. A
+  model whose scenarios share one array reads as one block even when fixing the
+  first stage splits it per scenario. The scalar-level companion is
+  `graph/element.py` (`ElementGraph`): one vertex per column and per constraint
+  row, read from the evaluator's own `constraint_row_map()` and Jacobian
+  sparsity (the source `block_structure.py` already trusts), each tagged with its
+  array and index tuple. `ElementGraph.coarsen(var_axes, con_axes)` merges the
+  elements of an array that differ only along chosen axes — index coarsening in
+  the sense of Allen & Westerberg (1976) and Kalamaris & Maravelias (2026,
+  arXiv:2611.23472, §3.1) — and coarsening every axis recovers this array-level graph exactly.
+  `StructureReport` carries the scalar-level block counts
+  (`element_blocks`, `element_blocks_after_integer_projection`,
+  `array_level_hides_blocks`); no candidate generator or solver consumes them
+  yet, because Benders/Lagrangian still partition columns by array name.
+
 ### 4.2 Constraint Hypergraph
 
 - **Build:** each constraint = a hyperedge over its variable set; vertices =
