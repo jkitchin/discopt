@@ -11823,10 +11823,24 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
     #
     # Reported sense: a maximize model's bound is an UPPER bound (tighter =
     # smaller), a minimize model's is a LOWER bound (tighter = larger).
+    #
+    # #2271: what gates adoption is the loser's CLAIM about its bound
+    # (``bound_valid``), not its gap certificate -- the distinction drawn above
+    # applies in both directions. A bound its own producer declined to claim
+    # valid may not replace one the winner does claim. The lifted slice of
+    # ``_ipx_lift_race`` on ``tloss`` returned ``time_limit`` with an unclaimed
+    # 16.3, the unlifted slice certified 16.29999999998 with ``bound_valid=True``,
+    # and installing the tighter unclaimed number left ``gap_certified=True`` on a
+    # ``bound_valid=False`` result -- a certificate resting on a bound nobody
+    # proved. (Same shape on ``cvxnonsep_nsig30r``: OA's unclaimed 156.41984 over
+    # NLP-BB's certified 156.41298.) An unclaimed loser bound can still replace an
+    # unclaimed winner bound: nothing is asserted either way, so tighter is the
+    # only thing left to prefer.
     w_b, l_b = winner.bound, loser.bound
     if (
         l_b is not None
         and np.isfinite(l_b)
+        and (loser.bound_valid or not winner.bound_valid)
         and (w_b is None or not np.isfinite(w_b) or (l_b < w_b if is_maximize else l_b > w_b))
         # ...and only if it does not cross the incumbent it would be reported
         # against. A dual bound past the winner's own objective is a broken
@@ -11880,7 +11894,12 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
             winner.gap_certified = False
         else:
             winner.gap = _gap_mod.reported_gap(obj, bnd)
-            if adopt_certificate and winner is route:
+            # #2271: carry the certificate only onto a bound that is claimed valid.
+            # The fallback's bound reaches the route only through the gate above,
+            # and a certified fallback's bound is always claimed (``__post_init__``
+            # rule 1) -- but a certificate is the assertion ``bound_valid`` exists
+            # for, so it is checked here rather than inferred.
+            if adopt_certificate and winner is route and winner.bound_valid:
                 # The fallback's certified bound was installed on the route above
                 # (it is the tighter of two valid bounds) and does not cross the
                 # route's objective, so the certificate carries over.

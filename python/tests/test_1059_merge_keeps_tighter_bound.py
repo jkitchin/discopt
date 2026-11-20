@@ -29,7 +29,9 @@ from discopt.modeling.core import SolveResult
 from discopt.solver import _merge_route_and_fallback
 
 
-def _R(objective, bound, *, gap_certified=False, node_count=0, status="feasible"):
+def _R(
+    objective, bound, *, gap_certified=False, node_count=0, status="feasible", bound_valid=False
+):
     """A real ``SolveResult``, not a stand-in.
 
     This was a hand-rolled stub carrying "the fields the merge touches" -- and
@@ -44,13 +46,20 @@ def _R(objective, bound, *, gap_certified=False, node_count=0, status="feasible"
     A fixture that omits the fields under test measures nothing (CLAUDE.md §6).
     The real type is not more expensive here, so use it.
     """
-    return SolveResult(
+    r = SolveResult(
         status=status,
         objective=objective,
         bound=bound,
         gap_certified=gap_certified,
         node_count=node_count,
     )
+    if bound_valid:
+        # A time-limited B&B's uncertified bound is still a CLAIMED global dual
+        # bound (measured: the squfl025-040 fallback reports ``bound_valid=True``,
+        # ``root_relaxation``). Only a claimed loser bound may replace a claimed
+        # winner bound (#2271), so the squfl shape has to say so.
+        r._set_bound(bound, valid=True, source="bnb_tree")
+    return r
 
 
 @pytest.mark.unit
@@ -58,14 +67,14 @@ class TestTighterBoundIsKept:
     def test_uncertified_fallback_bound_is_adopted_when_tighter(self):
         """The squfl025-040 shape: route wins the incumbent, fallback the bound."""
         route = _R(423.98, 76.87, gap_certified=True, node_count=0)
-        fallback = _R(1139.53, 127.40, gap_certified=False, node_count=991)
+        fallback = _R(1139.53, 127.40, gap_certified=False, node_count=991, bound_valid=True)
         out = _merge_route_and_fallback(route, fallback, is_maximize=False)
         assert out.objective == pytest.approx(423.98)
         assert out.bound == pytest.approx(127.40), "the tighter valid bound was discarded"
 
     def test_maximize_sense_takes_the_smaller_upper_bound(self):
         route = _R(-70.0, 2176.14, gap_certified=True, node_count=3)
-        fallback = _R(-211.0, 860.84, gap_certified=False, node_count=447)
+        fallback = _R(-211.0, 860.84, gap_certified=False, node_count=447, bound_valid=True)
         out = _merge_route_and_fallback(route, fallback, is_maximize=True)
         assert out.objective == pytest.approx(-70.0)
         assert out.bound == pytest.approx(860.84)
@@ -91,7 +100,7 @@ class TestTighterBoundIsKept:
 
     def test_the_gap_is_recomputed_from_the_adopted_bound(self):
         route = _R(400.0, 76.87, gap_certified=True, node_count=0)
-        fallback = _R(1100.0, 127.40, gap_certified=False, node_count=991)
+        fallback = _R(1100.0, 127.40, gap_certified=False, node_count=991, bound_valid=True)
         out = _merge_route_and_fallback(route, fallback, is_maximize=False)
         assert out.gap == pytest.approx(abs(127.40 - 400.0) / 400.0)
 
@@ -100,7 +109,7 @@ class TestTighterBoundIsKept:
 class TestWorkIsReported:
     def test_node_count_sums_both_halves(self):
         route = _R(423.98, 76.87, gap_certified=True, node_count=0)
-        fallback = _R(1139.53, 127.40, gap_certified=False, node_count=991)
+        fallback = _R(1139.53, 127.40, gap_certified=False, node_count=991, bound_valid=True)
         out = _merge_route_and_fallback(route, fallback, is_maximize=False)
         assert out.node_count == 991, "991 nodes of real work were reported as 0"
 
