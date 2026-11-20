@@ -11848,9 +11848,14 @@ class Model:
                     # deterministic=True`` -- NLP-BB returned ``time_limit`` with one
                     # node, this branch certified in 38, and the route said
                     # ``nlp-bb``).
+                    # ``_fb`` is an ``LpSpatialResult`` (status, objective, bound,
+                    # gap, x, node_count) with no route of its own, so the engine is
+                    # named here; reading ``_fb.algorithm_route`` raised and the
+                    # ``except`` below reported a "failed" fallback after the primal
+                    # had already been adopted.
                     result.algorithm_route = (
                         f"{result.algorithm_route or 'unknown'} [#844 no-incumbent "
-                        f"fallback: {_fb.algorithm_route or 'lp-spatial-bb'}]"
+                        "fallback: lp-spatial-bb]"
                     )
                     result.solver_stats = {
                         **(result.solver_stats or {}),
