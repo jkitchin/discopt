@@ -81,7 +81,7 @@ try:
                cert=bool(getattr(r, "gap_certified", False)), nodes=r.node_count,
                route=str(r.algorithm_route)[:60], stats={k: v for k, v in
                (r.solver_stats or {}).items()
-               if k.startswith(("tree/py_spatial", "vub_cmir/", "nlpbb/", "spatial/convex_safe", "tree/bound_contradicted"))})
+               if k.startswith(("tree/py_spatial", "vub_cmir/", "nlpbb/", "spatial/convex_safe", "spatial/convex_point", "tree/bound_contradicted"))})
     if r.x is not None and r.objective is not None:
         flat = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in m._variables])
         ok, viol = check_feasibility(m, flat, tol=1e-5)
