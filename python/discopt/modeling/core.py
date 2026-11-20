@@ -5571,6 +5571,14 @@ class SolveResult:
     _provenance: Optional[dict] = None
     _solve_options: Optional[dict] = None
 
+    # The search's uncapped proved dual bound, declared sense, when the route
+    # tracks one apart from ``bound`` (NLP-BB under
+    # ``DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND``). ``bound`` is capped at the
+    # incumbent's value as the solver computed it; once
+    # :meth:`Model._reconcile_objective_with_model` re-values the objective
+    # exactly, ``min(this, objective)`` may be published instead. ``None`` elsewhere.
+    _proved_bound: Optional[float] = None
+
     def declared_x(self, model: "Model") -> dict[str, np.ndarray]:
         """``x`` restricted to the variables *model* declares.
 
@@ -12793,6 +12801,7 @@ class Model:
         reported = float(result.objective)
         if abs(f_declared - reported) <= 1e-9 * (1.0 + abs(reported)):
             return
+        _is_max = self._objective is not None and self._objective.sense == ObjectiveSense.MAXIMIZE
 
         _log.warning(
             "%s: reporting this model's objective at the returned point (%.12g) "
@@ -12806,11 +12815,35 @@ class Model:
         )
         result.objective = f_declared
 
+        # The bound was capped at the incumbent value just replaced. Where the
+        # route carried the search's uncapped proved bound, re-cap it at the exact
+        # value instead: ``min(proved, f(x))`` (min sense) is at most the optimum,
+        # since ``proved`` is a valid bound and ``x`` the returned point. Only ever
+        # tightens, and never past the objective.
+        from discopt.solver import _recap_bound_at_objective
+
+        _recapped = _recap_bound_at_objective(
+            result.bound, f_declared, result._proved_bound, _is_max
+        )
+        if _recapped is not None and _recapped != result.bound:
+            from discopt.solvers import _gap as _gap_mod
+
+            _log.info(
+                "%s: re-capping the bound at the exact objective: %.12g -> %.12g (proved %.12g).",
+                self.name,
+                result.bound,
+                _recapped,
+                result._proved_bound,
+            )
+            # Same tree, same proof: the validity claim and provenance carry over
+            # (#1244 -- every bound write goes through ``_set_bound``).
+            result._set_bound(_recapped, valid=result.bound_valid, source=result.bound_source)
+            result.gap = _gap_mod.reported_gap(f_declared, _recapped)
+
         # The certificate was granted against the number just replaced. Re-test it
         # with the same arbiter every other site uses.
         from discopt.solver import _withhold_stale_certificate
 
-        _is_max = self._objective is not None and self._objective.sense == ObjectiveSense.MAXIMIZE
         status, gap, certified, bound = _withhold_stale_certificate(
             result.status,
             result.objective,

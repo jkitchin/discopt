@@ -198,6 +198,21 @@ pub struct TreeStats {
     /// was not a valid lower bound — the tree's dual bound cannot be trusted,
     /// and a driver must not certify from it.
     pub bound_contradicted: bool,
+    /// The dual bound PROVED by the search, before `global_lower_bound`'s cap at
+    /// the incumbent value: the minimum over the open frontier, every floor
+    /// above, and the proved bounds of the leaves the search closed (nodes pruned
+    /// by bound, trusted integral fathoms, trusted no-branch fathoms), lifted by
+    /// the root seed. `-inf` while `bound_unresolved` (then the root seed).
+    ///
+    /// `global_lower_bound` caps the frontier at the incumbent value and, on an
+    /// exhausted tree, IS the incumbent value. That is a valid bound only as far
+    /// as the incumbent's value is: a driver whose incumbent value is the
+    /// objective of a point feasible only to a solver tolerance (convex NLP-BB)
+    /// publishes that tolerance as its gap, even where every closed region was
+    /// proved tighter. A driver that re-values the incumbent exactly may report
+    /// `min(proved_lower_bound, exact value)` instead. Read by nothing in the
+    /// tree itself.
+    pub proved_lower_bound: f64,
 }
 
 /// Internal buffer for results waiting to be processed.
@@ -225,6 +240,10 @@ struct PendingResult {
     /// point, which is what the incumbent must record (#1296): the floored value
     /// is a bound on the box, not the objective of the point.
     raw_lower_bound: f64,
+    /// The node's `local_lower_bound` BEFORE this import floored it: the bound
+    /// inherited from its ancestors. The #1296 test reads it when the node's own
+    /// imported bound is a proved bound above its point value.
+    inherited_lower_bound: f64,
 }
 
 /// Record of a branching decision at a node, used for retroactive
@@ -374,6 +393,9 @@ pub struct TreeManager {
     tight_unread: Vec<NodeId>,
     /// See [`TreeStats::bound_contradicted`] (#1296). Never cleared within a solve.
     bound_contradicted: bool,
+    /// Minimum proved bound over the leaves the search closed with a bound of
+    /// their own (see [`TreeStats::proved_lower_bound`]); `+inf` when none.
+    closed_floor: f64,
     /// R3a measurement counter (temporary, behavior-neutral): per-variable
     /// branch frequency. Incremented once per branching event (integer or
     /// spatial) with the branched flat column index. Length `n_vars`. Read by
@@ -471,6 +493,7 @@ impl TreeManager {
             safe_fathom_floor: f64::INFINITY,
             tight_unread: Vec::new(),
             bound_contradicted: false,
+            closed_floor: f64::INFINITY,
             branch_var_counts: vec![0; n_vars],
             sos1_selector_cols: Vec::new(),
             compl_pairs: Vec::new(),
@@ -824,6 +847,7 @@ impl TreeManager {
     ///
     /// Updates each node's lower bound and buffers solution data for processing.
     pub fn import_results(&mut self, results: &[NodeResult]) {
+        let mut inherited = Vec::with_capacity(results.len());
         for result in results {
             let node = self.pool.get_mut(result.node_id);
             // Hard asserts, not `debug_assert!` (#2092 review): `process_evaluated`
@@ -880,12 +904,13 @@ impl TreeManager {
             } else {
                 result.lower_bound
             };
+            inherited.push(node.local_lower_bound);
             node.local_lower_bound = effective_lb.max(node.local_lower_bound);
             // Store solution for warm-starting children.
             node.parent_solution = Some(std::sync::Arc::new(result.solution.clone()));
         }
         self.pending_results
-            .extend(results.iter().map(|r| PendingResult {
+            .extend(results.iter().zip(inherited).map(|(r, inh)| PendingResult {
                 node_id: r.node_id,
                 solution: r.solution.clone(),
                 is_feasible: r.is_feasible,
@@ -900,6 +925,7 @@ impl TreeManager {
                 bound_trusted: r.lower_bound.is_finite() && r.lower_bound < SENTINEL_THRESHOLD,
                 certified_infeasible: r.certified_infeasible,
                 raw_lower_bound: r.lower_bound,
+                inherited_lower_bound: inh,
             }));
     }
 
@@ -999,6 +1025,10 @@ impl TreeManager {
 
             // 1. Prune if lower bound >= cutoff (node can't improve).
             if node_lb >= self.cutoff_value() {
+                // Closed with a proved bound of its own (a sentinel proved none).
+                if node_lb < SENTINEL_THRESHOLD {
+                    self.closed_floor = self.closed_floor.min(node_lb);
+                }
                 self.pool.prune(result.node_id);
                 stats.pruned += 1;
                 continue;
@@ -1081,8 +1111,25 @@ impl TreeManager {
                     // not have (reported objective != c·x), and the tree's dual
                     // bound is no longer a certificate.
                     let value = point_value.unwrap_or(result.raw_lower_bound);
-                    if node_lb > value + 1e-6 * (1.0 + value.abs()) {
+                    // The test is about ANCESTOR bounds (#1296), and `node_lb` is
+                    // `max(own, inherited)`. That equals the inherited bound
+                    // whenever the node's own imported bound is at most its point
+                    // value, which holds for every driver that imports
+                    // `min(proved, value)` (#2067, #2136). A driver that imports a
+                    // proved bound ABOVE the point's value (the point is feasible
+                    // only to a solver tolerance; `DISCOPT_CONVEX_NODE_KEEP_PROVED_
+                    // BOUND`) has an own bound that bounds the box, not a claim
+                    // about any ancestor, so only the inherited bound is tested.
+                    let ancestors_lb = if point_value.is_some() && result.raw_lower_bound > value {
+                        result.inherited_lower_bound
+                    } else {
+                        node_lb
+                    };
+                    if ancestors_lb > value + 1e-6 * (1.0 + value.abs()) {
                         self.bound_contradicted = true;
+                    }
+                    if node_lb < SENTINEL_THRESHOLD {
+                        self.closed_floor = self.closed_floor.min(node_lb);
                     }
                     // #2067: the subtree is closed, but proved only down to
                     // `node_lb`; when that is below the point's own value the
@@ -1603,6 +1650,9 @@ impl TreeManager {
                     // exclusion case keeps the pre-existing behaviour: the caller
                     // removed the region deliberately, so no floor is owed.
                     self.unresolved_floor = self.unresolved_floor.min(node_lb);
+                } else if node_lb < SENTINEL_THRESHOLD {
+                    // Trusted and resolved: closed with its own proved bound.
+                    self.closed_floor = self.closed_floor.min(node_lb);
                 }
                 self.retire(result.node_id, NodeStatus::Fathomed);
                 stats.fathomed += 1;
@@ -1779,7 +1829,32 @@ impl TreeManager {
             unresolved_floor: self.unresolved_floor.min(self.tight_floor()),
             safe_fathom_floor: self.safe_fathom_floor,
             bound_contradicted: self.bound_contradicted,
+            proved_lower_bound: self.proved_lower_bound(),
         }
+    }
+
+    /// See [`TreeStats::proved_lower_bound`]. The frontier minimum of
+    /// [`Self::update_global_lower_bound`] with the closed leaves' proved bounds
+    /// in place of the incumbent cap; no objective-lattice lift (that reasons
+    /// from the incumbent), so it is never above what the cap-free search proved.
+    fn proved_lower_bound(&self) -> f64 {
+        if self.bound_unresolved {
+            return self.root_seed;
+        }
+        let mut min_lb = self
+            .unresolved_floor
+            .min(self.tight_floor())
+            .min(self.safe_fathom_floor)
+            .min(self.closed_floor);
+        for i in 0..self.pool.total_count() {
+            let node = self.pool.get(NodeId(i));
+            if matches!(node.status, NodeStatus::Pending | NodeStatus::Evaluated)
+                && node.local_lower_bound < min_lb
+            {
+                min_lb = node.local_lower_bound;
+            }
+        }
+        min_lb.max(self.root_seed)
     }
 
     /// Minimum over the tight-fathom floors (#1510); `+inf` when none.
@@ -3979,6 +4054,62 @@ mod tests {
         assert_eq!(ts.global_lower_bound, 3.5);
         assert!(!ts.bound_contradicted);
         assert!(tm.point_values.is_empty());
+    }
+
+    /// A proved bound ABOVE the point's value (the point is feasible only to a
+    /// solver tolerance): the incumbent records the point's value, the capped
+    /// `global_lower_bound` collapses onto it as before, and `proved_lower_bound`
+    /// keeps what the closed leaves proved. The #1296 test reads the inherited
+    /// (ancestor) bound, which the point does not contradict.
+    #[test]
+    fn proved_bound_above_point_value_is_kept_uncapped() {
+        let pv = 3.5 - 1e-5;
+        let tm = closed_children(3.5, pv);
+        let ts = tm.stats();
+        assert_eq!(tm.incumbent().unwrap().1, pv);
+        assert_eq!(ts.global_lower_bound, pv, "the capped bound is unchanged");
+        assert_eq!(ts.proved_lower_bound, 3.5, "min(closed 3.5, pruned sibling 9.0)");
+        assert_eq!(ts.safe_fathom_floor, f64::INFINITY);
+        // `node_lb` (3.5) exceeds the value by more than the 1e-6 tolerance; the
+        // ancestor bound (3.0) does not.
+        assert!(pv + 1e-6 * (1.0 + pv.abs()) < 3.5);
+        assert!(!ts.bound_contradicted);
+    }
+
+    /// The narrowed #1296 test still catches an ANCESTOR bound the point
+    /// contradicts when the node's own bound is above its point value.
+    #[test]
+    fn ancestor_contradiction_is_still_caught_above_point_value() {
+        let tm = closed_children(3.5, 2.0); // parent bound 3.0 > 2.0
+        assert!(tm.stats().bound_contradicted);
+    }
+
+    /// Where the node's own bound is at most its point value -- every driver
+    /// before the keep-proved import -- the #1296 test is the pre-change one, and
+    /// `proved_lower_bound` equals `global_lower_bound` on an exhausted tree.
+    #[test]
+    fn proved_lower_bound_matches_the_capped_bound_on_legacy_imports() {
+        for (bound, pv) in [(3.5, f64::NAN), (3.5, 3.5 + 2e-7), (3.5, 3.5)] {
+            let ts = closed_children(bound, pv).stats();
+            assert_eq!(ts.proved_lower_bound, ts.global_lower_bound, "{bound} {pv}");
+            assert!(!ts.bound_contradicted);
+        }
+        // A node whose OWN bound (2.0) is below the inherited one (3.0) and whose
+        // value is below the inherited one: contradicted, exactly as before.
+        let ts = closed_children(2.0, 2.0).stats();
+        assert!(ts.bound_contradicted);
+    }
+
+    /// With nodes still open the proved bound is the frontier minimum, uncapped;
+    /// an unresolved tree reports the root seed, as `global_lower_bound` does.
+    #[test]
+    fn proved_lower_bound_reads_the_open_frontier_and_unresolved_tree() {
+        let (tm, _first) = branched_child(3.0);
+        let ts = tm.stats();
+        assert_eq!(ts.proved_lower_bound, 3.0);
+        let mut tm = tm;
+        tm.bound_unresolved = true;
+        assert_eq!(tm.stats().proved_lower_bound, f64::NEG_INFINITY);
     }
 
     /// A non-finite point value is the pre-#2067 import: the bound is the point
