@@ -1055,6 +1055,34 @@ def _clipped_integral_point(evaluator, x, node_lb, node_ub, int_offsets, int_siz
     return xc, val
 
 
+def _abstaining_node_candidate(evaluator, x, raw, node_lb, node_ub, int_offsets, int_sizes, cl, cu):
+    """The incumbent candidate an ABSTAINING integral node offers: ``(point, value)``.
+
+    Under :func:`_convex_node_clip_point_value_enabled` this is the same clip-and-price
+    the proved nodes get (:func:`_clipped_integral_point`) -- an abstaining node skips
+    the bound step but its point is injected all the same, so without this an IPM point
+    just outside its box reached the tree at its raw value (review of #2276). Otherwise,
+    or when there is nothing to clip, ``(x, raw)`` unchanged.
+    """
+    x = np.asarray(x, dtype=np.float64).copy()
+    if _convex_node_clip_point_value_enabled():
+        m = 0 if cl is None else len(cl)
+        clipped = _clipped_integral_point(
+            evaluator,
+            x,
+            node_lb,
+            node_ub,
+            int_offsets,
+            int_sizes,
+            False,
+            np.asarray(cl if m else [], dtype=np.float64),
+            np.asarray(cu if m else [], dtype=np.float64),
+        )
+        if clipped is not None:
+            return clipped[0], clipped[1]
+    return x, float(raw)
+
+
 def _obbt_topk_enabled() -> bool:
     """Whether the T2.5 scored top-k OBBT de-gate is on (env flag, default OFF)."""
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
@@ -22563,7 +22591,19 @@ def solve_model(
                     if _sp_raw[_ai] < _SENTINEL_THRESHOLD and _is_integer_feasible_solution(
                         result_sols[_ai], int_offsets, int_sizes
                     ):
-                        _inject_incumbent(np.asarray(result_sols[_ai]).copy(), float(_sp_raw[_ai]))
+                        _inject_incumbent(
+                            *_abstaining_node_candidate(
+                                _active_evaluator,
+                                result_sols[_ai],
+                                _sp_raw[_ai],
+                                batch_lb[_ai],
+                                batch_ub[_ai],
+                                int_offsets,
+                                int_sizes,
+                                _sp_cl,
+                                _sp_cu,
+                            )
+                        )
             # For nonconvex problems, NLP objective is NOT a valid lower
             # bound (local minima can exceed the global optimum).  Reset ALL
             # non-sentinel nodes to -inf so only convex relaxation bounds are
@@ -23002,7 +23042,19 @@ def solve_model(
                         if _n_a and _is_integer_feasible_solution(
                             nlp_result.x, int_offsets, int_sizes
                         ):
-                            _inject_incumbent(np.asarray(nlp_result.x).copy(), float(nlp_lb))
+                            _inject_incumbent(
+                                *_abstaining_node_candidate(
+                                    _active_evaluator,
+                                    nlp_result.x,
+                                    nlp_lb,
+                                    node_lb,
+                                    node_ub,
+                                    int_offsets,
+                                    int_sizes,
+                                    _sp_cl,
+                                    _sp_cu,
+                                )
+                            )
                         nlp_lb = float(_one[0])
                         _sp_points[i] = _pt[0]
                     convex_lb = -np.inf  # accumulate valid convex lower bound
@@ -30508,7 +30560,17 @@ def _solve_nlp_bb(
                         result_sols[_ai], int_offsets, int_sizes
                     ):
                         tree.inject_incumbent(
-                            np.asarray(result_sols[_ai]).copy(), float(_raw_lbs[_ai])
+                            *_abstaining_node_candidate(
+                                evaluator,
+                                result_sols[_ai],
+                                _raw_lbs[_ai],
+                                batch_lb[_ai],
+                                batch_ub[_ai],
+                                int_offsets,
+                                int_sizes,
+                                cl_list,
+                                cu_list,
+                            )
                         )
         t_rust_start = time.perf_counter()
         tree.import_results(

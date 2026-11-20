@@ -153,3 +153,72 @@ def test_nvs15_certifies_in_every_run_with_the_flag(monkeypatch):
         assert r.objective == pytest.approx(1.0, abs=1e-9)
         assert r.bound is not None and r.bound <= 1.0 + 1e-9
         assert "tree/bound_contradicted" not in stats
+
+
+# ── abstaining nodes (review of #2276): no bound step, same clip-and-price ────
+
+
+def test_an_abstaining_candidate_is_clipped_and_priced(monkeypatch):
+    monkeypatch.setenv(FLAG, "1")
+    ev, cl, cu = _steep_model()
+    x = np.array([2.0 - 1e-8, 0.0])
+    raw = float(ev.evaluate_objective(x))
+    xc, val = S._abstaining_node_candidate(ev, x, raw, [2.0, 0.0], [2.0, 1.0], (0,), (1,), cl, cu)
+    np.testing.assert_array_equal(xc, [2.0, 0.0])
+    assert val == 2.0 * G
+    monkeypatch.setenv(FLAG, "0")
+    xr, vr = S._abstaining_node_candidate(ev, x, raw, [2.0, 0.0], [2.0, 1.0], (0,), (1,), cl, cu)
+    np.testing.assert_array_equal(xr, x)
+    assert vr == raw
+
+
+class _RecordInjections:
+    def __init__(self, tree):
+        self._t, self.injected = tree, []
+
+    def inject_incumbent(self, x, v):
+        self.injected.append((np.asarray(x, dtype=np.float64).copy(), float(v)))
+        return self._t.inject_incumbent(x, v)
+
+    def __getattr__(self, name):
+        return getattr(self._t, name)
+
+
+def test_nlpbb_injects_an_abstaining_node_at_its_clipped_point(monkeypatch):
+    """Every node abstains (no safe bound) and every node NLP point is pushed 1e-8
+    below its box on the integer column. NLP-BB still injects each integral point as
+    an incumbent; before the review fix it injected the raw point at its raw value."""
+    import discopt.solvers.convex_node_bound as CNB
+
+    monkeypatch.setenv(FLAG, "1")
+    monkeypatch.setattr(CNB, "convex_node_safe_bound", lambda *a, **k: (None, "test"))
+    orig_apply = S._apply_convex_node_safe_bounds
+    shifted = []
+
+    def shift_then_apply(ev, blb, bub, lbs, sols, *a, **k):
+        for i in range(len(sols)):
+            sols[i][0] = float(np.asarray(blb[i])[0]) - 1e-8  # integral within 1e-5
+            shifted.append(i)
+        return orig_apply(ev, blb, bub, lbs, sols, *a, **k)
+
+    monkeypatch.setattr(S, "_apply_convex_node_safe_bounds", shift_then_apply)
+    trees = []
+    orig_tree = S._tree_manager
+
+    def make(*a, **k):
+        trees.append(_RecordInjections(orig_tree(*a, **k)))
+        return trees[-1]
+
+    monkeypatch.setattr(S, "_tree_manager", make)
+    m = dm.Model("steep_convex")
+    y = m.integer("y", lb=0, ub=5)
+    z = m.continuous("z", lb=0, ub=1)
+    m.minimize(G * y + (z - 0.5) ** 2)
+    m.subject_to(y + z <= 4)
+    m.solve(time_limit=10, nlp_bb=True, deterministic=True, max_nodes=8)
+    assert shifted and len(trees) == 1, (shifted, trees)  # rule 6: the shift fired
+    nodes = [(x, v) for x, v in trees[0].injected if abs(x[0] - round(x[0])) < 1e-5]
+    assert nodes, trees[0].injected  # rule 6: an abstaining node was injected
+    for x, v in nodes:
+        assert x[0] == round(x[0]) and x[0] >= 0.0, x  # inside the box, not 1e-8 below
+        assert v == pytest.approx(G * x[0] + (x[1] - 0.5) ** 2, abs=1e-12)
