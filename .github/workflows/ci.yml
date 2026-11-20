@@ -667,6 +667,45 @@ jobs:
             gh issue create --title "$TITLE" --label ci-signal --body-file body.md
           fi
 
+  # The reporter above only ever opens or refreshes the issue, so after the lane
+  # recovered #2268 stayed open with nothing on it saying so (the D-gdp
+  # false-infeasible was fixed by #2269 and the next run was green). This job
+  # records the green run on the open issue. It does NOT close it: a soundness
+  # failure that passes on a rerun is not shown fixed, so closing stays a triage
+  # decision that names the fix (or tracks the flake).
+  note-slow-correctness-recovery:
+    name: Note recovery on the CI-signal issue
+    needs: python-correctness-slow
+    if: needs.python-correctness-slow.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Comment on the open tracking issue, if any
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: "CI signal down: slow-correctness lane is failing"
+        run: |
+          set -euo pipefail
+          NUM=$(gh issue list --state open --label ci-signal --json number,title \
+                  --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+          if [ -z "$NUM" ]; then
+            echo "no open CI-signal issue titled '$TITLE'; nothing to note"
+            exit 0
+          fi
+          printf '%s\n' \
+            "The \`slow\`+\`correctness\` lane passed on \`${GITHUB_REF_NAME}\` (${GITHUB_SHA})." \
+            "" \
+            "Run: ${RUN_URL}" \
+            "" \
+            "Not closed automatically: a failure that passes on a later run is not" \
+            "shown fixed. Close this once the failure is attributed to a fix (or is" \
+            "reproduced as a flake and tracked), and check that this ref contains it." \
+            > body.md
+          gh issue comment "$NUM" --body-file body.md
+
   python-claims-serial:
     # Relaxation claim-arbitration tests, run SERIALLY (-n0). The federated
     # lifted-relaxation "claimers" are arbitrated by a hand-maintained defer-list
