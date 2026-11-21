@@ -428,7 +428,16 @@ Two conventions used throughout:
   is **opt-in** (`analyze_decomposition(model, separator_search=True)`): it is
   not in `DEFAULT_GENERATORS`, so `solve(decomposition="auto")` never runs it.
   Measured on a 774-column capacity LP it spent 39 s against a 0.8 s
-  monolithic solve (the Benders solve on its split took 0.24 s). It
+  monolithic solve (the Benders solve on its split took 0.24 s). Cost fix:
+  two-hop same-type coarsening (395 -> 54 coarse vertices at 774 columns, still
+  54 at 3,078), skipping a `|C|` an earlier separator already covers, and
+  constraint separators off by default (they cost 4-8 s for 190+-row answers
+  where ~11 rows suffice). Opt-in pipeline, measured interleaved at load < 1.5
+  (3 reps; objectives equal every time): 150 cols mono 0.14 s vs advisor 0.83 s
+  + Benders 0.09 s; 774 cols mono 0.47 s vs 0.26 + 0.22 s; 3,078 cols mono
+  1.93 s vs 1.15 + 0.88 s. The decomposed solve is 1.5-2.2x faster than the
+  monolith, and advisor + solve breaks even from ~774 columns on this family; it
+  is not yet a net win. It
   turns variable separators into Benders candidates with a column-level master
   (`DecompositionStructure.master_columns`, honoured by `solve_benders`, refused
   by `solve_gbd`) and constraint separators into Lagrangian candidates; it runs

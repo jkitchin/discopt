@@ -26,7 +26,9 @@ Measured on a 150-column capacity-expansion LP: unrestricted matching merged the
 design variables (hubs) with operational ones and returned 14-column separators
 where the 6 design columns suffice; type-preserving matching returns the 6. Any
 coarsening is safe: a vertex set that separates the reduced graph separates the
-original once lifted, because merging only adds adjacency.
+original once lifted, because merging only adds adjacency. Same-type elements
+that share no row are merged through shared neighbours (two hops); see
+:func:`coarsen_by_matching` for the measurement.
 
 **Symmetry.** Components are interchangeable, which makes the program hard
 (the paper reports hours for large ``|C|``). Vertex ``v`` may only join a
@@ -151,9 +153,17 @@ def coarsen_by_matching(
     Returns ``(group, n_coarse, coarse_edges, coarse_weight)``: ``group[v]`` is
     the coarse vertex of original vertex ``v``. Vertices in *pinned* are only
     merged with other pinned vertices (a forced-separator vertex must not drag
-    a free one into the separator). Deterministic: vertices are visited by
-    ascending degree then index, partners by descending edge weight, ascending
-    coarse weight, then index. Stops early when a round merges nothing.
+    a free one into the separator). A vertex with no unmatched same-type
+    neighbour is matched to the same-type vertex it shares the most neighbour
+    weight with (two hops away): elements of one array rarely share a row
+    (``Q[s, t]`` and ``Q[s, t+1]`` do not), but share neighbours, and the
+    shared weight ranks a time step (shares ``K`` and ``I``) above another
+    scenario (shares only ``K``). Measured on a 774-column capacity LP: the
+    one-hop rule stalled at 395 vertices and the design separator cost 4.9 s;
+    two-hop reaches 54 vertices and finds it in 0.09 s (3,078 columns: still 54
+    vertices, 0.09 s). Deterministic: vertices are visited by ascending degree
+    then index, partners by descending (edge or shared) weight, ascending coarse
+    weight, then index. Stops early when a round merges nothing.
     """
     group = np.arange(n, dtype=np.int64)
     cur_n = n
@@ -163,19 +173,28 @@ def coarsen_by_matching(
     pin = np.zeros(n, dtype=bool)
     pin[np.asarray(list(pinned), dtype=np.int64)] = True
     while cur_n > target:
-        adj: list[list[tuple[int, int]]] = [[] for _ in range(cur_n)]
+        adj: list[dict[int, int]] = [{} for _ in range(cur_n)]
         for (a, b), wt in cur_edges.items():
-            adj[a].append((wt, b))
-            adj[b].append((wt, a))
+            adj[a][b] = wt
+            adj[b][a] = wt
         match = [-1] * cur_n
         for v in sorted(range(cur_n), key=lambda u: (len(adj[u]), u)):
             if match[v] != -1:
                 continue
             match[v] = v
-            for _wt, u in sorted(adj[v], key=lambda t: (-t[0], weight[t[1]], t[1])):
-                if match[u] == -1 and kind[u] == kind[v] and pin[u] == pin[v]:
-                    match[v], match[u] = u, v
-                    break
+
+            def free(u: int, v: int = v) -> bool:
+                return match[u] == -1 and u != v and kind[u] == kind[v] and pin[u] == pin[v]
+
+            score = {u: wt for u, wt in adj[v].items() if free(u)}
+            if not score:  # no same-type neighbour: look two hops away
+                for x, w_vx in adj[v].items():
+                    for u, w_xu in adj[x].items():
+                        if free(u):
+                            score[u] = score.get(u, 0) + min(w_vx, w_xu)
+            if score:
+                u = min(score, key=lambda k: (-score[k], weight[k], k))
+                match[v], match[u] = u, v
         new_id: dict[int, int] = {}
         nid = np.empty(cur_n, dtype=np.int64)
         for v in range(cur_n):
@@ -185,7 +204,7 @@ def coarsen_by_matching(
             nid[v] = new_id[r]
         m = len(new_id)
         if m == cur_n:
-            break  # nothing of one type is adjacent: no further progress
+            break  # no same-type pair within two hops: no further progress
         new_edges: dict[tuple[int, int], int] = {}
         for (a, b), wt in cur_edges.items():
             x, y = int(nid[a]), int(nid[b])
@@ -359,6 +378,7 @@ def find_separators(
     time_limit: float = 30.0,
     forced_columns: Sequence[int] = (),
     max_fraction: float = 0.5,
+    skip_covered: bool = True,
 ) -> list[Separator]:
     """Separators for ``|C| = 2 .. max_components``, verified and de-duplicated.
 
@@ -369,6 +389,16 @@ def find_separators(
     per-``|C|`` wall-clock backstop sized well above the node budget. A program
     with no incumbent contributes nothing. Every returned separator has been
     lifted and its split measured on *graph*.
+
+    With *skip_covered* a ``|C|`` is not solved when an earlier separator is
+    already verified to leave at least ``|C|`` blocks: that question is
+    answered, and each further program costs 2-3 s of HiGHS root work on a large
+    graph. Measured on the capacity-expansion LP family (whole call, coarsening
+    included): 3.78 s -> 0.58 s at 3,078 columns and 2.54 s -> 0.14 s at 774,
+    each still returning the design separator; at 150 columns 1.02 s -> 0.89 s,
+    returning the ``|C| = 2`` split (14 columns, 7 blocks) but no longer the
+    6-column, 3-block one ``|C| = 3`` finds. ``skip_covered=False`` runs every
+    ``|C|``.
 
     A separator holding more than *max_fraction* of the active elements is
     dropped: a time-limited incumbent can isolate a few vertices by putting
@@ -399,9 +429,12 @@ def find_separators(
 
     out: list[Separator] = []
     seen: set[tuple[int, ...]] = set()
+    covered = 1  # the most blocks any separator so far is verified to leave
     for C in range(2, max_components + 1):
         if C > nv - len(c_forced):
             break
+        if skip_covered and C <= covered:
+            continue
         t0 = time.perf_counter()
         R, status = _solve_partition(
             nv, list(c_edges), c_weight, C, epsilon, c_forced, node_limit, time_limit
@@ -414,7 +447,9 @@ def find_separators(
         if lifted in seen or len(lifted) > max_fraction * keep.size:
             continue
         seen.add(lifted)
-        out.append(_verify(graph, kind, C, lifted, status, seconds))
+        found = _verify(graph, kind, C, lifted, status, seconds)
+        covered = max(covered, found.blocks)
+        out.append(found)
     return out
 
 

@@ -72,7 +72,7 @@ def _design_columns(g: ElementGraph) -> set[int]:
 @pytest.mark.requires_highs
 def test_variable_separator_recovers_design_variables():
     g = ElementGraph.from_model(_capex())
-    seps = find_separators(g, "variables", max_components=3)
+    seps = find_separators(g, "variables", max_components=3, skip_covered=False)
     by_c = {s.num_components: s for s in seps}
     assert 3 in by_c
     three = by_c[3]
@@ -82,12 +82,18 @@ def test_variable_separator_recovers_design_variables():
     for s in seps:  # every result was lifted and re-measured
         assert s.blocks >= s.num_components
         assert sum(len(b) for b in s.block_columns) + s.weight <= g.num_cols
+    # The default skips a |C| an earlier separator already covers: here the
+    # |C| = 2 split leaves more than 3 blocks, so |C| = 3 is not solved.
+    default = find_separators(g, "variables", max_components=3)
+    assert [s.num_components for s in default] == [2]
+    assert default[0].blocks > 3
+    assert default[0].columns == by_c[2].columns
 
 
 @pytest.mark.requires_highs
 def test_constraint_separator_splits_and_is_verified():
     g = ElementGraph.from_model(_capex())
-    seps = find_separators(g, "constraints", max_components=2)
+    seps = find_separators(g, "constraints", max_components=2, skip_covered=False)
     assert seps
     for s in seps:
         assert s.rows and not s.columns
@@ -163,7 +169,10 @@ def test_master_columns_out_of_range_and_gbd_refusal():
 @pytest.mark.requires_highs
 def test_advisor_recommends_separator_benders_and_decomposes_it():
     mono = _capex().solve()
-    adv = analyze_decomposition(_capex(), separator_search=True)
+    from discopt.decomposition.advisor.candidates import SeparatorGenerator
+
+    # The full sweep, so the 6-column design split (|C| = 3 here) is generated.
+    adv = analyze_decomposition(_capex(), separator_search=SeparatorGenerator(skip_covered=False))
     rec = adv.recommendation()
     assert rec.recommendation is MethodKind.BENDERS
     picked = next(r.candidate for r in adv.ranked() if r.recommended)

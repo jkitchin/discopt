@@ -416,10 +416,14 @@ class SeparatorGenerator:
     reach is measured, not guessed: on a 150-column capacity-expansion LP each
     program costs ~1 s up to ``|C| = 3`` (variables) and ``|C| = 2``
     (constraints), and 4-8 s beyond, in HiGHS's root processing even at 50
-    nodes -- hence the defaults. Classical Benders is exact
-    on any linear partition (``PROVEN_EQUIVALENT``); the Lagrangian bound is a
-    relaxation. Nonlinear models are left out: GBD takes whole arrays only and
-    is exact only on convex recourse.
+    nodes -- hence the defaults. Constraint separators are **off** by default
+    (``max_components_constraints=0``; set it to 2 or more to search them):
+    coarsening merges a period-linking row into the chain of ordinary rows of
+    the same type, and measured on the 774-column LP the ``|C| = 2`` program
+    spent 3.9 s to return a 302-row separator where about 11 rows suffice.
+    Classical Benders is exact on any linear partition (``PROVEN_EQUIVALENT``);
+    the Lagrangian bound is a relaxation. Nonlinear models are left out: GBD
+    takes whole arrays only and is exact only on convex recourse.
     """
 
     name = "separator-program"
@@ -427,16 +431,18 @@ class SeparatorGenerator:
     def __init__(
         self,
         max_components_variables: int = 3,
-        max_components_constraints: int = 2,
+        max_components_constraints: int = 0,
         node_limit: int = 200,
         time_limit: float = 30.0,
         max_columns: int = 20_000,
+        skip_covered: bool = True,
     ):
         self.max_components_variables = max_components_variables
         self.max_components_constraints = max_components_constraints
         self.node_limit = node_limit
         self.time_limit = time_limit
         self.max_columns = max_columns
+        self.skip_covered = skip_covered  # see find_separators
 
     def applicable(self, report: StructureReport) -> bool:
         return (
@@ -471,6 +477,7 @@ class SeparatorGenerator:
             max_components=self.max_components_variables,
             node_limit=self.node_limit,
             time_limit=self.time_limit,
+            skip_covered=self.skip_covered,
         ):
             arrays = sorted({graph.var_names[int(graph.col_var[j])] for j in sep.columns})
             structure = dataclasses.replace(
@@ -499,12 +506,15 @@ class SeparatorGenerator:
                 )
             )
         m = report.num_constraints
+        if self.max_components_constraints < 2:
+            return out  # constraint separators are off unless asked for
         for sep in find_separators(
             graph,
             "constraints",
             max_components=self.max_components_constraints,
             node_limit=self.node_limit,
             time_limit=self.time_limit,
+            skip_covered=self.skip_covered,
         ):
             owners = {graph.con_model_index[int(graph.row_con[r])] for r in sep.rows}
             if None in owners or not all(
