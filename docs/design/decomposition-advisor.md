@@ -424,10 +424,10 @@ Two conventions used throughout:
   (HiGHS under `DISCOPT_LP_ENGINE=auto`: 0.71 s vs 5.7-6.4 s for the simplex
   B&B at `|C| = 3`), under a deterministic node budget (a wall clock made the
   recommendation load-dependent). Every separator is lifted and its split
-  re-measured on the element graph; a disagreement raises. `SeparatorGenerator`
-  is **opt-in** (`analyze_decomposition(model, separator_search=True)`): it is
-  not in `DEFAULT_GENERATORS`, so `solve(decomposition="auto")` never runs it.
-  Measured on a 774-column capacity LP it spent 39 s against a 0.8 s
+  re-measured on the element graph; a disagreement raises. The advisor ran it
+  as `SeparatorGenerator`, opt-in via `analyze_decomposition(model,
+  separator_search=True)` -- **retired**, see the end of this item. Measured on
+  a 774-column capacity LP it spent 39 s against a 0.8 s
   monolithic solve (the Benders solve on its split took 0.24 s). Cost fix:
   two-hop same-type coarsening (395 -> 54 coarse vertices at 774 columns, still
   54 at 3,078), skipping a `|C|` an earlier separator already covers, and
@@ -457,8 +457,8 @@ Two conventions used throughout:
   in the Rust core -- `dm.sum(Q[g])` read as `Q.flat[g]` -- fixed separately
   (`test_partial_integer_index_sum.py`). The paper's own coarsening is
   available too: `find_separators(..., coarse=graph.coarsen(var_axes,
-  con_axes))`, or `SeparatorGenerator(var_axes=..., con_axes=..., epsilon=...)`
-  through the advisor. On the capacity LP family it finds the same design
+  con_axes))` (the retired generator also took `var_axes`/`con_axes`/`epsilon`).
+  On the capacity LP family it finds the same design
   separator as the automatic coarsening from 774 columns up but is slower
   (102 vs 54 coarse vertices at 3,078 columns: 1.04 s vs 0.10 s); its value is
   control for a modeller who knows the structure, not speed. `con_axes` helps
@@ -483,11 +483,15 @@ Two conventions used throughout:
   end to end 0.84x / 1.52x / 0.95x at 20 / 100 / 400 scenarios. On CVaR it
   recommends a 200-column master that stops at its iteration limit (no false
   certificate, but nothing delivered). Net: no case for a default, and the
-  recommendation is harmful on two-stage LPs. It
-  turns variable separators into Benders candidates with a column-level master
-  (`DecompositionStructure.master_columns`, honoured by `solve_benders`, refused
-  by `solve_gbd`) and constraint separators into Lagrangian candidates; it runs
-  only on linear models where nothing else was found. Measured: on a linear
+  recommendation is harmful on two-stage LPs. **Retired** on that evidence
+  (CLAUDE.md §5): `SeparatorGenerator` and the `separator_search=` keyword are
+  deleted, and the advisor never calls the program
+  (`test_advisor_never_runs_the_separator_program`). Kept as an explicit
+  library tool: `find_separators(graph, kind, ...)`, with a variable separator
+  usable as a Benders first stage through `DecompositionStructure.master_columns`
+  (honoured by `solve_benders`, refused by `solve_gbd`); every separator it
+  returns gives an exact Benders solve (`test_every_separator_benders_is_exact`).
+  Historical, while it was in the advisor: on a linear
   capacity-expansion model the advisor moves from `NONE` to Benders over the
   6 design columns `K, L` with one block per scenario (the paper's Fig. 8a), and
   solves to the monolithic optimum; 87-model panel 85/87 identical (2 synthetic

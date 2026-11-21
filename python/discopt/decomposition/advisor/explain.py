@@ -216,15 +216,7 @@ class Explainer:
             ]
         reasons: list[Rationale] = []
         if cand.method in (MethodKind.BENDERS, MethodKind.GENERALIZED_BENDERS):
-            if cand.structure is not None and cand.structure.master_columns is not None:
-                n_rec = cand.element_view.num_blocks if cand.element_view else 0
-                arrays = ", ".join(cand.structure.complicating_vars)
-                text = (
-                    f"Fixing {len(cand.structure.master_columns)} first-stage column(s) of "
-                    f"{arrays}, chosen by the separator program, disconnects the model "
-                    f"into {n_rec} recourse blocks."
-                )
-            elif cand.element_view is not None:
+            if cand.element_view is not None:
                 n_rec = cand.element_view.num_blocks
                 text = (
                     f"Fixing {report.num_integer} integer variable(s) disconnects the "

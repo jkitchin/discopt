@@ -8731,20 +8731,18 @@ class Model:
                 self._coupling_keys.add(cname)
         return self
 
-    def analyze_decomposition(self, *, separator_search=False):
+    def analyze_decomposition(self):
         """Analyze this model's decomposition structure (does not solve it).
 
         Returns a
         :class:`~discopt.decomposition.advisor.DecompositionAdvisor` exposing the
         structure report, discovered decomposition candidates, block partition,
         and graph views/exports. See ``docs/design/decomposition-advisor.md``.
-        ``separator_search=True`` opts into the (potentially expensive)
-        separator program; see :func:`discopt.decomposition.analyze_decomposition`.
         Runs :meth:`validate` first, the canonicalization every ``solve`` applies.
         """
         from discopt.decomposition import analyze_decomposition
 
-        return analyze_decomposition(self, separator_search=separator_search)
+        return analyze_decomposition(self)
 
     # ── Fast construction API (direct arena building) ──
 

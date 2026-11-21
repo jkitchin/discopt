@@ -3,9 +3,10 @@
 Pins: the program recovers the design variables of a capacity-expansion LP as
 the Benders first stage; every separator is lifted and its split re-measured
 on the element graph (a disagreement raises); coarsening never merges vertices
-of different types; Benders accepts a column-level master; the advisor
-recommends the separator candidate, ``decompose()`` builds the recommended one,
-and its solve reproduces the monolithic optimum.
+of different types; Benders accepts a column-level master and is exact on
+every separator the program returns. The advisor's separator search is
+retired (it measured slower than the monolith on two-stage LPs); a guard here
+keeps the advisor from calling the program.
 """
 
 import dataclasses
@@ -161,79 +162,30 @@ def test_master_columns_out_of_range_and_gbd_refusal():
         solve_gbd(m, structure=st)
 
 
-# ── advisor ─────────────────────────────────────────────────────
-
-
-@pytest.mark.slow
-@pytest.mark.correctness
-@pytest.mark.requires_highs
-def test_advisor_recommends_separator_benders_and_decomposes_it():
-    mono = _capex().solve()
-    from discopt.decomposition.advisor.candidates import SeparatorGenerator
-
-    # The full sweep, so the 6-column design split (|C| = 3 here) is generated.
-    adv = analyze_decomposition(_capex(), separator_search=SeparatorGenerator(skip_covered=False))
-    rec = adv.recommendation()
-    assert rec.recommendation is MethodKind.BENDERS
-    picked = next(r.candidate for r in adv.ranked() if r.recommended)
-    assert picked.provenance.startswith("separator program")
-    # ``decompose()`` builds the recommended candidate, not the first generated.
-    decomposed = adv.decompose()
-    assert decomposed.structure.master_columns == picked.structure.master_columns
-    assert decomposed.num_blocks == picked.num_blocks
-    # The design-only first stage is among the candidates (the scorer may rank
-    # a larger master with more blocks above it).
-    g = ElementGraph.from_model(_capex())
-    masters = [
-        set(c.structure.master_columns)
-        for c in adv.candidates()
-        if c.structure is not None and c.structure.master_columns is not None
-    ]
-    assert _design_columns(g) in masters
-    assert "separator program" in adv.explain()
-    result = decomposed.solve()
-    assert result.status == "optimal" and result.gap_certified
-    assert result.objective == pytest.approx(mono.objective, abs=1e-6)
-
-
-def test_separator_generator_silent_on_nonlinear_or_structured_models():
-    from discopt.decomposition.advisor.candidates import SeparatorGenerator
-
-    gen = SeparatorGenerator()
-    nonlinear = _capex()
-    nonlinear.subject_to(nonlinear._variables[0][0, 0] ** 2 <= 100)
-    assert not gen.applicable(analyze_decomposition(nonlinear).structure())
-
-    m = dm.Model("benders_fixture")
-    z = m.binary("z")
-    a = m.continuous("a", lb=0, ub=5)
-    b = m.continuous("b", lb=0, ub=5)
-    m.subject_to(a <= 5 * z)
-    m.subject_to(b <= 5 * z)
-    m.minimize(a + b - z)
-    report = analyze_decomposition(m).structure()
-    assert report.integer_localizes and not gen.applicable(report)
+# ── soundness of the library path ───────────────────────────────
 
 
 @pytest.mark.slow
 @pytest.mark.correctness
 @pytest.mark.requires_highs
 @pytest.mark.parametrize("seed", [1, 2, 3])
-def test_every_separator_candidate_is_sound(seed):
-    """Benders candidates reproduce the optimum; Lagrangian bounds stay below it."""
-    from discopt.decomposition.ir.reformulation import build_decomposition
-
+def test_every_separator_benders_is_exact(seed):
+    """Every variable separator, used as a Benders master, reproduces the
+    monolithic optimum (Benders is exact on any linear partition)."""
     mono = _capex(seed).solve()
-    adv = analyze_decomposition(_capex(seed), separator_search=True)
-    cands = [c for c in adv.candidates() if c.provenance.startswith("separator program")]
-    assert cands
-    for c in cands:
-        res = build_decomposition(adv._model, c).solve(max_iterations=60, time_limit=60.0)
-        if c.method is MethodKind.BENDERS:
-            assert res.status == "optimal"
-            assert res.objective == pytest.approx(mono.objective, abs=1e-6)
-        else:
-            assert res.bound is None or res.bound <= mono.objective + 1e-6
+    assert mono.status == "optimal"
+    g = ElementGraph.from_model(_capex(seed))
+    seps = find_separators(g, "variables", max_components=3, skip_covered=False)
+    assert seps
+    for sep in seps:
+        m = _capex(seed)
+        arrays = sorted({g.var_names[int(g.col_var[j])] for j in sep.columns})
+        st = dataclasses.replace(
+            detect_decomposition(m), complicating_vars=arrays, master_columns=sep.columns
+        )
+        res = solve_benders(m, structure=st)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(mono.objective, rel=1e-4)
 
 
 @pytest.mark.requires_highs
@@ -276,26 +228,27 @@ def test_separators_are_deterministic():
     assert first and first == second
 
 
-def test_separator_search_is_opt_in(monkeypatch):
-    """Neither the default advisor nor ``solve(decomposition="auto")`` runs the
-    separator program (it measured 39 s against a 0.8 s solve at 774 columns)."""
-    from discopt.decomposition.advisor import candidates as cand_mod
+def test_advisor_never_runs_the_separator_program(monkeypatch):
+    """The advisor's separator search is retired: neither the advisor nor
+    ``solve(decomposition="auto")`` calls the program, and the opt-in keyword
+    is gone (it measured slower than the monolith on two-stage LPs)."""
 
     def boom(*args, **kwargs):
-        raise AssertionError("the separator program ran without being requested")
+        raise AssertionError("the separator program ran from the advisor")
 
     monkeypatch.setattr(sepmod, "find_separators", boom)
-    assert not any(isinstance(g, cand_mod.SeparatorGenerator) for g in cand_mod.DEFAULT_GENERATORS)
     adv = analyze_decomposition(_capex())
-    assert all(not c.provenance.startswith("separator program") for c in adv.candidates())
+    assert all(c.structure is None or c.structure.master_columns is None for c in adv.candidates())
     assert adv.recommendation().recommendation is MethodKind.NONE
-    result = _capex().solve(decomposition="auto")
-    assert result.status == "optimal"
-    with pytest.raises(AssertionError, match="without being requested"):
-        analyze_decomposition(_capex(), separator_search=True).candidates()
+    assert _capex().solve(decomposition="auto").status == "optimal"
+    with pytest.raises(TypeError):
+        analyze_decomposition(_capex(), separator_search=True)
+    from discopt.decomposition.advisor import candidates as cand_mod
+
+    assert not hasattr(cand_mod, "SeparatorGenerator")
 
 
-# ── user index coarsening, the generator's Lagrangian path, epsilon ─
+# ── user index coarsening, epsilon ───────────────────────────────
 
 
 @pytest.mark.requires_highs
@@ -330,34 +283,8 @@ def _small_other():
     return m
 
 
-@pytest.mark.slow
-@pytest.mark.correctness
 @pytest.mark.requires_highs
-def test_generator_lagrangian_path_rounds_to_whole_constraints():
-    """Constraint separators (opt-in) become whole-constraint coupling sets
-    that still split the model, and their dual bound stays below the optimum."""
-    from discopt.decomposition.advisor.candidates import SeparatorGenerator
-    from discopt.decomposition.ir.reformulation import build_decomposition
-
-    mono = _capex().solve()
-    adv = analyze_decomposition(
-        _capex(), separator_search=SeparatorGenerator(max_components_constraints=2)
-    )
-    lag = [c for c in adv.candidates() if c.method is MethodKind.LAGRANGIAN]
-    assert lag, "the constraint search produced no Lagrangian candidate"
-    g = ElementGraph.from_model(_capex())
-    for c in lag:
-        coupling = set(c.structure.coupling_constraints)
-        assert coupling and c.element_view.num_blocks >= 2
-        # Whole constraints: every row of a coupling constraint is dropped.
-        rows = [i for i in range(g.num_rows) if g.con_model_index[g.row_con[i]] in coupling]
-        assert g.bearing_blocks(drop_rows=rows) == c.element_view.num_blocks
-        res = build_decomposition(adv._model, c).solve(max_iterations=60, time_limit=60.0)
-        assert res.bound is not None and res.bound <= mono.objective + 1e-6
-
-
-@pytest.mark.requires_highs
-def test_epsilon_trades_separator_size_for_balance(monkeypatch):
+def test_epsilon_trades_separator_size_for_balance():
     g = ElementGraph.from_model(_capex())
 
     def weight(eps):
@@ -368,73 +295,8 @@ def test_epsilon_trades_separator_size_for_balance(monkeypatch):
     # A larger penalty on separator weight never yields a larger separator.
     assert weight(100.0) <= weight(0.01)
 
-    # The generator forwards its epsilon (and its axes) to the program.
-    from discopt.decomposition.advisor import candidates as cand_mod
 
-    seen = []
-
-    def spy(graph, kind, **kw):
-        seen.append((kind, kw["epsilon"], kw["coarse"] is not None))
-        return []
-
-    monkeypatch.setattr(sepmod, "find_separators", spy)
-    gen = cand_mod.SeparatorGenerator(
-        epsilon=7.5, max_components_constraints=2, var_axes={"Q": (3,)}
-    )
-    report = analyze_decomposition(_capex()).structure()
-    gen.generate(_capex(), report)
-    assert seen == [("variables", 7.5, True), ("constraints", 7.5, True)]
-
-
-# ── gating, unbounded first-stage variables, driver diagnostics ─
-
-
-def _farmer_like(S=6):
-    """Continuous first stage x shared by S scenarios, with a pendant bridge per
-    scenario (the beet row) -- the structure that gated the search off."""
-    m = dm.Model("farmer_like")
-    x = m.continuous("x", shape=(3,), lb=0, ub=500)
-    m.subject_to(dm.sum(x) <= 500)
-    rng = np.random.default_rng(4)
-    for s in range(S):
-        y = rng.uniform(0.8, 1.2, 3) * np.array([2.5, 3.0, 20.0])
-        buy = m.continuous(f"buy_{s}", shape=(2,), lb=0, ub=1e4)
-        sell = m.continuous(f"sell_{s}", shape=(4,), lb=0, ub=1e4)
-        m.subject_to(float(y[0]) * x[0] + buy[0] - sell[0] >= 200)
-        m.subject_to(float(y[1]) * x[1] + buy[1] - sell[1] >= 240)
-        m.subject_to(sell[2] + sell[3] <= float(y[2]) * x[2])
-        m.subject_to(sell[2] <= 6000)
-    m.minimize(
-        150 * x[0]
-        + 230 * x[1]
-        + 260 * x[2]
-        + sum(
-            (238 * m._variables[1 + 2 * s][0] - 170 * m._variables[2 + 2 * s][0]) / S
-            for s in range(S)
-        )
-    )
-    return m
-
-
-@pytest.mark.requires_highs
-def test_pendant_bridges_do_not_gate_the_search_off():
-    from discopt.decomposition.advisor.candidates import SeparatorGenerator
-
-    report = analyze_decomposition(_farmer_like()).structure()
-    assert report.element_coupling_constraints  # the pendant bridges are there
-    assert SeparatorGenerator().applicable(report)
-    adv = analyze_decomposition(_farmer_like(), separator_search=True)
-    pick = next(r.candidate for r in adv.ranked() if r.recommended)
-    assert pick.method is MethodKind.BENDERS
-    g = ElementGraph.from_model(_farmer_like())
-    # The master is part of the first stage x (the program may leave x[2] with
-    # the beet rows as one recourse block), and the split is real.
-    assert set(pick.structure.master_columns) <= set(g.columns_of("x").tolist())
-    assert pick.num_blocks >= 2
-    mono = _farmer_like().solve()
-    res = adv.decompose().solve()
-    assert res.status == "optimal"
-    assert res.objective == pytest.approx(mono.objective, rel=1e-4)
+# ── unbounded first-stage variables, driver diagnostics ─────────
 
 
 def _unbounded_link():
@@ -464,15 +326,3 @@ def test_benders_names_an_unbounded_first_stage():
     res = solve_benders(m, structure=st)
     assert res.status == "error"
     assert "'t'" in res.error and "bounded first stage" in res.error
-
-
-def test_no_separator_candidate_for_non_algebraic_rows():
-    """A disjunction is skipped by the linearity check but not by
-    solve_benders: the generator must not propose what no driver can run."""
-    from discopt.decomposition.advisor.candidates import SeparatorGenerator
-
-    m = _farmer_like()
-    x = m._variables[0]
-    m.either_or([[x[0] <= 100.0], [x[0] >= 200.0]])
-    report = analyze_decomposition(m).structure()
-    assert SeparatorGenerator().generate(m, report) == []
