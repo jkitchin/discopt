@@ -456,8 +456,14 @@ def solve_milp(
     max_nodes: int = 1_000_000,
     mip_start: Optional[np.ndarray] = None,
     confirm_bound_from: Optional[float] = None,
+    node_limit: Optional[int] = None,
 ) -> MILPResult:
     """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq`` with HiGHS.
+
+    ``node_limit`` caps the branch-and-bound nodes (HiGHS ``mip_max_nodes``), a
+    deterministic budget; ``None`` (the default) leaves HiGHS's own limit. It is
+    distinct from ``max_nodes``, which is accepted for signature compatibility
+    with the simplex engine and is not forwarded.
 
     Signature-compatible with :func:`discopt.solvers.milp_simplex.solve_milp`, so
     it drops into ``get_milp_solver``'s contract. ``bound`` is HiGHS's dual bound,
@@ -483,6 +489,7 @@ def solve_milp(
         integrality=integrality,
         gap_tolerance=gap_tolerance,
         mip_start=mip_start,
+        node_limit=node_limit,
     )
     primary = _solve_milp_once(time_limit=time_limit, presolve=True, **kw)
     if primary.status == SolveStatus.ERROR:
@@ -629,6 +636,7 @@ def _solve_milp_once(
     gap_tolerance: float,
     mip_start: Optional[np.ndarray],
     presolve: bool,
+    node_limit: Optional[int] = None,
 ) -> MILPResult:
     """One HiGHS MILP solve; ``presolve=False`` is the #1634 cross-solve, not an option."""
     highspy = _require_highspy()
@@ -680,6 +688,11 @@ def _solve_milp_once(
         opts.append(("presolve", "off"))
     if time_limit is not None:
         opts.append(("time_limit", float(time_limit)))
+    if node_limit is not None:
+        # A deterministic work budget (HiGHS ``mip_max_nodes``), for callers whose
+        # answer must not depend on machine load. Opt-in: ``max_nodes`` above is a
+        # signature-compat parameter this wrapper has never forwarded.
+        opts.append(("mip_max_nodes", int(node_limit)))
     for key, val in opts:
         st = h.setOptionValue(key, val)
         if st != highspy.HighsStatus.kOk:

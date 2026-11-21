@@ -185,11 +185,18 @@ class DecompositionAdvisor:
         return build_decomposition(self._model, cand)
 
     def _candidate_for(self, method: MethodKind | None) -> Candidate | None:
-        """The candidate to reformulate: a named method's, or the recommendation's."""
-        cands = self.candidates()
+        """The candidate to reformulate: the recommended one, or a named method's best.
+
+        Taken from the ranking, not the generation order: a method can have
+        several candidates (the separator program yields one per ``|C|``), and
+        the first generated is not the one scored best. With one candidate per
+        method -- every generator before the separator program -- the two agree.
+        """
+        ranked = self.ranked()
         if method is None:
-            method = self.recommendation().recommendation
-        return next((c for c in cands if c.method is method), None)
+            pick = next((r for r in ranked if r.recommended), None)
+            return pick.candidate if pick is not None else None
+        return next((r.candidate for r in ranked if r.candidate.method is method), None)
 
 
 def analyze_decomposition(model, *, store=None) -> DecompositionAdvisor:

@@ -62,6 +62,13 @@ class DecompositionStructure:
     source : str
         ``"annotated"``, ``"detected"``, or ``"mixed"`` — provenance of the
         partition, for diagnostics.
+    master_columns : tuple[int, ...] | None
+        Flat columns held in the Benders master, when the first stage is not a
+        union of whole arrays (a separator may take ``I[0, 2, :]`` and leave the
+        rest of ``I`` in the recourse). Overrides ``complicating_vars`` in
+        ``solve_benders``; ``complicating_vars`` then names the arrays touched,
+        for display. ``None``: the master is ``complicating_vars``, by name.
+        ``solve_gbd`` refuses a structure that sets it.
     """
 
     blocks: list[list[str]]
@@ -72,6 +79,7 @@ class DecompositionStructure:
     is_separable: bool
     source: str
     detection_truncated: bool = False
+    master_columns: tuple[int, ...] | None = None
 
     @property
     def num_blocks(self) -> int:

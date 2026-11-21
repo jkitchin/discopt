@@ -215,6 +215,15 @@ def _master_columns(model: Model, structure: DecompositionStructure):
     self-contained. Integer variables must be first-stage (the recourse NLP
     needs continuous KKT multipliers).
     """
+    if structure.master_columns is not None:
+        # The C2 guard below and the recourse NLP's master/recourse split are
+        # keyed by array name; a column-level master would be partly ignored.
+        raise NotImplementedError(
+            "GBD takes its first stage as whole arrays (complicating_vars); this "
+            "structure fixes individual columns (master_columns), which only "
+            "classical Benders supports. Use solve_benders on a linear model, or "
+            "mark whole arrays with model.first_stage(...)."
+        )
     complicating = set(structure.complicating_vars)
     master_cols: list[int] = []
     sub_cols: list[int] = []

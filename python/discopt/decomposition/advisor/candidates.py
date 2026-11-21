@@ -395,6 +395,145 @@ class ElementCouplingGenerator:
         ]
 
 
+class SeparatorGenerator:
+    """Complicating features chosen by an integer program → Benders / Lagrangian.
+
+    The other generators find a decomposition only where the integers, a single
+    constraint, or the model as written already split it. This one solves for
+    the separator (``graph.separator``, after Kalamaris & Maravelias 2026 §4):
+    variable separators become Benders candidates with a column-level master
+    (``master_columns``; the integer columns are forced in, as the Benders
+    driver requires), constraint separators become Lagrangian candidates whose
+    coupling rows are rounded up to whole constraints and re-verified.
+
+    Fires only on a **linear** model where no other generator found anything,
+    so every candidate list the others produce is unchanged. The search is a
+    deterministic node budget (the recommendation must not depend on machine
+    load; a wall-clock limit made it do so) with a wall-clock backstop. Its
+    reach is measured, not guessed: on a 150-column capacity-expansion LP each
+    program costs ~1 s up to ``|C| = 3`` (variables) and ``|C| = 2``
+    (constraints), and 4-8 s beyond, in HiGHS's root processing even at 50
+    nodes -- hence the defaults. Classical Benders is exact
+    on any linear partition (``PROVEN_EQUIVALENT``); the Lagrangian bound is a
+    relaxation. Nonlinear models are left out: GBD takes whole arrays only and
+    is exact only on convex recourse.
+    """
+
+    name = "separator-program"
+
+    def __init__(
+        self,
+        max_components_variables: int = 3,
+        max_components_constraints: int = 2,
+        node_limit: int = 200,
+        time_limit: float = 30.0,
+        max_columns: int = 20_000,
+    ):
+        self.max_components_variables = max_components_variables
+        self.max_components_constraints = max_components_constraints
+        self.node_limit = node_limit
+        self.time_limit = time_limit
+        self.max_columns = max_columns
+
+    def applicable(self, report: StructureReport) -> bool:
+        return (
+            not report.model_is_nonlinear
+            and report.element_blocks is not None
+            and report.element_blocks < 2
+            and not report.is_block_diagonal
+            and not report.integer_localizes
+            and (report.element_blocks_after_integer_projection or 0) < 2
+            and not report.coupling_constraints
+            and not report.element_coupling_constraints
+        )
+
+    def generate(self, model, report: StructureReport) -> list[Candidate]:
+        import dataclasses
+
+        from discopt.decomposition.advisor.analyzer import integer_columns
+        from discopt.decomposition.graph.element import ElementGraph
+        from discopt.decomposition.graph.separator import find_separators
+
+        graph = ElementGraph.from_model(model)
+        if graph.num_cols > self.max_columns:
+            return []
+        out: list[Candidate] = []
+        base = detect_decomposition(model)
+        n = graph.num_cols
+        int_cols = integer_columns(model, graph)
+        for sep in find_separators(
+            graph,
+            "variables",
+            forced_columns=int_cols.tolist(),
+            max_components=self.max_components_variables,
+            node_limit=self.node_limit,
+            time_limit=self.time_limit,
+        ):
+            arrays = sorted({graph.var_names[int(graph.col_var[j])] for j in sep.columns})
+            structure = dataclasses.replace(
+                base, complicating_vars=arrays, master_columns=sep.columns
+            )
+            view = ElementView(
+                block_columns=sep.block_columns,
+                block_labels=tuple(
+                    tuple(graph.col_label(j) for j in blk) for blk in sep.block_columns
+                ),
+                separator_fraction=sep.weight / n if n else 0.0,
+            )
+            out.append(
+                Candidate(
+                    method=MethodKind.BENDERS,
+                    structure=structure,
+                    provenance=f"separator program, variables (|C|={sep.num_components})",
+                    est_soundness=Soundness.PROVEN_EQUIVALENT,
+                    notes=(
+                        f"fixing {sep.weight} column(s) of {', '.join(arrays)} exposes "
+                        f"{sep.blocks} recourse blocks",
+                        f"separator {sep.status} in {sep.seconds:.2f}s; split verified on "
+                        "the element graph",
+                    ),
+                    element_view=view,
+                )
+            )
+        m = report.num_constraints
+        for sep in find_separators(
+            graph,
+            "constraints",
+            max_components=self.max_components_constraints,
+            node_limit=self.node_limit,
+            time_limit=self.time_limit,
+        ):
+            owners = {graph.con_model_index[int(graph.row_con[r])] for r in sep.rows}
+            if None in owners or not all(
+                graph.con_is_algebraic[int(graph.row_con[r])] for r in sep.rows
+            ):
+                continue  # a row with no dualizable model constraint behind it
+            coupling = sorted(int(i) for i in owners if i is not None)
+            # Rounding rows up to whole constraints only removes more; re-measure.
+            view = _element_view(
+                model,
+                drop_model_constraints=coupling,
+                coupling_density=(len(coupling) / m) if m else 0.0,
+            )
+            if view.num_blocks < 2:
+                continue
+            out.append(
+                Candidate(
+                    method=MethodKind.LAGRANGIAN,
+                    structure=detect_decomposition(model, coupling=coupling),
+                    provenance=f"separator program, constraints (|C|={sep.num_components})",
+                    est_soundness=Soundness.RELAXATION,
+                    notes=(
+                        f"{len(coupling)} coupling constraint(s) dualized; "
+                        f"{view.num_blocks} blocks",
+                        "yields a valid dual bound; primal recovery may need extra work",
+                    ),
+                    element_view=view,
+                )
+            )
+        return out
+
+
 #: Default generator cascade, cheap-first (design doc §5.1).
 DEFAULT_GENERATORS: tuple[CandidateGenerator, ...] = (
     MonolithicGenerator(),
@@ -405,6 +544,7 @@ DEFAULT_GENERATORS: tuple[CandidateGenerator, ...] = (
     ElementIndependentBlockGenerator(),
     ElementIntegerProjectionGenerator(),
     ElementCouplingGenerator(),
+    SeparatorGenerator(),
 )
 
 
@@ -418,6 +558,7 @@ def _dedup_key(cand: Candidate) -> tuple:
         tuple(sorted(s.complicating_vars)),
         tuple(sorted(s.coupling_constraints)),
         cand.element_view is not None,
+        s.master_columns,
     )
 
 
@@ -456,5 +597,6 @@ __all__ = [
     "IndependentBlockGenerator",
     "IntegerProjectionGenerator",
     "MonolithicGenerator",
+    "SeparatorGenerator",
     "generate_candidates",
 ]

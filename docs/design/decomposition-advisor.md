@@ -414,6 +414,28 @@ Two conventions used throughout:
   today; lifting that gate needs its own panel. Benders needed no change (its
   multicut already splits recourse per element); `solve_lagrangian` now takes
   its blocks from the element-level column components of the non-coupling rows.
+- **Separator program (`graph/separator.py`).** Kalamaris & Maravelias §4
+  (eqs. 30-36, 40, `gamma = 0`) on the variable or constraint projection of the
+  element graph: choose `R` so the rest splits into `>= |C|` balanced
+  components. Solved after type-preserving heavy-edge matching (same array /
+  same referenced-array signature only; unrestricted matching merged the design
+  hubs into operational vertices and returned 14-column separators where 6
+  suffice), with the representative symmetry break, on the pure-MILP engine
+  (HiGHS under `DISCOPT_LP_ENGINE=auto`: 0.71 s vs 5.7-6.4 s for the simplex
+  B&B at `|C| = 3`), under a deterministic node budget (a wall clock made the
+  recommendation load-dependent). Every separator is lifted and its split
+  re-measured on the element graph; a disagreement raises. `SeparatorGenerator`
+  turns variable separators into Benders candidates with a column-level master
+  (`DecompositionStructure.master_columns`, honoured by `solve_benders`, refused
+  by `solve_gbd`) and constraint separators into Lagrangian candidates; it runs
+  only on linear models where nothing else was found. Measured: on a linear
+  capacity-expansion model the advisor moves from `NONE` to Benders over the
+  6 design columns `K, L` with one block per scenario (the paper's Fig. 8a), and
+  solves to the monolithic optimum; 87-model panel 85/87 identical (2 synthetic
+  linear MILPs gain Benders), deterministic across concurrent runs; 40-model
+  random sweep, 57 candidate solves, 0 violations. Not done: the functionality
+  penalty `gamma` (item 3), and `|C| >= 4` / multi-constraint `|C| >= 3`, which
+  cost 4-8 s each in HiGHS root processing and are left to direct calls.
 
 ### 4.2 Constraint Hypergraph
 
