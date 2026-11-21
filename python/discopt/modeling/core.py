@@ -13197,6 +13197,7 @@ class Model:
         blocks = [d for d in self._gdp_factory_disjuncts if d._attached and d._local_vars]
         if not blocks:
             return
+
         def body_vars(body) -> set[str]:
             # The complete walker: ``gdp_reformulate._collect_variables`` has no arm
             # for ``SumExpression``/``MatMulExpression``/``CustomCall``, so a local

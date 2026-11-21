@@ -12,6 +12,24 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Element-level decomposition structure** (`discopt.decomposition.graph.element`).
+  The advisor's structure graph treated each array variable as one vertex, so
+  scenarios sharing an array read as one block. `ElementGraph` has one vertex per
+  column and per constraint row (from the evaluator's row map and Jacobian
+  sparsity), tagged with its array and index; `coarsen(var_axes, con_axes)` is the
+  index coarsening of Allen & Westerberg (1976) and Kalamaris & Maravelias (2026,
+  arXiv:2611.23472). The advisor proposes Benders / Lagrangian / independent-block
+  candidates the array view cannot see, and `solve_lagrangian` takes its blocks
+  from element-level components. On an 87-model panel 84 recommendations are
+  unchanged and 3 shared-array models move from `NONE` to an exact decomposition.
+- **`find_separators`** (`discopt.decomposition.graph.separator`): the
+  partitioning program of Kalamaris & Maravelias (2026, §4) choosing complicating
+  variables or constraints, with type-preserving coarsening and every result
+  re-verified on the element graph. An explicit tool: use a variable separator as a
+  Benders first stage via the new `DecompositionStructure.master_columns` (honoured
+  by `solve_benders`, refused by `solve_gbd`). Not run by the advisor -- see
+  Removed.
+
 - **`discopt.modeling.from_mps` / `from_lp`: read MPS and CPLEX-LP files.** Both
   use the in-house HiGHS-compatible parsers. The model is built in vector form: one
   integer and one continuous variable (`x_int`, `x_cont`), the rows as matrix blocks
@@ -33,6 +51,19 @@ The release procedure that produces these entries is documented in
   an overrunning solve is killed. See `docs/mcp.md`.
 
 ### Changed
+
+- **`analyze_decomposition` and the decomposition drivers validate the model
+  first**, as `Model.solve` does (`Model.validate` canonicalizes the bodies in
+  place). Without it a shared sum (`r = r + r` repeated) was expanded as a tree:
+  an out-of-memory kill in the advisor, a hang in `solve_benders` /
+  `solve_lagrangian`.
+- **`milp_highs.solve_milp` / `solve_milp_with_lazy_cuts` enforce `max_nodes`**
+  (HiGHS `mip_max_nodes`; across restarts for the lazy-cuts variant). It was
+  accepted and ignored; the default `1_000_000` is now a real cap, as on the
+  simplex engine. The default MILP route already forwarded it.
+- **`gdp_method="auto"` recommends hull only when hull's coverage guard accepts
+  the disjunction**; otherwise mbigm / big-M. A body like `(A @ X)[0] + y` made
+  `auto` choose hull, which then refused it.
 
 - **`pounce-solver` floor raised to 0.17** (`>=0.17`, core dependency and the `pounce`
   alias extra). discopt's pounce-facing tests pass on 0.17.0 (432); see the PR for the
@@ -80,6 +111,14 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **The advisor's separator search** (`SeparatorGenerator`,
+  `analyze_decomposition(..., separator_search=True)`), briefly opt-in on the
+  development branch, retired before release: on two-stage stochastic LPs it
+  recommended Benders slower than the monolith (0.17-0.55x before its own
+  12-66 s search) and was break-even on a mixed-integer family.
+  `find_separators` remains as a tool; `docs/design/decomposition-advisor.md`
+  §4.1 records the panels.
+
 - **The Python MILP branch-and-bound tree (`solver._solve_milp_bb`).** Every pure MILP
   runs on the Rust engine. Where the engine cannot certify, the result says so
   (`feasible` with no bound, or `unknown` with no point and no bound) instead of
@@ -90,6 +129,26 @@ The release procedure that produces these entries is documented in
   that tree. `batch_size` has no effect on a MILP any more (it sized that tree's batches).
 
 ### Fixed
+
+- **False certificate: `dm.sum(Q[g])` over a multi-dimensional `Q` was read as
+  the single element `Q.flat[g]`** by the Rust core (`index_spec_collect_flat`):
+  the LP/MILP extraction optimized a different objective (the default route's
+  reconciliation guard withdrew the certificate, reporting `feasible` at a
+  non-optimal point), and `solve_benders` certified an optimum of 67.07 for a
+  point whose objective is 193.49. A short integer index now selects the
+  sub-array, as in numpy.
+- **The decomposition layer could not see variables inside `dm.sum` / `A @ x`**:
+  coupled models split into "independent" blocks, the Lagrangian dropped such rows
+  (a vacuous bound), and GBD's master-only nonlinear guard was skipped. The
+  disjunct-local-variable guard and `detect_separability` had the same blind spot.
+- **`decomposition="auto"` raised `TypeError` on every block-diagonal model**
+  (it passed `max_iterations` to `Model.solve`).
+- **`Model.validate` raised `RecursionError`** on a long Python `sum(...)` inside
+  a body of unknown static shape (e.g. `dm.sum(y[0]) + sum(x[i] for i in
+  range(4000))`); the exact array walk is now iterative, with byte-identical
+  output.
+- **`solve_benders` reports why it stops** when the first stage is unbounded,
+  instead of a bare `status="error"`.
 
 - **MILP presolve could certify a suboptimal answer when costs or coefficients were tiny
   against a wide column range.** The row-dual dominated-column rule and the pairwise
