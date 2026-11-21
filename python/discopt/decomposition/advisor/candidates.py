@@ -406,8 +406,11 @@ class SeparatorGenerator:
     driver requires), constraint separators become Lagrangian candidates whose
     coupling rows are rounded up to whole constraints and re-verified.
 
-    Fires only on a **linear** model where no other generator found anything,
-    so every candidate list the others produce is unchanged. The search is a
+    **Opt-in**: not in :data:`DEFAULT_GENERATORS`, so neither the advisor's
+    default analysis nor ``solve(decomposition="auto")`` runs it; request it with
+    ``analyze_decomposition(model, separator_search=True)``. Fires only on a
+    **linear** model where no other generator found anything, so every candidate
+    list the others produce is unchanged. The search is a
     deterministic node budget (the recommendation must not depend on machine
     load; a wall-clock limit made it do so) with a wall-clock backstop. Its
     reach is measured, not guessed: on a 150-column capacity-expansion LP each
@@ -544,8 +547,12 @@ DEFAULT_GENERATORS: tuple[CandidateGenerator, ...] = (
     ElementIndependentBlockGenerator(),
     ElementIntegerProjectionGenerator(),
     ElementCouplingGenerator(),
-    SeparatorGenerator(),
 )
+"""The cascade every advisor runs. ``SeparatorGenerator`` is not in it: its
+partitioning program is opt-in (``analyze_decomposition(model,
+separator_search=True)``), because measured on a 774-column LP it spent 39 s
+against a 0.8 s monolithic solve, which ``solve(decomposition="auto")`` would
+pay before solving."""
 
 
 def _dedup_key(cand: Candidate) -> tuple:

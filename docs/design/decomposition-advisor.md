@@ -425,6 +425,10 @@ Two conventions used throughout:
   B&B at `|C| = 3`), under a deterministic node budget (a wall clock made the
   recommendation load-dependent). Every separator is lifted and its split
   re-measured on the element graph; a disagreement raises. `SeparatorGenerator`
+  is **opt-in** (`analyze_decomposition(model, separator_search=True)`): it is
+  not in `DEFAULT_GENERATORS`, so `solve(decomposition="auto")` never runs it.
+  Measured on a 774-column capacity LP it spent 39 s against a 0.8 s
+  monolithic solve (the Benders solve on its split took 0.24 s). It
   turns variable separators into Benders candidates with a column-level master
   (`DecompositionStructure.master_columns`, honoured by `solve_benders`, refused
   by `solve_gbd`) and constraint separators into Lagrangian candidates; it runs

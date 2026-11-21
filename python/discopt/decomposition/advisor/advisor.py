@@ -20,7 +20,11 @@ Entry point::
 from __future__ import annotations
 
 from discopt.decomposition.advisor.analyzer import StructureAnalyzer, StructureReport
-from discopt.decomposition.advisor.candidates import generate_candidates
+from discopt.decomposition.advisor.candidates import (
+    DEFAULT_GENERATORS,
+    SeparatorGenerator,
+    generate_candidates,
+)
 from discopt.decomposition.advisor.explain import Explainer, Explanation
 from discopt.decomposition.advisor.scoring import Scorer, ScoreVector
 from discopt.decomposition.advisor.selection import (
@@ -52,8 +56,16 @@ class DecompositionAdvisor:
         scorer: Scorer | None = None,
         policy: Policy | None = None,
         store=None,
+        separator_search: bool | SeparatorGenerator = False,
     ) -> None:
         self._model = model
+        # The separator program is opt-in (see ``DEFAULT_GENERATORS``): True adds
+        # it with its defaults, an instance adds that configured generator.
+        if separator_search is True:
+            separator_search = SeparatorGenerator()
+        self._generators: tuple = DEFAULT_GENERATORS + (
+            (separator_search,) if isinstance(separator_search, SeparatorGenerator) else ()
+        )
         self._analyzer = analyzer or StructureAnalyzer()
         self._scorer = scorer or Scorer()
         # When a telemetry store is supplied (and no explicit policy), wrap the
@@ -82,7 +94,7 @@ class DecompositionAdvisor:
     def candidates(self) -> list[Candidate]:
         """Return the discovered decomposition candidates (unranked)."""
         if self._candidates is None:
-            self._candidates = generate_candidates(self._model, self.structure())
+            self._candidates = generate_candidates(self._model, self.structure(), self._generators)
         return list(self._candidates)
 
     def scores(self) -> list[tuple[Candidate, ScoreVector]]:
@@ -199,15 +211,23 @@ class DecompositionAdvisor:
         return next((r.candidate for r in ranked if r.candidate.method is method), None)
 
 
-def analyze_decomposition(model, *, store=None) -> DecompositionAdvisor:
+def analyze_decomposition(
+    model, *, store=None, separator_search: bool | SeparatorGenerator = False
+) -> DecompositionAdvisor:
     """Analyze *model* and return a :class:`DecompositionAdvisor`.
 
     The public entry point to the advisor's analysis surface. Does not solve or
     modify the model. When *store* (a
     :class:`~discopt.decomposition.learning.store.RecordStore`) is given, the
     advisor consults it via the instance-based learned policy (W2).
+
+    ``separator_search=True`` also runs the separator program
+    (:class:`~discopt.decomposition.advisor.candidates.SeparatorGenerator`),
+    which chooses complicating variables/constraints by integer programming. It
+    is off by default because it can cost far more than solving the model; pass
+    a configured ``SeparatorGenerator`` to set its budget.
     """
-    return DecompositionAdvisor(model, store=store)
+    return DecompositionAdvisor(model, store=store, separator_search=separator_search)
 
 
 __all__ = ["DecompositionAdvisor", "analyze_decomposition"]

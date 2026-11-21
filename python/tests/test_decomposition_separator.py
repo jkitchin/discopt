@@ -163,7 +163,7 @@ def test_master_columns_out_of_range_and_gbd_refusal():
 @pytest.mark.requires_highs
 def test_advisor_recommends_separator_benders_and_decomposes_it():
     mono = _capex().solve()
-    adv = analyze_decomposition(_capex())
+    adv = analyze_decomposition(_capex(), separator_search=True)
     rec = adv.recommendation()
     assert rec.recommendation is MethodKind.BENDERS
     picked = next(r.candidate for r in adv.ranked() if r.recommended)
@@ -215,7 +215,7 @@ def test_every_separator_candidate_is_sound(seed):
     from discopt.decomposition.ir.reformulation import build_decomposition
 
     mono = _capex(seed).solve()
-    adv = analyze_decomposition(_capex(seed))
+    adv = analyze_decomposition(_capex(seed), separator_search=True)
     cands = [c for c in adv.candidates() if c.provenance.startswith("separator program")]
     assert cands
     for c in cands:
@@ -252,3 +252,22 @@ def test_separators_are_deterministic():
         (s.num_components, s.columns) for s in find_separators(g, "variables", max_components=3)
     ]
     assert first and first == second
+
+
+def test_separator_search_is_opt_in(monkeypatch):
+    """Neither the default advisor nor ``solve(decomposition="auto")`` runs the
+    separator program (it measured 39 s against a 0.8 s solve at 774 columns)."""
+    from discopt.decomposition.advisor import candidates as cand_mod
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the separator program ran without being requested")
+
+    monkeypatch.setattr(sepmod, "find_separators", boom)
+    assert not any(isinstance(g, cand_mod.SeparatorGenerator) for g in cand_mod.DEFAULT_GENERATORS)
+    adv = analyze_decomposition(_capex())
+    assert all(not c.provenance.startswith("separator program") for c in adv.candidates())
+    assert adv.recommendation().recommendation is MethodKind.NONE
+    result = _capex().solve(decomposition="auto")
+    assert result.status == "optimal"
+    with pytest.raises(AssertionError, match="without being requested"):
+        analyze_decomposition(_capex(), separator_search=True).candidates()
