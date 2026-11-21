@@ -98,7 +98,17 @@ class DecomposedModel:
         """Run the coordinated solve and return the driver's ``SolveResult``."""
         model = self.source_model
         if self.method in (MethodKind.NONE, MethodKind.INDEPENDENT_BLOCKS):
-            return model.solve(**config)
+            # The drivers take ``max_iterations``; ``Model.solve`` refuses it (it
+            # rejects unknown options rather than ignoring them) and names its
+            # node budget ``max_nodes``. ``solve(decomposition="auto")`` passes
+            # the user's ``max_nodes`` in as ``max_iterations``, so this maps it
+            # back; before, every block-diagonal model sent here raised TypeError.
+            mono = dict(config)
+            if "max_iterations" in mono:
+                limit = mono.pop("max_iterations")
+                if limit is not None:
+                    mono.setdefault("max_nodes", limit)
+            return model.solve(**mono)
         if self.method is MethodKind.BENDERS:
             return solve_benders(model, structure=self.structure, **config)
         if self.method is MethodKind.GENERALIZED_BENDERS:

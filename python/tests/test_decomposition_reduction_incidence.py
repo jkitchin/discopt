@@ -103,3 +103,29 @@ def test_gbd_refuses_master_only_nonlinear_sum_row():
     m.minimize(y + dm.sum(z))
     with pytest.raises(NotImplementedError, match="master-only nonlinear"):
         solve_gbd(m)
+
+
+def _block_diagonal():
+    m = dm.Model("diag")
+    x = m.continuous("x", shape=(2,), lb=0, ub=1)
+    y = m.continuous("y", shape=(2,), lb=0, ub=1)
+    m.subject_to(x[0] + x[1] <= 1)
+    m.subject_to(y[0] + y[1] <= 1.5)
+    m.minimize(-dm.sum(x) - dm.sum(y))
+    return m
+
+
+def test_independent_blocks_route_solves():
+    """``INDEPENDENT_BLOCKS`` falls back to ``Model.solve``; the driver keyword
+    ``max_iterations`` must not reach it (it raised TypeError)."""
+    from discopt.decomposition import MethodKind, analyze_decomposition
+
+    advisor = analyze_decomposition(_block_diagonal())
+    assert advisor.recommendation().recommendation is MethodKind.INDEPENDENT_BLOCKS
+    result = advisor.decompose().solve(max_iterations=1000, time_limit=60.0)
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(-2.5, abs=1e-6)
+
+    auto = _block_diagonal().solve(decomposition="auto")
+    assert auto.status == "optimal"
+    assert auto.objective == pytest.approx(-2.5, abs=1e-6)
