@@ -25,7 +25,16 @@ that is structurally present but numerically zero can only *merge* blocks,
 never separate them, so the graph errs toward fewer blocks, which is the safe
 direction for anything that later treats a split as exact.
 
-**Scope.** Like the array-level layer, the graph is built from constraint rows
+**Constraints the evaluator does not emit.** Disjunctions, SOS sets, indicator
+and logical constraints are not rows of the NLP evaluator, but they still tie
+variables together. Each one becomes a single *pseudo-row* touching every
+column of every array it references. That over-approximates (an SOS over
+``x[0], x[1]`` merges all of ``x``), which errs toward fewer blocks, the safe
+direction; ignoring them would report coupled variables as independent. A
+constraint type this module cannot walk is refused
+(:class:`UnsupportedConstraintError`) rather than skipped.
+
+**Scope.** Like the array-level layer, the graph is built from constraints
 only; the objective is assumed separable across blocks (the standard
 Lagrangian setup) and is not an edge source here.
 """
@@ -42,6 +51,56 @@ from discopt.decomposition.graph import kernels
 
 class ElementGraphError(ValueError):
     """The evaluator's row/column layout does not match the model's."""
+
+
+class UnsupportedConstraintError(ElementGraphError):
+    """A model constraint of a kind whose variables this module cannot enumerate."""
+
+
+def _constraint_variables(con) -> list:
+    """Every ``Variable`` a constraint of any kind references (for pseudo-rows).
+
+    Mirrors ``Model._iter_owned_leaves``'s per-constraint case analysis, which
+    is the walk the solver's ownership guard relies on to see every leaf.
+    """
+    from discopt.modeling.core import (
+        Constraint,
+        Variable,
+        _DisjunctiveConstraint,
+        _IndicatorConstraint,
+        _iter_model_leaves,
+        _logical_backing_vars,
+        _LogicalConstraint,
+        _SOSConstraint,
+    )
+
+    def leaves(c):
+        if isinstance(c, Constraint):
+            yield from _iter_model_leaves(c.body)
+        elif isinstance(c, _IndicatorConstraint):
+            yield from _iter_model_leaves(c.indicator)
+            yield from leaves(c.constraint)
+        elif isinstance(c, _DisjunctiveConstraint):
+            for disjunct in c.disjuncts:
+                for sub in disjunct:
+                    yield from leaves(sub)
+        elif isinstance(c, _SOSConstraint):
+            yield from _iter_model_leaves(*c.variables)
+        elif isinstance(c, _LogicalConstraint):
+            yield from _iter_model_leaves(*_logical_backing_vars(c.expression))
+        elif hasattr(c, "body"):
+            yield from _iter_model_leaves(c.body)
+        else:
+            raise UnsupportedConstraintError(
+                f"cannot enumerate the variables of a {type(c).__name__}; treating it "
+                "as absent would report the variables it couples as independent."
+            )
+
+    out: dict[str, Any] = {}
+    for leaf in leaves(con):
+        if isinstance(leaf, Variable):
+            out.setdefault(leaf.name, leaf)
+    return list(out.values())
 
 
 def _shape_of(obj: Any, size: int) -> tuple[int, ...]:
@@ -79,6 +138,7 @@ class ElementChecks:
     columns_labelled: int
     rows_labelled: int
     jacobian_entries: int
+    pseudo_rows: int = 0
 
 
 @dataclass(frozen=True)
@@ -95,8 +155,16 @@ class ElementGraph:
         ``col_index[j]`` is column ``j``'s index tuple inside its array (C order,
         the layout ``_flat_index`` and the evaluators share).
     con_names, con_shapes : tuple
-        One entry per source constraint of the evaluator's row map, in row order.
-        ``con_names[k]`` is the constraint's name, or ``"c{k}"`` when unnamed.
+        One entry per source constraint: first the evaluator's row map, in row
+        order, then one pseudo-row entry per model constraint the evaluator does
+        not emit (see the module docstring). ``con_names[k]`` is the
+        constraint's name, or ``"c{k}"`` when unnamed.
+    con_model_index : tuple[int | None, ...]
+        ``con_model_index[k]`` is the position of entry ``k`` in
+        ``model._constraints``, or ``None`` for rows with no model constraint
+        object (fast-builder rows, materialized fresh by the evaluator).
+    con_is_algebraic : tuple[bool, ...]
+        False for pseudo-row entries.
     row_con : np.ndarray
         ``row_con[i]`` is the position in ``con_names`` of row ``i``.
     row_index : tuple[tuple[int, ...], ...]
@@ -112,6 +180,8 @@ class ElementGraph:
     col_index: tuple[tuple[int, ...], ...]
     con_names: tuple[str, ...]
     con_shapes: tuple[tuple[int, ...], ...]
+    con_model_index: tuple[int | None, ...]
+    con_is_algebraic: tuple[bool, ...]
     row_con: np.ndarray
     row_index: tuple[tuple[int, ...], ...]
     row_cliques: tuple[np.ndarray, ...]
@@ -126,7 +196,8 @@ class ElementGraph:
         Raises :class:`ElementGraphError` when the evaluator's column count or
         row map disagrees with the model; a label that is merely in range after
         a shift names a neighbouring element, so a mismatch is refused rather
-        than guessed around.
+        than guessed around. Raises :class:`UnsupportedConstraintError` for a
+        constraint kind whose variables cannot be enumerated.
         """
         if evaluator is None:
             from discopt._tape_nlp_evaluator import make_evaluator
@@ -155,8 +226,10 @@ class ElementGraph:
 
         # Rows: the evaluator's own row map, which must tile [0, m) exactly.
         m = int(evaluator.n_constraints)
+        model_index_of = {id(c): i for i, c in enumerate(model._constraints)}
         con_names: list[str] = []
         con_shapes: list[tuple[int, ...]] = []
+        con_model_index: list[int | None] = []
         row_con = np.full(m, -1, dtype=np.int64)
         row_index: list[tuple[int, ...]] = [()] * m
         expected = 0
@@ -173,6 +246,7 @@ class ElementGraph:
             name = getattr(con, "name", None)
             con_names.append(str(name) if name else f"c{k}")
             con_shapes.append(shape)
+            con_model_index.append(model_index_of.get(id(con)))
             row_con[start:stop] = k
             for r in range(width):
                 row_index[start + r] = _unravel(r, shape)
@@ -189,7 +263,35 @@ class ElementGraph:
         jc = np.asarray(jc, dtype=np.int64)
         if jr.size and (jr.min() < 0 or jr.max() >= m or jc.min() < 0 or jc.max() >= n):
             raise ElementGraphError("Jacobian structure indexes outside the evaluator's shape.")
-        row_cliques = _group_by_row(jr, jc, m)
+        row_cliques = list(_group_by_row(jr, jc, m))
+        con_is_algebraic = [True] * len(con_names)
+
+        # Pseudo-rows: model constraints the evaluator does not emit.
+        covered = {i for i in con_model_index if i is not None}
+        var_cols: dict[str, np.ndarray] = {}
+        offset = 0
+        for v in model._variables:
+            size = int(v.size) if v.shape != () else 1
+            var_cols[v.name] = np.arange(offset, offset + size, dtype=np.int64)
+            offset += size
+        row_con_list = row_con.tolist()
+        pseudo = 0
+        for i, c in enumerate(model._constraints):
+            if i in covered:
+                continue
+            cols = [var_cols[v.name] for v in _constraint_variables(c) if v.name in var_cols]
+            clique = np.unique(np.concatenate(cols)) if cols else np.zeros(0, np.int64)
+            k = len(con_names)
+            name = getattr(c, "name", None)
+            con_names.append(str(name) if name else f"{type(c).__name__.lstrip('_')}{i}")
+            con_shapes.append(())
+            con_model_index.append(i)
+            con_is_algebraic.append(False)
+            row_con_list.append(k)
+            row_index.append(())
+            row_cliques.append(clique)
+            pseudo += 1
+        row_con = np.asarray(row_con_list, dtype=np.int64)
 
         return cls(
             var_names=tuple(var_names),
@@ -198,11 +300,16 @@ class ElementGraph:
             col_index=tuple(col_index),
             con_names=tuple(con_names),
             con_shapes=tuple(con_shapes),
+            con_model_index=tuple(con_model_index),
+            con_is_algebraic=tuple(con_is_algebraic),
             row_con=row_con,
             row_index=tuple(row_index),
-            row_cliques=row_cliques,
+            row_cliques=tuple(row_cliques),
             checks=ElementChecks(
-                columns_labelled=n, rows_labelled=m, jacobian_entries=int(jr.size)
+                columns_labelled=n,
+                rows_labelled=m,
+                jacobian_entries=int(jr.size),
+                pseudo_rows=pseudo,
             ),
         )
 
@@ -287,6 +394,31 @@ class ElementGraph:
             kept = local[clique]
             cliques.append(kept[kept >= 0].tolist())
         return keep_col, cliques
+
+    def constraint_cliques(self) -> list[list[int]]:
+        """Columns per constraint entry (the union over its rows)."""
+        members: list[set[int]] = [set() for _ in self.con_names]
+        for i, clique in enumerate(self.row_cliques):
+            members[int(self.row_con[i])].update(clique.tolist())
+        return [sorted(s) for s in members]
+
+    def bridge_constraints(self) -> list[int]:
+        """Model constraints whose sole removal splits the element graph.
+
+        The element-level analogue of the array-level bridge scan: a constraint
+        is reported when dropping all of its rows raises the number of
+        constraint-bearing components. Linear time (:func:`separating_cliques`),
+        so unlike the array-level scan it needs no budget. Only algebraic
+        constraints that are ``model._constraints`` entries are reported: a
+        pseudo-row or a fast-builder row is never offered for dualization.
+        Like the array-level scan, a graph that is already split reports none.
+        """
+        found = separating_cliques(self.num_cols, self.constraint_cliques())
+        return sorted(
+            int(mi)
+            for k in found
+            if self.con_is_algebraic[k] and (mi := self.con_model_index[k]) is not None
+        )
 
     # ── index coarsening ────────────────────────────────────────
 
@@ -424,6 +556,90 @@ def _group_by_row(jr: np.ndarray, jc: np.ndarray, m: int) -> tuple[np.ndarray, .
     return tuple(cs[bounds[i] : bounds[i + 1]] for i in range(m))
 
 
+def separating_cliques(n: int, cliques: Sequence[Sequence[int]]) -> set[int]:
+    """Cliques whose removal raises the number of clique-bearing components.
+
+    Same answer as ``kernels.bridge_cliques_status`` (which re-runs a component
+    count per clique, ``O(m·(n+E))``), in one ``O(n + m + E)`` pass: an
+    iterative Tarjan DFS over the bipartite column/clique graph, where clique
+    ``k`` is a cut vertex that separates bearing pieces. For each clique node
+    the pieces left by its removal are the DFS children ``w`` with
+    ``low[w] >= disc[k]`` plus, unless it is a DFS root, the rest of its
+    component; a piece *bears* when it holds at least one other clique. Returns
+    the empty set when the graph already has two or more bearing components,
+    matching the kernel ("no single coupling clique is needed").
+    """
+    m = len(cliques)
+    total = n + m
+    adj: list[list[int]] = [[] for _ in range(total)]
+    for k, clique in enumerate(cliques):
+        node = n + k
+        for j in clique:
+            adj[node].append(int(j))
+            adj[int(j)].append(node)
+
+    disc = [-1] * total
+    low = [0] * total
+    tparent = [-1] * total
+    sub_cons = [0] * total  # clique nodes in the DFS subtree (inclusive)
+    found: set[int] = set()
+    bearing_components = 0
+    timer = 0
+    for root in range(n, total):  # start only from cliques: bearing components
+        if disc[root] != -1 or not adj[root]:
+            continue  # visited, or a clique over no column (bears nothing)
+        bearing_components += 1
+        comp_nodes = [root]
+        disc[root] = low[root] = timer
+        timer += 1
+        stack: list[tuple[int, int]] = [(root, 0)]
+        while stack:
+            v, it = stack[-1]
+            if it < len(adj[v]):
+                stack[-1] = (v, it + 1)
+                w = adj[v][it]
+                if disc[w] == -1:
+                    tparent[w] = v
+                    disc[w] = low[w] = timer
+                    timer += 1
+                    comp_nodes.append(w)
+                    stack.append((w, 0))
+                elif w != tparent[v]:
+                    low[v] = min(low[v], disc[w])
+            else:
+                stack.pop()
+                if v >= n:
+                    sub_cons[v] += 1
+                p = tparent[v]
+                if p != -1:
+                    low[p] = min(low[p], low[v])
+                    sub_cons[p] += sub_cons[v]
+        comp_cons = sub_cons[root]
+        children: dict[int, list[int]] = {}
+        for w in comp_nodes:
+            if tparent[w] != -1:
+                children.setdefault(tparent[w], []).append(w)
+        for v in comp_nodes:
+            if v < n or len(cliques[v - n]) < 2:
+                continue
+            pieces = 0
+            separated = 0
+            for w in children.get(v, ()):
+                if low[w] >= disc[v]:
+                    separated += sub_cons[w]
+                    if sub_cons[w] > 0:
+                        pieces += 1
+            # Whatever is not in a separated subtree stays connected through the
+            # parent side (empty for a DFS root: every root child is separated).
+            if comp_cons - 1 - separated > 0:
+                pieces += 1
+            if pieces >= 2:
+                found.add(v - n)
+    if bearing_components >= 2:
+        return set()
+    return found
+
+
 def _check_axes(
     axes: Mapping[str, Sequence[int]],
     names: Sequence[str],
@@ -470,4 +686,10 @@ def _merge(
     return out, keys
 
 
-__all__ = ["CoarseGraph", "ElementChecks", "ElementGraph", "ElementGraphError"]
+__all__ = [
+    "CoarseGraph",
+    "ElementChecks",
+    "ElementGraph",
+    "ElementGraphError",
+    "UnsupportedConstraintError",
+]

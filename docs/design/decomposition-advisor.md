@@ -394,8 +394,26 @@ Two conventions used throughout:
   arXiv:2611.23472, §3.1) — and coarsening every axis recovers this array-level graph exactly.
   `StructureReport` carries the scalar-level block counts
   (`element_blocks`, `element_blocks_after_integer_projection`,
-  `array_level_hides_blocks`); no candidate generator or solver consumes them
-  yet, because Benders/Lagrangian still partition columns by array name.
+  `array_level_hides_blocks`) and `element_coupling_constraints`, the
+  element-level bridge scan (`separating_cliques`: one Tarjan pass, `O(n+m+E)`,
+  checked against the per-clique kernel on random graphs, so it needs no
+  budget). Constraints the evaluator does not emit as rows (disjunctions, SOS,
+  indicator, logical) enter as conservative pseudo-rows over every column of
+  each array they reference; an unknown constraint kind is refused.
+- **Who consumes it.** Three element generators (`ElementIndependentBlock`,
+  `ElementIntegerProjection`, `ElementCoupling`) fire *only* where the
+  array-level generator is blind for granularity reasons, and attach an
+  `ElementView` (block columns/labels, separator fraction, coupling density)
+  that the scorer, explainer and IR read in place of the array graph. Measured
+  on 87 models (74 in-repo MINLPLib + advisor fixtures + synthetic): 84 ranked
+  candidate lists byte-identical, the 3 shared-array models move from `NONE` to
+  `BENDERS`/`INDEPENDENT_BLOCKS` and solve to the monolithic optimum.
+  `ElementCoupling` is held back where the array scan was budget-truncated
+  (`coupling_scan_truncated`): there a find is a budget effect, not hidden
+  structure, and adopting it would reroute models the array view handles
+  today; lifting that gate needs its own panel. Benders needed no change (its
+  multicut already splits recourse per element); `solve_lagrangian` now takes
+  its blocks from the element-level column components of the non-coupling rows.
 
 ### 4.2 Constraint Hypergraph
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from discopt.decomposition.advisor.analyzer import StructureReport
-from discopt.decomposition.advisor.types import Candidate, MethodKind, Soundness
+from discopt.decomposition.advisor.types import Candidate, ElementView, MethodKind, Soundness
 from discopt.decomposition.structure import DecompositionStructure, detect_decomposition
 
 
@@ -207,6 +207,194 @@ class CouplingGenerator:
         ]
 
 
+# ── element-level generators ───────────────────────────────────
+#
+# Each fires only where its array-level counterpart is blind for reasons of
+# *granularity*: the array view treats each array variable as one vertex, so
+# scenarios sharing an array read as one block. Where the array view already
+# sees the structure, these stay silent, so every candidate the array-level
+# generators produce -- and every recommendation built on them -- is unchanged.
+
+
+def _element_view(
+    model,
+    *,
+    drop_cols=(),
+    drop_model_constraints=(),
+    separator_fraction: float = 0.0,
+    coupling_density: float = 0.0,
+) -> ElementView:
+    """The constraint-bearing blocks of the element graph after removals."""
+    import numpy as np
+
+    from discopt.decomposition.graph.element import ElementGraph
+
+    graph = ElementGraph.from_model(model)
+    drop_cols = np.asarray(drop_cols, dtype=np.int64)
+    dropped_cons = set(int(i) for i in drop_model_constraints)
+    drop_rows = [
+        i
+        for i in range(graph.num_rows)
+        if graph.con_model_index[int(graph.row_con[i])] in dropped_cons
+    ]
+    block_of, _ = graph.components(drop_cols=drop_cols, drop_rows=drop_rows)
+    dropped_rows = set(drop_rows)
+    bearing: dict[int, None] = {}
+    for i, clique in enumerate(graph.row_cliques):
+        if i in dropped_rows:
+            continue
+        kept = [b for b in block_of[clique].tolist() if b >= 0]
+        if kept:
+            bearing.setdefault(kept[0], None)
+    cols_of: dict[int, list[int]] = {b: [] for b in bearing}
+    for j, b in enumerate(block_of.tolist()):
+        if b in cols_of:
+            cols_of[b].append(j)
+    blocks = [tuple(cols_of[b]) for b in sorted(cols_of, key=lambda b: cols_of[b][0])]
+    return ElementView(
+        block_columns=tuple(blocks),
+        block_labels=tuple(tuple(graph.col_label(j) for j in blk) for blk in blocks),
+        separator_fraction=separator_fraction,
+        coupling_density=coupling_density,
+    )
+
+
+class ElementIndependentBlockGenerator:
+    """Independent blocks the array view merges (they share an array variable)."""
+
+    name = "independent-blocks-element"
+
+    def applicable(self, report: StructureReport) -> bool:
+        return (
+            not report.is_block_diagonal
+            and not report.coupling_constraints
+            and (report.element_blocks or 0) >= 2
+        )
+
+    def generate(self, model, report: StructureReport) -> list[Candidate]:
+        view = _element_view(model)
+        if view.num_blocks < 2:
+            return []
+        return [
+            Candidate(
+                method=MethodKind.INDEPENDENT_BLOCKS,
+                structure=detect_decomposition(model),
+                provenance=f"element-level connected components ({view.num_blocks} blocks)",
+                est_soundness=Soundness.PROVEN_EQUIVALENT,
+                notes=(
+                    f"{view.num_blocks} independent blocks that share array variables",
+                    "solved as one model (the per-block parallel solve is Phase 6)",
+                ),
+                element_view=view,
+            )
+        ]
+
+
+class ElementIntegerProjectionGenerator:
+    """Fixing the integers splits the recourse element by element → Benders.
+
+    The array-level generator asks the same question on array vertices, where
+    a recourse array shared by every scenario never splits. Benders itself
+    already partitions its recourse into element-level blocks (multicut), so
+    the candidate needs no new driver: the structure is the shipping default
+    (complicating = integer variables).
+    """
+
+    name = "integer-projection-element"
+
+    def applicable(self, report: StructureReport) -> bool:
+        return (
+            report.num_integer > 0
+            and not report.integer_localizes
+            and (report.element_blocks_after_integer_projection or 0) >= 2
+        )
+
+    def generate(self, model, report: StructureReport) -> list[Candidate]:
+        from discopt.decomposition.advisor.analyzer import integer_columns
+        from discopt.decomposition.graph.element import ElementGraph
+
+        structure = detect_decomposition(model)
+        if not structure.complicating_vars:
+            return []
+        graph = ElementGraph.from_model(model)
+        int_cols = integer_columns(model, graph)
+        view = _element_view(
+            model,
+            drop_cols=int_cols,
+            separator_fraction=(int_cols.size / graph.num_cols) if graph.num_cols else 0.0,
+            coupling_density=report.coupling_density,
+        )
+        if view.num_blocks < 2:
+            return []
+        if report.model_is_nonlinear:
+            method, soundness = MethodKind.GENERALIZED_BENDERS, Soundness.UNKNOWN
+            kind = "nonlinear recourse → GBD; exact only if subproblems are convex"
+        else:
+            method, soundness = MethodKind.BENDERS, Soundness.PROVEN_EQUIVALENT
+            kind = "linear recourse → classical Benders (exact)"
+        return [
+            Candidate(
+                method=method,
+                structure=structure,
+                provenance="integer-variable projection (element level)",
+                est_soundness=soundness,
+                notes=(
+                    f"fixing {int_cols.size} integer column(s) exposes {view.num_blocks} "
+                    "recourse blocks that share array variables",
+                    kind,
+                ),
+                element_view=view,
+            )
+        ]
+
+
+class ElementCouplingGenerator:
+    """Rows that couple *elements* of shared arrays → Lagrangian.
+
+    Fires only when the array-level bridge scan ran and found nothing; where it
+    was truncated by its budget the element scan's extra finds are a budget
+    effect, not hidden structure, and adopting them would change routing on
+    models the array view handles today. Linear models only: the Lagrangian
+    driver extracts a linear model and refuses anything else.
+    """
+
+    name = "coupling-element"
+
+    def applicable(self, report: StructureReport) -> bool:
+        return (
+            not report.coupling_constraints
+            and not report.coupling_scan_truncated
+            and not report.model_is_nonlinear
+            and bool(report.element_coupling_constraints)
+        )
+
+    def generate(self, model, report: StructureReport) -> list[Candidate]:
+        coupling = list(report.element_coupling_constraints)
+        structure = detect_decomposition(model, coupling=coupling)
+        m = report.num_constraints
+        view = _element_view(
+            model,
+            drop_model_constraints=coupling,
+            coupling_density=(len(coupling) / m) if m else 0.0,
+        )
+        if view.num_blocks < 2:
+            return []
+        return [
+            Candidate(
+                method=MethodKind.LAGRANGIAN,
+                structure=structure,
+                provenance="element-level bridge-constraint scan",
+                est_soundness=Soundness.RELAXATION,
+                notes=(
+                    f"{len(coupling)} coupling constraint(s) dualized; "
+                    f"{view.num_blocks} blocks that share array variables",
+                    "yields a valid dual bound; primal recovery may need extra work",
+                ),
+                element_view=view,
+            )
+        ]
+
+
 #: Default generator cascade, cheap-first (design doc §5.1).
 DEFAULT_GENERATORS: tuple[CandidateGenerator, ...] = (
     MonolithicGenerator(),
@@ -214,6 +402,9 @@ DEFAULT_GENERATORS: tuple[CandidateGenerator, ...] = (
     IntegerProjectionGenerator(),
     OuterApproximationGenerator(),
     CouplingGenerator(),
+    ElementIndependentBlockGenerator(),
+    ElementIntegerProjectionGenerator(),
+    ElementCouplingGenerator(),
 )
 
 
@@ -226,6 +417,7 @@ def _dedup_key(cand: Candidate) -> tuple:
         cand.method,
         tuple(sorted(s.complicating_vars)),
         tuple(sorted(s.coupling_constraints)),
+        cand.element_view is not None,
     )
 
 
@@ -258,6 +450,9 @@ __all__ = [
     "DEFAULT_GENERATORS",
     "CandidateGenerator",
     "CouplingGenerator",
+    "ElementCouplingGenerator",
+    "ElementIndependentBlockGenerator",
+    "ElementIntegerProjectionGenerator",
     "IndependentBlockGenerator",
     "IntegerProjectionGenerator",
     "MonolithicGenerator",

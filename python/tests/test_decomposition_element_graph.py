@@ -33,7 +33,7 @@ def _two_stage_array_model():
         for t in range(T - 1):
             m.subject_to(x[s, t + 1] - x[s, t] <= 2)
         m.subject_to(dm.sum(x[s, :]) >= 1)
-    m.subject_to(dm.sum(build) <= S - 1)
+    m.subject_to(dm.sum(build) <= S)
     m.minimize(dm.sum(build) + dm.sum(x))
     return m
 
@@ -317,3 +317,107 @@ def test_lagrangian_splits_scenarios_sharing_an_array(monkeypatch):
     assert max(widths) == T + 1
     assert result.bound <= mono.objective + 1e-6
     assert result.bound >= mono.objective - 1e-4
+
+
+# ── element-level coupling scan ─────────────────────────────────
+
+
+def test_separating_cliques_matches_brute_force_kernel():
+    """The linear-time scan answers exactly what the per-clique kernel does."""
+    from discopt.decomposition.graph import kernels
+    from discopt.decomposition.graph.element import separating_cliques
+
+    rng = np.random.default_rng(2611)
+    compared = nonempty = 0
+    for _ in range(3000):
+        n = int(rng.integers(1, 10))
+        m = int(rng.integers(0, 9))
+        cliques = [
+            sorted(set(rng.integers(0, n, size=int(rng.integers(0, 4))).tolist())) for _ in range(m)
+        ]
+        expected, truncated = kernels.bridge_cliques_status(cliques, n, 10**12)
+        assert not truncated
+        assert separating_cliques(n, cliques) == expected, (n, cliques)
+        compared += 1
+        nonempty += bool(expected)
+    assert compared == 3000 and nonempty > 100
+
+
+def test_budget_row_is_element_level_coupling():
+    m = _two_stage_array_model()
+    report = StructureAnalyzer().analyze(m)
+    budget = len(m._constraints) - 1
+    assert report.coupling_constraints == ()  # invisible at the array level
+    assert report.element_coupling_constraints == (budget,)
+    assert not report.coupling_scan_truncated
+
+
+def test_non_row_constraints_couple_conservatively():
+    """An SOS set or disjunction is not an evaluator row; it must still join
+    the variables it references, or they would read as independent."""
+    for add in (
+        lambda m, x: m.sos1([x[0, 0], x[1, 0]]),
+        lambda m, x: m.either_or([[x[0, 0] <= 0.2], [x[1, 0] >= 0.8]]),
+    ):
+        m = dm.Model("nonrow")
+        x = m.continuous("x", shape=(2, 2), lb=0, ub=1)
+        m.subject_to(x[0, 0] + x[0, 1] <= 1)
+        m.subject_to(x[1, 0] + x[1, 1] <= 1)
+        m.minimize(-dm.sum(x))
+        assert ElementGraph.from_model(m).bearing_blocks() == 2
+        add(m, x)
+        g = ElementGraph.from_model(m)
+        assert g.checks.pseudo_rows == 1
+        assert g.bearing_blocks() == 1
+        assert g.bridge_constraints() == []  # a pseudo-row is never offered
+
+
+# ── advisor: element-level candidates ───────────────────────────
+
+
+@pytest.mark.requires_highs
+def test_advisor_recommends_benders_for_shared_array_two_stage():
+    from discopt.decomposition import MethodKind, analyze_decomposition
+
+    mono = _two_stage_array_model().solve()
+    assert mono.status == "optimal"
+    adv = analyze_decomposition(_two_stage_array_model())
+    expl = adv.recommendation()
+    assert expl.recommendation is MethodKind.BENDERS
+    assert "element level" in adv.explain()
+    decomposed = adv.decompose()
+    assert decomposed.num_blocks == S
+    assert decomposed.subproblems[1].variables == tuple(f"x[1, {t}]" for t in range(T))
+    result = decomposed.solve()
+    assert result.status == "optimal" and result.gap_certified
+    assert result.objective == pytest.approx(mono.objective, abs=1e-6)
+
+
+@pytest.mark.requires_highs
+def test_element_lagrangian_candidate_bounds_the_optimum():
+    from discopt.decomposition import MethodKind, analyze_decomposition
+
+    mono = _shared_array_lagrangian().solve()
+    model = _shared_array_lagrangian()
+    model._coupling_keys = set()  # drop the annotation: the scan must find it
+    adv = analyze_decomposition(model)
+    lag = [c for c in adv.candidates() if c.method is MethodKind.LAGRANGIAN]
+    assert len(lag) == 1 and lag[0].element_view is not None
+    assert lag[0].num_blocks == S
+    result = adv.decompose(MethodKind.LAGRANGIAN).solve(max_iterations=60)
+    assert result.bound <= mono.objective + 1e-6
+
+
+def test_element_generators_silent_where_array_view_sees_structure():
+    """On a model whose arrays are per block, no element candidate appears."""
+    from discopt.decomposition import analyze_decomposition
+
+    m = dm.Model("per_block_arrays")
+    z = m.binary("z")
+    a = m.continuous("a", shape=(2,), lb=0, ub=5)
+    b = m.continuous("b", shape=(2,), lb=0, ub=5)
+    m.subject_to(a[0] + a[1] <= 5 * z)
+    m.subject_to(b[0] + b[1] <= 5 * z)
+    m.minimize(dm.sum(a) + dm.sum(b) - z)
+    cands = analyze_decomposition(m).candidates()
+    assert cands and all(c.element_view is None for c in cands)

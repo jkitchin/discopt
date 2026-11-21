@@ -280,7 +280,31 @@ def build_decomposition(model, candidate: Candidate) -> DecomposedModel:
             caveats = ("bound withheld unless the recourse is convex",)
     certificate = SoundnessCertificate(method, level, rationale, caveats)
 
-    if method in (
+    view = candidate.element_view
+    if view is not None and method in (
+        MethodKind.BENDERS,
+        MethodKind.GENERALIZED_BENDERS,
+        MethodKind.LAGRANGIAN,
+        MethodKind.INDEPENDENT_BLOCKS,
+    ):
+        # Element-level candidate: its blocks share array variables, so the
+        # array-name mapping below would describe one block. Describe the
+        # element blocks instead (labels like ``x[0, 3]``).
+        fixes = method in (MethodKind.BENDERS, MethodKind.GENERALIZED_BENDERS)
+        complicating = list(structure.complicating_vars) if fixes else []
+        coupling = tuple(structure.coupling_constraints)
+        master = (
+            MasterModel(method, tuple(complicating), coupling)
+            if method is not MethodKind.INDEPENDENT_BLOCKS
+            else None
+        )
+        subproblems = [
+            SubproblemModel(block_id=i, variables=labels)
+            for i, labels in enumerate(view.block_labels)
+        ]
+        block_of_label = {lab: i for i, labels in enumerate(view.block_labels) for lab in labels}
+        var_map = VariableMapping(tuple(complicating), block_of_label, view.num_blocks)
+    elif method in (
         MethodKind.BENDERS,
         MethodKind.GENERALIZED_BENDERS,
         MethodKind.OUTER_APPROXIMATION,
