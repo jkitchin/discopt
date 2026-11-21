@@ -268,3 +268,52 @@ def test_layout_mismatch_is_refused():
         ElementGraph.from_model(m, _ShiftedEvaluator(ev, extra_cols=1))
     with pytest.raises(ElementGraphError, match="row map"):
         ElementGraph.from_model(m, _ShiftedEvaluator(ev, drop_last_row=True))
+
+
+# ── Lagrangian block partition is element-level ─────────────────
+
+
+def _shared_array_lagrangian():
+    """S scenarios in one array ``x[s, t]``, joined only by the budget row."""
+    m = dm.Model("shared_lag")
+    x = m.continuous("x", shape=(S, T), lb=0, ub=10)
+    z = m.integer("z", shape=(S,), lb=0, ub=5)
+    for s in range(S):
+        for t in range(T):
+            m.subject_to(x[s, t] <= 2 * z[s])
+        m.subject_to(dm.sum(x[s, :]) >= 3 + 2 * s)
+    m.subject_to(dm.sum(z) <= 6, name="budget")
+    m.mark_coupling("budget")
+    m.minimize(dm.sum(x) + 3 * dm.sum(z))
+    return m
+
+
+@pytest.mark.requires_highs
+def test_lagrangian_splits_scenarios_sharing_an_array(monkeypatch):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.decomposition import solve_lagrangian
+
+    mono = _shared_array_lagrangian().solve()
+    assert mono.status == "optimal"
+
+    real_get = lp_backend.get_decomposition_master_solver
+    widths: list[int] = []
+
+    def counting_get():
+        milp, info = real_get()
+
+        def wrapped(c, *args, **kwargs):
+            widths.append(len(c))
+            return milp(c, *args, **kwargs)
+
+        return wrapped, info
+
+    monkeypatch.setattr(lp_backend, "get_decomposition_master_solver", counting_get)
+    result = solve_lagrangian(_shared_array_lagrangian(), max_iterations=60)
+
+    # One block per scenario (T + 1 columns each), not one block of all of them.
+    assert widths, "no block subproblem was solved"
+    assert widths[:S] == [T + 1] * S
+    assert max(widths) == T + 1
+    assert result.bound <= mono.objective + 1e-6
+    assert result.bound >= mono.objective - 1e-4
