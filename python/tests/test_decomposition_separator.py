@@ -464,3 +464,15 @@ def test_benders_names_an_unbounded_first_stage():
     res = solve_benders(m, structure=st)
     assert res.status == "error"
     assert "'t'" in res.error and "bounded first stage" in res.error
+
+
+def test_no_separator_candidate_for_non_algebraic_rows():
+    """A disjunction is skipped by the linearity check but not by
+    solve_benders: the generator must not propose what no driver can run."""
+    from discopt.decomposition.advisor.candidates import SeparatorGenerator
+
+    m = _farmer_like()
+    x = m._variables[0]
+    m.either_or([[x[0] <= 100.0], [x[0] >= 200.0]])
+    report = analyze_decomposition(m).structure()
+    assert SeparatorGenerator().generate(m, report) == []

@@ -491,6 +491,13 @@ class SeparatorGenerator:
         graph = ElementGraph.from_model(model)
         if graph.num_cols > self.max_columns:
             return []
+        if graph.checks.pseudo_rows:
+            # A disjunction / SOS / indicator / logical row: the linearity check
+            # above skips those (algebraic_only), but solve_benders cannot take
+            # them and hands the model to GBD, which refuses a column-level
+            # master. Measured on the corpus panel: 5 GDP models proposed a
+            # candidate no driver could run.
+            return []
         out: list[Candidate] = []
         base = detect_decomposition(model)
         n = graph.num_cols
