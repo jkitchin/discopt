@@ -444,7 +444,18 @@ Two conventions used throughout:
   13.63 s vs 5.70 + 8.67 = 14.37 s. The decomposed solve's speedup shrinks with
   size (2.4x, 1.9x, 1.6x) -- on an LP both scale about linearly -- and the
   advisor is then dominated by the existing nonlinearity check
-  (`extract_linear`, 3.4 s of 4.6 s at 12,294 columns). It
+  (`extract_linear`, 3.4 s of 4.6 s at 12,294 columns). Mixed-integer
+  experiment (integer build/units first stage plus a continuous shared
+  inventory capacity, so the integers alone do not split the scenarios and the
+  default advisor finds nothing; 2 reps interleaved, load < 1.5, every solve
+  optimal within rel 1e-4 with mutually consistent bounds): 891 cols mono
+  1.53 s vs advisor 0.94 + Benders 0.58 = 1.52 s; 3,483 cols 6.01 s vs 2.90 s
+  (2.1x); 6,939 cols 9.99 s vs 5.75 s (1.7x); 13,851 cols 24.12 s vs 12.42 s
+  (1.9x), the separator finding exactly the 27 first-stage columns (y, N, L)
+  from 3,483 columns up. The `threads` recourse backend was slower than
+  `sequential` at every size. This experiment also exposed a false certificate
+  in the Rust core -- `dm.sum(Q[g])` read as `Q.flat[g]` -- fixed separately
+  (`test_partial_integer_index_sum.py`). It
   turns variable separators into Benders candidates with a column-level master
   (`DecompositionStructure.master_columns`, honoured by `solve_benders`, refused
   by `solve_gbd`) and constraint separators into Lagrangian candidates; it runs

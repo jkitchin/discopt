@@ -408,7 +408,13 @@ class SeparatorGenerator:
 
     **Opt-in**: not in :data:`DEFAULT_GENERATORS`, so neither the advisor's
     default analysis nor ``solve(decomposition="auto")`` runs it; request it with
-    ``analyze_decomposition(model, separator_search=True)``. Fires only on a
+    ``analyze_decomposition(model, separator_search=True)``. *Why not default:*
+    its search costs about 0.3x the monolithic solve where it helps, and on LPs
+    the decomposed solve does not recover that (break-even to slower beyond
+    ~12k columns). On a mixed-integer capacity-expansion family it is 1.7-2.1x
+    faster end to end from ~3.5k columns. *What would change that:* a corpus
+    panel (not one synthetic family) showing it at least neutral on models
+    where it fires, including the advisor's cost. Fires only on a
     **linear** model where no other generator found anything, so every candidate
     list the others produce is unchanged. The search is a
     deterministic node budget (the recommendation must not depend on machine
