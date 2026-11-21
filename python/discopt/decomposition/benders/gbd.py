@@ -321,6 +321,10 @@ def solve_gbd(
     # #1614 D-26: HiGHS when available (an exact-vertex engine, as #986 requires).
     milp, _ = get_decomposition_master_solver()
 
+    # Validate first, as Model.solve does: it canonicalizes the bodies, and the
+    # coefficient extraction below walks an un-canonicalized shared sum
+    # (``r = r + r`` repeated, #2100) as a tree -- exponential, a hang.
+    model.validate()
     if structure is None:
         structure = detect_decomposition(model)
     mcols, scols, master_int = _master_columns(model, structure)

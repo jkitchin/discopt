@@ -461,3 +461,40 @@ def test_advisor_on_unvalidated_shared_sum_does_not_blow_up():
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert proc.stdout.strip().splitlines()[-1] == "1"
+
+
+_SHARED_SUM_DRIVER = """
+import resource, sys
+resource.setrlimit(resource.RLIMIT_AS, (3 * 1024**3, 3 * 1024**3))
+import discopt.modeling as dm
+from discopt.decomposition import solve_benders, solve_lagrangian
+
+m = dm.Model("shared_driver")
+x = m.continuous("x", lb=0, ub=1)
+y = m.continuous("y", lb=0, ub=1)
+z = m.binary("z")
+row = x - y
+for _ in range(40):
+    row = row + row
+m.subject_to(row <= 1.0)
+m.subject_to(x <= z)
+m.subject_to(y <= 1 - z, name="c")
+m.mark_coupling("c")
+m.minimize(x + z)
+print(getattr(sys.modules["__main__"], "DRIVER")(m).status)
+"""
+
+
+@pytest.mark.parametrize("driver", ["solve_benders", "solve_lagrangian"])
+def test_drivers_on_unvalidated_shared_sum_return(driver):
+    """Called directly, the drivers skipped Model.validate and their linear
+    extraction walked a shared sum as a tree (a hang). Subprocess, 3 GB cap,
+    120 s timeout, so a regression fails here instead of hanging the runner."""
+    import subprocess
+    import sys
+
+    code = f"DRIVER = None\n{_SHARED_SUM_DRIVER}".replace(
+        'getattr(sys.modules["__main__"], "DRIVER")', driver
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-2000:]

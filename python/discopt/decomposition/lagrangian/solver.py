@@ -187,6 +187,10 @@ def solve_lagrangian(
                 "none available, falling back to the Kelley cutting-plane step."
             )
 
+    # Validate first, as Model.solve does: it canonicalizes the bodies, and the
+    # coefficient extraction below walks an un-canonicalized shared sum
+    # (``r = r + r`` repeated, #2100) as a tree -- exponential, a hang.
+    model.validate()
     if structure is None:
         structure = detect_decomposition(model)
 
