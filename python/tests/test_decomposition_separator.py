@@ -237,17 +237,30 @@ def test_every_separator_candidate_is_sound(seed):
 
 
 @pytest.mark.requires_highs
-def test_highs_node_limit_is_forwarded():
-    """``node_limit`` reaches HiGHS (``max_nodes`` never has): an invalid value
-    is rejected by HiGHS itself, a valid one solves."""
+def test_highs_max_nodes_is_forwarded():
+    """``max_nodes`` reaches HiGHS (it used to be accepted and dropped): a
+    value outside HiGHS's range is clamped, not rejected, and a node budget too
+    small to close the tree stops it short of a certificate."""
+    from discopt.solvers import SolveStatus
     from discopt.solvers.milp_highs import solve_milp
 
     c = -np.ones(3)
     a = np.array([[2.0, 2.0, 2.0]])
     kw = dict(A_ub=a, b_ub=np.array([3.0]), bounds=[(0, 1)] * 3, integrality=np.ones(3, int))
-    assert solve_milp(c, node_limit=5, **kw).objective == pytest.approx(-1.0)
-    with pytest.raises(RuntimeError, match="mip_max_nodes"):
-        solve_milp(c, node_limit=-1, **kw)
+    assert solve_milp(c, max_nodes=10**12, **kw).objective == pytest.approx(-1.0)
+    # A 5-dimensional knapsack HiGHS needs ~80 nodes for (seed 2, measured):
+    # capped at 5 it must stop short of a certificate, with a valid bound.
+    rng = np.random.default_rng(2)
+    n, m = 35, 5
+    w = rng.integers(10, 100, size=(m, n)).astype(float)
+    v = rng.integers(10, 100, size=n).astype(float)
+    hard = dict(A_ub=w, b_ub=w.sum(1) / 2, bounds=[(0, 1)] * n, integrality=np.ones(n, int))
+    full = solve_milp(-v, **hard)
+    assert full.status == SolveStatus.OPTIMAL
+    assert full.node_count > 10  # the instance really branches (the probe fires)
+    capped = solve_milp(-v, max_nodes=5, **hard)
+    assert capped.status == SolveStatus.ITERATION_LIMIT
+    assert capped.bound <= full.objective + 1e-6 <= capped.objective + 2e-6
 
 
 @pytest.mark.requires_highs

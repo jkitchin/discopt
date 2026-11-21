@@ -334,7 +334,7 @@ def _solve_partition(
         # A partition heuristic needs no certified bound: skip HiGHS's
         # presolve-free cross-check solve (measured to halve the time).
         res = milp_highs.solve_milp(
-            cost, confirm_bound_from=math.inf, node_limit=node_limit, **kwargs
+            cost, confirm_bound_from=math.inf, max_nodes=node_limit, **kwargs
         )
         if res.status == SolveStatus.ERROR and _engine_falls_back():
             res = None  # as the pure-MILP route: retry an ``error`` on the Rust engine
