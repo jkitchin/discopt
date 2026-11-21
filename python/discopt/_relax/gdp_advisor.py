@@ -247,6 +247,33 @@ def recommend_method(
             max_big_m=effective_M,
         )
 
+    # Hull is only a candidate when its own coverage guard will accept every body:
+    # the walkers above cannot see inside ``dm.sum``/``A @ x``, so a body like
+    # ``(A @ X)[0] + y`` reads as linear and small, ``auto`` chose hull, and hull
+    # then refused it (``HullVariableCoverageError``) -- ``solve()`` raised on a
+    # model big-M and mbigm solve. Asking hull's own predicate keeps the two from
+    # disagreeing; every model hull accepts today is routed exactly as before.
+    from discopt._relax.gdp_reformulate import (
+        HullVariableCoverageError,
+        _assert_hull_saw_every_variable,
+    )
+
+    try:
+        _assert_hull_saw_every_variable(dc)
+    except HullVariableCoverageError as exc:
+        rec = "big-m" if any_unbounded_M else "mbigm"
+        return GdpAdvice(
+            disjunction_index=-1,
+            name=name,
+            recommendation=rec,
+            rationale=f"linear, but hull cannot see every variable ({exc.args[0][:80]}…) ⇒ {rec}",
+            n_disjuncts=n_disjuncts,
+            n_common_vars=n_common_vars,
+            hull_aux_cost=hull_aux_cost,
+            has_nonlinear=False,
+            max_big_m=effective_M,
+        )
+
     # Linear and small enough — hull wins on tightness, cost is bounded.
     return GdpAdvice(
         disjunction_index=-1,

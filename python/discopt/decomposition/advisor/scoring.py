@@ -150,6 +150,8 @@ def _effective_block_sizes(cand: Candidate, graph: ModelGraph) -> list[int]:
       (that is where the parallelism lives once the master fixes them).
     - Lagrangian / independent blocks: the partition's blocks directly.
     """
+    if cand.element_view is not None:
+        return sorted((len(b) for b in cand.element_view.block_columns), reverse=True)
     s = cand.structure
     if s is None:
         return []
@@ -168,6 +170,17 @@ def _effective_block_sizes(cand: Candidate, graph: ModelGraph) -> list[int]:
                 sizes[b] += 1
         return sorted(sizes.values(), reverse=True)
     return sorted((len(b) for b in s.blocks), reverse=True)
+
+
+def _coupling_density(cand: Candidate, report: StructureReport) -> float:
+    """The candidate's coupling density: its element view's when it has one.
+
+    An element-level Lagrangian candidate dualizes rows the array-level scan
+    did not find, so ``report.coupling_density`` (array level) reads 0 for it.
+    """
+    if cand.element_view is not None and cand.method is MethodKind.LAGRANGIAN:
+        return cand.element_view.coupling_density
+    return report.coupling_density
 
 
 def _performance_estimate(
@@ -196,7 +209,7 @@ def _performance_estimate(
     if cand.method is MethodKind.INDEPENDENT_BLOCKS:
         f_coord = 0.0
     else:
-        f_coord = min(0.9, max(0.02, report.coupling_density))
+        f_coord = min(0.9, max(0.02, _coupling_density(cand, report)))
     speedup = 1.0 / (f_coord + (1.0 - f_coord) / p_eff)
     speedup = max(1.0, speedup)
 
@@ -275,17 +288,21 @@ class Scorer:
         localization = self._localization(cand, report)
         cut_strength = _CUT_STRENGTH.get(cand.method, 0.5)
         # Communication cost proxy: separator size relative to the model.
-        if cand.method in _FIXES_COMPLICATING and cand.structure is not None:
+        density = _coupling_density(cand, report)
+        if cand.method in _FIXES_COMPLICATING and cand.element_view is not None:
+            # Element units: master columns over all columns.
+            comm_norm = cand.element_view.separator_fraction
+        elif cand.method in _FIXES_COMPLICATING and cand.structure is not None:
             sep = len(cand.structure.complicating_vars)
             comm_norm = sep / report.num_vars if report.num_vars else 0.0
         else:
-            comm_norm = report.coupling_density
+            comm_norm = density
         warm = perf.parallel_efficiency  # balanced blocks warm-start best
 
         metrics = {
             "num_blocks": float(perf.num_blocks),
             "block_size_cv": round(cv, 4),
-            "coupling_density": round(report.coupling_density, 4),
+            "coupling_density": round(density, 4),
             "parallel_efficiency": round(perf.parallel_efficiency, 4),
             "estimated_speedup": round(perf.estimated_speedup, 4),
             "integer_localization": round(localization, 4),
@@ -295,7 +312,7 @@ class Scorer:
         }
 
         # Dense coupling ⇒ decomposition does not pay: drop below the baseline.
-        if report.coupling_density > w.tau_couple:
+        if density > w.tau_couple:
             return ScoreVector(
                 metrics=metrics,
                 aggregate=-w.penalty,
@@ -330,9 +347,11 @@ class Scorer:
         if cand.method is MethodKind.INDEPENDENT_BLOCKS:
             return 1.0
         if cand.method in _FIXES_COMPLICATING:
-            return 1.0 if report.integer_localizes else 0.5
+            # An element-level candidate exists only because fixing the
+            # integers splits the recourse, i.e. the integers localize.
+            return 1.0 if (report.integer_localizes or cand.element_view is not None) else 0.5
         # Lagrangian: more balanced blocks localize better.
-        if cand.structure is not None and cand.structure.num_blocks > 1:
+        if cand.num_blocks > 1:
             return 0.6
         return 0.4
 

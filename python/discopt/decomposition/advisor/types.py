@@ -82,6 +82,38 @@ class Soundness(Enum):
 
 
 @dataclass(frozen=True)
+class ElementView:
+    """The element-level partition behind a candidate the array view cannot see.
+
+    Attached by the element generators (``candidates.py``) when a decomposition
+    exists only element by element -- e.g. scenarios sharing one array variable.
+    The scorer and the IR read their block sizes, separator and coupling from
+    here instead of from the array-level graph, which for such a candidate
+    reports one block. ``None`` on every array-level candidate.
+
+    Attributes
+    ----------
+    block_columns : tuple[tuple[int, ...], ...]
+        Flat columns of each independent block (constraint-bearing blocks only).
+    block_labels : tuple[tuple[str, ...], ...]
+        Element labels (``x[0, 3]``) of the same columns, for the IR.
+    separator_fraction : float
+        Master (complicating) columns over all columns; ``0`` when nothing is fixed.
+    coupling_density : float
+        Dualized constraints over all constraints; ``0`` when nothing is dualized.
+    """
+
+    block_columns: tuple[tuple[int, ...], ...]
+    block_labels: tuple[tuple[str, ...], ...]
+    separator_fraction: float = 0.0
+    coupling_density: float = 0.0
+
+    @property
+    def num_blocks(self) -> int:
+        return len(self.block_columns)
+
+
+@dataclass(frozen=True)
 class Candidate:
     """A proposed decomposition: a method applied to a discovered structure.
 
@@ -105,6 +137,9 @@ class Candidate:
     notes : tuple[str, ...]
         Short human-readable reasons/caveats; seed material for the Phase 4
         explanation.
+    element_view : ElementView | None
+        The element-level partition, for a candidate only the element graph
+        reveals; ``None`` otherwise.
     """
 
     method: MethodKind
@@ -112,10 +147,13 @@ class Candidate:
     provenance: str
     est_soundness: Soundness
     notes: tuple[str, ...] = field(default_factory=tuple)
+    element_view: ElementView | None = None
 
     @property
     def num_blocks(self) -> int:
         """Number of blocks in the candidate's partition (0 if monolithic)."""
+        if self.element_view is not None:
+            return self.element_view.num_blocks
         return self.structure.num_blocks if self.structure is not None else 0
 
     def summary(self) -> str:
@@ -124,4 +162,4 @@ class Candidate:
         return f"{self.method.label} [{self.est_soundness.value}{extra}] — {self.provenance}"
 
 
-__all__ = ["Candidate", "MethodKind", "Soundness"]
+__all__ = ["Candidate", "ElementView", "MethodKind", "Soundness"]

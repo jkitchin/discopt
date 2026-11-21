@@ -215,6 +215,15 @@ def _master_columns(model: Model, structure: DecompositionStructure):
     self-contained. Integer variables must be first-stage (the recourse NLP
     needs continuous KKT multipliers).
     """
+    if structure.master_columns is not None:
+        # The C2 guard below and the recourse NLP's master/recourse split are
+        # keyed by array name; a column-level master would be partly ignored.
+        raise NotImplementedError(
+            "GBD takes its first stage as whole arrays (complicating_vars); this "
+            "structure fixes individual columns (master_columns), which only "
+            "classical Benders supports. Use solve_benders on a linear model, or "
+            "mark whole arrays with model.first_stage(...)."
+        )
     complicating = set(structure.complicating_vars)
     master_cols: list[int] = []
     sub_cols: list[int] = []
@@ -312,6 +321,10 @@ def solve_gbd(
     # #1614 D-26: HiGHS when available (an exact-vertex engine, as #986 requires).
     milp, _ = get_decomposition_master_solver()
 
+    # Validate first, as Model.solve does: it canonicalizes the bodies, and the
+    # coefficient extraction below walks an un-canonicalized shared sum
+    # (``r = r + r`` repeated, #2100) as a tree -- exponential, a hang.
+    model.validate()
     if structure is None:
         structure = detect_decomposition(model)
     mcols, scols, master_int = _master_columns(model, structure)
@@ -388,9 +401,9 @@ def solve_gbd(
             # constraint would silently degrade to a per-point feasibility check
             # (one no-good cut at a time, or a mid-solve error). Reject it up
             # front (C2) — the module docstring documents this restriction.
-            from discopt._relax.gdp_reformulate import _collect_variables
+            from discopt.decomposition.graph.base import variable_names_in
 
-            support_names = set(_collect_variables(c.body))
+            support_names = set(variable_names_in(c.body))
             complicating_names = set(structure.complicating_vars)
             if support_names and support_names <= complicating_names and not all_binary_master:
                 raise NotImplementedError(

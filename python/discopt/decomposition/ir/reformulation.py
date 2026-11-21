@@ -98,7 +98,17 @@ class DecomposedModel:
         """Run the coordinated solve and return the driver's ``SolveResult``."""
         model = self.source_model
         if self.method in (MethodKind.NONE, MethodKind.INDEPENDENT_BLOCKS):
-            return model.solve(**config)
+            # The drivers take ``max_iterations``; ``Model.solve`` refuses it (it
+            # rejects unknown options rather than ignoring them) and names its
+            # node budget ``max_nodes``. ``solve(decomposition="auto")`` passes
+            # the user's ``max_nodes`` in as ``max_iterations``, so this maps it
+            # back; before, every block-diagonal model sent here raised TypeError.
+            mono = dict(config)
+            if "max_iterations" in mono:
+                limit = mono.pop("max_iterations")
+                if limit is not None:
+                    mono.setdefault("max_nodes", limit)
+            return model.solve(**mono)
         if self.method is MethodKind.BENDERS:
             return solve_benders(model, structure=self.structure, **config)
         if self.method is MethodKind.GENERALIZED_BENDERS:
@@ -270,7 +280,31 @@ def build_decomposition(model, candidate: Candidate) -> DecomposedModel:
             caveats = ("bound withheld unless the recourse is convex",)
     certificate = SoundnessCertificate(method, level, rationale, caveats)
 
-    if method in (
+    view = candidate.element_view
+    if view is not None and method in (
+        MethodKind.BENDERS,
+        MethodKind.GENERALIZED_BENDERS,
+        MethodKind.LAGRANGIAN,
+        MethodKind.INDEPENDENT_BLOCKS,
+    ):
+        # Element-level candidate: its blocks share array variables, so the
+        # array-name mapping below would describe one block. Describe the
+        # element blocks instead (labels like ``x[0, 3]``).
+        fixes = method in (MethodKind.BENDERS, MethodKind.GENERALIZED_BENDERS)
+        complicating = list(structure.complicating_vars) if fixes else []
+        coupling = tuple(structure.coupling_constraints)
+        master = (
+            MasterModel(method, tuple(complicating), coupling)
+            if method is not MethodKind.INDEPENDENT_BLOCKS
+            else None
+        )
+        subproblems = [
+            SubproblemModel(block_id=i, variables=labels)
+            for i, labels in enumerate(view.block_labels)
+        ]
+        block_of_label = {lab: i for i, labels in enumerate(view.block_labels) for lab in labels}
+        var_map = VariableMapping(tuple(complicating), block_of_label, view.num_blocks)
+    elif method in (
         MethodKind.BENDERS,
         MethodKind.GENERALIZED_BENDERS,
         MethodKind.OUTER_APPROXIMATION,

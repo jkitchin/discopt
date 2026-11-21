@@ -37,6 +37,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from discopt.decomposition._linear import extract_linear, relative_gap, solution_dict
+from discopt.decomposition.graph import kernels
 from discopt.decomposition.structure import (
     DecompositionStructure,
     detect_decomposition,
@@ -186,6 +187,10 @@ def solve_lagrangian(
                 "none available, falling back to the Kelley cutting-plane step."
             )
 
+    # Validate first, as Model.solve does: it canonicalizes the bodies, and the
+    # coefficient extraction below walks an un-canonicalized shared sum
+    # (``r = r + r`` repeated, #2100) as a tree -- exponential, a hang.
+    model.validate()
     if structure is None:
         structure = detect_decomposition(model)
 
@@ -236,39 +241,39 @@ def solve_lagrangian(
         off += v.size
 
     # ── block partition (the relaxed subproblem separates across blocks) ──
-    # Column blocks are the connected components of the non-coupling constraint
-    # graph (every variable belongs to exactly one). Each non-coupling row lies
-    # entirely in one block, so the relaxed subproblem
-    # ``min (c + A_c^T λ)·z s.t. block rows`` decomposes into independent
-    # per-block MILPs whose bounds sum to the monolithic relaxation bound.
-    flat_of: dict[str, tuple[int, int]] = {}
-    _o = 0
-    for v in model._variables:
-        flat_of[v.name] = (_o, v.size)
-        _o += v.size
-    num_blocks = max(1, structure.num_blocks)
+    # Column blocks are the element-level column components of the non-coupling
+    # rows: two columns share a block iff a chain of non-coupling rows links
+    # them. Each non-coupling row therefore lies entirely in one block, so the
+    # relaxed subproblem ``min (c + A_c^T λ)·z s.t. block rows`` decomposes into
+    # independent per-block MILPs whose bounds sum to the monolithic relaxation
+    # bound. The partition is taken from the rows actually dualized against,
+    # not from ``structure.block_of_var``: that map is per *array*, so scenarios
+    # sharing one array variable landed in one block. Any partition the
+    # structure states is a coarsening of this one, so using the finer one is
+    # the same separable function with smaller pieces.
+    A_leq, b_leq, src_leq = lin.rows_leq()
+    keep_rows = [i for i, src in enumerate(src_leq) if src not in coupling_src]
+    row_support = [np.flatnonzero(np.abs(A_leq[i]) > 0) for i in keep_rows]
+    block_of_col, num_blocks = kernels.connected_components(
+        n, [sup.tolist() for sup in row_support]
+    )
+    num_blocks = max(1, num_blocks)
     col_blocks: list[list[int]] = [[] for _ in range(num_blocks)]
-    for v in model._variables:
-        b = structure.block_of_var.get(v.name, 0)
-        o, sz = flat_of[v.name]
-        col_blocks[b].extend(range(o, o + sz))
+    for j in range(n):
+        col_blocks[block_of_col[j]].append(j)
     col_arrays = [np.array(cb, dtype=int) for cb in col_blocks]
 
     # Block ``<=`` rows (equalities expanded), each restricted to its block cols.
-    A_leq, b_leq, src_leq = lin.rows_leq()
     blk_A_rows: list[list[np.ndarray]] = [[] for _ in range(num_blocks)]
     blk_r_rows: list[list[float]] = [[] for _ in range(num_blocks)]
-    for vec, rhs, src in zip(A_leq, b_leq, src_leq):
-        if src in coupling_src:
-            continue
-        b = structure.block_of_constraint[src]
-        if b < 0:
-            continue  # references no variable
+    for i, support in zip(keep_rows, row_support):
+        if support.size == 0:
+            continue  # references no variable (all coefficients zero)
+        b = block_of_col[int(support[0])]
         cols = col_arrays[b]
-        support = np.nonzero(np.abs(vec) > 0)[0]
         assert set(support.tolist()) <= set(cols.tolist()), "non-coupling row spans blocks"
-        blk_A_rows[b].append(vec[cols])
-        blk_r_rows[b].append(rhs)
+        blk_A_rows[b].append(A_leq[i][cols])
+        blk_r_rows[b].append(b_leq[i])
 
     block_A = [
         (np.array(rows) if rows else np.zeros((0, col_arrays[b].size)))

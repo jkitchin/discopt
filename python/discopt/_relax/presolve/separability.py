@@ -77,7 +77,7 @@ def detect_separability(model: Any) -> SeparabilityReport:
     The implementation is union-find for ``O((V + E) · α(V))`` time;
     deterministic in the model's declared variable order.
     """
-    from discopt._relax.gdp_reformulate import _collect_variables
+    from discopt.modeling.core import Variable, _iter_model_leaves
 
     var_names: list[str] = [v.name for v in model._variables]
     name_to_idx: dict[str, int] = {n: i for i, n in enumerate(var_names)}
@@ -98,7 +98,12 @@ def detect_separability(model: Any) -> SeparabilityReport:
     def _names_in(expr) -> list[int]:
         if expr is None:
             return []
-        names = _collect_variables(expr)
+        # The complete walker: ``_collect_variables`` cannot see inside ``dm.sum``
+        # or ``A @ x``, which split coupled variables into separate "blocks".
+        names: dict[str, None] = {}
+        for leaf in _iter_model_leaves(expr):
+            if isinstance(leaf, Variable):
+                names.setdefault(leaf.name, None)
         out: list[int] = []
         for nm in names:
             idx = name_to_idx.get(nm)

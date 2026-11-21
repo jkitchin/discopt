@@ -381,6 +381,125 @@ Two conventions used throughout:
   column. Bound changes do *not* change it. Version counter bumps on structural
   edits only.
 
+- **Granularity (as built).** `_collect_variables` maps every `x[s, t]` to the
+  whole array `x`, so the vertices of this graph are *arrays*, not scalars. A
+  model whose scenarios share one array reads as one block even when fixing the
+  first stage splits it per scenario. The scalar-level companion is
+  `graph/element.py` (`ElementGraph`): one vertex per column and per constraint
+  row, read from the evaluator's own `constraint_row_map()` and Jacobian
+  sparsity (the source `block_structure.py` already trusts), each tagged with its
+  array and index tuple. `ElementGraph.coarsen(var_axes, con_axes)` merges the
+  elements of an array that differ only along chosen axes — index coarsening in
+  the sense of Allen & Westerberg (1976) and Kalamaris & Maravelias (2026,
+  arXiv:2611.23472, §3.1) — and coarsening every axis recovers this array-level graph exactly.
+  `StructureReport` carries the scalar-level block counts
+  (`element_blocks`, `element_blocks_after_integer_projection`,
+  `array_level_hides_blocks`) and `element_coupling_constraints`, the
+  element-level bridge scan (`separating_cliques`: one Tarjan pass, `O(n+m+E)`,
+  checked against the per-clique kernel on random graphs, so it needs no
+  budget). Constraints the evaluator does not emit as rows (disjunctions, SOS,
+  indicator, logical) enter as conservative pseudo-rows over every column of
+  each array they reference; an unknown constraint kind is refused.
+- **Who consumes it.** Three element generators (`ElementIndependentBlock`,
+  `ElementIntegerProjection`, `ElementCoupling`) fire *only* where the
+  array-level generator is blind for granularity reasons, and attach an
+  `ElementView` (block columns/labels, separator fraction, coupling density)
+  that the scorer, explainer and IR read in place of the array graph. Measured
+  on 87 models (74 in-repo MINLPLib + advisor fixtures + synthetic): 84 ranked
+  candidate lists byte-identical, the 3 shared-array models move from `NONE` to
+  `BENDERS`/`INDEPENDENT_BLOCKS` and solve to the monolithic optimum.
+  `ElementCoupling` is held back where the array scan was budget-truncated
+  (`coupling_scan_truncated`): there a find is a budget effect, not hidden
+  structure, and adopting it would reroute models the array view handles
+  today; lifting that gate needs its own panel. Benders needed no change (its
+  multicut already splits recourse per element); `solve_lagrangian` now takes
+  its blocks from the element-level column components of the non-coupling rows.
+- **Separator program (`graph/separator.py`).** Kalamaris & Maravelias §4
+  (eqs. 30-36, 40, `gamma = 0`) on the variable or constraint projection of the
+  element graph: choose `R` so the rest splits into `>= |C|` balanced
+  components. Solved after type-preserving heavy-edge matching (same array /
+  same referenced-array signature only; unrestricted matching merged the design
+  hubs into operational vertices and returned 14-column separators where 6
+  suffice), with the representative symmetry break, on the pure-MILP engine
+  (HiGHS under `DISCOPT_LP_ENGINE=auto`: 0.71 s vs 5.7-6.4 s for the simplex
+  B&B at `|C| = 3`), under a deterministic node budget (a wall clock made the
+  recommendation load-dependent). Every separator is lifted and its split
+  re-measured on the element graph; a disagreement raises. The advisor ran it
+  as `SeparatorGenerator`, opt-in via `analyze_decomposition(model,
+  separator_search=True)` -- **retired**, see the end of this item. Measured on
+  a 774-column capacity LP it spent 39 s against a 0.8 s
+  monolithic solve (the Benders solve on its split took 0.24 s). Cost fix:
+  two-hop same-type coarsening (395 -> 54 coarse vertices at 774 columns, still
+  54 at 3,078), skipping a `|C|` an earlier separator already covers, and
+  constraint separators off by default (they cost 4-8 s for 190+-row answers
+  where ~11 rows suffice). Opt-in pipeline, measured interleaved at load < 1.5
+  (3 reps; objectives equal every time): 150 cols mono 0.14 s vs advisor 0.83 s
+  + Benders 0.09 s; 774 cols mono 0.47 s vs 0.26 + 0.22 s; 3,078 cols mono
+  1.93 s vs 1.15 + 0.88 s. The decomposed solve is 1.5-2.2x faster than the
+  monolith, and advisor + solve breaks even from ~774 columns on this family; it
+  is not yet a net win. Larger sizes (after capping two-hop matching at hubs,
+  which had cost 13.2 s of a 13.4 s search at 12,294 columns; 2 reps, load
+  < 1.5): 3,078 cols mono 2.01 s vs advisor 0.69 + Benders 0.84 = 1.53 s;
+  12,294 cols 9.11 s vs 3.34 + 4.86 = 8.20 s (mono spread 0.96 s); 18,438 cols
+  13.63 s vs 5.70 + 8.67 = 14.37 s. The decomposed solve's speedup shrinks with
+  size (2.4x, 1.9x, 1.6x) -- on an LP both scale about linearly -- and the
+  advisor is then dominated by the existing nonlinearity check
+  (`extract_linear`, 3.4 s of 4.6 s at 12,294 columns). Mixed-integer
+  experiment (integer build/units first stage plus a continuous shared
+  inventory capacity, so the integers alone do not split the scenarios and the
+  default advisor finds nothing; 2 reps interleaved, load < 1.5, every solve
+  optimal within rel 1e-4 with mutually consistent bounds): 891 cols mono
+  1.53 s vs advisor 0.94 + Benders 0.58 = 1.52 s; 3,483 cols 6.01 s vs 2.90 s
+  (2.1x); 6,939 cols 9.99 s vs 5.75 s (1.7x); 13,851 cols 24.12 s vs 12.42 s
+  (1.9x), the separator finding exactly the 27 first-stage columns (y, N, L)
+  from 3,483 columns up. The `threads` recourse backend was slower than
+  `sequential` at every size. This experiment also exposed a false certificate
+  in the Rust core -- `dm.sum(Q[g])` read as `Q.flat[g]` -- fixed separately
+  (`test_partial_integer_index_sum.py`). The paper's own coarsening is
+  available too: `find_separators(..., coarse=graph.coarsen(var_axes,
+  con_axes))` (the retired generator also took `var_axes`/`con_axes`/`epsilon`).
+  On the capacity LP family it finds the same design
+  separator as the automatic coarsening from 774 columns up but is slower
+  (102 vs 54 coarse vertices at 3,078 columns: 1.04 s vs 0.10 s); its value is
+  control for a modeller who knows the structure, not speed. `con_axes` helps
+  only vectorized constraints -- loop-built rows are separate constraints with
+  nothing to merge. **Corpus panel (item 1).** (a) Firing/soundness: every
+  model solved by the smoke suite plus the stochastic/decomposition/LP/MILP/GDP
+  test files, captured at `solve` entry (5,023 unique; 51 unpicklable, 36 fail
+  `validate`, 1 unloadable), analysed as solve sees them: 2,310 linear, the
+  opt-in search fires on 99 and is recommended on 95, 90 solved pairs, 0
+  inconsistent certificates, 0 undelivered. These models are tiny (median 3
+  columns), so this shows soundness and reach, not speed. The panel found
+  five defects, all fixed: two hangs on un-validated shared sums (advisor and
+  drivers), a gate that switched the search off on most two-stage models, a
+  CVaR value-at-risk variable put in an unbounded Benders master (bare
+  `error`), and candidates on GDP models no driver could run. (b) Benefit:
+  two-stage stochastic families built with `build_extensive_form` (farmer,
+  multi-product newsvendor, a DCAP-style capacity acquisition MILP, a CVaR
+  newsvendor; 2 reps interleaved, load < 1.5). On the LP families the
+  recommended Benders is SLOWER than the monolithic LP even before the advisor
+  (solve alone 0.17x-0.55x), and the advisor costs 12-66 s against 2-11 s
+  monoliths. On the MILP family the decomposed solve is 1.55-3.0x faster but
+  end to end 0.84x / 1.52x / 0.95x at 20 / 100 / 400 scenarios. On CVaR it
+  recommends a 200-column master that stops at its iteration limit (no false
+  certificate, but nothing delivered). Net: no case for a default, and the
+  recommendation is harmful on two-stage LPs. **Retired** on that evidence
+  (CLAUDE.md §5): `SeparatorGenerator` and the `separator_search=` keyword are
+  deleted, and the advisor never calls the program
+  (`test_advisor_never_runs_the_separator_program`). Kept as an explicit
+  library tool: `find_separators(graph, kind, ...)`, with a variable separator
+  usable as a Benders first stage through `DecompositionStructure.master_columns`
+  (honoured by `solve_benders`, refused by `solve_gbd`); every separator it
+  returns gives an exact Benders solve (`test_every_separator_benders_is_exact`).
+  Historical, while it was in the advisor: on a linear
+  capacity-expansion model the advisor moves from `NONE` to Benders over the
+  6 design columns `K, L` with one block per scenario (the paper's Fig. 8a), and
+  solves to the monolithic optimum; 87-model panel 85/87 identical (2 synthetic
+  linear MILPs gain Benders), deterministic across concurrent runs; 40-model
+  random sweep, 57 candidate solves, 0 violations. Not done: the functionality
+  penalty `gamma` (item 3), and `|C| >= 4` / multi-constraint `|C| >= 3`, which
+  cost 4-8 s each in HiGHS root processing and are left to direct calls.
+
 ### 4.2 Constraint Hypergraph
 
 - **Build:** each constraint = a hyperedge over its variable set; vertices =

@@ -743,16 +743,36 @@ impl ModelBuilder {
         block_idx
     }
 
-    /// Get or create an Index(var, Scalar(col)) node, caching to avoid duplicates.
+    /// Get or create the Index node of flat column `col` of a variable block,
+    /// caching to avoid duplicates (full-arity index on a rank >= 2 block).
     fn get_index_node(&mut self, var_block_idx: usize, col: usize) -> ExprId {
         let key = (var_block_idx, col);
         if let Some(&id) = self.index_cache.get(&key) {
             return id;
         }
         let var_id = self.var_expr_ids[var_block_idx];
+        // `col` is a FLAT column within the block. A bare `Scalar(col)` names that
+        // element only on a rank <= 1 variable: on a 2-D or higher one it is the
+        // numpy sub-array `X[col]` (`index_spec_collect_flat`), so write the
+        // full-arity index there. Writing `Scalar(col)` for every shape misread
+        // each fast-API element of a 2-D variable once a short integer index got
+        // numpy semantics: an LP built with `add_linear_constraints(A, X, ...)` on
+        // `X` of shape (2, 3) returned `feasible` 35.96 instead of `optimal` 27.06.
+        let shape = &self.variables[var_block_idx].shape;
+        let index = if shape.len() <= 1 {
+            IndexSpec::Scalar(col)
+        } else {
+            let mut rem = col;
+            let mut idx = vec![0usize; shape.len()];
+            for (k, &d) in shape.iter().enumerate().rev() {
+                idx[k] = rem % d;
+                rem /= d;
+            }
+            IndexSpec::Tuple(idx)
+        };
         let id = self.arena.add(ExprNode::Index {
             base: var_id,
-            index: IndexSpec::Scalar(col),
+            index,
         });
         self.index_cache.insert(key, id);
         id
@@ -1849,18 +1869,21 @@ impl ExprArena {
             ExprNode::Index { base, index } => {
                 // Evaluate the indexed element from a variable or constant array.
                 match self.get(*base) {
+                    // A non-element index (slice, short integer index) is
+                    // array-valued; scalar evaluation reports NaN, as it does for
+                    // any other unsupported node, rather than one aliased element.
                     ExprNode::Variable { shape, .. } => {
                         let offset = self.var_offset(*base);
-                        let flat = index_spec_to_flat(index, shape);
-                        x[offset + flat]
+                        match index_spec_to_flat(index, shape) {
+                            Some(flat) => x[offset + flat],
+                            None => f64::NAN,
+                        }
                     }
                     ExprNode::ConstantArray(data, shape) => {
-                        let flat = index_spec_to_flat(index, shape);
-                        data[flat]
+                        index_spec_to_flat(index, shape).map_or(f64::NAN, |f| data[f])
                     }
                     ExprNode::Parameter { value, shape, .. } => {
-                        let flat = index_spec_to_flat(index, shape);
-                        value[flat]
+                        index_spec_to_flat(index, shape).map_or(f64::NAN, |f| value[f])
                     }
                     _ => {
                         // Indexing a compound expression — not yet supported
@@ -2014,30 +2037,38 @@ impl ExprArena {
     }
 }
 
-/// Convert an IndexSpec to a flat index given a shape (row-major / C-order).
+/// The flat (row-major / C-order) slot of an index that selects exactly ONE
+/// element of an array of `shape`, else `None`.
 ///
-/// Returns 0 for index specs that contain a slice — callers that need to
-/// enumerate the selected elements should use [`index_spec_collect_flat`]
-/// instead.
-fn index_spec_to_flat(spec: &IndexSpec, shape: &[usize]) -> usize {
-    match spec {
-        IndexSpec::Scalar(i) => *i,
-        IndexSpec::Tuple(indices) => tuple_to_flat(indices, shape),
+/// `None` for a slice, and for an integer index of lower arity than the rank
+/// (`Q[g]` on a 4-D `Q` is a sub-array, not an element). This used to return
+/// element 0 for any slice and the flat element `i` for a short `Scalar(i)`:
+/// a wrong-but-in-range slot, which aliases another value silently. Callers
+/// that need every selected element use [`index_spec_collect_flat`].
+fn index_spec_to_flat(spec: &IndexSpec, shape: &[usize]) -> Option<usize> {
+    let indices: Vec<usize> = match spec {
+        IndexSpec::Scalar(i) => vec![*i],
+        IndexSpec::Tuple(indices) => indices.clone(),
         IndexSpec::Multi(_) => {
             let elems = spec.base_elems(shape.len());
-            let mut indices: Vec<usize> = Vec::with_capacity(elems.len());
+            let mut out: Vec<usize> = Vec::with_capacity(elems.len());
             for elem in &elems {
                 match elem {
-                    IndexElem::Scalar(i) => indices.push(*i),
-                    IndexElem::Slice { .. } => return 0,
+                    IndexElem::Scalar(i) => out.push(*i),
+                    IndexElem::Slice { .. } => return None,
                     IndexElem::NewAxis | IndexElem::Ellipsis => {
                         unreachable!("base_elems() resolves NewAxis and Ellipsis")
                     }
                 }
             }
-            tuple_to_flat(&indices, shape)
+            out
         }
+    };
+    // A rank-0 or rank-1 base takes one index; a higher rank needs one per axis.
+    if indices.len() != shape.len().max(1) {
+        return None;
     }
+    Some(tuple_to_flat(&indices, shape))
 }
 
 fn tuple_to_flat(indices: &[usize], shape: &[usize]) -> usize {
@@ -2056,6 +2087,19 @@ fn tuple_to_flat(indices: &[usize], shape: &[usize]) -> usize {
 /// vector for slices that select no elements (e.g. `x[5:5]`).
 pub fn index_spec_collect_flat(spec: &IndexSpec, shape: &[usize]) -> Vec<usize> {
     match spec {
+        // An integer index of lower arity than the rank selects a sub-array
+        // (numpy: `Q[g]` on a 4-D `Q` is `Q[g, :, :, :]`), so it takes the
+        // padded `Multi` path below. Returning the single flat element `i` here
+        // made `dm.sum(Q[g])` read as `Q.flat[g]`: the LP/MILP extraction then
+        // optimized a different objective, and a Benders solve on it reported a
+        // certified optimum of 67.07 for a point whose true objective is 193.49.
+        IndexSpec::Scalar(i) if shape.len() > 1 => {
+            index_spec_collect_flat(&IndexSpec::Multi(vec![IndexElem::Scalar(*i)]), shape)
+        }
+        IndexSpec::Tuple(indices) if indices.len() < shape.len() => index_spec_collect_flat(
+            &IndexSpec::Multi(indices.iter().map(|i| IndexElem::Scalar(*i)).collect()),
+            shape,
+        ),
         IndexSpec::Scalar(i) => vec![*i],
         IndexSpec::Tuple(indices) => vec![tuple_to_flat(indices, shape)],
         IndexSpec::Multi(_) => {
@@ -2316,16 +2360,16 @@ impl ModelRepr {
                     ..
                 } => {
                     let offset = self.variables[*var_idx].offset;
-                    let flat = index_spec_to_flat(index, shape);
-                    x[offset + flat]
+                    match index_spec_to_flat(index, shape) {
+                        Some(flat) => x[offset + flat],
+                        None => f64::NAN, // array-valued: see index_spec_to_flat
+                    }
                 }
                 ExprNode::ConstantArray(data, shape) => {
-                    let flat = index_spec_to_flat(index, shape);
-                    data[flat]
+                    index_spec_to_flat(index, shape).map_or(f64::NAN, |f| data[f])
                 }
                 ExprNode::Parameter { value, shape, .. } => {
-                    let flat = index_spec_to_flat(index, shape);
-                    value[flat]
+                    index_spec_to_flat(index, shape).map_or(f64::NAN, |f| value[f])
                 }
                 _ => f64::NAN,
             },
@@ -3129,11 +3173,85 @@ mod tests {
 
     #[test]
     fn test_index_spec_to_flat() {
-        assert_eq!(index_spec_to_flat(&IndexSpec::Scalar(3), &[5]), 3);
+        assert_eq!(index_spec_to_flat(&IndexSpec::Scalar(3), &[5]), Some(3));
         // 2D: shape (3, 4), index (1, 2) => 1*4 + 2 = 6
         assert_eq!(
             index_spec_to_flat(&IndexSpec::Tuple(vec![1, 2]), &[3, 4]),
-            6
+            Some(6)
+        );
+        // A short integer index is a sub-array, and a slice is not one element:
+        // neither has a single slot (they used to alias flat 1 and flat 0).
+        assert_eq!(index_spec_to_flat(&IndexSpec::Scalar(1), &[3, 4]), None);
+        assert_eq!(
+            index_spec_to_flat(&IndexSpec::Tuple(vec![1]), &[2, 3, 4]),
+            None
+        );
+        let full = IndexSpec::Multi(vec![IndexElem::FULL]);
+        assert_eq!(index_spec_to_flat(&full, &[3]), None);
+    }
+
+    #[test]
+    fn test_builder_index_names_one_element_on_any_rank() {
+        // The fast-API builder addresses a FLAT column of a variable block. On a
+        // rank >= 2 block that must be a full-arity index: a bare `Scalar(col)` is
+        // the numpy sub-array `X[col]` there.
+        let mut b = ModelBuilder::new();
+        let shape = vec![2, 3];
+        let v = b.add_variable(
+            "X".into(),
+            VarType::Continuous,
+            shape.clone(),
+            vec![0.0; 6],
+            vec![1.0; 6],
+        );
+        let one_d = b.add_variable(
+            "y".into(),
+            VarType::Continuous,
+            vec![4],
+            vec![0.0; 4],
+            vec![1.0; 4],
+        );
+        for col in 0..6 {
+            let id = b.get_index_node(v, col);
+            match b.arena.get(id) {
+                ExprNode::Index { index, .. } => {
+                    assert_eq!(index_spec_collect_flat(index, &shape), vec![col]);
+                    assert_eq!(index_spec_to_flat(index, &shape), Some(col));
+                }
+                other => panic!("expected an Index node, got {other:?}"),
+            }
+        }
+        let id = b.get_index_node(one_d, 3);
+        match b.arena.get(id) {
+            ExprNode::Index { index, .. } => assert_eq!(index, &IndexSpec::Scalar(3)),
+            other => panic!("expected an Index node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_short_integer_index_selects_subarray() {
+        // `Q[1]` on (2, 3) is row 1 -> flat 3, 4, 5 (numpy), not flat element 1.
+        assert_eq!(
+            index_spec_collect_flat(&IndexSpec::Scalar(1), &[2, 3]),
+            vec![3, 4, 5]
+        );
+        // `Q[1]` on (2, 2, 3) -> flat 6..12; `Q[1, 0]` (a short Tuple) -> 6, 7, 8.
+        assert_eq!(
+            index_spec_collect_flat(&IndexSpec::Scalar(1), &[2, 2, 3]),
+            (6..12).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            index_spec_collect_flat(&IndexSpec::Tuple(vec![1, 0]), &[2, 2, 3]),
+            vec![6, 7, 8]
+        );
+        // Full-arity indices are unchanged: one element.
+        assert_eq!(
+            index_spec_collect_flat(&IndexSpec::Scalar(2), &[5]),
+            vec![2]
+        );
+        assert_eq!(
+            index_spec_collect_flat(&IndexSpec::Tuple(vec![1, 2]), &[3, 4]),
+            vec![6]
         );
     }
 
@@ -3159,7 +3277,7 @@ mod tests {
             IndexElem::NewAxis,
             IndexElem::Scalar(1),
         ]);
-        assert_eq!(index_spec_to_flat(&spec, &[3, 2]), 5);
+        assert_eq!(index_spec_to_flat(&spec, &[3, 2]), Some(5));
     }
 
     #[test]
@@ -3182,7 +3300,7 @@ mod tests {
             IndexElem::Ellipsis,
             IndexElem::Scalar(0),
         ]);
-        assert_eq!(index_spec_to_flat(&spec, &[3, 2]), 2);
+        assert_eq!(index_spec_to_flat(&spec, &[3, 2]), Some(2));
     }
 
     #[test]
