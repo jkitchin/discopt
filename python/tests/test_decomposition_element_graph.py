@@ -421,3 +421,43 @@ def test_element_generators_silent_where_array_view_sees_structure():
     m.minimize(dm.sum(a) + dm.sum(b) - z)
     cands = analyze_decomposition(m).candidates()
     assert cands and all(c.element_view is None for c in cands)
+
+
+# ── the advisor validates before reading the evaluator ─────────
+
+
+_SHARED_SUM_ADVISOR = """
+import resource, sys
+resource.setrlimit(resource.RLIMIT_AS, (3 * 1024**3, 3 * 1024**3))
+import discopt.modeling as dm
+from discopt.decomposition import analyze_decomposition
+
+m = dm.Model("shared")
+x = m.continuous("x", lb=0, ub=1)
+y = m.continuous("y", lb=0, ub=1)
+row = x - y
+for _ in range(40):  # 41 nodes; 2**40 leaves as a tree
+    row = row + row
+m.subject_to(row <= 1.0)
+m.minimize(x)
+print(analyze_decomposition(m).structure().element_blocks)
+"""
+
+
+def test_advisor_on_unvalidated_shared_sum_does_not_blow_up():
+    """A shared sum (``r = r + r`` repeated, #2100) is exponential as a tree.
+    The element graph built the evaluator on the un-validated model, whose tape
+    lowering expanded it until the process was killed for memory; the advisor
+    now validates first, as every solve does. Run in a subprocess under a 3 GB
+    cap so a regression fails this test instead of the test runner."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _SHARED_SUM_ADVISOR],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert proc.stdout.strip().splitlines()[-1] == "1"

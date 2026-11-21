@@ -216,8 +216,10 @@ def analyze_decomposition(
 ) -> DecompositionAdvisor:
     """Analyze *model* and return a :class:`DecompositionAdvisor`.
 
-    The public entry point to the advisor's analysis surface. Does not solve or
-    modify the model. When *store* (a
+    The public entry point to the advisor's analysis surface. Does not solve the
+    model. It does run ``Model.validate()``, which canonicalizes the bodies in
+    place (the meaning-preserving rewrite every ``solve`` applies first), because
+    the scalar-level structure graph is read from the model's evaluator. When *store* (a
     :class:`~discopt.decomposition.learning.store.RecordStore`) is given, the
     advisor consults it via the instance-based learned policy (W2).
 

@@ -202,6 +202,14 @@ class ElementGraph:
         if evaluator is None:
             from discopt._tape_nlp_evaluator import make_evaluator
 
+            # The evaluator is built for a VALIDATED model, as every solve builds
+            # it: ``Model.validate`` canonicalizes the bodies first (meaning-
+            # preserving and idempotent). Without it, a shared sum such as
+            # ``r = r + r`` repeated -- a 46-node DAG, exponential as a tree
+            # (#2100) -- reached the tape lowering un-collapsed, which expanded it
+            # until the process was killed for memory; the same model solves in
+            # 0.2 s once validated.
+            model.validate()
             evaluator = make_evaluator(model)
 
         # Columns: declared order, C-order inside each array.
