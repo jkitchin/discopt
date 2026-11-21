@@ -632,14 +632,44 @@ class _Collector:
     # Polynomials are never mutated once built, so elements may be shared.
 
     def _array(self, node) -> np.ndarray:
-        hit = self.arrays.get(id(node))
-        if hit is None:
-            hit = self._array_uncached(node)
-            known = _known_shape(node)
-            if known is not None and tuple(known) != hit.shape:
+        """The array of ``node``, memoised; ``+``/``-``/``*`` chains walked iteratively.
+
+        A left-folded Python ``sum(...)`` is a chain of ``BinaryOp`` one node per
+        term, and a body whose static shape is unknown (``dm.sum(y[0]) + sum(x[i]
+        for i in range(4000))``) is walked here whole. Recursing once per node
+        raised ``RecursionError`` from ``Model.validate`` at ~1000 terms (measured:
+        a 3,000-term capacity-expansion objective). The explicit stack visits the
+        same nodes in the same order (left subtree, right subtree, then the node)
+        and calls :meth:`_elementwise` exactly as the recursion did, so every
+        polynomial -- and every rewrite built from one -- is unchanged.
+        """
+        hit: np.ndarray | None = self.arrays.get(id(node))
+        if hit is not None:
+            return hit
+        stack: list = [(node, False)]
+        while stack:
+            cur, children_done = stack.pop()
+            if id(cur) in self.arrays:
+                continue
+            if type(cur) is BinaryOp and cur.op in ("+", "-", "*"):
+                if not children_done:
+                    stack.append((cur, True))
+                    # Pushed right first so the left subtree is finished first,
+                    # matching the recursion's evaluation order.
+                    stack.append((cur.right, False))
+                    stack.append((cur.left, False))
+                    continue
+                res = self._elementwise(
+                    cur.op, self.arrays[id(cur.left)], self.arrays[id(cur.right)]
+                )
+            else:
+                res = self._array_uncached(cur)
+            known = _known_shape(cur)
+            if known is not None and tuple(known) != res.shape:
                 raise _Decline("array walk disagrees with the static shape")
-            self.arrays[id(node)] = hit
-        return hit
+            self.arrays[id(cur)] = res
+        result: np.ndarray = self.arrays[id(node)]
+        return result
 
     def _array_uncached(self, node) -> np.ndarray:
         t = type(node)
@@ -680,6 +710,8 @@ class _Collector:
         if t is BinaryOp:
             op = node.op
             if op == "+" or op == "-" or op == "*":
+                # Reached only through a direct call; :meth:`_array` walks these
+                # chains itself, iteratively.
                 a = self._array(node.left)
                 b = self._array(node.right)
                 return self._elementwise(op, a, b)
