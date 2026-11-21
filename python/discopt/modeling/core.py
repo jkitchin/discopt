@@ -13198,7 +13198,12 @@ class Model:
         blocks = [d for d in self._gdp_factory_disjuncts if d._attached and d._local_vars]
         if not blocks:
             return
-        from discopt._relax.gdp_reformulate import _collect_variables
+        def body_vars(body) -> set[str]:
+            # The complete walker: ``gdp_reformulate._collect_variables`` has no arm
+            # for ``SumExpression``/``MatMulExpression``/``CustomCall``, so a local
+            # variable used through ``dm.sum`` outside its disjunct escaped this
+            # guard unseen.
+            return {leaf.name for leaf in _iter_model_leaves(body) if isinstance(leaf, Variable)}
 
         def subtree_rows(d: "Disjunct", out: set[int]) -> None:
             out.update(id(c) for c in d._constraints)
@@ -13251,7 +13256,7 @@ class Model:
             for row_id, body, where in uses:
                 if row_id is not None and row_id in own:
                     continue
-                hit = local & set(_collect_variables(body))
+                hit = local & body_vars(body)
                 if hit:
                     raise ValueError(
                         f"variable {sorted(hit)[0]!r} is declared local to disjunct "
