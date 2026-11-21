@@ -87,3 +87,42 @@ def test_benders_certificate_matches_its_point():
         + 6.0 * np.asarray(x["U"]).sum() / S
     )
     assert res.objective == pytest.approx(true_obj, abs=1e-6)
+
+
+# The fast-API builder addresses a FLAT column of a variable block. With a short
+# integer index meaning the numpy sub-array, a bare `Scalar(col)` on a 2-D block
+# named a whole row: an LP built through `add_linear_constraints` on `X` of shape
+# (2, 3) returned `feasible` 35.96 instead of `optimal` 27.06 (reported in review
+# of jkitchin/discopt#2282). The builder now writes a full-arity index there.
+_A = np.vstack([np.eye(6), np.random.default_rng(0).uniform(0, 1, size=(3, 6))])
+_B = np.concatenate([[2, 0, 0, 0, 0, 4], [1.0, 2.0, 1.5]])
+_W = np.array([3.0, 1.0, 2.0, 1.5, 2.5, 5.0])
+_SHAPES = [(6,), (2, 3), (3, 2), (2, 1, 3)]
+
+
+def _fast_lp(shape, objective):
+    m = dm.Model(f"fast_{'x'.join(map(str, shape))}")
+    x = m.continuous("X", shape=shape, lb=0, ub=10)
+    m.add_linear_constraints(_A, x, ">=", _B)
+    if objective == "expression":
+        m.minimize(dm.sum(_W.reshape(shape) * x))
+    elif objective == "linear":
+        m.add_linear_objective(_W, x)
+    else:  # quadratic: 0.5 x'Qx + c'x with Q = diag(1)
+        m.add_quadratic_objective(np.eye(6), _W, x)
+    return m
+
+
+@pytest.mark.parametrize("objective", ["expression", "linear", "quadratic"])
+def test_fast_api_rows_on_multidimensional_variables(objective):
+    reference = _fast_lp((6,), objective).solve()
+    assert reference.status == "optimal"
+    checked = 0
+    for shape in _SHAPES[1:]:
+        res = _fast_lp(shape, objective).solve()
+        assert res.status == "optimal" and res.gap_certified, (shape, res.status)
+        assert res.objective == pytest.approx(reference.objective, rel=1e-6), shape
+        x = np.asarray(res.x["X"]).ravel()
+        assert np.all(_A @ x >= _B - 1e-6), shape
+        checked += 1
+    assert checked == len(_SHAPES) - 1

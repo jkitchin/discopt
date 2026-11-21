@@ -743,16 +743,36 @@ impl ModelBuilder {
         block_idx
     }
 
-    /// Get or create an Index(var, Scalar(col)) node, caching to avoid duplicates.
+    /// Get or create the Index node of flat column `col` of a variable block,
+    /// caching to avoid duplicates (full-arity index on a rank >= 2 block).
     fn get_index_node(&mut self, var_block_idx: usize, col: usize) -> ExprId {
         let key = (var_block_idx, col);
         if let Some(&id) = self.index_cache.get(&key) {
             return id;
         }
         let var_id = self.var_expr_ids[var_block_idx];
+        // `col` is a FLAT column within the block. A bare `Scalar(col)` names that
+        // element only on a rank <= 1 variable: on a 2-D or higher one it is the
+        // numpy sub-array `X[col]` (`index_spec_collect_flat`), so write the
+        // full-arity index there. Writing `Scalar(col)` for every shape misread
+        // each fast-API element of a 2-D variable once a short integer index got
+        // numpy semantics: an LP built with `add_linear_constraints(A, X, ...)` on
+        // `X` of shape (2, 3) returned `feasible` 35.96 instead of `optimal` 27.06.
+        let shape = &self.variables[var_block_idx].shape;
+        let index = if shape.len() <= 1 {
+            IndexSpec::Scalar(col)
+        } else {
+            let mut rem = col;
+            let mut idx = vec![0usize; shape.len()];
+            for (k, &d) in shape.iter().enumerate().rev() {
+                idx[k] = rem % d;
+                rem /= d;
+            }
+            IndexSpec::Tuple(idx)
+        };
         let id = self.arena.add(ExprNode::Index {
             base: var_id,
-            index: IndexSpec::Scalar(col),
+            index,
         });
         self.index_cache.insert(key, id);
         id
@@ -3168,6 +3188,44 @@ mod tests {
         );
         let full = IndexSpec::Multi(vec![IndexElem::FULL]);
         assert_eq!(index_spec_to_flat(&full, &[3]), None);
+    }
+
+    #[test]
+    fn test_builder_index_names_one_element_on_any_rank() {
+        // The fast-API builder addresses a FLAT column of a variable block. On a
+        // rank >= 2 block that must be a full-arity index: a bare `Scalar(col)` is
+        // the numpy sub-array `X[col]` there.
+        let mut b = ModelBuilder::new();
+        let shape = vec![2, 3];
+        let v = b.add_variable(
+            "X".into(),
+            VarType::Continuous,
+            shape.clone(),
+            vec![0.0; 6],
+            vec![1.0; 6],
+        );
+        let one_d = b.add_variable(
+            "y".into(),
+            VarType::Continuous,
+            vec![4],
+            vec![0.0; 4],
+            vec![1.0; 4],
+        );
+        for col in 0..6 {
+            let id = b.get_index_node(v, col);
+            match b.arena.get(id) {
+                ExprNode::Index { index, .. } => {
+                    assert_eq!(index_spec_collect_flat(index, &shape), vec![col]);
+                    assert_eq!(index_spec_to_flat(index, &shape), Some(col));
+                }
+                other => panic!("expected an Index node, got {other:?}"),
+            }
+        }
+        let id = b.get_index_node(one_d, 3);
+        match b.arena.get(id) {
+            ExprNode::Index { index, .. } => assert_eq!(index, &IndexSpec::Scalar(3)),
+            other => panic!("expected an Index node, got {other:?}"),
+        }
     }
 
     #[test]
