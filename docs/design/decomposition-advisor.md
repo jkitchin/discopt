@@ -463,7 +463,27 @@ Two conventions used throughout:
   (102 vs 54 coarse vertices at 3,078 columns: 1.04 s vs 0.10 s); its value is
   control for a modeller who knows the structure, not speed. `con_axes` helps
   only vectorized constraints -- loop-built rows are separate constraints with
-  nothing to merge. It
+  nothing to merge. **Corpus panel (item 1).** (a) Firing/soundness: every
+  model solved by the smoke suite plus the stochastic/decomposition/LP/MILP/GDP
+  test files, captured at `solve` entry (5,023 unique; 51 unpicklable, 36 fail
+  `validate`, 1 unloadable), analysed as solve sees them: 2,310 linear, the
+  opt-in search fires on 99 and is recommended on 95, 90 solved pairs, 0
+  inconsistent certificates, 0 undelivered. These models are tiny (median 3
+  columns), so this shows soundness and reach, not speed. The panel found
+  five defects, all fixed: two hangs on un-validated shared sums (advisor and
+  drivers), a gate that switched the search off on most two-stage models, a
+  CVaR value-at-risk variable put in an unbounded Benders master (bare
+  `error`), and candidates on GDP models no driver could run. (b) Benefit:
+  two-stage stochastic families built with `build_extensive_form` (farmer,
+  multi-product newsvendor, a DCAP-style capacity acquisition MILP, a CVaR
+  newsvendor; 2 reps interleaved, load < 1.5). On the LP families the
+  recommended Benders is SLOWER than the monolithic LP even before the advisor
+  (solve alone 0.17x-0.55x), and the advisor costs 12-66 s against 2-11 s
+  monoliths. On the MILP family the decomposed solve is 1.55-3.0x faster but
+  end to end 0.84x / 1.52x / 0.95x at 20 / 100 / 400 scenarios. On CVaR it
+  recommends a 200-column master that stops at its iteration limit (no false
+  certificate, but nothing delivered). Net: no case for a default, and the
+  recommendation is harmful on two-stage LPs. It
   turns variable separators into Benders candidates with a column-level master
   (`DecompositionStructure.master_columns`, honoured by `solve_benders`, refused
   by `solve_gbd`) and constraint separators into Lagrangian candidates; it runs
