@@ -142,6 +142,11 @@ pub fn extract_linear_coeffs(arena: &ExprArena, id: ExprId) -> Option<(Vec<(usiz
         ExprNode::Index { base, index } => {
             // For indexed variables, extract the specific variable element
             match arena.get(*base) {
+                // `var_idx` is the variable's position in the list, not its flat
+                // column, so `var_idx + offset` names the right column only for a
+                // scalar variable (every `.nl` model). An element of an array
+                // variable is declined rather than mapped to a neighbour's column.
+                ExprNode::Variable { size, .. } if *size > 1 => None,
                 ExprNode::Variable { index: var_idx, .. } => {
                     let offset = match index {
                         crate::expr::IndexSpec::Scalar(i) => *i,
@@ -394,6 +399,24 @@ mod tests {
         let result = extract_linear_coeffs(&arena, c).unwrap();
         assert!(result.0.is_empty());
         assert!((result.1 - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_extract_linear_coeffs_declines_array_element() {
+        // `x[1]` of an array variable: `index` is the variable's list position,
+        // so `index + 1` would name another variable's column. Declined.
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 3,
+            shape: vec![3],
+        });
+        let x1 = arena.add(ExprNode::Index {
+            base: x,
+            index: crate::expr::IndexSpec::Scalar(1),
+        });
+        assert!(extract_linear_coeffs(&arena, x1).is_none());
     }
 
     #[test]
