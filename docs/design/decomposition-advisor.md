@@ -437,7 +437,14 @@ Two conventions used throughout:
   + Benders 0.09 s; 774 cols mono 0.47 s vs 0.26 + 0.22 s; 3,078 cols mono
   1.93 s vs 1.15 + 0.88 s. The decomposed solve is 1.5-2.2x faster than the
   monolith, and advisor + solve breaks even from ~774 columns on this family; it
-  is not yet a net win. It
+  is not yet a net win. Larger sizes (after capping two-hop matching at hubs,
+  which had cost 13.2 s of a 13.4 s search at 12,294 columns; 2 reps, load
+  < 1.5): 3,078 cols mono 2.01 s vs advisor 0.69 + Benders 0.84 = 1.53 s;
+  12,294 cols 9.11 s vs 3.34 + 4.86 = 8.20 s (mono spread 0.96 s); 18,438 cols
+  13.63 s vs 5.70 + 8.67 = 14.37 s. The decomposed solve's speedup shrinks with
+  size (2.4x, 1.9x, 1.6x) -- on an LP both scale about linearly -- and the
+  advisor is then dominated by the existing nonlinearity check
+  (`extract_linear`, 3.4 s of 4.6 s at 12,294 columns). It
   turns variable separators into Benders candidates with a column-level master
   (`DecompositionStructure.master_columns`, honoured by `solve_benders`, refused
   by `solve_gbd`) and constraint separators into Lagrangian candidates; it runs

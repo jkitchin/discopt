@@ -147,6 +147,7 @@ def coarsen_by_matching(
     type_of: np.ndarray,
     target: int,
     pinned: Sequence[int] = (),
+    hub_degree: int = 64,
 ) -> tuple[np.ndarray, int, dict[tuple[int, int], int], np.ndarray]:
     """Type-preserving heavy-edge matching until ``<= target`` vertices.
 
@@ -164,6 +165,13 @@ def coarsen_by_matching(
     vertices, 0.09 s). Deterministic: vertices are visited by ascending degree
     then index, partners by descending (edge or shared) weight, ascending coarse
     weight, then index. Stops early when a round merges nothing.
+
+    The two-hop search does not pass through a *hub*, an intermediate of more
+    than *hub_degree* neighbours: a design variable ``K[g, p]`` is adjacent to
+    every operational element of every scenario, so walking through it is
+    quadratic in the model and only ever proposes the cross-scenario merges the
+    ranking exists to avoid. Measured at 12,294 columns: 11.3 M candidate
+    checks and 13.2 s of the separator search's 13.4 s without the cap.
     """
     group = np.arange(n, dtype=np.int64)
     cur_n = n
@@ -189,6 +197,8 @@ def coarsen_by_matching(
             score = {u: wt for u, wt in adj[v].items() if free(u)}
             if not score:  # no same-type neighbour: look two hops away
                 for x, w_vx in adj[v].items():
+                    if len(adj[x]) > hub_degree:
+                        continue  # never look through a hub (see docstring)
                     for u, w_xu in adj[x].items():
                         if free(u):
                             score[u] = score.get(u, 0) + min(w_vx, w_xu)
