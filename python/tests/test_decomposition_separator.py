@@ -384,3 +384,83 @@ def test_epsilon_trades_separator_size_for_balance(monkeypatch):
     report = analyze_decomposition(_capex()).structure()
     gen.generate(_capex(), report)
     assert seen == [("variables", 7.5, True), ("constraints", 7.5, True)]
+
+
+# ── gating, unbounded first-stage variables, driver diagnostics ─
+
+
+def _farmer_like(S=6):
+    """Continuous first stage x shared by S scenarios, with a pendant bridge per
+    scenario (the beet row) -- the structure that gated the search off."""
+    m = dm.Model("farmer_like")
+    x = m.continuous("x", shape=(3,), lb=0, ub=500)
+    m.subject_to(dm.sum(x) <= 500)
+    rng = np.random.default_rng(4)
+    for s in range(S):
+        y = rng.uniform(0.8, 1.2, 3) * np.array([2.5, 3.0, 20.0])
+        buy = m.continuous(f"buy_{s}", shape=(2,), lb=0, ub=1e4)
+        sell = m.continuous(f"sell_{s}", shape=(4,), lb=0, ub=1e4)
+        m.subject_to(float(y[0]) * x[0] + buy[0] - sell[0] >= 200)
+        m.subject_to(float(y[1]) * x[1] + buy[1] - sell[1] >= 240)
+        m.subject_to(sell[2] + sell[3] <= float(y[2]) * x[2])
+        m.subject_to(sell[2] <= 6000)
+    m.minimize(
+        150 * x[0]
+        + 230 * x[1]
+        + 260 * x[2]
+        + sum(
+            (238 * m._variables[1 + 2 * s][0] - 170 * m._variables[2 + 2 * s][0]) / S
+            for s in range(S)
+        )
+    )
+    return m
+
+
+@pytest.mark.requires_highs
+def test_pendant_bridges_do_not_gate_the_search_off():
+    from discopt.decomposition.advisor.candidates import SeparatorGenerator
+
+    report = analyze_decomposition(_farmer_like()).structure()
+    assert report.element_coupling_constraints  # the pendant bridges are there
+    assert SeparatorGenerator().applicable(report)
+    adv = analyze_decomposition(_farmer_like(), separator_search=True)
+    pick = next(r.candidate for r in adv.ranked() if r.recommended)
+    assert pick.method is MethodKind.BENDERS
+    g = ElementGraph.from_model(_farmer_like())
+    # The master is part of the first stage x (the program may leave x[2] with
+    # the beet rows as one recourse block), and the split is real.
+    assert set(pick.structure.master_columns) <= set(g.columns_of("x").tolist())
+    assert pick.num_blocks >= 2
+    mono = _farmer_like().solve()
+    res = adv.decompose().solve()
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(mono.objective, rel=1e-4)
+
+
+def _unbounded_link():
+    """Scenarios coupled only through a FREE variable t (as CVaR's VaR is)."""
+    m = dm.Model("free_link")
+    t = m.continuous("t", lb=-1e20, ub=1e20)
+    q = m.continuous("q", lb=0, ub=10)
+    for s in range(4):
+        u = m.continuous(f"u_{s}", lb=0, ub=50)
+        m.subject_to(u >= 3.0 + s - q - t)
+    m.minimize(t + q + sum(m._variables[2 + s] for s in range(4)) / 4)
+    return m
+
+
+def test_unbounded_columns_are_never_in_the_master():
+    g = ElementGraph.from_model(_unbounded_link())
+    t = g.columns_of("t").tolist()
+    for s in find_separators(
+        g, "variables", max_components=3, skip_covered=False, excluded_columns=t, max_fraction=1.0
+    ):
+        assert not set(t) & set(s.columns)
+
+
+def test_benders_names_an_unbounded_first_stage():
+    m = _unbounded_link()
+    st = dataclasses.replace(detect_decomposition(m), complicating_vars=["t"], master_columns=(0,))
+    res = solve_benders(m, structure=st)
+    assert res.status == "error"
+    assert "'t'" in res.error and "bounded first stage" in res.error

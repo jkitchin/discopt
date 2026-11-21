@@ -148,6 +148,7 @@ def coarsen_by_matching(
     target: int,
     pinned: Sequence[int] = (),
     hub_degree: int = 64,
+    excluded: Sequence[int] = (),
 ) -> tuple[np.ndarray, int, dict[tuple[int, int], int], np.ndarray]:
     """Type-preserving heavy-edge matching until ``<= target`` vertices.
 
@@ -178,8 +179,12 @@ def coarsen_by_matching(
     cur_edges = dict(edges)
     weight = np.ones(n, dtype=np.int64)
     kind = np.asarray(type_of, dtype=np.int64).copy()
-    pin = np.zeros(n, dtype=bool)
-    pin[np.asarray(list(pinned), dtype=np.int64)] = True
+    # Merge class: 0 free, 1 pinned (forced into the separator), 2 excluded
+    # (barred from it). Only vertices of one class merge, so a forced or an
+    # excluded vertex never drags a free one along.
+    pin = np.zeros(n, dtype=np.int64)
+    pin[np.asarray(list(pinned), dtype=np.int64)] = 1
+    pin[np.asarray(list(excluded), dtype=np.int64)] = 2
     while cur_n > target:
         adj: list[dict[int, int]] = [{} for _ in range(cur_n)]
         for (a, b), wt in cur_edges.items():
@@ -225,7 +230,7 @@ def coarsen_by_matching(
         np.add.at(new_w, nid, weight)
         new_kind = np.empty(m, dtype=np.int64)
         new_kind[nid] = kind
-        new_pin = np.zeros(m, dtype=bool)
+        new_pin = np.zeros(m, dtype=np.int64)
         new_pin[nid] = pin
         group = nid[group]
         cur_n, cur_edges, weight, kind, pin = m, new_edges, new_w, new_kind, new_pin
@@ -244,6 +249,7 @@ def _solve_partition(
     forced: Sequence[int],
     node_limit: int,
     time_limit: float,
+    excluded: Sequence[int] = (),
 ) -> tuple[list[int] | None, str]:
     """Kalamaris & Maravelias eqs. (30)-(36), (40) with ``gamma = 0``.
 
@@ -314,6 +320,8 @@ def _solve_partition(
     bounds = [(0.0, 1.0)] * (nv + nX) + [(0.0, math.inf)] * (C + len(pairs))
     for v in forced:
         bounds[v] = (1.0, 1.0)
+    for v in excluded:
+        bounds[v] = (0.0, 0.0)
     for v in range(nv):  # representative symmetry break: v joins only c <= v
         for c in range(v + 1, C):
             bounds[ix(v, c)] = (0.0, 0.0)
@@ -387,6 +395,7 @@ def find_separators(
     node_limit: int = 200,
     time_limit: float = 30.0,
     forced_columns: Sequence[int] = (),
+    excluded_columns: Sequence[int] = (),
     max_fraction: float = 0.5,
     skip_covered: bool = True,
     coarse: CoarseGraph | None = None,
@@ -394,7 +403,10 @@ def find_separators(
     """Separators for ``|C| = 2 .. max_components``, verified and de-duplicated.
 
     *forced_columns* (``kind="variables"`` only) must be in every separator --
-    e.g. the integer columns, which a Benders driver requires in the master.
+    e.g. the integer columns, which a Benders driver requires in the master;
+    *excluded_columns* must be in none -- e.g. an unbounded variable, which
+    would leave a Benders master unbounded. A super-vertex holding both is
+    contradictory and yields no separator.
     Each ``|C|`` gets *node_limit* branch-and-bound nodes, a deterministic
     budget, so the answer does not depend on machine load; *time_limit* is a
     per-``|C|`` wall-clock backstop sized well above the node budget. A program
@@ -427,8 +439,8 @@ def find_separators(
     """
     if kind not in ("variables", "constraints"):
         raise ValueError(f"kind must be 'variables' or 'constraints', not {kind!r}")
-    if forced_columns and kind != "variables":
-        raise ValueError("forced_columns applies to kind='variables' only")
+    if (forced_columns or excluded_columns) and kind != "variables":
+        raise ValueError("forced_columns / excluded_columns apply to kind='variables' only")
     n, edges, type_of, active = _projection(graph, kind)
     forced = np.asarray(list(forced_columns), dtype=np.int64)
     # Inactive vertices are dropped from the program (they cannot form a
@@ -442,9 +454,11 @@ def find_separators(
         if local[a] >= 0 and local[b] >= 0
     }
     k_forced = [int(local[v]) for v in forced if local[v] >= 0]
+    excluded = np.asarray(list(excluded_columns), dtype=np.int64)
+    k_excluded = [int(local[v]) for v in excluded if local[v] >= 0]
     if coarse is None:
         group, nv, c_edges, c_weight = coarsen_by_matching(
-            int(keep.size), k_edges, type_of[keep], target, pinned=k_forced
+            int(keep.size), k_edges, type_of[keep], target, pinned=k_forced, excluded=k_excluded
         )
     else:
         owner = coarse.col_of if kind == "variables" else coarse.row_of
@@ -456,18 +470,21 @@ def find_separators(
             )
         group, nv, c_edges, c_weight = _quotient(np.asarray(owner)[keep], k_edges)
     c_forced = sorted({int(group[v]) for v in k_forced})
+    c_excluded = sorted({int(group[v]) for v in k_excluded})
+    if set(c_forced) & set(c_excluded):
+        return []  # a user super-vertex both forced into and barred from R
 
     out: list[Separator] = []
     seen: set[tuple[int, ...]] = set()
     covered = 1  # the most blocks any separator so far is verified to leave
     for C in range(2, max_components + 1):
-        if C > nv - len(c_forced):
+        if C > nv - len(c_forced) - len(c_excluded):
             break
         if skip_covered and C <= covered:
             continue
         t0 = time.perf_counter()
         R, status = _solve_partition(
-            nv, list(c_edges), c_weight, C, epsilon, c_forced, node_limit, time_limit
+            nv, list(c_edges), c_weight, C, epsilon, c_forced, node_limit, time_limit, c_excluded
         )
         seconds = time.perf_counter() - t0
         if R is None:

@@ -575,7 +575,26 @@ def solve_benders(
     if init.status == SolveStatus.INFEASIBLE:
         return SolveResult(status="infeasible", wall_time=time.time() - t0, gap_certified=True)
     if init.status != SolveStatus.OPTIMAL or init.x is None:
-        return SolveResult(status="error", wall_time=time.time() - t0)
+        # Say why: an unbounded first-stage variable (bounds at the 1e20
+        # sentinel) leaves this recourse-free master unbounded, which classical
+        # Benders cannot start from. It used to return a bare "error".
+        names = []
+        master_set = set(mcols.tolist())
+        off = 0
+        for v in model._variables:
+            for k in range(v.size):
+                j = off + k
+                if j in master_set and (abs(lb_all[j]) >= 1e19 or abs(ub_all[j]) >= 1e19):
+                    names.append(v.name if v.size == 1 else f"{v.name}[{k}]")
+            off += v.size
+        why = f"the initial master (first stage only) returned {init.status.value}" + (
+            f"; first-stage variable(s) {names[:5]} are unbounded, and classical "
+            "Benders needs a bounded first stage -- bound them, or keep them out "
+            "of the master"
+            if names
+            else ""
+        )
+        return SolveResult(status="error", wall_time=time.time() - t0, error=why)
     x_hat = _master_x(init)
 
     results = _recourse_all(x_hat)

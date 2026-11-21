@@ -414,9 +414,9 @@ class SeparatorGenerator:
     ~12k columns). On a mixed-integer capacity-expansion family it is 1.7-2.1x
     faster end to end from ~3.5k columns. *What would change that:* a corpus
     panel (not one synthetic family) showing it at least neutral on models
-    where it fires, including the advisor's cost. Fires only on a
-    **linear** model where no other generator found anything, so every candidate
-    list the others produce is unchanged. The search is a
+    where it fires, including the advisor's cost. Fires on a **linear** model
+    that is not already exactly decomposable (block-diagonal, or split by fixing
+    its integers); unbounded variables are kept out of the master. The search is a
     deterministic node budget (the recommendation must not depend on machine
     load; a wall-clock limit made it do so) with a wall-clock backstop. Its
     reach is measured, not guessed: on a 150-column capacity-expansion LP each
@@ -463,6 +463,13 @@ class SeparatorGenerator:
         self.con_axes = dict(con_axes) if con_axes else None
 
     def applicable(self, report: StructureReport) -> bool:
+        # Skipped only where an EXACT decomposition already exists (the model is
+        # block-diagonal, or fixing the integers splits it). It is not gated on
+        # coupling constraints: the bridge scans flag pendant rows -- a farmer
+        # scenario's beet row cuts off a two-variable piece -- on most real
+        # models, and that gate left the two-stage farmer and newsvendor
+        # families with no candidate at all. (The gate only ever served the
+        # default advisor's invariance, which opt-in no longer needs.)
         return (
             not report.model_is_nonlinear
             and report.element_blocks is not None
@@ -470,12 +477,12 @@ class SeparatorGenerator:
             and not report.is_block_diagonal
             and not report.integer_localizes
             and (report.element_blocks_after_integer_projection or 0) < 2
-            and not report.coupling_constraints
-            and not report.element_coupling_constraints
         )
 
     def generate(self, model, report: StructureReport) -> list[Candidate]:
         import dataclasses
+
+        import numpy as np
 
         from discopt.decomposition.advisor.analyzer import integer_columns
         from discopt.decomposition.graph.element import ElementGraph
@@ -493,10 +500,18 @@ class SeparatorGenerator:
             else None
         )
         int_cols = integer_columns(model, graph)
+        # A Benders master needs bounded variables: an unbounded one (the CVaR
+        # value-at-risk variable, bounds +-1e20) leaves the first master
+        # unbounded and the driver can only report an error. Bar them.
+        from discopt.decomposition.structure import flat_bounds
+
+        lb, ub = flat_bounds(model)
+        unbounded = np.flatnonzero((np.abs(lb) >= 1e19) | (np.abs(ub) >= 1e19))
         for sep in find_separators(
             graph,
             "variables",
             forced_columns=int_cols.tolist(),
+            excluded_columns=unbounded.tolist(),
             max_components=self.max_components_variables,
             node_limit=self.node_limit,
             time_limit=self.time_limit,
