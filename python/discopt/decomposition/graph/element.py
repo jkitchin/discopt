@@ -1,7 +1,7 @@
 """Element-level incidence graph and index coarsening.
 
 :class:`~discopt.decomposition.graph.base.ModelGraph` is built from
-``_collect_variables``, which maps every ``x[s, t]`` back to the whole array
+variable *names* (``variable_names_in``), which map every ``x[s, t]`` back to the whole array
 ``x``. Its vertices are therefore *arrays*, not scalars: a model whose
 scenarios share one array variable reads as a single block even when fixing a
 few first-stage variables would split it per scenario. This module builds the

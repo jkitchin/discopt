@@ -89,16 +89,9 @@ class DecompositionStructure:
 
 def _vars_in(expr, name_to_idx: dict[str, int]) -> list[int]:
     """Flat variable indices referenced by *expr* (deduplicated, ordered)."""
-    if expr is None:
-        return []
-    from discopt._relax.gdp_reformulate import _collect_variables
+    from discopt.decomposition.graph.base import variable_names_in
 
-    out: list[int] = []
-    for nm in _collect_variables(expr):
-        idx = name_to_idx.get(nm)
-        if idx is not None:
-            out.append(idx)
-    return out
+    return [name_to_idx[nm] for nm in variable_names_in(expr) if nm in name_to_idx]
 
 
 def _components(

@@ -388,9 +388,9 @@ def solve_gbd(
             # constraint would silently degrade to a per-point feasibility check
             # (one no-good cut at a time, or a mid-solve error). Reject it up
             # front (C2) — the module docstring documents this restriction.
-            from discopt._relax.gdp_reformulate import _collect_variables
+            from discopt.decomposition.graph.base import variable_names_in
 
-            support_names = set(_collect_variables(c.body))
+            support_names = set(variable_names_in(c.body))
             complicating_names = set(structure.complicating_vars)
             if support_names and support_names <= complicating_names and not all_binary_master:
                 raise NotImplementedError(
