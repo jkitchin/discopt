@@ -47,7 +47,7 @@ from typing import Literal, Sequence
 import numpy as np
 import scipy.sparse as sp
 
-from discopt.decomposition.graph.element import ElementGraph
+from discopt.decomposition.graph.element import CoarseGraph, ElementGraph
 
 Kind = Literal["variables", "constraints"]
 
@@ -389,6 +389,7 @@ def find_separators(
     forced_columns: Sequence[int] = (),
     max_fraction: float = 0.5,
     skip_covered: bool = True,
+    coarse: CoarseGraph | None = None,
 ) -> list[Separator]:
     """Separators for ``|C| = 2 .. max_components``, verified and de-duplicated.
 
@@ -409,6 +410,15 @@ def find_separators(
     returning the ``|C| = 2`` split (14 columns, 7 blocks) but no longer the
     6-column, 3-block one ``|C| = 3`` finds. ``skip_covered=False`` runs every
     ``|C|``.
+
+    *coarse* replaces the automatic coarsening with the user's own: a
+    :class:`~discopt.decomposition.graph.element.CoarseGraph` from
+    ``graph.coarsen(var_axes, con_axes)`` -- the paper's index coarsening, where
+    the modeller names the axes to merge ("over time, keep scenarios"). Its
+    super-columns (``kind="variables"``) or super-rows (``kind="constraints"``)
+    are the program's vertices as given; *target* is then unused. A super-vertex
+    holding any forced column is forced whole. It must have been built from
+    *graph* (checked by size; a mismatch raises ``ValueError``).
 
     A separator holding more than *max_fraction* of the active elements is
     dropped: a time-limited incumbent can isolate a few vertices by putting
@@ -432,9 +442,19 @@ def find_separators(
         if local[a] >= 0 and local[b] >= 0
     }
     k_forced = [int(local[v]) for v in forced if local[v] >= 0]
-    group, nv, c_edges, c_weight = coarsen_by_matching(
-        int(keep.size), k_edges, type_of[keep], target, pinned=k_forced
-    )
+    if coarse is None:
+        group, nv, c_edges, c_weight = coarsen_by_matching(
+            int(keep.size), k_edges, type_of[keep], target, pinned=k_forced
+        )
+    else:
+        owner = coarse.col_of if kind == "variables" else coarse.row_of
+        expected = graph.num_cols if kind == "variables" else graph.num_rows
+        if owner.size != expected:
+            raise ValueError(
+                f"the CoarseGraph maps {owner.size} {kind} elements but the graph has "
+                f"{expected}; it was built from a different graph"
+            )
+        group, nv, c_edges, c_weight = _quotient(np.asarray(owner)[keep], k_edges)
     c_forced = sorted({int(group[v]) for v in k_forced})
 
     out: list[Separator] = []
@@ -461,6 +481,27 @@ def find_separators(
         covered = max(covered, found.blocks)
         out.append(found)
     return out
+
+
+def _quotient(
+    owner: np.ndarray, edges: dict[tuple[int, int], int]
+) -> tuple[np.ndarray, int, dict[tuple[int, int], int], np.ndarray]:
+    """Collapse vertices by a given grouping (*owner*), like one coarsening round.
+
+    Returns ``(group, n_groups, edges, weight)`` in the shape
+    :func:`coarsen_by_matching` returns, with groups renumbered densely in order
+    of first appearance.
+    """
+    remap: dict[int, int] = {}
+    group = np.array([remap.setdefault(int(o), len(remap)) for o in owner], dtype=np.int64)
+    out: dict[tuple[int, int], int] = {}
+    for (a, b), w in edges.items():
+        x, y = int(group[a]), int(group[b])
+        if x != y:
+            key = (x, y) if x < y else (y, x)
+            out[key] = out.get(key, 0) + w
+    weight = np.bincount(group, minlength=len(remap)).astype(np.int64)
+    return group, len(remap), out, weight
 
 
 def _verify(

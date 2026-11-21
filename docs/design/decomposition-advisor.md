@@ -455,7 +455,15 @@ Two conventions used throughout:
   from 3,483 columns up. The `threads` recourse backend was slower than
   `sequential` at every size. This experiment also exposed a false certificate
   in the Rust core -- `dm.sum(Q[g])` read as `Q.flat[g]` -- fixed separately
-  (`test_partial_integer_index_sum.py`). It
+  (`test_partial_integer_index_sum.py`). The paper's own coarsening is
+  available too: `find_separators(..., coarse=graph.coarsen(var_axes,
+  con_axes))`, or `SeparatorGenerator(var_axes=..., con_axes=..., epsilon=...)`
+  through the advisor. On the capacity LP family it finds the same design
+  separator as the automatic coarsening from 774 columns up but is slower
+  (102 vs 54 coarse vertices at 3,078 columns: 1.04 s vs 0.10 s); its value is
+  control for a modeller who knows the structure, not speed. `con_axes` helps
+  only vectorized constraints -- loop-built rows are separate constraints with
+  nothing to merge. It
   turns variable separators into Benders candidates with a column-level master
   (`DecompositionStructure.master_columns`, honoured by `solve_benders`, refused
   by `solve_gbd`) and constraint separators into Lagrangian candidates; it runs

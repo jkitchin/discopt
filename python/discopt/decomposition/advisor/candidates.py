@@ -13,7 +13,7 @@ order later.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Mapping, Protocol, Sequence, runtime_checkable
 
 from discopt.decomposition.advisor.analyzer import StructureReport
 from discopt.decomposition.advisor.types import Candidate, ElementView, MethodKind, Soundness
@@ -442,6 +442,9 @@ class SeparatorGenerator:
         time_limit: float = 30.0,
         max_columns: int = 20_000,
         skip_covered: bool = True,
+        epsilon: float = 2.0,
+        var_axes: Mapping[str, Sequence[int]] | None = None,
+        con_axes: Mapping[str, Sequence[int]] | None = None,
     ):
         self.max_components_variables = max_components_variables
         self.max_components_constraints = max_components_constraints
@@ -449,6 +452,15 @@ class SeparatorGenerator:
         self.time_limit = time_limit
         self.max_columns = max_columns
         self.skip_covered = skip_covered  # see find_separators
+        # Separator weight vs component imbalance (Kalamaris & Maravelias eq. 40):
+        # larger favours small separators, smaller favours balanced blocks.
+        self.epsilon = epsilon
+        # The paper's index coarsening: axes of each array (variables) or
+        # constraint (rows) to merge, e.g. {"Q": (3,)} for "over time". Given
+        # either, the program runs on ``graph.coarsen(var_axes, con_axes)``
+        # instead of the automatic matching.
+        self.var_axes = dict(var_axes) if var_axes else None
+        self.con_axes = dict(con_axes) if con_axes else None
 
     def applicable(self, report: StructureReport) -> bool:
         return (
@@ -475,6 +487,11 @@ class SeparatorGenerator:
         out: list[Candidate] = []
         base = detect_decomposition(model)
         n = graph.num_cols
+        coarse = (
+            graph.coarsen(self.var_axes, self.con_axes)
+            if (self.var_axes or self.con_axes)
+            else None
+        )
         int_cols = integer_columns(model, graph)
         for sep in find_separators(
             graph,
@@ -484,6 +501,8 @@ class SeparatorGenerator:
             node_limit=self.node_limit,
             time_limit=self.time_limit,
             skip_covered=self.skip_covered,
+            epsilon=self.epsilon,
+            coarse=coarse,
         ):
             arrays = sorted({graph.var_names[int(graph.col_var[j])] for j in sep.columns})
             structure = dataclasses.replace(
@@ -521,6 +540,8 @@ class SeparatorGenerator:
             node_limit=self.node_limit,
             time_limit=self.time_limit,
             skip_covered=self.skip_covered,
+            epsilon=self.epsilon,
+            coarse=coarse,
         ):
             owners = {graph.con_model_index[int(graph.row_con[r])] for r in sep.rows}
             if None in owners or not all(

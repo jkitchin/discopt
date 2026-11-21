@@ -280,3 +280,94 @@ def test_separator_search_is_opt_in(monkeypatch):
     assert result.status == "optimal"
     with pytest.raises(AssertionError, match="without being requested"):
         analyze_decomposition(_capex(), separator_search=True).candidates()
+
+
+# ── user index coarsening, the generator's Lagrangian path, epsilon ─
+
+
+@pytest.mark.requires_highs
+def test_user_index_coarsening_drives_the_program():
+    """``coarse=`` (the paper's index coarsening) replaces the automatic one."""
+    g = ElementGraph.from_model(_capex())
+    coarse = g.coarsen({"Q": (0, 3), "I": (2,), "U": (2,)})
+    seps = find_separators(g, "variables", max_components=3, skip_covered=False, coarse=coarse)
+    assert seps
+    for s in seps:
+        assert s.blocks >= s.num_components
+        members = set(s.columns)
+        # The separator is a union of the user's super-columns: each one is
+        # wholly in or wholly out.
+        for sc in range(coarse.num_cols):
+            cols = set(np.flatnonzero(coarse.col_of == sc).tolist())
+            assert cols <= members or not (cols & members)
+
+
+def test_coarse_graph_from_another_model_is_refused():
+    g = ElementGraph.from_model(_capex())
+    other = ElementGraph.from_model(_small_other())
+    with pytest.raises(ValueError, match="different graph"):
+        find_separators(g, "variables", coarse=other.coarsen({}))
+
+
+def _small_other():
+    m = dm.Model("other")
+    x = m.continuous("x", shape=(4,), lb=0, ub=1)
+    m.subject_to(x[0] + x[1] <= 1)
+    m.minimize(dm.sum(x))
+    return m
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+@pytest.mark.requires_highs
+def test_generator_lagrangian_path_rounds_to_whole_constraints():
+    """Constraint separators (opt-in) become whole-constraint coupling sets
+    that still split the model, and their dual bound stays below the optimum."""
+    from discopt.decomposition.advisor.candidates import SeparatorGenerator
+    from discopt.decomposition.ir.reformulation import build_decomposition
+
+    mono = _capex().solve()
+    adv = analyze_decomposition(
+        _capex(), separator_search=SeparatorGenerator(max_components_constraints=2)
+    )
+    lag = [c for c in adv.candidates() if c.method is MethodKind.LAGRANGIAN]
+    assert lag, "the constraint search produced no Lagrangian candidate"
+    g = ElementGraph.from_model(_capex())
+    for c in lag:
+        coupling = set(c.structure.coupling_constraints)
+        assert coupling and c.element_view.num_blocks >= 2
+        # Whole constraints: every row of a coupling constraint is dropped.
+        rows = [i for i in range(g.num_rows) if g.con_model_index[g.row_con[i]] in coupling]
+        assert g.bearing_blocks(drop_rows=rows) == c.element_view.num_blocks
+        res = build_decomposition(adv._model, c).solve(max_iterations=60, time_limit=60.0)
+        assert res.bound is not None and res.bound <= mono.objective + 1e-6
+
+
+@pytest.mark.requires_highs
+def test_epsilon_trades_separator_size_for_balance(monkeypatch):
+    g = ElementGraph.from_model(_capex())
+
+    def weight(eps):
+        seps = find_separators(g, "variables", max_components=2, epsilon=eps)
+        assert seps
+        return seps[0].weight
+
+    # A larger penalty on separator weight never yields a larger separator.
+    assert weight(100.0) <= weight(0.01)
+
+    # The generator forwards its epsilon (and its axes) to the program.
+    from discopt.decomposition.advisor import candidates as cand_mod
+
+    seen = []
+
+    def spy(graph, kind, **kw):
+        seen.append((kind, kw["epsilon"], kw["coarse"] is not None))
+        return []
+
+    monkeypatch.setattr(sepmod, "find_separators", spy)
+    gen = cand_mod.SeparatorGenerator(
+        epsilon=7.5, max_components_constraints=2, var_axes={"Q": (3,)}
+    )
+    report = analyze_decomposition(_capex()).structure()
+    gen.generate(_capex(), report)
+    assert seen == [("variables", 7.5, True), ("constraints", 7.5, True)]
