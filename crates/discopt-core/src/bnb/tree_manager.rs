@@ -4068,7 +4068,10 @@ mod tests {
         let ts = tm.stats();
         assert_eq!(tm.incumbent().unwrap().1, pv);
         assert_eq!(ts.global_lower_bound, pv, "the capped bound is unchanged");
-        assert_eq!(ts.proved_lower_bound, 3.5, "min(closed 3.5, pruned sibling 9.0)");
+        assert_eq!(
+            ts.proved_lower_bound, 3.5,
+            "min(closed 3.5, pruned sibling 9.0)"
+        );
         assert_eq!(ts.safe_fathom_floor, f64::INFINITY);
         // `node_lb` (3.5) exceeds the value by more than the 1e-6 tolerance; the
         // ancestor bound (3.0) does not.
