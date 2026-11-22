@@ -1736,14 +1736,17 @@ class VarBlock:
         if len({id(v) for v in vs}) != len(vs):
             raise ValueError("a VarBlock lists each variable at most once")
         self.vars = vs
-        sizes = np.fromiter((int(v.size) for v in vs), dtype=np.int64, count=len(vs))
+        # ``np.intp``, not int64: ``np.repeat`` casts ``repeats`` to ``intp`` under the
+        # ``safe`` rule, and on wasm32 (Pyodide) ``intp`` is int32, so int64 sizes
+        # raise ``TypeError`` there (#2295). ``pos``/``local`` stay int64.
+        sizes = np.fromiter((int(v.size) for v in vs), dtype=np.intp, count=len(vs))
         self.size = int(sizes.sum())
         self.name = "[" + ", ".join(v.name for v in vs) + "]"
         # Vectorized: a file's model has one block over thousands of scalar variables,
         # and a Python loop per variable here cost O(n) per block (304 blocks on
         # piperout-d27).
         pos = np.repeat(np.arange(len(vs), dtype=np.int64), sizes)
-        starts = np.concatenate([[0], np.cumsum(sizes)[:-1]])
+        starts = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int64)
         local = np.arange(self.size, dtype=np.int64) - np.repeat(starts, sizes)
         self._cols: tuple[np.ndarray, np.ndarray] = (pos, local)
         # (id(model), its variable count, builder indices) once checked for a model.
