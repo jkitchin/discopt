@@ -1858,6 +1858,17 @@ def _run_with_deep_recursion(fn: Callable[[], _T], *, depth_need: int) -> _T:
     thread overhead). Otherwise it runs on a worker thread with a large stack so a
     raised Python recursion limit cannot overflow the C stack and crash the
     process. The recursion limit is restored afterward; exceptions propagate.
+
+    Where the platform refuses the large stack *or refuses the thread itself*,
+    ``fn`` runs inline under the raised limit instead. The second case is a
+    threadless interpreter: Pyodide (wasm32) raises ``RuntimeError: can't start new
+    thread`` from ``Thread.start``. Before that fallback the error reached every
+    caller, so in the browser the #1551 objective-error check withdrew the
+    certificate of any solve whose objective needed more than the default 1000
+    frames (a 60-item knapsack ``.nl`` came back ``feasible`` instead of
+    ``optimal``, measured under Pyodide 0.28.3). On CPython >= 3.12 a pure-Python
+    recursion does not consume C stack, and C recursion has its own guard, so the
+    inline path raises ``RecursionError`` rather than crashing.
     """
     import contextvars
     import threading
@@ -1885,22 +1896,30 @@ def _run_with_deep_recursion(fn: Callable[[], _T], *, depth_need: int) -> _T:
         finally:
             sys.setrecursionlimit(old)
 
-    old_stack = threading.stack_size()
-    try:
-        threading.stack_size(_DEEP_RECURSION_STACK_BYTES)
-    except (ValueError, RuntimeError, OverflowError):
-        # Platform rejected the requested stack size: fall back to inline with a
-        # raised limit. Best effort — may still RecursionError, which is caught
-        # upstream and is no worse than before.
+    def _inline() -> _T:
+        # Best effort — may still RecursionError, which propagates to the caller
+        # exactly as a RecursionError on the worker would.
         old = sys.getrecursionlimit()
         sys.setrecursionlimit(depth_need)
         try:
             return fn()
         finally:
             sys.setrecursionlimit(old)
+
+    old_stack = threading.stack_size()
+    try:
+        threading.stack_size(_DEEP_RECURSION_STACK_BYTES)
+    except (ValueError, RuntimeError, OverflowError):
+        # Platform rejected the requested stack size.
+        return _inline()
     try:
         t = threading.Thread(target=_worker, name="convexity-classify")
-        t.start()
+        try:
+            t.start()
+        except RuntimeError:
+            # No OS threads (Pyodide/wasm32: "can't start new thread"). ``_worker``
+            # never ran, so ``box`` is empty and ``fn`` has not been called.
+            return _inline()
         t.join()
     finally:
         try:
