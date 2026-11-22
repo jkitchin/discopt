@@ -498,9 +498,49 @@ test RMSE of 0.226; `outer` never found a better incumbent than −2.43.
 
    **Falsified as the whole cause.** Turning on the per-node OBBT gate alone
    turns both timeouts into certified solves, but it leaves a 3–9× node gap, and
-   deprioritising the tanh outputs slightly hurts. The rest of the gap is being
-   localised by knocking out the other array-skipping sites (root FBBT, root
-   cutoff-FBBT, per-node linear-row FBBT) in the scalar build.
+   deprioritising the tanh outputs slightly hurts.
+
+   *Localisation, continued.* Knocking out root FBBT, root cutoff-FBBT and the
+   per-node linear-row FBBT one at a time in the scalar build changes nothing
+   (node counts identical on 2; 8 and 2; 16). Variable order changes nothing
+   (interleaved vs block scalar build: 19/19, 117/117). With detection emptied,
+   the array build and the scalar build are **identical** (105 and 2,953 nodes,
+   identical bounds), and the root bound of array-affine and per-element-affine
+   rows is bit-identical on 12 random sub-boxes. So the relaxation, FBBT and
+   OBBT treat both forms the same; the **whole** difference is which variables
+   the detector marks.
+
+   On the scalar build the detector marks both the tanh outputs `z_j` *and* the
+   pre-activations `zh_j`. Marking exactly that set on the array build gives the
+   scalar build's node counts exactly (19 / 117 / 165 on 2; 8, 2; 16 s0, 2; 16
+   s1). Marking only the tanh outputs gives 51 / 997 / 1521. (The earlier "B"
+   column above marked only the outputs, which is why deprioritising looked
+   harmful.)
+
+   **But `zh_j` is marked by accident.** The detector is meant to mark only
+   variables pinned by a *nonlinear* equality; affine ones are left to presolve
+   by design. The row `zh_j − (w·x + b) == 0` is affine, yet
+   `_body_is_nonlinear` returns True because it has no `IndexExpression` case
+   (`x[0]` is an indexed reference to the array input) and treats an
+   unrecognised node as nonlinear. The same row over scalar inputs would be
+   classed affine and `zh_j` left unmarked. So there are two defects, and they
+   interact:
+
+   * **D1** — `find_functionally_dependent_names` / `dependent_columns_for_model`
+     skip every variable with `size != 1`. Any model with array intermediates
+     gets no per-node OBBT and no deprioritisation.
+   * **D2** — `_body_is_nonlinear` misclassifies affine rows that reference an
+     indexed variable, so whether a variable is deprioritised depends on whether
+     its neighbours are scalars or array elements.
+
+   The measurement also says the design rule behind D2's gate ("affine-pinned
+   outputs are presolve's job") does not hold here. Presolve keeps `zh_j`
+   (bounded, used in a nonlinear row), and deprioritising it is worth 3–9× in
+   nodes. A correct fix therefore needs a rule for *which side* of an affine
+   defining equality is the output (in `zh = Wx + b` either side can be solved
+   for, and marking the inputs too would deprioritise everything). That rule
+   changes branch order on every model, not only on arrays, so it needs the
+   corpus panel.
 2. **`nonlinear_to_pwl` finds 0 terms and reports 0 skipped on array-valued
    constraints** (`full_space`'s one-constraint-per-layer form). It is a silent
    no-op; it must replace those terms or list them as skipped.
