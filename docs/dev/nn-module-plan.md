@@ -541,6 +541,21 @@ test RMSE of 0.226; `outer` never found a better incumbent than −2.43.
    for, and marking the inputs too would deprioritise everything). That rule
    changes branch order on every model, not only on arrays, so it needs the
    corpus panel.
+
+   *Fixed 2026-11-22: `DISCOPT_DEFINED_VARS`, graduated default ON.*
+   `dependent_vars.find_defined_variables` keys array elements as
+   `(name, flat, size)` (D1), treats indexed references as affine leaves (D2),
+   and gives each affine `==` row one output: the unmarked candidate occurring in
+   strictly fewer scalar constraint rows than every other candidate (greedy
+   minimum degree; a tie marks nothing). `=0` restores the legacy detector. With
+   it, `full_space` and the per-neuron build run identical searches (15 / 79 /
+   107 nodes on 2; 8, 2; 16 s0, 2; 16 s1). Panels, deterministic and
+   interleaved: the in-repo corpus (74 instances, 30 s) is cert-clean with 70
+   instances identical and 3 improved (`haverly` 69 → 35 nodes, `ex8_5_3`
+   143 → 137, `nvs05` bound 4.32 → 5.07), wall 748.6 → 747.1 s; the class panel
+   (12 tanh / sigmoid / softplus `full_space` nets, 120 s) is clean over 54 checks
+   with certified 6 → 11 and wall 948 → 380 s. Full rows in
+   `docs/dev/flag-retirement-audit.md`.
 2. **`nonlinear_to_pwl` finds 0 terms and reports 0 skipped on array-valued
    constraints** (`full_space`'s one-constraint-per-layer form). It is a silent
    no-op; it must replace those terms or list them as skipped.

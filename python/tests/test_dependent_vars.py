@@ -499,3 +499,13 @@ def test_full_space_solves_like_the_per_neuron_build(monkeypatch):
     assert ra.status == rb.status == "optimal"
     assert ra.objective == pytest.approx(rb.objective, abs=1e-6)
     assert ra.node_count == rb.node_count
+
+
+@pytest.mark.unit
+def test_defined_vars_is_the_default_and_zero_opts_out(monkeypatch):
+    from discopt.solver_tuning import SolverTuning
+
+    monkeypatch.delenv("DISCOPT_DEFINED_VARS", raising=False)
+    assert SolverTuning().defined_vars is True
+    monkeypatch.setenv("DISCOPT_DEFINED_VARS", "0")
+    assert SolverTuning().defined_vars is False

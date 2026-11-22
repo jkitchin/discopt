@@ -17921,7 +17921,7 @@ def solve_model(
     # Its own ``_SCAN_WORK_BUDGET`` bounds ONE call deterministically; the
     # deadline decides whether the block can still afford the call at all
     # (#1456). Measured 5.25 s on ``densitymod`` with that budget in force.
-    # ``DISCOPT_DEFINED_VARS`` (default OFF) swaps in the per-element detector
+    # ``DISCOPT_DEFINED_VARS`` (default ON, ``=0`` = legacy) uses the per-element detector
     # with the affine-output rule; its keys map through the same
     # ``dependent_columns_for_model`` below (``SolverTuning.defined_vars``).
     if _presolve_deadline.afford("find_functionally_dependent_names"):
