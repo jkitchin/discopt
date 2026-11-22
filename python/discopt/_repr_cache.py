@@ -43,7 +43,7 @@ from typing import Any
 
 import numpy as np
 
-from discopt._evaluator_cache import _value_bytes
+from discopt._evaluator_cache import _value_bytes, id_column
 from discopt.modeling.core import Constraint, Model
 
 __all__ = ["readonly_model_repr"]
@@ -76,8 +76,11 @@ def _state_key(model: Model) -> tuple[tuple, tuple] | None:
         bounds = ((lb + 0.0).tobytes(), (ub + 0.0).tobytes())
     else:
         bounds = (b"", b"")
+    bodies = tuple(c.body for c in constraints)
+    # The id columns are packed bytes (`id_column`, #2293); `pins` keeps every
+    # object they name alive, exactly as it did when they were tuples of ints.
     key = (
-        tuple(map(id, variables)),
+        id_column(variables),
         tuple(v.name for v in variables),
         tuple(v.var_type for v in variables),
         tuple(v.shape for v in variables),
@@ -85,8 +88,8 @@ def _state_key(model: Model) -> tuple[tuple, tuple] | None:
         tuple(getattr(v, "_builder_idx", None) for v in variables),
         bounds,
         tuple((id(p), _value_bytes(p.value)) for p in parameters),
-        tuple(map(id, constraints)),
-        tuple(id(c.body) for c in constraints),
+        id_column(constraints),
+        id_column(bodies),
         tuple(c.sense for c in constraints),
         # A scalar rhs compares by value (``-0.0 == 0.0``; a NaN only ever
         # misses); an array rhs by its bytes, so tuple equality never meets an
@@ -103,7 +106,7 @@ def _state_key(model: Model) -> tuple[tuple, tuple] | None:
         variables,
         parameters,
         constraints,
-        tuple(c.body for c in constraints),
+        bodies,
         objective,
         None if objective is None else objective.expression,
     )

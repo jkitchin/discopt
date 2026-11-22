@@ -334,8 +334,12 @@ class TapeNLPEvaluator:
         self._n_constraints = len(cons)
 
         lb, ub = self.variable_bounds
-        self._lo = [float(v) for v in lb]
-        self._hi = [float(v) for v in ub]
+        # float64 arrays, not lists of Python floats: `build_nl_problem`
+        # takes either and reads the same values, and a list costs an 8-byte slot
+        # plus a 24-byte float object per variable, twice over (#2293 measured
+        # 65 B/variable for the pair, plus another 16 B for the `_tape_*` copies).
+        self._lo = np.array(lb, dtype=np.float64)
+        self._hi = np.array(ub, dtype=np.float64)
         # Optional: released (set to None) once the shared problem is built, #2283.
         self._obj_expr: Optional[Any] = obj
         self._con_exprs: Optional[list[Any]] = cons
@@ -343,8 +347,11 @@ class TapeNLPEvaluator:
         # are never variables of the NLP, so their tape bounds are free.
         n_hole_vars = sum(h.n_out for h in self._holes)
         self._n_tape = self._n_variables + n_hole_vars
-        self._tape_lo = self._lo + [-np.inf] * n_hole_vars
-        self._tape_hi = self._hi + [np.inf] * n_hole_vars
+        if n_hole_vars:
+            self._tape_lo = np.concatenate([self._lo, np.full(n_hole_vars, -np.inf)])
+            self._tape_hi = np.concatenate([self._hi, np.full(n_hole_vars, np.inf)])
+        else:
+            self._tape_lo, self._tape_hi = self._lo, self._hi
         self._hole_args = [node for h in self._holes for node in h.arg_nodes.reshape(-1)]
         self._hole_dense = self._n_tape <= _HOLE_DENSE_MAX
         self._chain_local = threading.local()
@@ -352,9 +359,17 @@ class TapeNLPEvaluator:
         self._shared_problem = self._new_problem() if _nlproblem_is_thread_safe() else None
         if self._shared_problem is not None:
             # #2283: the shared NlProblem is the only consumer of these roots, and
-            # it has its own tapes -- POUNCE does not keep the NlExpr DAG alive.
-            # Holding them pinned that whole DAG for the evaluator's lifetime:
-            # measured 66 MiB of live heap (~2.3 KiB/row) on a 28,672-row
+            # it has its own tapes -- POUNCE does not keep the NlExpr DAG alive
+            # (re-checked in #2293 on pounce 0.18.0: a pounce-only build of 200k
+            # rows frees the whole DAG once the roots are dropped).
+            #
+            # RSS after the release can still sit ~0.5 KiB/row above the problem's
+            # own size on glibc. That is fragmentation, not retention: the DAG's
+            # freed chunks are interleaved with the problem's live ones, so
+            # `malloc_trim` cannot return those pages, but a second DAG of the same
+            # size reuses them (it grew RSS by 0.50 KiB/row against 1.01 for the
+            # first, 229,376 linear rows). Holding the roots would add the whole
+            # DAG on top: #2283 measured 66 MiB (~2.3 KiB/row) on a 28,672-row
             # method-of-lines model, freed by this release. The per-thread
             # fallback below still needs them, because it builds one problem per
             # thread on first use, so they are kept on that path. A rebuild

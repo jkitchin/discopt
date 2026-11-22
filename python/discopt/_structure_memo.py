@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, TypeVar, cast
 
-from discopt._evaluator_cache import _value_bytes
+from discopt._evaluator_cache import _value_bytes, id_column
 from discopt.modeling.core import Constraint, Model
 
 _T = TypeVar("_T")
@@ -53,12 +53,14 @@ def _state_key(model: Model) -> tuple[tuple, tuple] | None:
     builder = getattr(model, "_builder", None)
     lin_obj = getattr(model, "_builder_linear_objective", None)
     quad_obj = getattr(model, "_builder_quadratic_objective", None)
+    bodies = tuple(c.body for c in constraints)
     key = (
-        tuple(map(id, variables)),
+        # Packed id columns (#2293); every object they name is pinned below.
+        id_column(variables),
         tuple(v.var_type for v in variables),
         tuple((id(p), _value_bytes(p.value)) for p in parameters),
-        tuple(map(id, constraints)),
-        tuple(id(c.body) for c in constraints),
+        id_column(constraints),
+        id_column(bodies),
         id(objective),
         id(expr),
         None if objective is None else getattr(objective, "_is_placeholder", None),
@@ -67,7 +69,10 @@ def _state_key(model: Model) -> tuple[tuple, tuple] | None:
         id(lin_obj),
         id(quad_obj),
     )
-    pins = (variables, parameters, constraints, objective, expr, builder, lin_obj, quad_obj)
+    # `bodies` is pinned too. The key holds their ids, and a body can be replaced
+    # in place (the #2090 like-term pass does it), which would free the old body
+    # and let a new expression reuse its id while this entry lives (#1329).
+    pins = (variables, parameters, constraints, bodies, objective, expr, builder, lin_obj, quad_obj)
     return key, pins
 
 
