@@ -54,8 +54,11 @@ class HandleResult:
 
 
 class MilpHandle:
-    """``min cᵀx + obj_const`` s.t. ``row_lo <= A x <= row_hi``, ``col_lb <= x <=
-    col_ub``, ``x_j`` integer where ``is_int[j]`` -- held in Rust, edited in place."""
+    """A MILP held in Rust and edited in place.
+
+    ``min cᵀx + obj_const`` s.t. ``row_lo <= A x <= row_hi``,
+    ``col_lb <= x <= col_ub``, ``x_j`` integer where ``is_int[j]``.
+    """
 
     def __init__(
         self,

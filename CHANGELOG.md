@@ -8,10 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The release procedure that produces these entries is documented in
 [`RELEASE.md`](RELEASE.md).
 
-## [Unreleased]
+## [0.13.0] - 2026-11-22
 
 ### Added
 
+- **`stop_reason` for native MILP and IIS results (#2251, #2261).**
+  - `milp_last_solve_stats()["stop_reason"]` names why the Rust MILP engine stopped:
+    - node or open-node cap: `node_limit`;
+    - time or stall: `time_limit`;
+    - work budget: `iteration_limit`.
+  - `MilpHandle.solve` now records stats, and `HandleResult.stop_reason` carries the
+    same value for IIS probes.
 - **Element-level decomposition structure** (`discopt.decomposition.graph.element`).
   The advisor's structure graph treated each array variable as one vertex, so
   scenarios sharing an array read as one block. `ElementGraph` has one vertex per
@@ -40,7 +47,7 @@ The release procedure that produces these entries is documented in
   `.nl` and using `from_nl` (one scalar variable per column), large files skip
   per-column Python passes. On MIPLIB `tbfp-network` (72,747 columns, 20 s budget),
   the Rust engine got 20.9 s instead of 19.8 s, and the wall was 21.8 s instead of
-  26.3 s.
+  26.3 s. (#2220)
 
 - **`discopt mcp`: a Model Context Protocol server.** Install with
   `pip install 'discopt[mcp]'`, then register it with Claude Desktop (or any MCP
@@ -48,10 +55,84 @@ The release procedure that produces these entries is documented in
   `solve_python`, `solve_file` (`.nl`, `.gms`, `.dopt`/`.json[.gz]`, `.py`),
   `model_summary`, `convert_model` and `discopt_info`. Every request runs in a
   subprocess worker, so solver output cannot corrupt the stdio JSON-RPC stream and
-  an overrunning solve is killed. See `docs/mcp.md`.
+  an overrunning solve is killed. See `docs/mcp.md`. (#2215)
 
 ### Changed
 
+- **Batched (parallel) search for the #2069 independent MILP confirmation (#2247,
+  closes #2235).**
+  - The confirmation solve now runs on the batched search via a new
+    `batched_search` option (`solve_milp_csc_py(batched_search=)`,
+    `milp_simplex.solve_milp(batched_search=)`).
+  - The 21 confirmation masters: 20.2 s to 2.3 s.
+  - The #2059 test solve: 250/257 s to 74/76 s.
+  - The `portfol_classical050_1` master: 211.7 s to 36.7 s.
+- **Rust MILP: score the search for an incumbent before one exists (#2229, closes
+  #2224).**
+  - `DISCOPT_MILP_PREINC_SCORE` is default ON (`=0` opt-out). Before the first
+    incumbent, the top-level search weights the cutoff-rate and inference terms at 1
+    instead of 1e-4.
+  - Widened screen: 7 gains, 0 losses.
+  - §5 panel: certified 150 to 153 (`enlight_hard`); `10teams` 842 to 148 nodes.
+- **Rust MILP pseudocosts no longer record the 1e30 infeasibility sentinel as a bound
+  gain (#2219).**
+  - An infeasible child now counts as a cutoff observation, as in HiGHS `getScore`
+    (weight 1e-4).
+  - 4,381 of 105,035 pseudocost updates were polluted, across 27 of 58 instances.
+  - Nodes 18,197 to 17,953 on 35 rows.
+  - Known cost: `enlight8` and `blend2` lost their incumbents under a node budget;
+    #2229 addresses that.
+- **Rust MILP root clique separator, and a path-separator spin fix (#2230,
+  contributes to #2225).**
+  - `DISCOPT_HIGHS_SEPA_CLIQUE` is default ON (`=0` opt-out).
+  - The ported path separator could spin. It now has a progress guard
+    (`HighsSepaPathSubstCap`): `neos-3135947-otra` ran past 140 s against a 20 s
+    budget and now stops at 20.5 s.
+  - §5 panel: certified 147 = 147; nodes 18,168 to 18,061.
+  - MIPcc27 smallset: `hole9` 10,185 to 115 nodes; `hole10` went from undecided to
+    117 nodes.
+- **Rust MILP: gray-zone node LPs are decided by a sided tolerance box (#2261,
+  contributes to #2225).**
+  - `DISCOPT_MILP_TOL_ROBUST_SIDED` is default ON (`=0` opt-out).
+  - Before it, 67 of 371 `bell3ainf` IIS probes came back `node_limit` with
+    `stop_reason="none"`.
+  - The exact Farkas check is cheaper. On one probe: rounds 1100 to 190, exact time
+    2551 to 885 ms, probe 3.5 to 1.7 s.
+  - §5 panel: certified 147 = 147.
+  - IIS sizes (HiGHS in parentheses):
+    - `bell3ainf` 174 to 124 (130);
+    - `bell3binf` 148 incomplete to 121 complete (121).
+- **LP: warm dual clean-up of a refused cold primal solve, graduated (#2256, closes
+  #2236).**
+  - `DISCOPT_LP_PRIMAL_DUAL_CLEANUP` is default ON (`=0` opt-out). When a cold primal
+    solve ends `Numerical` and is refused by the bounds check, a warm dual clean-up
+    runs. Its result is accepted only with a certified value (weak duality or the
+    projected Neumaier-Shcherbina bound).
+  - The #671 row-filter trigger now also fires on an optimal LP with a loose safe
+    bound.
+  - It fired on 3,393 refusals across 20 of 74 instances. The #2236 fixture is now
+    decided at -0.06756047745692018 (HiGHS: -0.06756047745692995).
+  - Panel: 806 checks, 0 violations; certified 59 to 59; nodes 5,894 to 5,910; wall
+    2,135 to 2,150 s.
+- **Convex-MINLP route: OA master cut-noise relaxation and lazy restarts (#2228,
+  closes #2223).**
+  - New flags:
+    - `DISCOPT_OA_MASTER_RELAX_CUT_NOISE`, default ON;
+    - `DISCOPT_MILP_LAZY_RESTARTS=<K>`, default 3.
+    - Both have `=0` opt-outs.
+  - Route population: certified 90 to 92; wall 391.6 to 268.2 s.
+  - syn/rsyn: certified 30 to 30; wall 637.5 to 621.7 s. For comparison, the HiGHS
+    master: 29 certified, 709.9 s.
+  - `clay0303hfsg` 35.2 to 3.9 s; `cvxnonsep_psig40r` 35.3 to 1.8 s.
+  - The false-`infeasible` fix in the same PR is under Fixed.
+- **Rust MILP: deep dives no longer overrun the search deadline (#2267, contributes to
+  #2225).**
+  - `openNodesToQueue` was O(depth x stack) on a deep dive. A `chain_branched` flag
+    removes the rescan. Bound-neutral.
+  - `enlight4` IIS probe:
+    - 3 s limit: 21 s to 3.3 s;
+    - 5 s limit: over 60 s to 5.6 s;
+    - 30 s limit: never returned (over 150 s) to 27.6 s.
 - **`analyze_decomposition` and the decomposition drivers validate the model
   first**, as `Model.solve` does (`Model.validate` canonicalizes the bodies in
   place). Without it a shared sum (`r = r + r` repeated) was expanded as a tree:
@@ -65,9 +146,38 @@ The release procedure that produces these entries is documented in
   the disjunction**; otherwise mbigm / big-M. A body like `(A @ X)[0] + y` made
   `auto` choose hull, which then refused it.
 
-- **`pounce-solver` floor raised to 0.17** (`>=0.17`, core dependency and the `pounce`
-  alias extra). discopt's pounce-facing tests pass on 0.17.0 (432); see the PR for the
-  full-suite run.
+- **`pounce-solver` floor raised to 0.18** (`>=0.18`, core dependency and the `pounce`
+  alias extra). 0.18.0 carries jkitchin/pounce#1232 and #1236, the pounce half of
+  #2283 (memory retained by a large tape problem). discopt's pounce-facing tests pass
+  on 0.18.0 (582).
+
+- **A convex node keeps its proved bound; the published bound is re-capped at the
+  exact objective (#2274).** `DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND`, graduated
+  default-ON (`=0` opt-out). A convex node whose proved bound is above its NLP
+  objective imports the proved bound, and after the objective is re-valued exactly the
+  bound becomes `max(bound, min(proved, objective))`. Fixes a certificate lost on CI
+  when the NLP objective was 1.5e-6 below the exact value at an optimum of 0. The tree
+  now also reports `proved_lower_bound` and `bound_contradicted` in `stats()`.
+
+- **An integral convex node is valued at its box-clipped point (#2276).**
+  `DISCOPT_CONVEX_NODE_CLIP_POINT_VALUE`, graduated default-ON (`=0` opt-out). The
+  interior-point node solver can return a point ~1e-8 outside a node's box; on a steep
+  objective that understated the incumbent value (2.2e-3 low on `nvs15`). Such a node now
+  records the point clipped into its box, provided it passes the same constraint gate.
+  No bound changes. Extended to NLP-BB batches imported without a proved bound, i.e.
+  nonconvex models (#2280).
+
+- **Deterministic NLP-BB root cuts stop on a round budget (#2277).** Under
+  `deterministic=True` the root-cut stage's wall budget is inert, so on `nvs07`/`nvs15`
+  it ran until the deadline and the #844 LP-spatial fallback answered. It now stops at 20
+  rounds; other modes are unchanged. The #844 fallback is named in `algorithm_route`.
+
+- **Chained integer index `x[k][s]` resolves to one tape slot (#2284, contributes to
+  #2283).** Both the Python tape walk and the Rust `tape_program` now lower a chain of
+  integer index parts ending at a variable to the same slot as `x[k, s]`, instead of
+  materializing the whole variable per row (O(1), not O(n_variables)). A 1,200-row
+  stepped model builds in 0.11 s instead of 0.24 s. `TapeNLPEvaluator` also releases its
+  expression roots once the shared problem is built.
 
 - **highspy 1.16.0 is supported again** (`highspy>=1.11,!=1.12.0`; #2221). 1.16 swallows
   an exception raised in a HiGHS callback and ends the run in `kSolveError`; every
@@ -75,7 +185,7 @@ The release procedure that produces these entries is documented in
   re-raises it, so a broken separator or stop rule still crashes the solve on every
   release. An LP that 1.16 labels `kUnknown` with feasible primal and dual solutions is
   handed to the usual re-verification instead of failing. CI tests 1.11.0, 1.15.1 and
-  the latest release.
+  the latest release. (#2242)
 
 - **The LP-file reader (`from_lp`, `discopt._lpfile.read_lp`) now follows HiGHS
   1.16.0's rewritten reader** (it was a port of 1.15.1's), so some files now read as a
@@ -86,20 +196,55 @@ The release procedure that produces these entries is documented in
   is now accepted with Hessian entry 4, **twice** the `[ 2 x^2 ] / 2` reading (2). A
   file that repeats no cost and writes `/ 2` is unaffected by the first and last change.
 
-- **HiGHS is an optional extra (`pip install 'discopt[highs]'`).** Without `highspy`
-  every default path runs on discopt's in-house Rust engine: pure LPs and pure MILPs
-  (the Rust simplex and MILP engine, whether or not HiGHS is installed), IIS
-  (`iis_engine="rust"`), root cuts, the decomposition and OA masters. Explicit HiGHS
-  opt-ins raise `MissingHighsError` naming the extra.
-- **HiGHS for pure LP/MILP performance.** With `discopt[highs]` installed,
-  `Model.solve(milp_backend="highs")` (or `DISCOPT_LP_MILP_BACKEND=highs`) solves a
-  pure LP or MILP with HiGHS, its certificate still verified by discopt. On the
-  120-instance MIPLIB benchmark at 20 s, HiGHS certifies 26 instances to the Rust
-  engine's 15, so MILP-heavy users who want speed should opt in. MINLPs are unaffected:
-  their node LPs always use the in-house simplex.
-- **`highs_options=` on a pure LP is dropped with a `UserWarning`**, because pure LPs
-  now solve on the Rust simplex by default. Set `DISCOPT_LP_BACKEND=highs` to keep the
-  HiGHS route for LPs.
+- **One engine switch, `DISCOPT_LP_ENGINE=auto|highs|rust`, and HiGHS is again the
+  default for pure LP, pure MILP and IIS (#2233).**
+  - `auto` (the default) uses HiGHS when `highspy` imports. If the HiGHS route returns
+    `error`, discopt re-solves on the in-house Rust engine. The error cases are a model
+    HiGHS refuses (coefficients or bounds near 1e15 at `passModel`) or an answer that
+    fails discopt's verification. One case: on `1e-13*y >= 5` HiGHS returned
+    `kOptimal` with the row violated by 5.
+  - A fallback is recorded as `[engine fallback: ...]` in `algorithm_route` and as
+    `solver_stats["lp/engine_fallback"]`. It is taken only from `error`, never from a
+    certified status.
+  - Without `highspy`, `auto` is the Rust engine. `highs` and `rust` pin one engine
+    with no fallback.
+  - The per-seam variables (`DISCOPT_LP_BACKEND`, `DISCOPT_LP_MILP_BACKEND`,
+    `DISCOPT_IIS_ENGINE`) and the `milp_backend=` keyword still win, also with no
+    fallback.
+  - Decomposition masters and the per-node MINLP LP stay on the Rust simplex.
+  - Evidence: 624 interleaved solves, 0 incorrect.
+    - MIPLIB-38: certified 111/114 (HiGHS) vs 90/114 (Rust); total wall 325 vs 727 s.
+    - IIS fixtures: 53/53 identical.
+    - Rust was faster only on the small-MILP panel (geo-mean wall ratio 0.76).
+  - This reverses the Rust defaults from earlier in this cycle: #2196 and highs-parity
+    D1 (LP) and P6.4 (IIS).
+- **`highspy` is a core dependency again.**
+  - `pip install 'discopt[highs]'` is kept as a no-op alias.
+  - An install without `highspy` (Pyodide, `--no-deps`) still works: every default
+    path runs on the Rust engine.
+  - Explicit HiGHS opt-ins raise `MissingHighsError` naming the extra. These are
+    `milp_backend="highs"`, `highs_options=`, `DISCOPT_LP_ENGINE=highs` and a per-seam
+    variable set to `highs`.
+- **`highs_options=` applies to any pure LP or MILP solved on the HiGHS route, which
+  is the default route under `auto`.**
+  - Options are a request for HiGHS. A HiGHS `error` under them is reported, not
+    re-solved on Rust.
+  - Without `highspy` they are refused.
+  - A `UserWarning` ("highs_options was not used") remains for a solve that took no
+    HiGHS route, e.g. a MINLP, `DISCOPT_LP_ENGINE=rust` or `milp_backend="native"`.
+- **The convex-MINLP route's OA master (#1059) is not governed by
+  `DISCOPT_LP_ENGINE`; it stays on the in-house lazy master (#2241).**
+  - syn/rsyn panel (47 instances, 30 s):
+    - in-house: 31 certified, 537 s;
+    - HiGHS master with SCIP: 32 certified, 624 s;
+    - HiGHS master without SCIP: 30 certified, 640 s.
+  - Small masters run 2-4x slower on HiGHS.
+  - `DISCOPT_CONVEX_ROUTE_OA_MASTER=highs` is the documented opt-in. It never falls
+    back and raises `MissingHighsError` without `highspy`. With it,
+    `portfol_classical050_1` certifies in 38.2 s; the in-house master does not certify
+    in 203.5 s.
+  - `auto` or an unknown value raises `ValueError`. A blank value now means unset; it
+    used to raise.
 - **`milp_backend="native"` runs the Rust MILP engine**, which now honours `strategy`,
   `branching_rule`, `milp_cuts`, `node_callback` and `lagrangian_bound`.
 - **`milp_solver="pounce"` (AMP, OA, GDP, `milp_relaxation`) is a deprecated alias** for
@@ -107,10 +252,17 @@ The release procedure that produces these entries is documented in
 - **New defaults on the Rust MILP engine:** big-M coefficient tightening before the
   search (`DISCOPT_MILP_RUST_COEF_ENTRY`), default-box sides passed as "no bound"
   (`DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX`), and no hand-off when the stall slice finds no
-  incumbent. Each graduated on recorded §5 panels; `=0` opts out of the first two.
+  incumbent. Each graduated on recorded §5 panels; `=0` opts out of the first two. (#2220)
 
 ### Removed
 
+- **Four default-OFF Rust flags retired under §5 (#2214, closes #2211).** Each flag
+  and its implementation are deleted:
+  - `DISCOPT_PRIMAL_EXPAND_RESET`;
+  - `DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY`;
+  - `DISCOPT_CVX_NATIVELP` (wall 26.2 vs 19.9 s with it off);
+  - `DISCOPT_LP_FACTORIZATION_HARDENING`.
+  - Setting any of them now has no effect.
 - **The advisor's separator search** (`SeparatorGenerator`,
   `analyze_decomposition(..., separator_search=True)`), briefly opt-in on the
   development branch, retired before release: on two-stage stochastic LPs it
@@ -120,15 +272,22 @@ The release procedure that produces these entries is documented in
   §4.1 records the panels.
 
 - **The Python MILP branch-and-bound tree (`solver._solve_milp_bb`).** Every pure MILP
-  runs on the Rust engine. Where the engine cannot certify, the result says so
-  (`feasible` with no bound, or `unknown` with no point and no bound) instead of
-  handing off. The opt-outs that only reached or skipped that tree are gone:
+  runs on a verified engine (HiGHS under `DISCOPT_LP_ENGINE=auto`, otherwise Rust).
+  Where the engine cannot certify, the result says so (`feasible` with no bound, or
+  `unknown` with no point and no bound) instead of handing off. The opt-outs that only reached or skipped that tree are gone:
   `DISCOPT_MILP_ENGINE`, `DISCOPT_MILP_NO_STALL_TREE=0`, `DISCOPT_IPX_RACE_STALL_EXIT`,
   `DISCOPT_P3_FORCE_CUT_PATH`. A model the classifier calls a MILP but the exact-linearity
   check rejects now raises a "routing defect" `RuntimeError` instead of falling back to
-  that tree. `batch_size` has no effect on a MILP any more (it sized that tree's batches).
+  that tree. `batch_size` has no effect on a MILP any more (it sized that tree's batches). (#2196, #2220)
 
 ### Fixed
+
+- **A contradicted tree certifies nothing on the Python B&B drivers (#2275).** When an
+  integral node's value comes in below its ancestors' bound, the tree flags
+  `bound_contradicted` (#1296). The MILP driver already acted on it; spatial B&B,
+  NLP-BB and MIQP-BB now withdraw the certificate too (`optimal` → `feasible`,
+  `infeasible` → `unknown`, bound dropped, `tree/bound_contradicted` recorded). With an
+  invalid root bound injected, NLP-BB had returned `optimal` with `gap_certified=True`.
 
 - **No certificate on the default integer box (#2281).** An integer variable
   declared without `lb`/`ub` gets the fallback `0` / `1e6`; a result whose point sat
@@ -165,25 +324,25 @@ The release procedure that produces these entries is documented in
   up to that tolerance times the column's range. Measured: a 1e-12 cost on
   `y in [0, 1e9]` gave `optimal` 2.999 against a true 2.999995; a 1e-9 cost difference
   on two unbounded columns fixed the wrong one at 0. Both tolerances are now divided by
-  the column range (exact for an unbounded column).
+  the column range (exact for an unbounded column). (#2220)
 - **`compute_iis` reported infeasible matrix-row models as feasible.** Rows added through
   `add_linear_constraints` -- and, since this release, every row of a linear model read
   by `from_nl` / `from_mps` / `from_lp` -- were invisible to both IIS engines. They are
   now rewritten as expression constraints first, **on the model passed in** (the model
-  is mathematically unchanged; its rows move to `model._constraints`).
+  is mathematically unchanged; its rows move to `model._constraints`). (#2220)
 - **`from_mps` / `from_lp` refuse a row with an impossible side** (lower bound `+inf`,
   upper bound `-inf`, or NaN) instead of dropping it and loading an infeasible model as
-  feasible.
+  feasible. (#2220)
 - **`DISCOPT_LP_DUAL_SPARSE_SOLVES=` (empty) no longer turns the default-ON sparse
   solves off**: an empty value now means unset for every HiGHS-configuration member
-  switch, as for every other flag.
+  switch, as for every other flag. (#2220)
 
 - **`deterministic=True` no longer lets the wall-priced improver governor pick the
   incumbent (#2216).** The #2176 governor (`DISCOPT_HEUR_WALL_COST`) admits RINS /
   local branching / enumeration by comparing measured walls, so load changed which
   improvers ran. `cvxnonsep_nsig30` returned 130.6287126437295 or
   130.62871265397885 from run to run at the same nodes and bound. Under
-  `deterministic` the governor now uses the fixed-cost test (as with `=0`).
+  `deterministic` the governor now uses the fixed-cost test (as with `=0`). (#2217)
 
 - **macOS: cyipopt and torch in one process now raise instead of aborting it
   (#2205).** Each brings its own `libomp` (torch's wheel ships one; cyipopt's Ipopt
@@ -206,7 +365,7 @@ The release procedure that produces these entries is documented in
   with a #2205 reason, a test that would load the second runtime into a worker,
   instead of losing the worker. Not covered: a bare `import torch` / `import
   cyipopt` in the caller's own code, and a runtime loaded with `dlopen` at run
-  time. Linux is unaffected.
+  time. Linux is unaffected. (#2207)
 - **MINLPLib `nous1` no longer stalls on undecided node LPs (#2202).** The 0.12.0
   known issue ("on macOS/arm64 `nous1` no longer certifies with
   `DISCOPT_DUAL_PROOF_PROPAGATION` on") was not a dual-proof defect. A child's node LP
@@ -220,7 +379,159 @@ The release procedure that produces these entries is documented in
   that decides all 40 captured failing LPs, agreeing with HiGHS, and all 24 permuted
   runs certify. `DISCOPT_NODE_LP_SLACK_RETRY=0` restores the previous behaviour.
   `solver_stats` gains `tree/slack_retries`, `tree/slack_retry_decided` and the
-  kernel's `tree/dual_proof_*` counters.
+  kernel's `tree/dual_proof_*` counters. (#2209)
+- **`solve(nlp_bb=True)` certified a wrong optimum on a convex integer QP (#2264,
+  closes #2262).**
+  - On a 2-variable convex integer QP whose optimum is 0, it certified 332.28.
+  - Cause: c-MIR complemented integer columns against fractional bounds, or against
+    invented ones (`generate_root_cuts` passed 0/1e5 placeholders). GMI cuts
+    inherited the error.
+  - Fix:
+    - `separate_cmir` rounds integer bounds inward;
+    - `_cmir_row` complements only against real finite bounds;
+    - the root-cut callers pass the real separation bounds.
+  - Covers NLP-BB root cuts and `lp_spatial_bb`.
+  - On a random convex integer QP generator: wrong answers 15/100 to 0/100;
+    certified 38 to 44.
+- **Duplicate entries in a sparse `add_linear_constraints` matrix produced a false
+  certificate (#2260, closes #2258).**
+  - Each consumer summed the duplicates in binary64, in its own order.
+  - For entries `2**53, 1, -2**53` (exactly `x <= 1`), the solve certified x = 10,
+    while `verify_point` rejected x = 5.
+  - Duplicates are now coalesced once, exactly (`Fraction` sums rounded once). The
+    example returns optimal 1.0.
+- **A fractional bound on an INTEGER variable gave a dual bound above a feasible
+  point (#2255, closes #2252).**
+  - The `Variable.lb`/`.ub` setter now applies one integer-range rule:
+    - a bound within 1e-6 of an integer snaps to it;
+    - otherwise `lb` rounds up and `ub` rounds down.
+  - Before: `x - 1/x` with `lb=1.000001` returned optimal 1.5 with bound
+    1.499999999999, but x = 1 gives 0. Now: 0.0.
+  - An empty integer box (`lb=1.2, ub=1.8`, i.e. [2, 1]) is reported `infeasible`
+    instead of failing `validate()`. `lp_spatial_bb` used to certify `optimal` on such
+    a box.
+  - OA publishes the snapped point.
+- **`verify_point` accepted integer values outside their bounds (#2254, closes
+  #2253).**
+  - It applied the continuous relative bound tolerance to integer columns, so it
+    accepted x = 99990 for `lb=100000` and x = 100020 for `ub=100010`.
+  - The rounded value must now lie in `[ceil(lb - INT_TOL), floor(ub + INT_TOL)]`.
+- **Engines adopted integer points that miss a row by 2e-7 to 3e-5 (#2257,
+  contributes to #2252).**
+  - `verify_point` refused these points, so users saw `error`, or a `feasible`
+    result the verifier rejected, where the model was solvable. On the probe set, 37
+    of 216 models failed on main; now 0. Reproducers R1-R5 now return optimal x = 2.
+  - Fixes:
+    - spatial B&B judges injected candidates at their integral realisation;
+    - the HiGHS MILP verifier re-solves at `mip_feasibility_tolerance=1e-9`;
+    - OA rounds single-integer cuts and rows;
+    - the integer-bilinear lift judges incumbents on the un-lifted model;
+    - `validate()` again raises on boxes the caller crossed.
+  - 74-instance panel: certified 55 = 55.
+- **A row with one free integer column lost its certificate (#2259, contributes to
+  #2252).**
+  - Example: `2x + y >= 2.0000004` with y fixed at 0 returned `feasible` x = 1 (a
+    downgrade; no false certificate) instead of certified optimal x = 2.
+  - Such rows are now rounded to exact integer bounds on the Rust and HiGHS routes.
+    Rows with |q| >= 5e8 are skipped.
+  - New stat `milp/int_row_bounds_rounded`. It fires on 9 of the 38 MIPLIB-38
+    instances with statuses and objectives identical; `fiber` on Rust goes from 58
+    to 23 nodes.
+  - Follow-up (#2269): the rounding's noise allowance scaled with |q|, but the float
+    error in q = (b - rest)/a scales with |b| and |rest|. On a cancelling row
+    (`z + 1.01e-8*w <= 0.5000000101` with z = 0.5) q came out 0.9999999948, and the
+    floor removed the feasible w = 1. A box-MCP GDP reformulation then returned
+    `infeasible`, a false certificate. The allowance is now
+    `1e-9*max(1, |q|, (|b| + sum|a_k x_k|)/|a|)` in both the sparse and OA forms.
+- **The route/fallback merge certified a bound nobody claimed valid (#2272, closes
+  #2271).**
+  - `_merge_route_and_fallback` kept the tighter dual bound from either side
+    without checking the loser's `bound_valid`, so an unclaimed bound could replace
+    a proved one under a live certificate: `tloss` and `cvxnonsep_nsig30r` (0.12.0)
+    returned `gap_certified=True` with `bound_valid=False`.
+  - A loser's bound is now adopted only when it is claimed valid, or when the
+    winner's own bound is unclaimed too; the #1913 certificate hand-over also
+    requires a claimed bound.
+- **Point-feasibility checks accepted overflowing or NaN rows (#2248, closes #2245;
+  #2246, closes #2244).**
+  - `_matrix_solution_feasible` accepted points whose row activity overflows f64, e.g.
+    `2**900*x <= 1` at x = `finfo.max` (violation about 1e600). It also accepted rows
+    where nan or -inf cancelled. It now decides these exactly in `Fraction`.
+  - `_check_constraint_feasibility` accepted a NaN activity, or +-inf against an
+    infinite row bound, when no gradient was available. These are now rejected.
+- **The native MILP engine called a feasible model `infeasible`, with
+  `gap_certified=True` (#2227).**
+  - The ported HiGHS path separator substituted `min(lb, ub)` for narrow columns
+    regardless of coefficient sign. This produced invalid cuts on the #2156 ReLU
+    model.
+  - It now substitutes `lb` for a positive coefficient and `ub` for a negative one.
+  - Invalid cuts 7 to 0 of 701; certified 47 = 47.
+- **A lazy-constraint hook stop before any incumbent could report `infeasible` (#2228,
+  closes #2223).** Before the fix, 12 of 48 such stops were false `infeasible`; after,
+  0.
+- **Rust FBBT and the AMP piecewise relaxation cut off feasible points (#2213).**
+  - The sin/cos backward rule used an absolute 1e-12 slack. For
+    `sin(TH0 + 1e-12 n) >= 0.5` this gave optimal -1 (truth -2), or a false
+    `infeasible`. It now uses a rounding-error margin.
+  - AMP piecewise 1-d secant rows cut feasible points: 2,307 misses, and the
+    relaxation cut the optimum 0.02 by 2.8e-8. They are now guarded by
+    `envelope_1d_slack`.
+- **Nine soundness fixes in convexity detection, FBBT, interval arithmetic and the
+  exporters (#2210).**
+  - The Gershgorin slack certified `sqrt(exp(x))` concave, which gave 14.784
+    instead of 9.2556.
+  - Log FBBT declared the feasible `log(x) <= -709` infeasible.
+  - An atanh cancellation certified -15.312667 instead of -15.313221.
+  - `x**1e19` crashed or segfaulted.
+  - `Interval.__pow__` hung.
+  - `x**k >= 3` with x in [-2, -1] was declared infeasible.
+  - `max x + 0.5*abs(x)` certified 0 instead of 0.075. The sign envelope rows were
+    also corrected, and the per-atom ulp budgets were revised.
+  - The exporters treated |b| >= 1e18 (or 1e19) as no bound, so `x <= 1e18` became
+    unbounded after a `.nl` round trip. They now use `constants.bound_is_open`
+    (9.999e19).
+- **The native spatial tree reported `infeasible` for a feasible problem (#2218,
+  contributes to #2212).**
+  - When it closed width-exhausted regions (an `x**6` example), it reported
+    `Infeasible`. It now reports `Exhausted`.
+  - `solve_lp_warm_csc_py` panicked in `PreparedDual::prepare` on an inconsistent
+    start basis. The basis is now refused.
+- **Rust MILP cut separators: integer overflow (#2234, closes #2232).**
+  - `fast_floor` panicked under overflow checks, and returned a sign-flipped floor in
+    release builds, for x <= -2^63.
+  - The lifted knapsack-cover and mixed-integer-cover casts could overflow and emit
+    invalid cuts. They are now refused (`exact_i64`).
+  - Lifting has a new work budget, `MAX_LIFT_WORK` = 2^24.
+  - Bound-neutral on 38 MILP fixtures.
+- **A free-column bound check lost a certificate on the default route (#2238, closes
+  #2226).**
+  - #2196 had moved `_verified_free_column_bound` to Rust, and `ex8_5_3` became
+    `feasible` with bound -0.5665. It again tries HiGHS first under `auto` and
+    certifies at -0.0041359.
+  - Panel: certified 56 vs 55, 0 incorrect.
+- **The no-incumbent native-MILP exit reported `time_limit` on a node-cap stop (#2251,
+  closes #2239).** It now reports `node_limit`, `time_limit` or `iteration_limit` from
+  the engine's actual stop reason.
+- **`compute_iis(include_integrality=True, portfolio=True)` raised `TypeError: 'bool'
+  object is not iterable` (#2208, closes #2206).**
+  - `portfolio=True` now means the default portfolio and `False` means none.
+  - A bare string raises a `TypeError` with a hint.
+- **Mixing a scipy sparse matrix with an expression gave an opaque error (#2263).**
+  - `A @ x` raises `AttributeError`, pointing to
+    `Model.add_linear_constraints(A, x, sense, b)` or `A.toarray() @ x`.
+  - `x @ A` and `x + A` raise `TypeError`. Previously these raised "ValueError:
+    setting an array element with a sequence".
+- **Rust MILP engine fixes from the Python-tree retirement (#2220).**
+  - An unbounded LP relaxation was reported as a certified unbounded MILP.
+  - A seeded unbounded MILP was reported `Optimal`.
+  - `time_limit` is honoured.
+  - A `dominated_pairs` near-miss produced a false certificate: -1.5 where the
+    optimum is -2.49999999.
+  - The lazy master's gap test is absolute below unit scale.
+    `DISCOPT_OA_MASTER_GAP_SCALED=0` restores the old test.
+  - Sub-MIPs run on a deterministic work budget, `DISCOPT_MILP_SUBMIP_WORK` (default
+    2.5e9). `=0` restores the wall-clock share.
+  - A fractionality clamp took `portfol_roundlot` from 60 s uncertified to 8.6 s.
 
 ## [0.12.0] - 2026-11-07
 
@@ -6871,6 +7182,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
+[0.13.0]: https://github.com/jkitchin/discopt/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/jkitchin/discopt/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/jkitchin/discopt/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/jkitchin/discopt/compare/v0.10.0...v0.11.0

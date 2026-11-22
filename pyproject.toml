@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "discopt"
-version = "0.12.1.dev0"
+version = "0.13.0"
 description = "MINLP solver with a Rust core: spatial branch and bound over convex relaxations"
 requires-python = ">=3.12"
 authors = [{name = "John Kitchin"}]
@@ -33,7 +33,7 @@ dependencies = [
     # JAX is NOT here: it is the `jax` extra below (issue #1873).
     "numpy>=1.24",
     "scipy>=1.10",
-    "pounce-solver>=0.17",
+    "pounce-solver>=0.18",
     # HiGHS is the default LP/MILP/IIS engine again (DISCOPT_LP_ENGINE=auto, 2026-11-17),
     # so it is a core dependency; see the `highs` extra below for the version pins.
     # Pyodide installs discopt with deps=false and runs the Rust engine (no wheel).
@@ -59,7 +59,7 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 jax = ["jax>=0.4", "jaxlib>=0.4"]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
-pounce = ["pounce-solver>=0.17"]
+pounce = ["pounce-solver>=0.18"]
 # macOS: cyipopt's Ipopt and torch each bring a libomp; one process cannot load
 # both (OMP Error #15 abort). discopt raises OpenMPRuntimeConflictError first (#2205).
 ipopt = ["cyipopt>=1.4"]

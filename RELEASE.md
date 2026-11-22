@@ -10,10 +10,10 @@ For each release, fill in:
 - `vX.Y.Z` -- the target version
 - `vA.B.C` -- the previous released version
 
-The next planned release is **`v0.12.0`** (minor bump on top of `v0.11.1`: new
-public API -- `relu_complementarity`, `solve_mpec_multistart`,
-`solve_mpec(method="native")`, `SolveResult.multistart`, the GAMS `discopt.opt`
-option file -- and a changed default, the open-frontier memory budget, #2092).
+The next planned release is **`v0.13.0`** (minor bump on top of `v0.12.0`: new
+public API -- `discopt.modeling.from_mps` / `from_lp` and the `discopt mcp` server --
+and a changed default, HiGHS as the pure LP/MILP/IIS engine under
+`DISCOPT_LP_ENGINE=auto` with `highspy` a core dependency again, #2233).
 
 ---
 
@@ -205,6 +205,11 @@ directly; always re-export from org.
   (substitute the previous version `A.B.C`).
 - [ ] Rebuild the Rust extension locally (`make build` or `cd crates/discopt-python && maturin develop`) and re-run `pytest python/tests/ -m "not slow"` to confirm the bump didn't break imports.
 - [ ] `python -c "import discopt; print(discopt.__version__)"` prints the new version.
+- [ ] Restage the browser wheel at the new version: `crates/discopt-wasm/build-wheel.sh`,
+      then `crates/discopt-wasm/build-wheel.sh --check`. It replaces
+      `crates/discopt-wasm/web/wheels/discopt-A.B.C-*.whl` and rewrites
+      `discopt-wheel.json`; commit the rename. (v0.12.0 did this in the release commit;
+      the step was missing from this list.)
 
 ## 9. Review and merge
 
