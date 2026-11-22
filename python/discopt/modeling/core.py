@@ -1775,6 +1775,13 @@ class Variable(Expression):
 
     # __array_ufunc__ = None is inherited from Expression.
 
+    # #2281: the sides of an INTEGER variable that ``Model.integer`` filled with
+    # the finite fallback (``0`` / ``1e6``) because the caller wrote none. Set
+    # once at declaration and never cleared: the guard that reads it
+    # (``Model._withhold_default_box_certificate``) also requires the side to
+    # still hold the default value, so a later ``x.ub = 10`` disarms it.
+    _int_default_sides: frozenset = frozenset()
+
     def __init__(
         self,
         name: str,
@@ -7810,7 +7817,9 @@ class Model:
         **loudly** — a ``UserWarning`` names the variable and the imposed
         range — and it **never** overrides a bound you provide. Pass explicit
         ``lb``/``ub`` (e.g. ``lb=-5, ub=10``) to silence the warning and to
-        solve the problem you actually mean.
+        solve the problem you actually mean. A result whose point sits on a
+        defaulted side carries no certificate: it is reported ``feasible`` with
+        no dual bound, since the problem as posed may be unbounded (#2281).
 
         Examples
         --------
@@ -7818,16 +7827,22 @@ class Model:
         >>> batch = m.integer("batch", shape=(3,), lb=1, ub=100)
         >>> n = m.integer("n", over=plants, lb=0, ub=10)  # indexed integer
         """
+        # #2281: which sides discopt invents, so a certificate resting on one is
+        # withheld (``_withhold_default_box_certificate``).
+        defaulted = frozenset(side for side, val in (("lb", lb), ("ub", ub)) if val is None)
         lb, ub = self._resolve_integer_defaults(name, lb, ub)
         if over is not None:
             _require_no_shape(shape, "integer")
-            return self._make_indexed_var(
+            ivar = self._make_indexed_var(
                 name, VarType.INTEGER, over, lb, ub, _INTEGER_DEFAULT_LB, _INTEGER_DEFAULT_UB
             )
+            ivar.flat._int_default_sides = defaulted
+            return ivar
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.INTEGER, shape, lb, ub, self)
+        var._int_default_sides = defaulted
         return self._register_variable(var)
 
     @staticmethod
@@ -12629,6 +12644,19 @@ class Model:
         side is a relaxation of the invented box (an unbounded convex MIQP
         measured ``unknown`` with ``bound = -1.9998e20``, twice the default box,
         #1699). It is cleared the same way.
+
+        #2281: the integer fallback box is the same kind of invention. A side
+        ``Model.integer`` filled because the caller wrote none (recorded in
+        ``Variable._int_default_sides``) and that still holds its default value
+        (``0`` / ``1e6``) counts as defaulted. Integer points reach it exactly, so
+        a coordinate within half a unit of it is "on" it, and the result is
+        downgraded as above (``min -x - y`` s.t. ``x - 2y >= -3``, ``x >= 0``
+        integer, was certified ``optimal`` at ``x = 1e6`` by the HiGHS MILP route
+        and the native spatial kernel; it is unbounded). An explicitly written
+        ``ub=1e6`` is not a default and is honoured. The bound-only test above
+        does not apply: a dual bound near ``-1e6`` is not recognisable as the
+        box's. The ``.nl`` path defaults integers to ``+/-inf`` and never sets the
+        record.
         """
         import logging as _dlogging
         import warnings as _warnings
@@ -12641,6 +12669,7 @@ class Model:
         _sentinel = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
         _on_side = EFFECTIVE_INF
         hits: list[str] = []
+        int_hit = False
         # A variable the model never references (GAMS ``obj =e= f(x)`` folded into
         # the objective leaves ``obj`` behind) is free in every sense: its value
         # is arbitrary, often the box side, and it cannot make the problem
@@ -12657,8 +12686,25 @@ class Model:
             if xv.shape != lb.shape:
                 continue
             on = ((ub >= _sentinel) & (xv >= _on_side)) | ((lb <= -_sentinel) & (xv <= -_on_side))
+            # #2281: the integer analogue. ``Model.integer`` fills an unwritten
+            # side with the finite fallback (``0`` / ``1e6``), which -- unlike the
+            # ``9.999e19`` corner -- an integer point reaches exactly. A point on
+            # it describes the invented box just the same (``min -x`` over
+            # ``x >= 0`` integer was certified ``optimal`` at ``x = 1e6``, and the
+            # C-6 ``min n`` at ``n = 0``). Within half a unit is "on" for an integer
+            # coordinate; the side must still hold the default value, so a bound
+            # assigned later (``x.ub = 10``) is honoured.
+            if v._int_default_sides:
+                on_int = _np.zeros(xv.shape, dtype=bool)
+                if "ub" in v._int_default_sides:
+                    on_int |= (ub == _INTEGER_DEFAULT_UB) & (xv > ub - 0.5)
+                if "lb" in v._int_default_sides:
+                    on_int |= (lb == _INTEGER_DEFAULT_LB) & (xv < lb + 0.5)
+                int_hit = int_hit or bool(on_int.any())
+                on = on | on_int
             if on.any():
-                hits.append(name if xv.size == 1 else f"{name}{list(_np.flatnonzero(on)[:3])}")
+                where = [int(i) for i in _np.flatnonzero(on)[:3]]
+                hits.append(name if xv.size == 1 else f"{name}{where}")
         box_bound = False
         if not hits and result.bound is not None:
             b = float(result.bound)
@@ -12678,9 +12724,15 @@ class Model:
         # relaxation could not bound this objective". (``box_bound`` implies a
         # bound, so that branch always has something to clear.)
         if hits:
+            sides = f"+/-{DEFAULT_VARIABLE_BOUND:g}"
+            if int_hit:
+                sides += (
+                    f", or the default integer lb={_INTEGER_DEFAULT_LB:g} / "
+                    f"ub={_INTEGER_DEFAULT_UB:g}"
+                )
             what = (
                 f"the returned point sits on the default variable bound "
-                f"(+/-{DEFAULT_VARIABLE_BOUND:g}) for {', '.join(hits[:5])}"
+                f"({sides}) for {', '.join(hits[:5])}"
             )
         else:
             what = (
@@ -12692,7 +12744,7 @@ class Model:
             f"stands in for 'no bound', so the result describes a box the model never "
             f"declared: the problem as posed may be unbounded or have no attained "
             f"optimum. Reporting no dual bound and no certificate "
-            f"(#1678). Declare finite lb/ub for these variables to "
+            f"(#1678, #2281). Declare finite lb/ub for these variables to "
             f"solve a bounded problem."
         )
         _dlogging.getLogger("discopt.solver").warning(msg)

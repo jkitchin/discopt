@@ -894,6 +894,24 @@ a diagnostic and honors input). mypy blocked only by a **pre-existing** env mism
 while `[tool.mypy] python_version = "3.10"`) — reproduces identically on the
 unmodified tree, unrelated to this change.
 
+**Log:** 2026-11-22, #2281 (adversary). The (b) fix above warned at *declaration*
+but still issued the certificate: `min -x - y` s.t. `x - 2y >= -3` (`x >= 0`
+integer, no `ub`), which is unbounded, came back `optimal`/`gap_certified=True` at
+`x = 1e6` from the HiGHS MILP route and the native spatial kernel, and this entry's
+own reproduction `m.integer("n"); m.minimize(n)` came back `optimal` at `n = 0`. So
+the minimum acceptable fix ("never silently report a default-box-active optimum as
+certified") was not actually met. `Model.integer` now records the sides it
+defaulted (`Variable._int_default_sides`), and `Model._withhold_default_box_certificate`
+(#1678 (b)) treats a coordinate within half a unit of such a side, while that side
+still holds its default value, as on the invented box: `optimal` becomes
+`feasible`, and the bound and certificate are withheld. An explicitly written
+`ub=1e6`, or a bound assigned later, is honoured. Measured cost: with the
+lower-side check probed on, the full non-slow `python/tests` lane (21,719 passed)
+never hit it, and one pinned test (`test_850…::test_obs2_default_integer_box_optimal`,
+which asserted the false certificate) was revised. Known gap: `discopt.serialize`
+does not carry the record (it would need a schema minor), so a `loads(dumps(m))`
+model reads the default as a written bound. `pickle`/`clone` carry it.
+
 ---
 
 ## C-7 (P2) — `.nl` defined variables (V segments) are parsed then discarded → hard error on any reference
