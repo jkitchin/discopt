@@ -88,7 +88,9 @@ def test_interpreted_region_is_excluded_from_its_native_parent():
             with _timing.charge("pounce"):
                 _spin(0.05)
     spent = _timing.since(before)
-    assert 0.045 <= spent["rust"] < 0.09, f"interpreted callback billed to rust: {spent}"
+    # Upper bound 0.12, not 0.09: a runner descheduled for ~40 ms during the 50 ms
+    # spin must not fail this. Billing the 0.1 s callback to rust would give >= 0.15.
+    assert 0.045 <= spent["rust"] < 0.12, f"interpreted callback billed to rust: {spent}"
     assert spent["pounce"] >= 0.045, f"nested charge inside interpreted() lost: {spent}"
 
 
@@ -99,6 +101,49 @@ def test_as_interpreted_wraps_and_passes_none_through():
     with _timing.charge("rust"):
         assert hook(1) == 2
     assert _timing.since(before)["rust"] < 0.05
+
+
+def test_lazy_callback_time_is_not_billed_to_rust():
+    """A native solve that calls back into Python keeps the callback in python_time.
+
+    ``solve_milp_lazy_csc_py`` runs inside ``charge("rust")`` and calls the lazy
+    separator for every integer-feasible point. The separator here spins 0.2 s per
+    call (the solve makes one or two). If it were not wrapped in
+    ``as_interpreted``, that time would be Rust self time and the rust bucket would
+    hold at least ``calls * 0.2`` s.
+    """
+    import numpy as np
+    from discopt.solvers.milp_simplex import solve_milp_with_lazy_cuts
+
+    calls = {"n": 0}
+
+    def _lazy(x):
+        calls["n"] += 1
+        _spin(0.2)
+        return []  # accept every point
+
+    before = _timing.snapshot()
+    t0 = time.perf_counter()
+    res = solve_milp_with_lazy_cuts(
+        c=np.array([-1.0, -1.0]),
+        A_ub=np.array([[2.0, 1.0], [1.0, 2.0]]),
+        b_ub=np.array([4.0, 4.0]),
+        bounds=[(0.0, 3.0), (0.0, 3.0)],
+        integrality=np.array([1, 1]),
+        lazy_callback=_lazy,
+        time_limit=30.0,
+    )
+    wall = time.perf_counter() - t0
+    spent = _timing.since(before)
+
+    assert res.objective is not None
+    assert calls["n"] > 0, "the lazy callback never ran; the test measured nothing"
+    in_callbacks = 0.2 * calls["n"]
+    assert spent["rust"] > 0.0, "the lazy MILP solve was not charged to rust at all"
+    assert spent["rust"] <= wall - in_callbacks + 0.01, (
+        f"rust={spent['rust']:.3f} s of a {wall:.3f} s solve whose {calls['n']} lazy "
+        f"callbacks spun {in_callbacks:.3f} s: callback time was billed to rust"
+    )
 
 
 def _spin(seconds: float) -> None:
