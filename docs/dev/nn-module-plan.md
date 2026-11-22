@@ -447,7 +447,7 @@ per neuron with identical bounds, and `nonlinear_to_pwl` in `"outer"` (8
 segments, certified) and `"approximate"` (4 or 8 chords, PWLNet's interpolant,
 uncertified) modes. tanh nets, 2–5 inputs; 2 reps; 300 s limit. Every incumbent
 is re-evaluated through `forward`, and no certified bound may exceed the best
-incumbent. All checks passed.
+incumbent. All 24 checks passed.
 
 | net | full_space | per-neuron | outer | approx4 | approx8 |
 |---|---|---|---|---|---|
@@ -456,12 +456,14 @@ incumbent. All checks passed.
 | 2; 32 | TL, bnd −12.9 | 140 s ✓ | TL, bnd −1.67 | 4.2 s, opt | 10 s, opt |
 | 2; 16, 16 | TL, bnd −11.0 | TL, bnd −7.95 | TL, bnd −2.34 | 5.1 s, **−1.109** | 15 s, opt |
 | 5; 16 | TL, bnd −9.25 | TL, bnd −6.1 | TL, bnd −3.691 | 1.4 s, opt | 3.3 s, opt |
+| 5; 16, 16 | TL, bnd −23.8 | TL, bnd −23.6 | TL, bnd −12.0, inc −2.43 | 12 s, **−3.144** | 108 s, opt |
+| 2; 16 (seed 1) | 296 s ✓ (25,543 nodes) | 31 s ✓ (165 nodes) | TL, bnd −1.561 | 1.0 s, opt | 2.8 s, opt |
 
 ✓ = certified; TL = 300 s limit; "opt" = the approximate arm's point, checked
 through the exact network, equals the best-known optimum. On 2; 16, 16 the best-known
 value is −1.6147 (no arm certified it), so approx4 misses by 0.51, 17× the net's test RMSE of 0.029.
-(Rows for 5; 16, 16 and 2; 16 seed 1 are being rerun; the first attempt hit the
-job's time limit.)
+On 5; 16, 16 (best-known −4.0512, uncertified) approx4 misses by 0.91, 4× the
+test RMSE of 0.226; `outer` never found a better incumbent than −2.43.
 
 * `outer` certifies only the smallest net, 15× slower than the per-neuron exact
   solve. That is the kill. It does reach the tightest bound at the limit on every
