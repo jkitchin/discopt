@@ -479,7 +479,28 @@ test RMSE of 0.226; `outer` never found a better incumbent than −2.43.
    uncertified at 300 s, and 2; 32 from certified in 140 s to a bound of −12.9
    at the limit. This is the same class as the `MatMulExpression` note in
    `full_space.py` (#1215 §55): the bound depends on how the constraint is
-   written. Being fixed next.
+   written.
+
+   *Root-cause work (2026-11-22).* The root LP bound is identical (−7.1527 on
+   2; 8) whether the rows are written as arrays or per neuron, so the node LP is
+   not the weaker part. A search of the solve path found several stages that only
+   act on size-1 variables. The leading suspect,
+   `_relax/dependent_vars.find_functionally_dependent_names` skipping any
+   variable with `size != 1`, was tested by patching it to report the tanh-output
+   arrays. Kill criterion: patched array build within 1.5× of the scalar build's
+   node count.
+
+   | net | array build | + OBBT gate on | + OBBT + deprioritise | scalar build |
+   |---|---|---|---|---|
+   | 2; 8 | 131 | 33 | 51 | 19 |
+   | 2; 16 s0 | TL (29,871) | ✓ 913 (139 s) | ✓ 997 | ✓ 117 (27 s) |
+   | 2; 16 s1 | TL (24,771) | ✓ 1241 (194 s) | ✓ 1521 | ✓ 165 (32 s) |
+
+   **Falsified as the whole cause.** Turning on the per-node OBBT gate alone
+   turns both timeouts into certified solves, but it leaves a 3–9× node gap, and
+   deprioritising the tanh outputs slightly hurts. The rest of the gap is being
+   localised by knocking out the other array-skipping sites (root FBBT, root
+   cutoff-FBBT, per-node linear-row FBBT) in the scalar build.
 2. **`nonlinear_to_pwl` finds 0 terms and reports 0 skipped on array-valued
    constraints** (`full_space`'s one-constraint-per-layer form). It is a silent
    no-op; it must replace those terms or list them as skipped.
