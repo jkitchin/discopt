@@ -146,6 +146,94 @@ def test_lazy_callback_time_is_not_billed_to_rust():
     )
 
 
+#: Every native solve entry point the extension exports, whether or not anything
+#: calls it today: a call site added later is checked without editing this test.
+NATIVE_SOLVES = tuple(n for n in dir(_rust) if n.startswith("solve_") and n.endswith("_py"))
+
+
+def _gap_milp():
+    """A small generalized-assignment MILP with marked coupling rows, so
+    ``lagrangian_bound=True`` attaches the native tree's ``node_bound_hook``."""
+    import discopt.modeling as dm
+    import numpy as np
+
+    K, N = 2, 6
+    rng = np.random.default_rng(0)
+    cost = rng.integers(1, 10, (K, N))
+    w = rng.integers(3, 9, (K, N))
+    m = dm.Model("gap2289")
+    x = m.binary("x", shape=(K * N,))
+    m.minimize(sum(int(cost[k, i]) * x[k * N + i] for k in range(K) for i in range(N)))
+    for k in range(K):
+        cap = int(w[k].sum() * 0.6)
+        m.subject_to(sum(int(w[k, i]) * x[k * N + i] for i in range(N)) <= cap)
+    for i in range(N):
+        c = sum(x[k * N + i] for k in range(K)) == 1
+        m.subject_to(c)
+        m.mark_coupling(c)
+    return m
+
+
+def test_every_native_solve_is_charged_and_every_callback_is_wrapped(monkeypatch):
+    """Structural form of the guard, with no timing in it, so it cannot flake.
+
+    At every call into a native ``solve_*_py`` entry point, (1) the innermost open
+    ``_timing`` region must be a ``charge("rust")`` and (2) every callable argument
+    must be an ``as_interpreted`` wrapper. (1) is the #2289 leak: a missing region
+    sends native time to ``python_time``. (2) is its mirror: a bare callback bills
+    interpreted Python to rust. The timing tests above can only cover the
+    callback-free entry points; this one covers the callback-taking ones too.
+
+    The solves are picked so that every callback-taking call site runs at least
+    once, and the test asserts that each one did: ``dispatch`` reaches the native
+    spatial kernel with its ``primal_hook`` and ``incumbent_value``; ``gbd`` reaches
+    the lazy MILP with its separator, ``debug_hook`` and ``node_callback``; the GAP
+    MILP on the Rust engine reaches ``solve_milp_csc_py`` with a user
+    ``node_callback`` (passed as ``debug_hook``) and the Lagrangian
+    ``node_bound_hook``; ``nvs05`` covers root OBBT's probe LPs.
+    """
+    seen: dict[str, set] = {}
+    violations: list[str] = []
+
+    def _spy(name, fn):
+        def _wrapped(*args, **kwargs):
+            stack = _timing._stack()
+            if not stack or stack[-1].bucket != "rust":
+                top = stack[-1].bucket if stack else "no region"
+                violations.append(f"{name} called outside charge('rust') (innermost: {top})")
+            for key, val in list(enumerate(args)) + list(kwargs.items()):
+                if callable(val):
+                    seen.setdefault(name, set()).add(key)
+                    if not getattr(val, _timing.INTERPRETED_MARKER, False):
+                        violations.append(f"{name}: callback {key!r} is not as_interpreted")
+            seen.setdefault(name, set())
+            return fn(*args, **kwargs)
+
+        return _wrapped
+
+    for name in NATIVE_SOLVES:
+        monkeypatch.setattr(_rust, name, _spy(name, getattr(_rust, name)))
+
+    for inst in ("dispatch", "gbd", "nvs05"):
+        from_nl(str(CORPUS / f"{inst}.nl")).solve(time_limit=3.0)
+    monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")  # a pure MILP goes to HiGHS otherwise
+    _gap_milp().solve(time_limit=30, lagrangian_bound=True, node_callback=lambda ctx, m: None)
+
+    assert not violations, "\n".join(sorted(set(violations)))
+    expected = {
+        "solve_lp_warm_csc_py": set(),
+        "solve_spatial_tree_py": {"primal_hook", "incumbent_value"},
+        "solve_milp_lazy_csc_py": {11, "debug_hook", "node_callback"},
+        "solve_milp_csc_py": {"debug_hook", "node_bound_hook"},
+    }
+    for name, callbacks in expected.items():
+        assert name in seen, f"{name} was never called; the probe did not reach it"
+        assert callbacks <= seen[name], (
+            f"{name} saw callbacks {sorted(map(str, seen[name]))}, expected at least "
+            f"{sorted(map(str, callbacks))}: a call site this test guards was not reached"
+        )
+
+
 def _spin(seconds: float) -> None:
     end = time.perf_counter() + seconds
     while time.perf_counter() < end:
