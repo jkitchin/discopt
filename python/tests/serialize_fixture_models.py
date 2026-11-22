@@ -382,6 +382,28 @@ def gdp_or_block():
 
 #: name -> builder. Order is the manifest's order; never reorder or rename a case
 #: once a shipped version's fixtures exist for it (fixtures are immutable, §0.3.11).
+def integer_default_box():
+    """Integer variables with sides left unspecified (#2281; recorded from 1.8).
+
+    ``n`` defaults ``ub``, ``k`` both sides, ``e`` writes ``ub=1e6`` itself: only the
+    first two carry ``int_default_sides``. Every writer can build it; before 1.8 the
+    fallback box is written as an ordinary bound.
+    """
+    import warnings
+
+    import discopt.modeling as dm
+
+    m = dm.Model("integer_default_box")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        n = m.integer("n", lb=0)
+        k = m.integer("k", shape=(2,))
+    e = m.integer("e", lb=0, ub=1e6)
+    m.minimize(-n + k[0] - k[1] - e)
+    m.subject_to(n + k[0] + e <= 2e6, name="cap")
+    return m, {}
+
+
 CASES = {
     f.__name__: f
     for f in (
@@ -412,6 +434,8 @@ CASES = {
         # Added with schema 1.7 (WP-3b-2), recorded for every earlier version too.
         gdp_nested_blocks,
         gdp_or_block,
+        # Added with schema 1.8 (#2281), recorded for every earlier version too.
+        integer_default_box,
     )
 }
 

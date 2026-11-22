@@ -130,6 +130,15 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **No certificate on the default integer box (#2281).** An integer variable
+  declared without `lb`/`ub` gets the fallback `0` / `1e6`; a result whose point sat
+  on that invented side was still published `optimal` with `gap_certified=True`
+  (`min -x - y` s.t. `x - 2y >= -3`, `x >= 0` integer, is unbounded and was
+  certified at `x = 1e6`). Such a result is now `feasible` with no dual bound, and a
+  warning names the variable. A written `ub=1e6` is honoured. The record of which
+  sides were defaulted survives `clone`, `pickle` and `Model.save` (schema
+  `discopt.model/1.8`, new `int_default_sides` on a variable record).
+
 - **False certificate: `dm.sum(Q[g])` over a multi-dimensional `Q` was read as
   the single element `Q.flat[g]`** by the Rust core (`index_spec_collect_flat`):
   the LP/MILP extraction optimized a different objective (the default route's

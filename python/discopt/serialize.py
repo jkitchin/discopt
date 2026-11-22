@@ -271,7 +271,20 @@ logger = logging.getLogger(__name__)
 #: reader refuses an unknown row kind. Only the local-variable record can be lost
 #: that way (an unknown ``state`` key is skipped there too), which drops a
 #: ``validate`` refusal, never a row.
-SCHEMA = "discopt.model/1.7"
+#:
+#: 1.8 (#2281) adds ``int_default_sides`` to a variable record: the sides of an
+#: integer variable that ``Model.integer`` filled with the fallback ``0`` / ``1e6``
+#: because the caller wrote none. ``Model._withhold_default_box_certificate`` reads
+#: it, so a point on an invented side is never certified; without it a reloaded
+#: model would read the fallback as a written bound. Written only when set, read
+#: only from a document of minor >= 8. It is a key on the existing record rather
+#: than a new kind: the readers that skip an unknown nested key (1.0-1.4) then load
+#: the variable with its fallback box as a written bound -- exactly the model they
+#: build from the same ``Model.integer`` call themselves, since none of them has
+#: the record or the guard -- and 1.5-1.7 refuse it (the forward cells). A document
+#: of minor <= 7 never carries the information, so its integer bounds all read as
+#: written.
+SCHEMA = "discopt.model/1.8"
 
 #: Major version this reader accepts. A document whose major differs is refused
 #: rather than best-effort parsed.
@@ -296,6 +309,11 @@ _SCHEMA_MINOR_NEWAXIS_NESTED_DISJUNCTION = 6
 #: ``block_indicator`` and ``nested_disjunction`` row kinds and the
 #: ``_gdp_blocks`` state entry.
 _SCHEMA_MINOR_DISJUNCT_BLOCKS = 7
+
+#: Minor that first wrote ``int_default_sides`` on a variable record: the sides
+#: ``Model.integer`` defaulted (#2281). Read only from a document of this minor or
+#: later.
+_SCHEMA_MINOR_INT_DEFAULT_SIDES = 8
 
 #: This reader's minor, the one ``SCHEMA`` names.
 SCHEMA_MINOR = int(SCHEMA.rsplit(".", 1)[1])
@@ -1347,6 +1365,11 @@ def _enc_variable(v: Variable) -> dict:
         "bound_stack": [
             [_enc_array(lb), _enc_array(ub)] for lb, ub in getattr(v, "_bound_stack", [])
         ],
+        # 1.8 (#2281): the sides `Model.integer` defaulted because the caller wrote
+        # none. Without it a reloaded model reads the fallback `0` / `1e6` as a
+        # written bound, and a point on it is certified again. Written only when set,
+        # so every other variable record is what 1.7 wrote.
+        **({"int_default_sides": sorted(v._int_default_sides)} if v._int_default_sides else {}),
     }
 
 
@@ -1367,7 +1390,36 @@ def _dec_name(name, kind: str) -> str:
     return name
 
 
-def _dec_variable(d: dict, model: Model) -> Variable:
+def _dec_int_default_sides(d: dict, name: str, var_type: VarType, minor: int) -> frozenset:
+    """The 1.8 ``int_default_sides`` record of a variable, refused unless a writer
+    of the document's minor could have produced it (#2281)."""
+    if "int_default_sides" not in d:
+        return frozenset()
+    if minor < _SCHEMA_MINOR_INT_DEFAULT_SIDES:
+        raise SerializationError(
+            f"a 1.{minor} document carries an 'int_default_sides' record on variable "
+            f"{name!r}; it is written only from schema 1.{_SCHEMA_MINOR_INT_DEFAULT_SIDES}"
+        )
+    raw = _seq(d["int_default_sides"], f"int_default_sides of {name!r}")
+    if var_type is not VarType.INTEGER:
+        raise SerializationError(
+            f"variable {name!r} is {var_type.value}, but carries 'int_default_sides': "
+            "only an integer variable has defaulted sides"
+        )
+    if (
+        not raw
+        or not all(isinstance(side, str) for side in raw)
+        or len(set(raw)) != len(raw)
+        or not set(raw) <= {"lb", "ub"}
+    ):
+        raise SerializationError(
+            f"int_default_sides of {name!r} must be a non-empty list of distinct "
+            f"'lb' / 'ub', got {raw!r}"
+        )
+    return frozenset(raw)
+
+
+def _dec_variable(d: dict, model: Model, minor: int = SCHEMA_MINOR) -> Variable:
     name = _dec_name(d.get("name"), "variable")
     # #1310: a corrupted document (or a future writer bug) can carry two
     # variables sharing a name. `_register_variable` below only ever ADDS to
@@ -1393,6 +1445,10 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # plus a [0, 1e6] fallback for an unspecified bound). Reloading a saved model
     # must reproduce the bounds that were saved, exactly, with no re-defaulting.
     var = Variable(name, VarType(d["type"]), shape, lb, ub, model)
+    # Not re-derived from the bounds: a written `ub=1e6` is not a default (#2281).
+    sides = _dec_int_default_sides(d, name, var.var_type, minor)
+    if sides:
+        var._int_default_sides = sides
     # Restore the fix stack, so `fix_depth`, `unfix()` and the declared-domain check
     # in `fix()` all see what the saved model saw.
     #
@@ -3847,7 +3903,8 @@ def _check_keys(
 def _decode_document(doc: dict, minor: int) -> Model:
     model = Model(doc["name"])
     variables = _StrictRefs(
-        [_dec_variable(d, model) for d in _seq(doc["variables"], "variables")], "variable"
+        [_dec_variable(d, model, minor) for d in _seq(doc["variables"], "variables")],
+        "variable",
     )
     params = [_dec_parameter(d, model) for d in _seq(doc["parameters"], "parameters")]
     table = doc["nodes"]
