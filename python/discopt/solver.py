@@ -17913,13 +17913,22 @@ def solve_model(
     _dependent_var_names: set = set()
     # #1497 (solve-time): no catch-all. The scan degrades to a partial set on
     # its own work budget; an exception is a defect, not 'no dependencies'.
-    from discopt._relax.dependent_vars import find_functionally_dependent_names
+    from discopt._relax.dependent_vars import (
+        find_defined_variables,
+        find_functionally_dependent_names,
+    )
 
     # Its own ``_SCAN_WORK_BUDGET`` bounds ONE call deterministically; the
     # deadline decides whether the block can still afford the call at all
     # (#1456). Measured 5.25 s on ``densitymod`` with that budget in force.
+    # ``DISCOPT_DEFINED_VARS`` (default OFF) swaps in the per-element detector
+    # with the affine-output rule; its keys map through the same
+    # ``dependent_columns_for_model`` below (``SolverTuning.defined_vars``).
     if _presolve_deadline.afford("find_functionally_dependent_names"):
-        _dependent_var_names = find_functionally_dependent_names(model)
+        if _tuning().defined_vars:
+            _dependent_var_names = find_defined_variables(model)
+        else:
+            _dependent_var_names = find_functionally_dependent_names(model)
 
     # --- Pure-binary multilinear exact linearization (issue #187) ---
     # A polynomial objective/constraint over binary-valued variables ({0,1}

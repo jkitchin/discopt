@@ -178,7 +178,9 @@ in the audit.
 
 **Terminology (PR #2196 review).** A "dual loss" (`d2_flag_panel.py`) is an instance neither arm certified whose ON median final gap at the time limit is worse than OFF's by more than OFF's own run-to-run spread: a performance measure. Bound validity is bar 1 (no bound past the oracle), checked separately.
 
-<!-- live-solver-math-gates: 66 -->
+<!-- live-solver-math-gates: 67 -->
+
+_66 -> 67 (2026-11-22): `DEFINED_VARS` added default OFF, panel owed (row under "Rows added 2026-11-22")._
 
 _66 -> 66 (2026-11-19, #2225): `MILP_TOL_ROBUST_SIDED` added and graduated to default ON in the same PR on its §5 panel (row below); `=0` restores the symmetric bound box. Cert-clean and not harmful (bar 2 as relaxed 2026-11-14), graduated as a completeness fix like its parent `MILP_TOL_ROBUST`._
 
@@ -940,3 +942,9 @@ Two things are worth carrying forward:
 | flag | what | evidence | state |
 |---|---|---|---|
 | `DISCOPT_CONVEX_ROUTE_OA_MASTER=highs` (selector, `solver._convex_route_oa_master`) | The HiGHS separate-and-restart master for the convex-MINLP route's OA (#1059), instead of the in-house lazy master (the default since highs-parity D3). The #2059 SOC outer block is built on this master only. | #2237 panel, 47 routed syn/rsyn MINLPLib instances, 30 s, three arms rotated per instance, load 5-10: certified 31 in-house / 32 HiGHS with SCIP / 30 HiGHS without SCIP; total wall 537 / 624 / 640 s; `rsyn0805m02m` lost without SCIP (reproduced); the HiGHS master 2-4x slower on small certifying instances (`syn40m03m` 20.2 s vs 8.2 s). 156 bound checks, 0 violations. For the opt-in: `portfol_classical050_1` certifies on the route with it (38.2 s with SCIP, 52.7 s without, post-#2247) and falls back to NLP-BB without it (307 s). | **Kept as a documented opt-in.** Not the default because a HiGHS default failed bar 2 on syn/rsyn (wall 1.16x beyond spread, one certificate lost without SCIP). **What would change that:** a panel where the HiGHS master is at or ahead of the in-house one on syn/rsyn; or porting the SOC block to the in-house master, which removes the reason for the opt-in. `=highs` never falls back to the in-house master; a failed HiGHS master is answered by the #1059 fallback to the default path. |
+
+### Rows added 2026-11-22 (full_space dependent-variable detection)
+
+| flag | what | evidence | state |
+|---|---|---|---|
+| `DISCOPT_DEFINED_VARS` (`SolverTuning.defined_vars`) | Swaps the dependent-variable detector for `dependent_vars.find_defined_variables`: per-element keys for array variables (D1), indexed references treated as affine leaves (D2), and one output per affine defining equality by greedy minimum degree. Search-changing only: it reorders spatial branching and switches on per-node OBBT for the models it marks. | `docs/dev/nn-module-plan.md` §6, E3 defect 1. On embedded tanh nets the legacy detector marks nothing on `full_space`'s arrays; with the flag, `full_space` and the per-neuron build run identical searches (15 / 79 / 107 nodes on 2;8, 2;16 s0, 2;16 s1, vs legacy 131 / time limit / 25,543). Corpus panel: see the row's update below once it runs. | **Default OFF, panel owed (running 2026-11-22).** The affine-output rule applies to scalar `.nl` models too, so it needs the §5 corpus panel before it graduates. |

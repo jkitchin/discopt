@@ -217,6 +217,29 @@ class SolverTuning:
     the same ``_node_point_feasible`` gate as a snapped one before injection. A
     wrong guess costs time, not correctness."""
 
+    # --- Defined-variable detection v2 (array elements + affine outputs) -------
+    defined_vars: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_DEFINED_VARS", default=False)
+    )
+    """Detect functionally dependent variables per array element, and give each
+    affine defining equality one output (``DISCOPT_DEFINED_VARS``, default OFF,
+    search-changing: it reorders spatial branching and switches per-node OBBT on
+    for the models it marks; never a bound or relaxation change).
+
+    The legacy detector (``_relax/dependent_vars.find_functionally_dependent_names``)
+    considers only size-1 variables, so a model with array intermediates gets no
+    per-node OBBT and no deprioritisation (D1), and it reads an affine row over an
+    indexed reference ``x[0]`` as nonlinear (D2), so the same model marks different
+    variables depending on whether its inputs are scalars or array elements.
+    Measured on tanh surrogates embedded with ``discopt.ml`` full_space
+    (``docs/dev/nn-module-plan.md`` §6, E3 defect 1): the array build timed out at
+    300 s where the per-neuron build certified 2; 16 in 24-31 s, and with the
+    detector's marks reproduced on the array build its node counts matched the
+    per-neuron build exactly (19 / 117 / 165).
+
+    Not the default until the §5 corpus panel runs: the affine-output rule applies
+    to every model, scalar ``.nl`` instances included."""
+
     # --- #671 LP iterative refinement (RHS-regularized dual + rigorous NS) ------
     lp_iterative_refinement: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_LP_ITERATIVE_REFINEMENT", default=False)
