@@ -99,10 +99,14 @@ def bridge_cliques_status(cliques: list[list[int]], n: int, budget: int) -> tupl
         return set(), False
     est = len(nontrivial) * (n + sum(len(c) for c in nontrivial))
     if est > budget:
+        # Name only remedies that ship (#2299): the KaHyPar border detector (plan
+        # T4.1) is deferred. When it lands, add its extra here by its real name.
         logger.warning(
             "bridge-constraint scan skipped: estimated cost %d exceeds budget %d "
-            "(%d constraints, %d vars); coupling not auto-detected — annotate with "
-            "model.mark_coupling(...) or install the hypergraph detector.",
+            "(%d constraints, %d vars); coupling constraints were not auto-detected. "
+            "Mark them with model.mark_coupling(...), or pass a partition from an "
+            "external detector (e.g. GCG) as a .dec file: "
+            "detect_decomposition(model, dec_file=...).",
             est,
             budget,
             len(nontrivial),

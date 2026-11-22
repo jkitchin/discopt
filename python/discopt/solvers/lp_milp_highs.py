@@ -1240,7 +1240,9 @@ def open_column_coefficient_ratio(sf: StdForm) -> float:
 _DUAL_CERT_SAFETY = 64.0
 
 
-def box_dual_violation(sf: StdForm, x: np.ndarray, row_dual: np.ndarray) -> float:
+def box_dual_violation(
+    sf: StdForm, x: np.ndarray, row_dual: np.ndarray, *, problem_scale_floor: bool = False
+) -> float:
     """How far HiGHS's returned primal/dual pair is from being a dual-feasible certificate.
 
     For ``min cᵀx s.t. Ax = b, xl <= x <= xu`` the reduced costs ``d = c - Aᵀy`` must, at
@@ -1261,12 +1263,29 @@ def box_dual_violation(sf: StdForm, x: np.ndarray, row_dual: np.ndarray) -> floa
     generated badly scaled LPs at a cost of 11/4192 (0.26%) correct results decertified;
     the pre-existing :data:`UNSCALABLE_OPEN_RATIO` proxy caught the same 8/8 but
     decertified 3197/4192 (76.3%).
+
+    ``problem_scale_floor`` (#2300) floors each column's scale at the LP's own magnitude
+    ``S = ‖c‖∞ + ‖A‖∞·‖y‖∞`` instead of at ``tiny``. Without it, a basic single-entry
+    ``c_j = 0`` slack whose row dual is round-off (``y_i = 7e-15``) has numerator and
+    denominator both ``|a·y_i|`` and reads exactly 1.0 however small ``y_i`` is -- which
+    the in-house LP engine's duals hit routinely (HiGHS returns exact zeros there).
+    Measured on the #2300 set cover (highspy 1.16.0): Rust pair 1.0 -> 1.05e-15, HiGHS
+    pair 5.6e-17 -> 3.2e-17, against a round-off bound of 1.42e-13. The flag is used for the *reported* statistic only; the MILP route's gate
+    still uses the per-column scale, because a floor makes the cheap filter pass more
+    often and so skip the NS gap, and the #1410 catch/false-refusal panel that would
+    justify that has not been re-run against it.
     """
     y = np.asarray(row_dual, dtype=np.float64).ravel()
     xv = np.asarray(x, dtype=np.float64).ravel()
     d = sf.c - np.asarray(sf.A.T @ y).ravel()
     absA = abs(sp.csc_matrix(sf.A))  # noqa: N806
-    scale = np.maximum(np.abs(sf.c) + np.asarray(absA.T @ np.abs(y)).ravel(), np.finfo(float).tiny)
+    floor = float(np.finfo(float).tiny)
+    if problem_scale_floor:
+        a_max = float(absA.max()) if absA.nnz else 0.0
+        c_max = float(np.abs(sf.c).max()) if sf.c.size else 0.0
+        y_max = float(np.abs(y).max()) if y.size else 0.0
+        floor = max(floor, c_max + a_max * y_max)
+    scale = np.maximum(np.abs(sf.c) + np.asarray(absA.T @ np.abs(y)).ravel(), floor)
     # An infinite (or sentinel-magnitude) side is not a bound a column can sit at, and
     # forming the test band against it yields ``inf - inf`` -> NaN, which would make every
     # comparison below false and silently empty the check. Slack columns all carry
@@ -4799,7 +4818,12 @@ def _solve_milp_std(
         if lp.x is not None and lp.row_dual is not None:
             dual_viol = box_dual_violation(sf, lp.x, lp.row_dual)
             dual_tol = dual_violation_tolerance(sf)
-            stats["milp/root_dual_violation"] = dual_viol
+            # #2300: report the problem-scale-floored value, which does not read 1.0 on
+            # a round-off slack dual (in-house engine duals); gate on the per-column
+            # value as before, so certify/refuse decisions are unchanged.
+            stats["milp/root_dual_violation"] = box_dual_violation(
+                sf, lp.x, lp.row_dual, problem_scale_floor=True
+            )
             if dual_viol > dual_tol:
                 # #1612: the per-column relative test is a sufficient condition, not
                 # the question. The question is whether HiGHS's own pair certifies the
