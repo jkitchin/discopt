@@ -104,3 +104,49 @@ def test_linear_node_emptiness_is_proved_without_highs(monkeypatch):
     checked += 1
     assert sys.modules["highspy"] is None
     assert checked == 2
+
+
+def test_varblock_repeat_sizes_cast_safely_to_wasm32_intp(monkeypatch, tmp_path):
+    """#2295: ``from_nl`` of any file with linear rows raised ``TypeError: Cannot cast
+    array data from dtype('int64') to dtype('int32')`` under Pyodide. ``VarBlock``
+    passed int64 sizes as ``np.repeat``'s ``repeats``, which numpy casts to ``intp``
+    under the ``safe`` rule; ``intp`` is int32 on wasm32. Simulated here by setting
+    ``np.intp`` to int32 (as on wasm32) and a ``np.repeat`` that enforces the cast.
+    On a 64-bit host ``intp`` is int64, so no dtype check alone can tell the two."""
+    import numpy as np
+    from discopt.modeling.core import VarBlock, from_nl
+
+    real_repeat = np.repeat
+    calls = {"n": 0}
+
+    def wasm32_repeat(a, repeats, axis=None):
+        calls["n"] += 1
+        r = np.asarray(repeats)
+        if r.dtype.kind in "iu" and not np.can_cast(r.dtype, np.intp, "safe"):
+            raise TypeError(
+                f"Cannot cast array data from dtype('{r.dtype}') to dtype('int32') "
+                "according to the rule 'safe'"
+            )
+        return real_repeat(a, repeats, axis=axis)
+
+    # Read the file before patching: only the block construction is under test.
+    m = dm.Model("lin")
+    x = m.continuous("x", shape=(3,), lb=0, ub=4)
+    y = m.integer("y", lb=0, ub=5)
+    m.subject_to(x[0] + 2 * x[1] - y <= 3)
+    m.subject_to(x[2] + y >= 1)
+    m.minimize(x[0] + x[1] + x[2] + y)
+    path = tmp_path / "lin.nl"
+    m.to_nl(str(path))
+
+    monkeypatch.setattr(np, "intp", np.int32)
+    monkeypatch.setattr(np, "repeat", wasm32_repeat)
+    blk = VarBlock([x, y])
+    pos, local = blk.columns()
+    assert pos.tolist() == [0, 0, 0, 1]
+    assert local.tolist() == [0, 1, 2, 0]
+    assert pos.dtype == np.int64 and local.dtype == np.int64
+
+    loaded = from_nl(str(path))
+    assert calls["n"] >= 4, "the simulated wasm32 np.repeat never ran"
+    assert loaded._builder_linear_blocks, "the file did not load as matrix blocks"
