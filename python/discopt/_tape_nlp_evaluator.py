@@ -336,8 +336,9 @@ class TapeNLPEvaluator:
         lb, ub = self.variable_bounds
         self._lo = [float(v) for v in lb]
         self._hi = [float(v) for v in ub]
-        self._obj_expr = obj
-        self._con_exprs = cons
+        # Optional: released (set to None) once the shared problem is built, #2283.
+        self._obj_expr: Optional[Any] = obj
+        self._con_exprs: Optional[list[Any]] = cons
         # #1903: hole outputs are extra tape columns after the model's own; they
         # are never variables of the NLP, so their tape bounds are free.
         n_hole_vars = sum(h.n_out for h in self._holes)
