@@ -2,7 +2,8 @@
 
 Phase 1 of the advisor (see ``docs/design/decomposition-advisor.md``): the
 foundational graph layer. A model induces several graphs — this package builds
-the near-linear ones (variable–constraint incidence, variable dependency graph),
+the near-linear ones (variable–constraint incidence, variable dependency graph,
+and the scalar-level incidence with index coarsening in ``element``),
 exposes the cheap structural detectors on them (connected components,
 bridges/articulation), caches them by structural version, and serializes them
 for external tooling and partitioners.
@@ -21,9 +22,17 @@ from discopt.decomposition.graph.base import (
     ModelGraph,
     build_graph,
 )
+from discopt.decomposition.graph.element import (
+    CoarseGraph,
+    ElementGraph,
+    ElementGraphError,
+)
 from discopt.decomposition.graph.export import export_graph
 
 __all__ = [
+    "CoarseGraph",
+    "ElementGraph",
+    "ElementGraphError",
     "GraphCache",
     "GraphKind",
     "ModelGraph",

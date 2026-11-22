@@ -802,6 +802,149 @@ def _convex_node_safe_bound_enabled() -> bool:
     return _env_flag("DISCOPT_CONVEX_NODE_SAFE_BOUND", default=True)
 
 
+def _convex_node_keep_proved_bound_enabled() -> bool:
+    """Whether a convex node whose proved bound is ABOVE its NLP objective imports
+    the proved bound, and NLP-BB re-caps the published bound at the exactly
+    re-valued objective (``DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND``, **default ON**
+    since the §5 panel below; ``=0`` restores the #2067 ``min()`` import and the
+    capped bound, and the legacy path is kept intact).
+
+    #2067 imports ``min(objective, proved)``, so where the proved bound is the
+    larger (``n_raised``) the node keeps the NLP objective -- the value of a point
+    feasible only to the NLP tolerance, which can sit below the box's true minimum.
+    On an integral node that point is also the incumbent, and the tree caps its
+    dual bound at the incumbent value; on an exhausted tree the bound IS that
+    value. ``Model.solve`` then re-values the objective exactly at the integral
+    point, so the published gap is the NLP's error, not the search's. Measured on
+    ``test_2262_cmir_integer_bounds`` (convex IQP, NLP-BB): closing integral node
+    objective -6.72e-7 locally, -1.46e-6 on CI, proved bound -3.78e-10;
+    certification hangs on whether that error clears the 1e-6 absolute tolerance
+    (the optimum is 0, so the relative one adds nothing), and shifting every node
+    objective down by 5e-7 reproduces CI's withheld certificate.
+
+    ON: (1) a raised node imports its proved bound, the NLP objective staying its
+    point value -- the tree reads the #1296 contradiction test against the
+    inherited bound in that case, since the node's own bound is no claim about an
+    ancestor; (2) NLP-BB carries the tree's uncapped ``proved_lower_bound``, and
+    once the objective is re-valued exactly the published bound becomes
+    ``max(bound, min(proved, objective))``. Sound: the proved bound is a valid
+    lower bound on the node (as #2067 already relies on whenever it is the
+    smaller), anything below a valid bound is one too, and ``min(proved, f(x))``
+    with ``x`` the verified returned point is at most the optimum.
+
+    Graduation panel (2026-11-20, commit ``52fd122``; regime 2;
+    ``discopt_benchmarks/scripts/flag_onoff_corpus_panel.py``, the 74 vendored
+    MINLPLib instances, 20 s, arms interleaved, MINLPLib ``.solu`` oracle):
+
+    * ``PANEL_SOLVE_KWARGS='{"nlp_bb": true}'`` (the route the flag acts on; the
+      arm fired on 18 instances): 0 problems, 130 incumbent feasibility checks
+      passed, certified 32 -> 33 (``nvs15`` gained, none lost), bounds tighter on
+      ``fac2``, ``gbd``, ``st_miqp2``, ``st_miqp3``, ``nvs14``, ``tls2``
+      (2.546 -> 2.578 at the time limit), never looser on a certified instance.
+    * Default route: 0 problems, 130 checks passed, certified 56 -> 56, the arm
+      fired on ``cvxnonsep_nsig30`` (via ``lp_nlp_bb``'s NLP-BB); its one ON row
+      at 1117 nodes and a 9.6e-5-relative worse incumbent did not reproduce
+      (re-run twice per arm, interleaved: 1039 nodes and objective 130.62871265
+      both arms, ON bound 1.3e-6 tighter). It solves at 18 of 20 s, so the row is
+      wall-clock spread.
+    * An earlier run of both panels at ``23e2b10`` (before the NLP-BB-side
+      re-cap) was cert-clean too: 56 -> 56 and 32 -> 32; ``cvxnonsep_psig30``
+      under ``nlp_bb`` found the exact optimum ON (78.99885434) where OFF
+      certified a point 3.5e-3 worse within tolerance.
+
+    Cert-clean and helpful: graduated.
+    """
+    return _env_flag("DISCOPT_CONVEX_NODE_KEEP_PROVED_BOUND", default=True)
+
+
+def _convex_node_clip_point_value_enabled() -> bool:
+    """Whether an integral convex node records its point CLIPPED INTO ITS BOX, valued
+    there, as its incumbent point and value (``DISCOPT_CONVEX_NODE_CLIP_POINT_VALUE``,
+    **default ON** since the §5 panel below; it moves incumbent values and so pruning;
+    ``=0`` restores the unclipped point and value, legacy path intact).
+
+    The node NLP's interior-point solver relaxes variable bounds (``bound_relax_factor``,
+    ~1e-8), so its point can sit just outside the node box, and a fixed box most of
+    all. Where the objective's gradient is large that is not a rounding matter.
+    Measured on ``nvs15`` (``nlp_bb=True``; NLP-BB's lifted model has 127 columns,
+    410 rows): a node whose box is a single point returned a point 9.87e-9 outside
+    it, with objective gradient up to 3.28e4, valued 0.99778029 -- 2.2e-3 below the
+    true optimum 1.0. The box point itself is valued exactly 1.000000000000 and
+    satisfies every row to 8.9e-16. The tree recorded 0.99778 as the incumbent, pruned
+    against that understated cutoff, and raised #1296 ``bound_contradicted`` (the
+    point sits below a proved ancestor bound), so about half the runs ended
+    ``feasible`` with no bound.
+
+    ON: for a node the tree will treat as integral (``is_feasible`` or every integer
+    column within 1e-5, the tree's own test) whose point is outside its box, the
+    clipped point replaces it -- in ``result_sols`` and as the point value -- when it
+    passes the same constraint gate the node's point did
+    (``_check_constraint_feasibility``) and its objective is finite. The bound import
+    is unchanged. Sound: the box is part of the model, so the clipped point is no
+    less feasible than the original, and a point value is an incumbent claim, never
+    a bound.
+
+    Graduation panel (2026-11-20, commit ``488371a``; regime 2;
+    ``discopt_benchmarks/scripts/flag_onoff_corpus_panel.py``, 74 vendored MINLPLib
+    instances, 20 s, interleaved arms, MINLPLib ``.solu`` oracle):
+
+    * ``PANEL_SOLVE_KWARGS='{"nlp_bb": true}'``: 0 problems, 131 incumbent
+      feasibility checks passed, certified 32 -> 33 (``nvs15`` gained, none lost),
+      ``nvs15``'s #1296 contradiction gone; the clip fired on 9 instances (``fac2``
+      16 nodes, ``flay03m`` 35, ``m3`` 7, ``flay02m``, ``nvs15``, ``st_miqp2/4/5``,
+      ``st_testgr3``); bounds tighter on ``fac2`` and ``st_miqp4``. The two rows
+      that read worse ON -- ``cvxnonsep_psig40r`` (objective 86.54625 vs 86.54516)
+      and ``tls2`` (no incumbent vs 10.3, time-limited) -- did not reproduce: two
+      interleaved re-runs per arm were identical, and the clip fired 0 times on
+      either instance.
+    * Default route: 0 problems, 130 checks passed, certified 56 -> 56; the clip
+      fired on no instance, so every difference there is run-to-run spread.
+
+    Kill criterion (``nvs15``, ``nlp_bb``, 10 interleaved runs per arm): OFF 5/10
+    certified (5 contradicted), ON 10/10 (0 contradicted, bound <= 1.0). Cert-clean
+    and helpful: graduated.
+
+    Extended (2026-11-20) to the NLP-BB batches imported WITHOUT a proved bound -- a
+    nonconvex model (heuristic NLP-BB) or ``DISCOPT_CONVEX_NODE_SAFE_BOUND=0`` -- which
+    had recorded every integral node's raw objective as its incumbent value with no
+    box check (:func:`_clip_unproved_integral_points`; stat
+    ``nlpbb/unproved_point_clipped``). Same clip, same gates; the raw value stays the
+    imported floor, so no bound moves. Panel on ``26c75ba0c`` + the change (same
+    script, ``PANEL_SOLVE_KWARGS='{"nlp_bb": true}'``, 74 instances, 20 s): 0 problems,
+    132 incumbent feasibility checks passed, certified 33 -> 33 (none gained or
+    lost), no errors; the extension fired on 21 instances (``nvs13`` 54 nodes,
+    ``contvar`` 29, ``heatexch_gen1`` 25, ...). Every objective difference is
+    <= 1e-7 relative, the out-of-box value replaced by the box point's (``ex1225``
+    30.999999985 -> 31.0, ``ex1226`` -17.00000001 -> -17.0).
+    """
+    return _env_flag("DISCOPT_CONVEX_NODE_CLIP_POINT_VALUE", default=True)
+
+
+def _recap_bound_at_objective(
+    bound: Optional[float],
+    objective: Optional[float],
+    proved: Optional[float],
+    is_max: bool,
+) -> Optional[float]:
+    """The published bound once ``objective`` has been re-valued: ``max(bound,
+    min(proved, objective))`` for a minimisation (mirrored for a maximisation).
+
+    ``proved`` is a search's uncapped proved dual bound (declared sense), and
+    ``objective`` the value of the point being returned. The tree caps its bound at
+    the incumbent value it converged on; once that value is replaced, the cap
+    belongs at the replacement. Only ever tightens ``bound``, and never past
+    ``objective``. Returns ``bound`` unchanged when any input is missing or not
+    finite (``_convex_node_keep_proved_bound_enabled``).
+    """
+    if bound is None or objective is None or proved is None:
+        return bound
+    if not (np.isfinite(bound) and np.isfinite(objective) and np.isfinite(proved)):
+        return bound
+    if is_max:
+        return min(bound, max(proved, objective))
+    return max(bound, min(proved, objective))
+
+
 def _apply_convex_node_safe_bounds(
     evaluator,
     batch_lb,
@@ -813,6 +956,10 @@ def _apply_convex_node_safe_bounds(
     *,
     deadline: Optional[float],
     budget=None,
+    int_offsets=(),
+    int_sizes=(),
+    result_feas=None,
+    counts: Optional[dict] = None,
 ) -> tuple[np.ndarray, int, int, int]:
     """Replace each convex node's NLP objective by a proved bound (#2067), in place.
 
@@ -835,7 +982,14 @@ def _apply_convex_node_safe_bounds(
     Returns ``(point_values, n_proved, n_abstained, n_raised)``: ``point_values`` is
     NaN where the bound and the point value coincide; ``n_raised`` counts nodes whose
     proved bound came out above the NLP objective (the objective is then kept, so the
-    count is a measurement, not a bound change).
+    count is a measurement, not a bound change -- unless
+    :func:`_convex_node_keep_proved_bound_enabled`, which imports the proved bound
+    there and returns the objective as the point value).
+
+    Under :func:`_convex_node_clip_point_value_enabled`, an integral node (per
+    ``int_offsets``/``int_sizes``/``result_feas``, the tree's own test) whose point is
+    outside its box records the clipped point instead, in ``result_sols`` and as its
+    point value; ``counts["clipped"]`` counts those nodes.
     """
     from discopt.solvers.convex_node_bound import convex_node_safe_bound
 
@@ -845,6 +999,8 @@ def _apply_convex_node_safe_bounds(
     cl_arr = np.asarray(cl if m else [], dtype=np.float64)
     cu_arr = np.asarray(cu if m else [], dtype=np.float64)
     proved = abstained = raised = 0
+    keep_proved = _convex_node_keep_proved_bound_enabled()
+    clip_points = _convex_node_clip_point_value_enabled()
     for i in range(n_batch):
         raw = float(result_lbs[i])
         if not np.isfinite(raw) or raw >= _SENTINEL_THRESHOLD:
@@ -867,10 +1023,138 @@ def _apply_convex_node_safe_bounds(
         proved += 1
         if safe >= raw:
             raised += 1
-            continue
-        result_lbs[i] = safe
-        points[i] = raw
+            if keep_proved and safe > raw:
+                result_lbs[i] = safe
+                points[i] = raw
+        else:
+            result_lbs[i] = safe
+            points[i] = raw
+        if clip_points:
+            clipped = _clipped_integral_point(
+                evaluator,
+                result_sols[i],
+                batch_lb[i],
+                batch_ub[i],
+                int_offsets,
+                int_sizes,
+                bool(result_feas[i]) if result_feas is not None else False,
+                cl_arr,
+                cu_arr,
+            )
+            if clipped is not None:
+                result_sols[i] = clipped[0]
+                points[i] = clipped[1]
+                if counts is not None:
+                    counts["clipped"] = counts.get("clipped", 0) + 1
     return points, proved, abstained, raised
+
+
+def _clipped_integral_point(evaluator, x, node_lb, node_ub, int_offsets, int_sizes, feas, cl, cu):
+    """The node point clipped into its box and its objective, for a node the tree will
+    treat as integral whose point is outside the box; ``None`` otherwise, or when the
+    clipped point fails the node constraint gate or its objective is not finite
+    (``_convex_node_clip_point_value_enabled``)."""
+    x = np.asarray(x, dtype=np.float64)
+    if not (feas or _is_integer_feasible_solution(x, int_offsets, int_sizes)):
+        return None
+    xc = np.clip(x, np.asarray(node_lb, dtype=np.float64), np.asarray(node_ub, dtype=np.float64))
+    if np.array_equal(xc, x):
+        return None
+    if len(cl) and not _check_constraint_feasibility(evaluator, xc, list(cl), list(cu)):
+        return None
+    val = float(evaluator.evaluate_objective(xc))
+    if not np.isfinite(val):
+        return None
+    return xc, val
+
+
+def _abstaining_node_candidate(evaluator, x, raw, node_lb, node_ub, int_offsets, int_sizes, cl, cu):
+    """The incumbent candidate an ABSTAINING integral node offers: ``(point, value)``.
+
+    Under :func:`_convex_node_clip_point_value_enabled` this is the same clip-and-price
+    the proved nodes get (:func:`_clipped_integral_point`) -- an abstaining node skips
+    the bound step but its point is injected all the same, so without this an IPM point
+    just outside its box reached the tree at its raw value (review of #2276). Otherwise,
+    or when there is nothing to clip, ``(x, raw)`` unchanged.
+    """
+    x = np.asarray(x, dtype=np.float64).copy()
+    if _convex_node_clip_point_value_enabled():
+        m = 0 if cl is None else len(cl)
+        clipped = _clipped_integral_point(
+            evaluator,
+            x,
+            node_lb,
+            node_ub,
+            int_offsets,
+            int_sizes,
+            False,
+            np.asarray(cl if m else [], dtype=np.float64),
+            np.asarray(cu if m else [], dtype=np.float64),
+        )
+        if clipped is not None:
+            return clipped[0], clipped[1]
+    return x, float(raw)
+
+
+def _clip_unproved_integral_points(
+    evaluator,
+    batch_lb,
+    batch_ub,
+    result_lbs,
+    result_sols,
+    result_feas,
+    int_offsets,
+    int_sizes,
+    cl,
+    cu,
+    counts: Optional[dict] = None,
+) -> Optional[np.ndarray]:
+    """Point values for the integral nodes of a batch imported WITHOUT a proved bound.
+
+    :func:`_apply_convex_node_safe_bounds` clips an integral node's point into its box
+    (:func:`_clipped_integral_point`) only on a convex model with the safe bound on. On
+    every other NLP-BB batch -- a nonconvex model (heuristic mode), or a convex one with
+    ``DISCOPT_CONVEX_NODE_SAFE_BOUND=0`` -- the node's NLP objective went in as both its
+    imported value and, for an integral node, the incumbent value the tree records. An
+    interior-point solution a bound-relaxation outside its box is valued at the outside
+    point, which on a steep objective understates it (``nvs15``: 9.87e-9 outside, 2.2e-3
+    low), and the tree then prunes and compares incumbents against that number.
+
+    Same clip, same gates (the node's constraint check, a finite objective), applied to
+    each finite non-sentinel node. The clipped point replaces ``result_sols[i]`` in place
+    and its value is returned as the node's point value; the imported ``result_lbs`` is
+    untouched, so the tree keeps the raw value as the node's floor (#2067) and no bound
+    rises. Returns ``None`` when nothing was clipped, so the import stays the legacy call.
+    Gated by :func:`_convex_node_clip_point_value_enabled` at the call site.
+    """
+    points: Optional[np.ndarray] = None
+    m = 0 if cl is None else len(cl)
+    cl_arr = np.asarray(cl if m else [], dtype=np.float64)
+    cu_arr = np.asarray(cu if m else [], dtype=np.float64)
+    for i in range(len(result_lbs)):
+        raw = float(result_lbs[i])
+        if not np.isfinite(raw) or raw >= _SENTINEL_THRESHOLD:
+            continue
+        clipped = _clipped_integral_point(
+            evaluator,
+            result_sols[i],
+            batch_lb[i],
+            batch_ub[i],
+            int_offsets,
+            int_sizes,
+            bool(result_feas[i]) if result_feas is not None else False,
+            cl_arr,
+            cu_arr,
+        )
+        if clipped is None:
+            continue
+        if points is None:
+            points = np.full(len(result_lbs), np.nan)
+        result_sols[i] = clipped[0]
+        points[i] = clipped[1]
+        if counts is not None:
+            counts["clipped"] = counts.get("clipped", 0) + 1
+    return points
 
 
 def _obbt_topk_enabled() -> bool:
@@ -8586,6 +8870,52 @@ def _withhold_stale_certificate(
         "feasible" if status == "optimal" else status,
     )
     return ("feasible" if status == "optimal" else status), honest_gap, False, bound_val
+
+
+def _withdraw_contradicted_tree_certificate(
+    tree_stats: dict,
+    status: str,
+    bound_val: Optional[float],
+    gap_val: Optional[float],
+    gap_certified: bool,
+    bound_source: Optional[str],
+    solver_stats: Optional[dict],
+    where: str,
+) -> tuple[str, Optional[float], Optional[float], bool, Optional[str], Optional[dict]]:
+    """Withdraw the certificate and the bound of a search whose tree reports
+    ``bound_contradicted`` (#1296), as the MILP driver does.
+
+    The tree raises it when an integral node's own value comes in below the bound
+    the node inherited from its ancestors: the node's box is inside every
+    ancestor's, so that point proves an ancestor bound invalid, and nothing derived
+    from the tree's bound -- including a root snapshot taken from the same tree --
+    is a certificate. The MILP driver acts on it (``milp_driver.rs``,
+    ``withdraw_certificate``); the Python drivers never read it, and the binding did
+    not expose it. Measured before this guard: a random convex IQP (seed 32 of
+    ``test_keep_proved_bound._random_convex_iqp``) with its root bound replaced by
+    ``opt + 1e-3`` -- an invalid bound -- had its optimal leaf witness the
+    contradiction, and NLP-BB still returned ``optimal``, ``gap_certified=True``.
+
+    Applied last, after every step that can (re-)earn a certificate. Downgrade-only:
+    ``optimal`` -> ``feasible``, ``infeasible`` -> ``unknown`` (no infeasibility
+    proof either), and the bound is dropped. Returns
+    ``(status, bound, gap, gap_certified, bound_source, solver_stats)``.
+    """
+    if not bool(tree_stats.get("bound_contradicted", False)):
+        return status, bound_val, gap_val, gap_certified, bound_source, solver_stats
+    logger.warning(
+        "%s: the search tree reports a contradicted bound (#1296: a feasible point "
+        "below a bound its ancestors proved), so its dual bound is not a "
+        "certificate; withdrawing the bound and the certificate (status %s).",
+        where,
+        status,
+    )
+    if status == "optimal":
+        status = "feasible"
+    elif status == "infeasible":
+        status = "unknown"
+    solver_stats = {**(solver_stats or {}), "tree/bound_contradicted": 1.0}
+    return status, None, None, False, None, solver_stats
 
 
 def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float) -> Optional[str]:
@@ -20014,6 +20344,7 @@ def solve_model(
     # raised], surfaced in ``solver_stats`` so an arm that never fired is visible.
     _sp_safe_bound_on = _convex_node_safe_bound_enabled()
     _sp_safe_counts = [0, 0, 0]
+    _sp_clip_counts: dict = {}
     from discopt.solvers.convex_node_bound import SafeBoundBudget as _SpSafeBoundBudget
 
     _sp_safe_budget = _SpSafeBoundBudget()
@@ -22319,6 +22650,10 @@ def solve_model(
                     _sp_cu,
                     deadline=_deadline,
                     budget=_sp_safe_budget,
+                    int_offsets=int_offsets,
+                    int_sizes=int_sizes,
+                    result_feas=result_feas,
+                    counts=_sp_clip_counts,
                 )
                 _sp_safe_counts[0] += _n_p
                 _sp_safe_counts[1] += _n_a
@@ -22330,7 +22665,19 @@ def solve_model(
                     if _sp_raw[_ai] < _SENTINEL_THRESHOLD and _is_integer_feasible_solution(
                         result_sols[_ai], int_offsets, int_sizes
                     ):
-                        _inject_incumbent(np.asarray(result_sols[_ai]).copy(), float(_sp_raw[_ai]))
+                        _inject_incumbent(
+                            *_abstaining_node_candidate(
+                                _active_evaluator,
+                                result_sols[_ai],
+                                _sp_raw[_ai],
+                                batch_lb[_ai],
+                                batch_ub[_ai],
+                                int_offsets,
+                                int_sizes,
+                                _sp_cl,
+                                _sp_cu,
+                            )
+                        )
             # For nonconvex problems, NLP objective is NOT a valid lower
             # bound (local minima can exceed the global optimum).  Reset ALL
             # non-sentinel nodes to -inf so only convex relaxation bounds are
@@ -22744,24 +23091,44 @@ def solve_model(
                         # #2067: the proved bound replaces the NLP objective, which
                         # becomes the point value (see the batch path above).
                         _one = np.array([float(nlp_lb)])
+                        _one_x = np.array(nlp_result.x, dtype=np.float64).reshape(1, -1)
+                        _clipped_before = _sp_clip_counts.get("clipped", 0)
                         _pt, _n_p, _n_a, _n_r = _apply_convex_node_safe_bounds(
                             _active_evaluator,
                             [node_lb],
                             [node_ub],
                             _one,
-                            np.asarray(nlp_result.x, dtype=np.float64).reshape(1, -1),
+                            _one_x,
                             _sp_cl,
                             _sp_cu,
                             deadline=_deadline,
                             budget=_sp_safe_budget,
+                            int_offsets=int_offsets,
+                            int_sizes=int_sizes,
+                            counts=_sp_clip_counts,
                         )
+                        if _sp_clip_counts.get("clipped", 0) > _clipped_before:
+                            # The point value now belongs to the clipped point.
+                            nlp_result.x = _one_x[0]
                         _sp_safe_counts[0] += _n_p
                         _sp_safe_counts[1] += _n_a
                         _sp_safe_counts[2] += _n_r
                         if _n_a and _is_integer_feasible_solution(
                             nlp_result.x, int_offsets, int_sizes
                         ):
-                            _inject_incumbent(np.asarray(nlp_result.x).copy(), float(nlp_lb))
+                            _inject_incumbent(
+                                *_abstaining_node_candidate(
+                                    _active_evaluator,
+                                    nlp_result.x,
+                                    nlp_lb,
+                                    node_lb,
+                                    node_ub,
+                                    int_offsets,
+                                    int_sizes,
+                                    _sp_cl,
+                                    _sp_cu,
+                                )
+                            )
                         nlp_lb = float(_one[0])
                         _sp_points[i] = _pt[0]
                     convex_lb = -np.inf  # accumulate valid convex lower bound
@@ -26025,6 +26392,8 @@ def solve_model(
         _solver_stats["spatial/convex_safe_bound_nodes"] = float(_sp_safe_counts[0])
         _solver_stats["spatial/convex_safe_bound_abstained"] = float(_sp_safe_counts[1])
         _solver_stats["spatial/convex_safe_bound_raised"] = float(_sp_safe_counts[2])
+        if _convex_node_clip_point_value_enabled():
+            _solver_stats["spatial/convex_point_clipped"] = float(_sp_clip_counts.get("clipped", 0))
         _solver_stats["spatial/convex_safe_bound_exact_suspended"] = float(
             _sp_safe_budget.suspended
         )
@@ -26134,6 +26503,21 @@ def solve_model(
         abs_gap_tol,
         "spatial B&B",
     )
+    # #1296, last: a contradicted tree certifies nothing.
+    status, bound_val, gap_val, _gap_certified, _bound_source, _contra_stats = (
+        _withdraw_contradicted_tree_certificate(
+            stats,
+            status,
+            bound_val,
+            gap_val,
+            _gap_certified,
+            _bound_source,
+            _solver_stats,
+            "spatial B&B",
+        )
+    )
+    if _contra_stats:
+        _solver_stats.update(_contra_stats)
 
     return SolveResult(
         status=status,
@@ -29159,6 +29543,7 @@ def _solve_nlp_bb(
         from discopt.solvers._root_cuts import RootCutsNotApplicable
 
         try:
+            from discopt.solvers import _root_cuts as _root_cuts_mod
             from discopt.solvers._root_cuts import (
                 flat_column_terms,
                 generate_root_cuts,
@@ -29183,6 +29568,13 @@ def _solve_nlp_bb(
                     _rc_is_int,
                     _rc_is_bin,
                     time_budget_s=_role2_horizon(_rc_budget),
+                    # Under ``deterministic`` the wall budget above is inert, so the
+                    # stage needs a deterministic working terminator of its own.
+                    max_rounds=(
+                        _root_cuts_mod.DETERMINISTIC_ROUNDS
+                        if _tuning().deterministic
+                        else _root_cuts_mod.ROUNDS
+                    ),
                 )
                 jax_time += time.perf_counter() - t_jax_start
                 _rc_cols = flat_column_terms(model)
@@ -29347,6 +29739,8 @@ def _solve_nlp_bb(
     # replaces each convex node's objective by a proved bound before import.
     _safe_bound_on = _convex_node_safe_bound_enabled()
     _safe_proved = _safe_abstained = _safe_raised = 0
+    _safe_clip_counts: dict = {}
+    _unproved_clip_counts: dict = {}
     from discopt.solvers.convex_node_bound import SafeBoundBudget as _SafeBoundBudget
 
     _safe_budget = _SafeBoundBudget()
@@ -30231,6 +30625,10 @@ def _solve_nlp_bb(
                 cu_list,
                 deadline=t_start + time_limit,
                 budget=_safe_budget,
+                int_offsets=int_offsets,
+                int_sizes=int_sizes,
+                result_feas=result_feas,
+                counts=_safe_clip_counts,
             )
             _safe_proved += _n_p
             _safe_abstained += _n_a
@@ -30245,8 +30643,34 @@ def _solve_nlp_bb(
                         result_sols[_ai], int_offsets, int_sizes
                     ):
                         tree.inject_incumbent(
-                            np.asarray(result_sols[_ai]).copy(), float(_raw_lbs[_ai])
+                            *_abstaining_node_candidate(
+                                evaluator,
+                                result_sols[_ai],
+                                _raw_lbs[_ai],
+                                batch_lb[_ai],
+                                batch_ub[_ai],
+                                int_offsets,
+                                int_sizes,
+                                cl_list,
+                                cu_list,
+                            )
                         )
+        elif _convex_node_clip_point_value_enabled():
+            # No proved bound on this batch (a nonconvex model, or the safe bound
+            # off): the same clip, as a point value over the unchanged raw import.
+            _safe_points = _clip_unproved_integral_points(
+                evaluator,
+                batch_lb,
+                batch_ub,
+                result_lbs,
+                result_sols,
+                result_feas,
+                int_offsets,
+                int_sizes,
+                cl_list,
+                cu_list,
+                counts=_unproved_clip_counts,
+            )
         t_rust_start = time.perf_counter()
         tree.import_results(
             result_ids,
@@ -31251,6 +31675,11 @@ def _solve_nlp_bb(
         if _incumbent_extension_taken > 0.0
         else None
     )
+    # The clip on batches imported without a proved bound (nonconvex, or the safe
+    # bound off), counted so a run in which it never fired is visible (§6).
+    if not (_model_is_convex and _safe_bound_on) and _convex_node_clip_point_value_enabled():
+        _ext_stats = dict(_ext_stats or {})
+        _ext_stats["nlpbb/unproved_point_clipped"] = float(_unproved_clip_counts.get("clipped", 0))
     # #2067: counted so a run in which the safe-bound arm never fired is visible as
     # such (CLAUDE.md §6).
     if _model_is_convex and _safe_bound_on:
@@ -31258,10 +31687,35 @@ def _solve_nlp_bb(
         _ext_stats["nlpbb/convex_safe_bound_nodes"] = float(_safe_proved)
         _ext_stats["nlpbb/convex_safe_bound_abstained"] = float(_safe_abstained)
         _ext_stats["nlpbb/convex_safe_bound_raised"] = float(_safe_raised)
+        if _convex_node_clip_point_value_enabled():
+            _ext_stats["nlpbb/convex_point_clipped"] = float(_safe_clip_counts.get("clipped", 0))
         _ext_stats["nlpbb/convex_safe_bound_exact_suspended"] = float(_safe_budget.suspended)
         _ext_stats["nlpbb/convex_safe_fathom_floor"] = float(
             stats.get("safe_fathom_floor", float("inf"))
         )
+
+    # The search's uncapped proved bound (declared sense). Only from a tree whose
+    # bound is itself valid, uncontradicted (#1296) and resolved. The tree capped
+    # its bound at the incumbent value it converged on; ``obj_val`` above may be a
+    # re-valuation of that point (and ``Model.solve`` re-values it once more), so
+    # the cap is re-applied at each re-valued objective.
+    _proved_bound_out: Optional[float] = None
+    if (
+        _convex_node_keep_proved_bound_enabled()
+        and _model_is_convex
+        and _tree_bound_valid
+        and not bool(stats.get("bound_contradicted", False))
+        and not bool(stats.get("bound_unresolved", False))
+    ):
+        _pb = stats.get("proved_lower_bound")
+        if _pb is not None and np.isfinite(_pb):
+            _proved_bound_out = -float(_pb) if _nlpbb_is_max else float(_pb)
+            _recapped = _recap_bound_at_objective(
+                bound_val, obj_val, _proved_bound_out, _nlpbb_is_max
+            )
+            if _recapped is not None and _recapped != bound_val:
+                bound_val = _recapped
+                gap_val = _gap_mod.reported_gap(obj_val, bound_val)
 
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
@@ -31291,6 +31745,20 @@ def _solve_nlp_bb(
         _ext_stats = dict(_ext_stats or {})
         _ext_stats["nlpbb/integral_incumbent_unverified"] = 1.0
 
+    # #1296, last: a contradicted tree certifies nothing.
+    status, bound_val, gap_val, _gap_certified, _bound_source, _ext_stats = (
+        _withdraw_contradicted_tree_certificate(
+            stats,
+            status,
+            bound_val,
+            gap_val,
+            _gap_certified,
+            _bound_source,
+            _ext_stats,
+            "NLP-BB",
+        )
+    )
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -31306,6 +31774,7 @@ def _solve_nlp_bb(
         root_gap=root_gap_val,
         root_time=_root_time,
         nlp_bb=True,
+        _proved_bound=_proved_bound_out,
         gap_certified=_gap_certified,
         # #1244: every value the branches above publish is a valid global
         # dual bound -- the certified branch reports the certificate itself,
@@ -41371,6 +41840,19 @@ def _solve_miqp_bb(
         gap_tolerance,
         abs_gap_tol,
         "MIQP-BB",
+    )
+    # #1296, last: a contradicted tree certifies nothing.
+    status, bound_val, gap_val, _gap_certified, _bound_source, _ext_stats = (
+        _withdraw_contradicted_tree_certificate(
+            stats,
+            status,
+            bound_val,
+            gap_val,
+            _gap_certified,
+            _bound_source,
+            _ext_stats,
+            "MIQP-BB",
+        )
     )
 
     return SolveResult(

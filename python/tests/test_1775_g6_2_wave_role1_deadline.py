@@ -27,6 +27,18 @@ pytestmark = pytest.mark.smoke
 
 SLEEP = 0.15
 
+# The deadline is asserted on the number of plans the wave attempted, which does
+# not depend on runner load: each fake sub-NLP sleeps SLEEP, so a 0.6 s deadline
+# admits 0.6 / SLEEP = 4 of them (+1 for the plan in flight at the boundary).
+# Wall time is only a backstop: it also counts the wave's set-up, which is runner
+# load, not the deadline. Measured on CI (run 44739908148, "Python without
+# HiGHS"): wall 1.23 s with attempted=4 -- the deadline held and the old
+# ``wall < 0.6 + 3 * SLEEP`` failed anyway; locally the same call is 0.62 s,
+# attempted=4. With no effective deadline (role-1 60 s, no caller deadline) it
+# measured attempted=16 in 31.5 s, so both assertions below catch that.
+MAX_ATTEMPTED = int(round(0.6 / SLEEP)) + 1
+WALL_BACKSTOP = 24 * SLEEP
+
 
 def _many_plans():
     """Four 3-way ``sum_k y_k == 1`` groups (the big-M lowering's shape): 81
@@ -72,7 +84,8 @@ def _run(deterministic: bool, role1_in: float, deadline_in: float | None):
 def test_deterministic_wave_stops_at_the_role1_deadline():
     wall, attempted = _run(deterministic=True, role1_in=0.6, deadline_in=0.6)
     assert attempted >= 1  # the wave ran (rule 6)
-    assert wall < 0.6 + 3 * SLEEP, (wall, attempted)  # 48 plans would be ~7 s
+    assert attempted <= MAX_ATTEMPTED, (wall, attempted)  # N_PLANS if the deadline is ignored
+    assert wall < WALL_BACKSTOP, (wall, attempted)
 
 
 def test_deterministic_wave_ignores_the_shorter_role2_slice():
@@ -85,4 +98,5 @@ def test_deterministic_wave_ignores_the_shorter_role2_slice():
 def test_default_mode_keeps_the_caller_deadline():
     wall, attempted = _run(deterministic=False, role1_in=60.0, deadline_in=0.6)
     assert attempted >= 1
-    assert wall < 0.6 + 3 * SLEEP
+    assert attempted <= MAX_ATTEMPTED, (wall, attempted)
+    assert wall < WALL_BACKSTOP, (wall, attempted)

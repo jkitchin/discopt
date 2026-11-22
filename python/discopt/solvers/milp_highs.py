@@ -443,6 +443,13 @@ def _status_map(highspy) -> dict:
     }
 
 
+def _clamp_nodes(max_nodes: int) -> int:
+    """``max_nodes`` as HiGHS's ``mip_max_nodes`` accepts it: a 32-bit int >= 0."""
+    from discopt.solvers.lp_milp_highs import _MAX_NODES_CAP
+
+    return int(min(max(int(max_nodes), 0), _MAX_NODES_CAP))
+
+
 def solve_milp(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
@@ -458,6 +465,11 @@ def solve_milp(
     confirm_bound_from: Optional[float] = None,
 ) -> MILPResult:
     """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq`` with HiGHS.
+
+    ``max_nodes`` caps the branch-and-bound nodes (HiGHS ``mip_max_nodes``,
+    clamped to its 32-bit range), as it does on the simplex engine whose
+    signature this shares. It used to be accepted and silently dropped, so a
+    caller's node budget was never applied on this engine.
 
     Signature-compatible with :func:`discopt.solvers.milp_simplex.solve_milp`, so
     it drops into ``get_milp_solver``'s contract. ``bound`` is HiGHS's dual bound,
@@ -483,6 +495,7 @@ def solve_milp(
         integrality=integrality,
         gap_tolerance=gap_tolerance,
         mip_start=mip_start,
+        max_nodes=max_nodes,
     )
     primary = _solve_milp_once(time_limit=time_limit, presolve=True, **kw)
     if primary.status == SolveStatus.ERROR:
@@ -629,6 +642,7 @@ def _solve_milp_once(
     gap_tolerance: float,
     mip_start: Optional[np.ndarray],
     presolve: bool,
+    max_nodes: Optional[int] = None,
 ) -> MILPResult:
     """One HiGHS MILP solve; ``presolve=False`` is the #1634 cross-solve, not an option."""
     highspy = _require_highspy()
@@ -680,6 +694,8 @@ def _solve_milp_once(
         opts.append(("presolve", "off"))
     if time_limit is not None:
         opts.append(("time_limit", float(time_limit)))
+    if max_nodes is not None:
+        opts.append(("mip_max_nodes", _clamp_nodes(max_nodes)))
     for key, val in opts:
         st = h.setOptionValue(key, val)
         if st != highspy.HighsStatus.kOk:
@@ -1800,6 +1816,14 @@ def solve_milp_with_lazy_cuts(
     nodes = 0
     iters = 0
     while True:
+        # The node budget spans every rebuilt tree, like the time limit: each
+        # restart gets what the earlier trees left (it was never forwarded).
+        nodes_left = int(max_nodes) - nodes
+        if nodes_left <= 0:
+            status = SolveStatus.ITERATION_LIMIT
+            break
+        if h.setOptionValue("mip_max_nodes", _clamp_nodes(nodes_left)) != highspy.HighsStatus.kOk:
+            raise RuntimeError("HiGHS rejected the remaining node limit")
         remaining = None
         if time_limit is not None:
             remaining = float(time_limit) - (time.time() - t0)

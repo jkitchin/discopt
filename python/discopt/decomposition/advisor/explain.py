@@ -216,13 +216,25 @@ class Explainer:
             ]
         reasons: list[Rationale] = []
         if cand.method in (MethodKind.BENDERS, MethodKind.GENERALIZED_BENDERS):
+            if cand.element_view is not None:
+                n_rec = cand.element_view.num_blocks
+                text = (
+                    f"Fixing {report.num_integer} integer variable(s) disconnects the "
+                    f"model into {n_rec} recourse blocks (element level: the blocks "
+                    "share array variables, so the array-level view sees one)."
+                )
+            else:
+                n_rec = report.blocks_after_integer_projection
+                text = (
+                    f"Fixing {report.num_integer} integer variable(s) disconnects the "
+                    f"model into {n_rec} recourse blocks."
+                )
             reasons.append(
                 Rationale(
-                    f"Fixing {report.num_integer} integer variable(s) disconnects the "
-                    f"model into {report.blocks_after_integer_projection} recourse blocks.",
+                    text,
                     {
                         "integer_localization": sv.metrics.get("integer_localization", 0.0),
-                        "components_after_projection": report.blocks_after_integer_projection,
+                        "components_after_projection": n_rec,
                     },
                 )
             )

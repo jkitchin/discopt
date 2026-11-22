@@ -73,6 +73,31 @@ ROUNDS = 200
 # between, so 2 is well clear of both. 2 rather than 1 because a round's cuts can
 # need the NEXT re-convergence to pay off.
 STALL_ROUNDS = 2
+# The round budget under ``deterministic`` (passed as ``max_rounds`` by NLP-BB). The
+# stage's working terminator is its wall budget, and that budget is role-2: it goes
+# inert under ``deterministic`` (#1371), leaving ``ROUNDS`` -- a runaway backstop --
+# and the stall exit, which never fires while each round gains a little. Measured
+# on the vendored corpus (``nlp_bb=True``, 20 s): deterministic ``nvs07`` ran 169
+# rounds and ``nvs15`` 103, each until the solve's own deadline, so NLP-BB returned
+# ``time_limit`` with ONE node and the #844 fallback answered for it.
+#
+# Why rounds and not a per-operation work unit: the stage's cost splits across
+# c-MIR separation, Gomory separation and the root LP in different shares per
+# instance (c-MIR 11.8 of 13.1 s on nvs15; Gomory 7.4, c-MIR 3.2, LP 2.5 of 13.6 s
+# on nvs12), and rows, dense row-ops and LP solves each vary 8-20x in cost per unit
+# across the instances that reach the stage. A round is the stage's natural
+# deterministic unit, as the node is for the tree.
+#
+# Why 20 (deterministic, 20 s, the 13 corpus instances that reach the stage under
+# ``nlp_bb=True`` plus the 6 the default route sends here; caps 10/20/40/80 swept):
+# the cap binds on flay02m, nvs07, nvs15 and tls2 only, and at 20 each ends as well
+# as or better than the uncapped stage -- nvs07 time_limit/1 node -> optimal in 3
+# nodes (3.4 s); nvs15 is certified by NLP-BB itself in 11 nodes (3.5 s, with the
+# integral-node clip of #2276) instead of by the #844 fallback after 13.3 s;
+# flay02m 5.8 -> 3.2 s; tls2 103 -> 175 nodes at the time limit. Cap 40 cost nvs11
+# 65 nodes against 49; cap 10 cut flay02m and nvs15 below 90% of their root-bound
+# gain. Unbound instances are bit-identical.
+DETERMINISTIC_ROUNDS = 20
 OA_TOL = 1e-6
 OA_MAX_ITERS = 60
 CUT_VIOL_TOL = 1e-6
@@ -875,7 +900,14 @@ def _select_cuts(candidates, x, top_k=SEL_TOP_K, par_max=SEL_PARALLEL_MAX):
 
 
 def generate_root_cuts(
-    model, evaluator, lb, ub, is_int, is_bin, time_budget_s: float = 10.0
+    model,
+    evaluator,
+    lb,
+    ub,
+    is_int,
+    is_bin,
+    time_budget_s: float = 10.0,
+    max_rounds: int = ROUNDS,
 ) -> RootCutResult:
     """Run the root cutting loop; return applied cuts + the final LP bound.
 
@@ -1012,7 +1044,7 @@ def generate_root_cuts(
     # Flag OFF: it restarts the clock here, exactly as it always did.
     t0 = t_stage if _deadline_enabled() else _time.perf_counter()
 
-    for _rnd in range(ROUNDS):
+    for _rnd in range(max_rounds):
         if _time.perf_counter() - t0 > time_budget_s:
             stop_reason = "budget"
             break

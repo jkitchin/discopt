@@ -420,3 +420,60 @@ def test_slow_correctness_lane_and_its_reporter_stay_reachable():
     # `gh` resolves the repo from the git remote and this job has no checkout.
     env = rep["steps"][0]["env"]
     assert env["GH_REPO"] == "${{ github.repository }}"
+
+
+_WORKFLOWS = _REPO / ".github" / "workflows"
+# (workflow, lane, failure reporter, recovery noter, event clause the two share)
+_SIGNAL_PAIRS = [
+    (
+        "ci.yml",
+        "python-correctness-slow",
+        "report-slow-correctness-failure",
+        "note-slow-correctness-recovery",
+        None,
+    ),
+    (
+        "graduation-gate.yml",
+        "graduation-gate-ci-subset",
+        "report-failure",
+        "note-recovery",
+        "github.event_name == 'schedule'",
+    ),
+    (
+        "amp-integration.yml",
+        "amp-integration",
+        "report-failure",
+        "note-recovery",
+        "(github.event_name == 'schedule' || github.event_name == 'push')",
+    ),
+]
+
+
+@pytest.mark.parametrize("wf_name,lane,reporter,noter,events", _SIGNAL_PAIRS)
+def test_ci_signal_recovery_is_noted_on_the_reporters_issue(wf_name, lane, reporter, noter, events):
+    """A lane that recovers says so on its open CI-signal issue, without closing it.
+
+    The reporters only open or refresh the issue, so #2268 stayed open after the
+    lane went green (the D-gdp false-infeasible was fixed by #2269). The noter
+    must look the issue up under the reporter's exact TITLE -- a drift there makes
+    it find nothing and exit 0, a no-op that reads as working -- fire on the same
+    events as the reporter, and never close: a soundness failure that passes on a
+    rerun is not shown fixed.
+    """
+    jobs = yaml.safe_load((_WORKFLOWS / wf_name).read_text())["jobs"]
+    rep, note = jobs[reporter], jobs[noter]
+    assert rep["needs"] == note["needs"] == lane
+
+    expected_if = f"needs.{lane}.result == 'success'"
+    if events is not None:
+        assert events in rep["if"], (wf_name, rep["if"])
+        expected_if += f" && {events}"
+    assert note["if"] == expected_if, (wf_name, note["if"])
+
+    rep_env, note_env = rep["steps"][0]["env"], note["steps"][0]["env"]
+    assert note_env["TITLE"] == rep_env["TITLE"], (wf_name, note_env["TITLE"], rep_env["TITLE"])
+    assert note_env["GH_REPO"] == "${{ github.repository }}"
+
+    script = note["steps"][0]["run"]
+    assert "gh issue comment" in script
+    assert "gh issue close" not in script and "gh issue create" not in script

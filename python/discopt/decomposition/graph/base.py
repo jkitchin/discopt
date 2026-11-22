@@ -42,6 +42,32 @@ class GraphKind(Enum):
     # BLOCK, COUPLING, STAGE, SCENARIO.
 
 
+def variable_names_in(expr) -> list[str]:
+    """Names of every ``Variable`` reachable from *expr*, in first-seen order.
+
+    Built on :func:`discopt.modeling.core._iter_model_leaves`, which descends
+    into every expression node type. ``gdp_reformulate._collect_variables`` --
+    which this layer used before -- has no arm for ``SumExpression``,
+    ``MatMulExpression`` or ``CustomCall``, so ``dm.sum(x) + y <= 1`` read as a
+    row over ``y`` alone: ``detect_decomposition`` then split a coupled model
+    into "independent" blocks, the Lagrangian solver dropped the row from its
+    block subproblems as "references no variable", and the GBD master-only
+    nonlinear guard (C2) saw an empty support and let such a row through. That
+    walker is not widened in place because the GDP hull's coverage guard
+    (``_assert_hull_saw_every_variable``) is a cross-check *between* the two
+    walkers and relies on the hull substitution seeing exactly what it collects.
+    """
+    from discopt.modeling.core import Variable, _iter_model_leaves
+
+    if expr is None:
+        return []
+    names: dict[str, None] = {}
+    for leaf in _iter_model_leaves(expr):
+        if isinstance(leaf, Variable):
+            names.setdefault(leaf.name, None)
+    return list(names)
+
+
 def _collect_constraint_cliques(model) -> tuple[list[str], list[list[int]]]:
     """Extract variable names and per-constraint variable-index cliques.
 
@@ -49,24 +75,16 @@ def _collect_constraint_cliques(model) -> tuple[list[str], list[list[int]]]:
     canonical incidence both the advisor graphs and ``detect_decomposition``
     consume.
     """
-    from discopt._relax.gdp_reformulate import _collect_variables
-
     var_names = [v.name for v in model._variables]
     name_to_idx = {nm: i for i, nm in enumerate(var_names)}
 
     cliques: list[list[int]] = []
     for c in model._constraints:
-        body = getattr(c, "body", None)
-        if body is None:
-            cliques.append([])
-            continue
-        idxs: list[int] = []
-        seen: set[int] = set()
-        for nm in _collect_variables(body):
-            j = name_to_idx.get(nm)
-            if j is not None and j not in seen:
-                seen.add(j)
-                idxs.append(j)
+        idxs = [
+            name_to_idx[nm]
+            for nm in variable_names_in(getattr(c, "body", None))
+            if nm in name_to_idx
+        ]
         cliques.append(idxs)
     return var_names, cliques
 

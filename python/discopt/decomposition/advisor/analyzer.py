@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+import numpy as np
+
 from discopt.decomposition.graph import kernels
 from discopt.decomposition.graph.base import ModelGraph
 from discopt.decomposition.structure import detect_decomposition
@@ -60,6 +62,34 @@ class StructureReport:
     model_is_nonlinear : bool
         Whether any constraint body is nonlinear (selects GBD over classical
         Benders, and gates convexity-dependent soundness).
+    element_blocks : int | None
+        Constraint-bearing components of the scalar-level graph
+        (:class:`~discopt.decomposition.graph.element.ElementGraph`). The fields
+        above treat each array as one vertex, so a model whose scenarios share an
+        array reads as one block there; this count sees through it. Only blocks
+        that carry a constraint are counted, so the elements of an array no
+        constraint touches are not mistaken for independent blocks. ``None``
+        when the element graph could not be built (see ``element_graph_error``).
+    element_blocks_after_integer_projection : int | None
+        ``blocks_after_integer_projection`` on the scalar-level graph.
+    array_level_hides_blocks : bool
+        True iff the scalar-level graph has more constraint-bearing blocks than
+        the array-level one, either as written or with the integers fixed:
+        structure the array-level fields, and the candidates built from them,
+        cannot see.
+    element_coupling_constraints : tuple[int, ...]
+        Algebraic constraints (indices into ``model._constraints``) whose sole
+        removal splits the scalar-level graph into more constraint-bearing
+        blocks: the element-level bridge scan, linear time and unbudgeted. A
+        superset in practice of ``coupling_constraints``' detected part, since
+        a row that only couples *elements* of one array is invisible at the
+        array level. Empty when the element graph is unavailable.
+    coupling_scan_truncated : bool
+        The array-level bridge scan exceeded its budget and did not run, so an
+        empty ``coupling_constraints`` means "not looked", not "none".
+    element_graph_error : str | None
+        Why the element graph is unavailable (no evaluator for the model), or
+        ``None`` when it was built.
     """
 
     num_vars: int
@@ -76,6 +106,12 @@ class StructureReport:
     articulation_vars: tuple[str, ...]
     has_annotations: bool
     model_is_nonlinear: bool
+    element_blocks: int | None = None
+    element_blocks_after_integer_projection: int | None = None
+    element_graph_error: str | None = None
+    array_level_hides_blocks: bool = False
+    element_coupling_constraints: tuple[int, ...] = ()
+    coupling_scan_truncated: bool = False
 
     @property
     def num_integer(self) -> int:
@@ -103,6 +139,14 @@ class StructureReport:
                 f"  bridges:     {len(self.bridge_constraints)}; "
                 f"articulation vars={len(self.articulation_vars)}",
                 f"  nonlinear:   {self.model_is_nonlinear}; annotated={self.has_annotations}",
+                (
+                    f"  elements:    unavailable ({self.element_graph_error})"
+                    if self.element_blocks is None
+                    else f"  elements:    blocks={self.element_blocks}; projection blocks="
+                    f"{self.element_blocks_after_integer_projection}"
+                    + f"; coupling={len(self.element_coupling_constraints)}"
+                    + (" (array level hides blocks)" if self.array_level_hides_blocks else "")
+                ),
             ]
         )
 
@@ -163,6 +207,30 @@ class StructureAnalyzer:
             or getattr(model, "_coupling_keys", None)
         )
 
+        egraph, element_error = _element_graph(model)
+        element_blocks = element_projected = None
+        element_coupling: tuple[int, ...] = ()
+        if egraph is not None:
+            element_blocks = egraph.bearing_blocks()
+            element_projected = (
+                egraph.bearing_blocks(drop_cols=integer_columns(model, egraph))
+                if integer_idx
+                else element_blocks
+            )
+            element_coupling = tuple(egraph.bridge_constraints())
+        array_bearing = kernels.bearing_blocks(n, graph.constraint_cliques)
+        array_projected_bearing = (
+            kernels.bearing_blocks(n, projected_cliques) if integer_idx else array_bearing
+        )
+        hides = (
+            element_blocks is not None
+            and element_projected is not None
+            and (
+                element_blocks > array_bearing
+                or (bool(integer_idx) and element_projected > array_projected_bearing)
+            )
+        )
+
         return StructureReport(
             num_vars=n,
             num_constraints=m,
@@ -178,7 +246,44 @@ class StructureAnalyzer:
             articulation_vars=articulation_vars,
             has_annotations=has_annotations,
             model_is_nonlinear=_model_is_nonlinear(model),
+            element_blocks=element_blocks,
+            element_blocks_after_integer_projection=element_projected,
+            element_graph_error=element_error,
+            array_level_hides_blocks=hides,
+            element_coupling_constraints=element_coupling,
+            coupling_scan_truncated=bool(decomp.detection_truncated),
         )
+
+
+def _element_graph(model):
+    """``(ElementGraph | None, reason | None)`` for *model*.
+
+    The element graph is built from the model's evaluator. A model it cannot be
+    built for -- no objective yet, the tape declines it and the JAX extra is
+    absent, or a constraint kind whose variables cannot be enumerated -- gets
+    ``None`` and the reason, recorded in the report and logged, so
+    "unavailable" is never read as "no further structure". Any other failure,
+    including an evaluator whose layout disagrees with the model, propagates.
+    """
+    from discopt.decomposition.graph.element import ElementGraph, UnsupportedConstraintError
+
+    if getattr(model, "_objective", None) is None:
+        # The evaluator the graph is read from requires an objective; the
+        # array-level fields do not, so this is reported, not raised.
+        return None, "the model has no objective, and the evaluator needs one"
+    try:
+        return ElementGraph.from_model(model), None
+    except (ImportError, UnsupportedConstraintError) as exc:
+        logger.info("element graph unavailable: %s", exc)
+        return None, str(exc)
+
+
+def integer_columns(model, graph) -> np.ndarray:
+    """Flat columns of the integer/binary variables, on *graph*'s column order."""
+    int_vars = [
+        p for p, v in enumerate(model._variables) if v.var_type in (VarType.BINARY, VarType.INTEGER)
+    ]
+    return np.flatnonzero(np.isin(graph.col_var, int_vars))
 
 
 __all__ = ["StructureAnalyzer", "StructureReport"]

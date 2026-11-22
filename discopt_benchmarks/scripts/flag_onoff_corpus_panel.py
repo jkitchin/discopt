@@ -44,7 +44,11 @@ import numpy as np
 import discopt.modeling as dm
 from discopt.modeling.core import objective_sense_sign
 from discopt.warm_start import check_feasibility
+import os
 path, tl = sys.argv[1], float(sys.argv[2])
+# Extra ``Model.solve`` keywords for every arm, e.g. '{"nlp_bb": true}' to put the
+# whole panel on one route (a flag that only acts there must be reached, rule 6).
+kw = json.loads(os.environ.get("PANEL_SOLVE_KWARGS") or "{}")
 from_start = len(sys.argv) > 3 and sys.argv[3] == "start"
 t = time.time()
 out = {}
@@ -68,12 +72,16 @@ try:
                 for k, val in ip.get(v, {}).items():
                     arr[int(k)] = val
                 start[v] = arr.reshape(v.shape) if v.shape else float(arr[0])
-    r = m.solve(time_limit=tl, initial_solution=start) if start else m.solve(time_limit=tl)
+    r = (
+        m.solve(time_limit=tl, initial_solution=start, **kw)
+        if start
+        else m.solve(time_limit=tl, **kw)
+    )
     out.update(status=r.status, obj=r.objective, bound=r.bound,
                cert=bool(getattr(r, "gap_certified", False)), nodes=r.node_count,
                route=str(r.algorithm_route)[:60], stats={k: v for k, v in
                (r.solver_stats or {}).items()
-               if k.startswith(("tree/py_spatial", "vub_cmir/"))})
+               if k.startswith(("tree/py_spatial", "vub_cmir/", "nlpbb/", "spatial/convex_safe", "spatial/convex_point", "tree/bound_contradicted"))})
     if r.x is not None and r.objective is not None:
         flat = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in m._variables])
         ok, viol = check_feasibility(m, flat, tol=1e-5)

@@ -130,14 +130,19 @@ class _Partition:
 
 def _partition_columns(model: Model, structure: DecompositionStructure) -> _Partition:
     complicating = set(structure.complicating_vars)
+    explicit = (
+        set(int(j) for j in structure.master_columns)
+        if structure.master_columns is not None
+        else None
+    )
     master_cols: list[int] = []
     sub_cols: list[int] = []
     master_int: list[bool] = []
     off = 0
     for v in model._variables:
-        is_master = v.name in complicating
         is_int = v.var_type in (VarType.BINARY, VarType.INTEGER)
         for _ in range(v.size):
+            is_master = (off in explicit) if explicit is not None else (v.name in complicating)
             if is_master:
                 master_cols.append(off)
                 master_int.append(is_int)
@@ -150,6 +155,12 @@ def _partition_columns(model: Model, structure: DecompositionStructure) -> _Part
                     )
                 sub_cols.append(off)
             off += 1
+    if explicit is not None and any(j < 0 or j >= off for j in explicit):
+        bad = sorted(j for j in explicit if j < 0 or j >= off)[:5]
+        raise ValueError(
+            f"master_columns names column(s) {bad} outside the model's {off} columns; "
+            "a column index that is out of range would otherwise be silently ignored."
+        )
     return _Partition(
         np.array(master_cols, dtype=int),
         np.array(sub_cols, dtype=int),
@@ -237,6 +248,10 @@ def solve_benders(
     # #1614 D-26: HiGHS when available (an exact-vertex engine, as #986 requires).
     milp, _ = get_decomposition_master_solver()
 
+    # Validate first, as Model.solve does: it canonicalizes the bodies, and the
+    # coefficient extraction below walks an un-canonicalized shared sum
+    # (``r = r + r`` repeated, #2100) as a tree -- exponential, a hang.
+    model.validate()
     if structure is None:
         structure = detect_decomposition(model)
 
@@ -560,7 +575,26 @@ def solve_benders(
     if init.status == SolveStatus.INFEASIBLE:
         return SolveResult(status="infeasible", wall_time=time.time() - t0, gap_certified=True)
     if init.status != SolveStatus.OPTIMAL or init.x is None:
-        return SolveResult(status="error", wall_time=time.time() - t0)
+        # Say why: an unbounded first-stage variable (bounds at the 1e20
+        # sentinel) leaves this recourse-free master unbounded, which classical
+        # Benders cannot start from. It used to return a bare "error".
+        names = []
+        master_set = set(mcols.tolist())
+        off = 0
+        for v in model._variables:
+            for k in range(v.size):
+                j = off + k
+                if j in master_set and (abs(lb_all[j]) >= 1e19 or abs(ub_all[j]) >= 1e19):
+                    names.append(v.name if v.size == 1 else f"{v.name}[{k}]")
+            off += v.size
+        why = f"the initial master (first stage only) returned {init.status.value}" + (
+            f"; first-stage variable(s) {names[:5]} are unbounded, and classical "
+            "Benders needs a bounded first stage -- bound them, or keep them out "
+            "of the master"
+            if names
+            else ""
+        )
+        return SolveResult(status="error", wall_time=time.time() - t0, error=why)
     x_hat = _master_x(init)
 
     results = _recourse_all(x_hat)

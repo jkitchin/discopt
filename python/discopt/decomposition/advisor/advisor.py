@@ -185,18 +185,27 @@ class DecompositionAdvisor:
         return build_decomposition(self._model, cand)
 
     def _candidate_for(self, method: MethodKind | None) -> Candidate | None:
-        """The candidate to reformulate: a named method's, or the recommendation's."""
-        cands = self.candidates()
+        """The candidate to reformulate: the recommended one, or a named method's best.
+
+        Taken from the ranking, not the generation order: when a method has more
+        than one candidate, the first generated need not be the one scored best
+        (a retired separator generator yielded one per ``|C|`` and exposed this).
+        With one candidate per method the two agree.
+        """
+        ranked = self.ranked()
         if method is None:
-            method = self.recommendation().recommendation
-        return next((c for c in cands if c.method is method), None)
+            pick = next((r for r in ranked if r.recommended), None)
+            return pick.candidate if pick is not None else None
+        return next((r.candidate for r in ranked if r.candidate.method is method), None)
 
 
 def analyze_decomposition(model, *, store=None) -> DecompositionAdvisor:
     """Analyze *model* and return a :class:`DecompositionAdvisor`.
 
-    The public entry point to the advisor's analysis surface. Does not solve or
-    modify the model. When *store* (a
+    The public entry point to the advisor's analysis surface. Does not solve the
+    model. It does run ``Model.validate()``, which canonicalizes the bodies in
+    place (the meaning-preserving rewrite every ``solve`` applies first), because
+    the scalar-level structure graph is read from the model's evaluator. When *store* (a
     :class:`~discopt.decomposition.learning.store.RecordStore`) is given, the
     advisor consults it via the instance-based learned policy (W2).
     """

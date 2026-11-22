@@ -90,13 +90,14 @@ def test_every_older_reader_refuses_block_state():
     mean an OR block read as select-one, so it is pinned out here.
     """
     seen = 0
-    for reader, entry in MANIFEST["versions"].items():
-        if reader == "1.7":
-            continue
+    # Only the readers before 1.7: a later one reads a 1.7 document as old, live.
+    older = [r for r in MANIFEST["versions"] if tuple(map(int, r.split("."))) < (1, 7)]
+    for reader in older:
+        entry = MANIFEST["versions"][reader]
         for case in CASES:
             assert entry["forward"]["1.7"][f"{case}.json"]["outcome"] == "refused", reader
             seen += 1
-    assert seen == 2 * (len(MANIFEST["versions"]) - 1)
+    assert seen == 2 * len(older) == 14
 
 
 @pytest.mark.parametrize("case", CASES)

@@ -85,6 +85,15 @@ def _small_gdp():
     return m
 
 
+# Root primal finders that run after the constructor, each with the value it returns
+# when it finds nothing (``Optional[ndarray]``, ``Optional[tuple]``, ``list``).
+_UNTESTED_FINDERS = {
+    "feasibility_pump": None,
+    "integer_local_search": None,
+    "enumerate_binary_seeds_subnlp": [],
+}
+
+
 def _root_grants(monkeypatch, on: bool) -> tuple[list[tuple[float, ...]], list[float], object]:
     """Solve the small GDP, recording each root-share decision the solve makes
     (``_gdp_config_root_until``'s arguments and result) and each grant the
@@ -110,6 +119,14 @@ def _root_grants(monkeypatch, on: bool) -> tuple[list[tuple[float, ...]], list[f
 
     monkeypatch.setattr(SV, "_gdp_config_root_until", until_spy)
     monkeypatch.setattr(PH, "one_hot_config_subnlp", cfg_spy)
+    # The later root finders are primal-only and not under test, but they were most
+    # of each solve: measured 4.4 s per solve, of it feasibility_pump 2.3 s,
+    # integer_local_search 0.65 s, enumerate_binary_seeds_subnlp 0.56 s, the
+    # constructor under test 0.19 s. Two solves then ran 16 s on a slow CI runner,
+    # over the 15 s fast-lane budget. Each now returns its own "found nothing"; the
+    # tree still certifies both arms (same status, nodes and optimum, measured).
+    for name, nothing in _UNTESTED_FINDERS.items():
+        monkeypatch.setattr(PH, name, lambda *a, _r=nothing, **k: _r)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _small_gdp().solve(time_limit=40)

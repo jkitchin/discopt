@@ -132,8 +132,12 @@ def test_schema_minor_is_bumped_for_the_non_additive_change():
     nested disjunction's ``parent_indicator``, and the ``_gdp_blocks`` state record.
     The writer emits them only for a model that every earlier writer refused, so a
     plain model's document is unchanged apart from the schema string.
+
+    1.8 adds ``int_default_sides`` on a variable record (#2281), read only from a
+    >=1.8 document and written only for an integer variable declared with a side
+    left unspecified.
     """
-    assert S.SCHEMA == "discopt.model/1.7"
+    assert S.SCHEMA == "discopt.model/1.8"
 
 
 def test_legacy_11_document_restores_a_tagged_float_in_the_trace():

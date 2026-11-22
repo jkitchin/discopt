@@ -313,16 +313,20 @@ def test_obs1_default_box_is_unbounded(backend):
 
 
 @pytest.mark.parametrize("backend", ["ipm", "ipopt"])
-def test_obs2_default_integer_box_optimal(backend):
-    """Obs 2 pin: the integer default box (1e6, below the relaxation threshold) is
-    a real finite bound on every backend -> optimal at -1e6."""
+def test_obs2_default_integer_box_not_certified(backend):
+    """Obs 2, revised by #2281: the integer default ``ub = 1e6`` is a finite box the
+    solve runs on, so the point lands at -1e6 on every backend -- but the user never
+    wrote that bound and ``min -x`` over ``x >= 0`` is unbounded, so the result is
+    ``feasible`` with no dual bound, never a certified ``optimal``. (This test used
+    to pin ``optimal``: the false certificate itself.)"""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         m = dm.Model("intunb")
         x = m.integer("x", lb=0)
         m.minimize(-x)
         r = m.solve(nlp_solver=backend)
-    assert r.status == "optimal"
+    assert r.status == "feasible"
+    assert r.gap_certified is False and r.bound is None
     assert r.objective == pytest.approx(-1e6, rel=1e-9)
 
 
