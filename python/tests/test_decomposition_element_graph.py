@@ -428,7 +428,10 @@ def test_element_generators_silent_where_array_view_sees_structure():
 
 _SHARED_SUM_ADVISOR = """
 import resource, sys
-resource.setrlimit(resource.RLIMIT_AS, (3 * 1024**3, 3 * 1024**3))
+# Linux only: macOS rejects any RLIMIT_AS cap ("current limit exceeds maximum
+# limit"). Elsewhere the caller's 120 s timeout is the backstop.
+if sys.platform.startswith("linux"):
+    resource.setrlimit(resource.RLIMIT_AS, (3 * 1024**3, 3 * 1024**3))
 import discopt.modeling as dm
 from discopt.decomposition import analyze_decomposition
 
@@ -465,7 +468,10 @@ def test_advisor_on_unvalidated_shared_sum_does_not_blow_up():
 
 _SHARED_SUM_DRIVER = """
 import resource, sys
-resource.setrlimit(resource.RLIMIT_AS, (3 * 1024**3, 3 * 1024**3))
+# Linux only: macOS rejects any RLIMIT_AS cap ("current limit exceeds maximum
+# limit"). Elsewhere the caller's 120 s timeout is the backstop.
+if sys.platform.startswith("linux"):
+    resource.setrlimit(resource.RLIMIT_AS, (3 * 1024**3, 3 * 1024**3))
 import discopt.modeling as dm
 from discopt.decomposition import solve_benders, solve_lagrangian
 
