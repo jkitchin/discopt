@@ -127,7 +127,8 @@ def main() -> int:
                 rows[row["arm"]] = row
                 fh.write(json.dumps(row) + "\n")
                 fh.flush()
-            best = min((r["forward_obj"] for r in rows.values() if "forward_obj" in r), default=None)
+            verified = [r["forward_obj"] for r in rows.values() if "forward_obj" in r]
+            best = min(verified, default=None)
             for r in rows.values():
                 if r["bound"] is not None and best is not None:
                     if r["bound"] > best + 1e-4 * max(1.0, abs(best)):
