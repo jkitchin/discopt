@@ -35,7 +35,9 @@ import functools as _functools
 import gc
 import itertools as _itertools
 import math
+import os as _os
 import re
+import sys as _sys
 import threading as _threading
 import time as _time
 import warnings
@@ -508,6 +510,10 @@ class VarType(Enum):
 # user-provided bound is always honored exactly and never replaced by these.
 _INTEGER_DEFAULT_LB = 0.0
 _INTEGER_DEFAULT_UB = 1e6
+#: The ``discopt`` package directory, with a trailing separator: a bound written
+#: from a file under it is discopt's own write, not the caller's (#2281,
+#: ``Variable._caller_wrote_side``).
+_DISCOPT_PACKAGE_DIR = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))) + _os.sep
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1776,10 +1782,13 @@ class Variable(Expression):
     # __array_ufunc__ = None is inherited from Expression.
 
     # #2281: the sides of an INTEGER variable that ``Model.integer`` filled with
-    # the finite fallback (``0`` / ``1e6``) because the caller wrote none. Set
-    # once at declaration and never cleared: the guard that reads it
-    # (``Model._withhold_default_box_certificate``) also requires the side to
-    # still hold the default value, so a later ``x.ub = 10`` disarms it.
+    # the finite fallback (``0`` / ``1e6``) because the caller wrote none, read by
+    # ``Model._withhold_default_box_certificate``. A side leaves the record when
+    # the CALLER assigns it (``x.lb = 0``, even to the default value); discopt's
+    # own writes through the same setters never clear it (``_caller_wrote_side``).
+    # A scoped pin (``fix``/``unfix``/``saved_bounds``) is such a write -- it is
+    # undone on exit and the default comes back -- and the guard skips an entry
+    # while it is pinned (``lb == ub``).
     _int_default_sides: frozenset = frozenset()
 
     def __init__(
@@ -1913,6 +1922,8 @@ class Variable(Expression):
         self._lb = _readonly_bound(
             value, self.shape, var_type=self.var_type, name=self.name, side="lb"
         )
+        if self._int_default_sides:  # empty for every variable but a defaulted integer
+            self._caller_wrote_side("lb")
         # Inline test first: the node loop's restores (any type, value IS the box)
         # must not pay a call.
         self._raw_lb = (
@@ -1931,6 +1942,8 @@ class Variable(Expression):
         self._ub = _readonly_bound(
             value, self.shape, var_type=self.var_type, name=self.name, side="ub"
         )
+        if self._int_default_sides:
+            self._caller_wrote_side("ub")
         # Inline test first: the node loop's restores (any type, value IS the box)
         # must not pay a call.
         self._raw_ub = (
@@ -1938,6 +1951,23 @@ class Variable(Expression):
             if value is self._ub or self.var_type is not VarType.INTEGER
             else _raw_unless_snapped(value, self._ub, self.var_type)
         )
+
+    def _caller_wrote_side(self, side: str) -> None:
+        """#2281: *side* of a defaulted integer was assigned. It leaves the record
+        only when the CALLER wrote it: outside a solve, from code outside the
+        ``discopt`` package (a script, notebook, test). discopt's own writes -- the
+        solver's node reductions and heuristic fixes, ``fix``/``unfix``/
+        ``saved_bounds``, a diagnostic's probe-and-restore (``conflict``,
+        ``infeasibility``, AMP's snapshot/restore) -- all go through these setters
+        too and never clear it, so a missed or future internal writer cannot drop
+        the record and let a point on the invented box be certified. Frame 2 is the
+        assigning frame (0 is this method, 1 the setter)."""
+        if side not in self._int_default_sides or _SOLVE_DEPTH.get() != 0:
+            return
+        writer = _sys._getframe(2).f_code.co_filename
+        if _os.path.abspath(writer).startswith(_DISCOPT_PACKAGE_DIR):
+            return
+        self._int_default_sides = self._int_default_sides - {side}
 
     def _declared_bound(self, side: str) -> np.ndarray:
         """The ``lb``/``ub`` the caller last assigned, before the INTEGER snap.
@@ -2098,6 +2128,11 @@ class Variable(Expression):
                 f"first if that is what you meant."
             )
 
+        if self._int_default_sides:
+            # #2281: ``unfix`` restores the box, so it restores the record with it.
+            self.__dict__.setdefault("_int_default_record_at", {})[len(self._bound_stack)] = (
+                self._int_default_sides
+            )
         self._bound_stack.append((prev_lb, prev_ub))
         self.lb = new_lb
         self.ub = new_ub
@@ -2112,6 +2147,9 @@ class Variable(Expression):
                 "bounds set at declaration time."
             )
         self.lb, self.ub = self._bound_stack.pop()
+        record = self.__dict__.get("_int_default_record_at", {}).pop(len(self._bound_stack), None)
+        if record is not None:
+            self._int_default_sides = record
         return self
 
     @_contextlib.contextmanager
@@ -8133,6 +8171,9 @@ class Model:
             ]
         else:
             saved = [(v.lb, v.ub, len(v._bound_stack)) for v in vars_]
+        # #2281: the record of defaulted integer sides is part of the box state a
+        # caller's write inside the block can change; the restore puts it back.
+        records = [v._int_default_sides for v in vars_]
         completed = False
         try:
             yield self
@@ -8146,10 +8187,16 @@ class Model:
             # the boxes are back (the restore is this scope's contract, and a
             # half-restored model is worse than a loud one) (#1321).
             orphaned: list[str] = []
-            for v, (lb, ub, depth) in zip(vars_, saved):
+            for v, (lb, ub, depth), record in zip(vars_, saved, records):
                 v.lb = lb
                 v.ub = ub
                 del v._bound_stack[depth:]
+                if record or v._int_default_sides:
+                    v._int_default_sides = record
+                    at = v.__dict__.get("_int_default_record_at")
+                    if at:
+                        for d in [d for d in at if d >= depth]:
+                            del at[d]
                 # Cheap in the node loop, where no variable carries a scope
                 # token at all: the scan only runs for variables that do.
                 toks = v._fix_scope_tokens
@@ -12647,9 +12694,13 @@ class Model:
 
         #2281: the integer fallback box is the same kind of invention. A side
         ``Model.integer`` filled because the caller wrote none (recorded in
-        ``Variable._int_default_sides``) and that still holds its default value
-        (``0`` / ``1e6``) counts as defaulted. Integer points reach it exactly, so
-        a coordinate within half a unit of it is "on" it, and the result is
+        ``Variable._int_default_sides``; a later caller write such as ``x.lb = 0``
+        takes it out, discopt's own writes never do) and that still holds its
+        default value (``0`` / ``1e6``) counts as defaulted. An entry with
+        ``lb == ub`` (a ``fix()`` pin, or a written side equal to the default) is
+        held by a written bound and does not count. Integer points reach a
+        defaulted side exactly, so a coordinate within half a unit of it is "on"
+        it, and the result is
         downgraded as above (``min -x - y`` s.t. ``x - 2y >= -3``, ``x >= 0``
         integer, was certified ``optimal`` at ``x = 1e6`` by the HiGHS MILP route
         and the native spatial kernel; it is unbounded). An explicitly written
@@ -12692,14 +12743,18 @@ class Model:
             # it describes the invented box just the same (``min -x`` over
             # ``x >= 0`` integer was certified ``optimal`` at ``x = 1e6``, and the
             # C-6 ``min n`` at ``n = 0``). Within half a unit is "on" for an integer
-            # coordinate; the side must still hold the default value, so a bound
-            # assigned later (``x.ub = 10``) is honoured.
+            # coordinate; the side must still be in the record, which a bound the
+            # caller assigns later (``x.ub = 10``, or ``x.lb = 0``) leaves.
             if v._int_default_sides:
                 on_int = _np.zeros(xv.shape, dtype=bool)
                 if "ub" in v._int_default_sides:
                     on_int |= (ub == _INTEGER_DEFAULT_UB) & (xv > ub - 0.5)
                 if "lb" in v._int_default_sides:
                     on_int |= (lb == _INTEGER_DEFAULT_LB) & (xv < lb + 0.5)
+                # An entry with ``lb == ub`` is held by a bound the caller wrote (a
+                # ``fix()`` pin, or the other side equal to the default), not by
+                # the invented one.
+                on_int &= lb != ub
                 int_hit = int_hit or bool(on_int.any())
                 on = on | on_int
             if on.any():
