@@ -152,9 +152,52 @@ if [[ "${1:-}" == "--check" ]]; then
   fi
   check_manifest discopt "discopt-${want}-" || fail=1
   # `pounce-solver` is not built here -- it is copied from the POUNCE repo,
-  # which builds and commits it. Only its presence and Pyodide version are ours
-  # to check.
+  # which builds and commits it. Its presence, its Pyodide version and its
+  # version against discopt's own `pounce-solver>=` floor are ours to check.
   check_manifest pounce "pounce_solver-" || fail=1
+  # #2291: v0.13.0 shipped a page running discopt (which requires
+  # pounce-solver>=0.18) against a staged pounce-solver 0.14.0, and this check
+  # passed. The floor is read from `[project] dependencies`, the same line pip
+  # enforces on a desktop install, so bumping it there is enough to make a stale
+  # staged wheel fail here. Both the manifest's `version` and the version in the
+  # wheel's file name are compared: either one being stale is a stale page.
+  pounce_floor_check() {
+    python3 - "$root/pyproject.toml" "$wheels/pounce-wheel.json" <<'FLOOR'
+import json, re, sys
+
+pyproject, manifest = sys.argv[1:3]
+text = open(pyproject).read()
+deps = re.search(r"^dependencies\s*=\s*\[(.*?)^\]", text, re.M | re.S)
+if deps is None:
+    sys.exit("could not find [project] dependencies in pyproject.toml")
+floors = re.findall(r'"pounce-solver\s*>=\s*([0-9][0-9.]*)', deps.group(1))
+if len(floors) != 1:
+    sys.exit(f"expected one pounce-solver>= floor in [project] dependencies, found {floors}")
+floor = floors[0]
+
+
+def key(v):
+    return tuple(int(p) for p in v.split("."))
+
+
+m = json.load(open(manifest))
+wheel_version = m["wheel"].split("-")[1]
+bad = []
+for label, v in (("manifest version", m["version"]), ("wheel file name", wheel_version)):
+    if not re.fullmatch(r"[0-9]+(\.[0-9]+)*", v):
+        bad.append(f"staged pounce-solver {label} {v!r} is not a release version")
+    elif key(v) < key(floor):
+        bad.append(f"staged pounce-solver {label} is {v}; discopt requires pounce-solver>={floor}")
+if m["version"] != wheel_version:
+    bad.append(f"pounce manifest says {m['version']} but names wheel {m['wheel']}")
+for line in bad:
+    print(line, file=sys.stderr)
+if bad:
+    sys.exit(1)
+print(f"pounce-solver {wheel_version} meets the >={floor} floor")
+FLOOR
+  }
+  pounce_floor_check || fail=1
 
   [[ $fail == 0 ]] && echo "wheel check OK: discopt ${want} (project $(project_version)) + pounce-solver for Pyodide $page"
   exit $fail
