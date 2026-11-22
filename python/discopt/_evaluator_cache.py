@@ -83,6 +83,54 @@ class Fingerprint:
         return f"Fingerprint({self.key!r})"
 
 
+def id_column(objs: Any) -> bytes:
+    """``id()`` of every object in the sequence *objs*, packed as native ``uintp`` bytes.
+
+    Use it for the per-row and per-variable columns of a structural key, in place
+    of ``tuple(map(id, objs))``. The two are equal for exactly the same id
+    sequences, because the width is fixed and so the byte length encodes the
+    count. Only the cost differs, and it matters (#2293): a tuple stores each
+    ``id`` as its own boxed ``int`` (an 8-byte slot plus a 32-byte object), while
+    this stores 8 bytes. Measured on a 229,376-row ODE model, the four such
+    columns in the evaluator fingerprint and the read-only repr key took
+    160 B/row of live heap as tuples, against 32 B/row packed.
+
+    This changes only how the ids are stored. Pinning still has to be done by the
+    caller: an id identifies an object only while that object is alive (#1329).
+    """
+    return np.fromiter(map(id, objs), dtype=np.uintp, count=len(objs)).tobytes()
+
+
+_object_getattribute = object.__getattribute__
+
+
+def built_body(c: Any) -> Any:
+    """``c.body`` if it has been built, else ``None``. Never builds a lazy body.
+
+    A lazy builder row (#1712) has no ``body`` until something first reads it.
+    Its ``Constraint.__getattr__`` hook then builds one, so a plain ``c.body``
+    would force the build. ``object.__getattribute__`` skips that hook. It is
+    used instead of ``c.__dict__.get("body")``, which gives the same answer but,
+    on CPython 3.12+, allocates a dict for an object whose attributes are stored
+    inline, and keeps it for the object's lifetime: 72 B/row, measured, on every
+    row of every model fingerprinted (#2293).
+
+    The fast path is taken only for an exact :class:`Constraint`, which has no
+    class-level ``body`` (checked by ``test_2293_fingerprint_memory.py``), so
+    instance lookup is all it can find. Any other type keeps the ``__dict__``
+    read, because a subclass or a non-``Constraint`` row could define ``body``
+    as a property.
+    """
+    from discopt.modeling.core import Constraint
+
+    if type(c) is Constraint:
+        try:
+            return _object_getattribute(c, "body")
+        except AttributeError:
+            return None
+    return getattr(c, "__dict__", {}).get("body")
+
+
 def evaluator_fingerprint(model: "Model") -> Fingerprint:
     """Structural fingerprint of a model for evaluator-cache validity.
 
@@ -115,22 +163,23 @@ def evaluator_fingerprint(model: "Model") -> Fingerprint:
     # a row whose like terms binary64 would add inexactly -- and an evaluator built
     # before that (``verify_point`` before ``solve``) then kept evaluating the old,
     # rounded objective: the solve reported an objective no feasible point has.
-    # Read from ``__dict__`` so a lazy builder row's unbuilt body is not forced
-    # here; its materialization changes the key once, which is a correct rebuild.
-    bodies = tuple(getattr(c, "__dict__", {}).get("body") for c in constraints)
+    # `built_body` does not force a lazy builder row's unbuilt body; building it
+    # later changes the key once, which correctly triggers a rebuild.
+    bodies = tuple(map(built_body, constraints))
     objective_expr = None if objective is None else objective.expression
     key = (
         id(objective),
         id(objective_expr),
-        tuple(id(c) for c in constraints),
-        tuple(id(b) for b in bodies),
+        # Packed rather than tuples of ints (#2293); pinned below like before.
+        id_column(constraints),
+        id_column(bodies),
         # #840: the fast-path builder rows are part of the evaluator's constraint
         # set, so they must be in the fingerprint — else a model that gains a fast
         # family (or has its builder rows materialized into ``_constraints``)
         # would reuse a stale evaluator built without them.
         tuple((id(A), int(A.shape[0]), sense) for A, _x, sense, _b, _name in _blocks),
-        tuple(id(v) for v in variables),
-        tuple(id(p) for p in parameters),
+        id_column(variables),
+        id_column(parameters),
         bool(getattr(model, "_gauss_newton_hessian", False)),
     )
     # Every object whose id() is in `key` is pinned, so no id in it can be
