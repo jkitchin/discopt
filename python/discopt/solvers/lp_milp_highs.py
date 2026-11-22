@@ -1270,10 +1270,11 @@ def box_dual_violation(
     denominator both ``|a·y_i|`` and reads exactly 1.0 however small ``y_i`` is -- which
     the in-house LP engine's duals hit routinely (HiGHS returns exact zeros there).
     Measured on the #2300 set cover (highspy 1.16.0): Rust pair 1.0 -> 1.05e-15, HiGHS
-    pair 5.6e-17 -> 3.2e-17, against a round-off bound of 1.42e-13. The flag is used for the *reported* statistic only; the MILP route's gate
-    still uses the per-column scale, because a floor makes the cheap filter pass more
-    often and so skip the NS gap, and the #1410 catch/false-refusal panel that would
-    justify that has not been re-run against it.
+    pair 5.6e-17 -> 3.2e-17, against a round-off bound of 1.42e-13. The flag is used for
+    the *reported* statistic only; the MILP route's gate still uses the per-column scale,
+    because a floor makes the cheap filter pass more often and so skip the NS gap, and
+    the #1410 catch/false-refusal panel that would justify that has not been re-run
+    against it.
     """
     y = np.asarray(row_dual, dtype=np.float64).ravel()
     xv = np.asarray(x, dtype=np.float64).ravel()
