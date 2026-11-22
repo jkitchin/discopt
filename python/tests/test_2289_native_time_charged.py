@@ -9,12 +9,16 @@ standard-form LP engine, the dual-bound refinement LPs and every
 ``solve_milp_csc_py`` call all fell into ``python_time`` -- the number the phase1
 ``interop_overhead`` gate reads.
 
-The test spies on the callback-free native entry points in ``discopt._rust``
-(every call site imports them from the module at call time) and asserts that the
-time measured inside them is covered by the solve's own ``rust`` self time
+The test spies on native entry points in ``discopt._rust`` (every call site
+imports them from the module at call time) and asserts that the time measured
+inside them is covered by the solve's own ``rust`` self time
 (``rust_time - pounce_time``). The spy's wall is an upper bound on the native
-self time it encloses only because these functions take no Python callback;
-``solve_spatial_tree_py`` and ``solve_milp_lazy_csc_py`` do, so they are left out.
+self time it encloses only while no Python callback runs inside the call.
+``solve_spatial_tree_py`` and ``solve_milp_lazy_csc_py`` always take callbacks, so
+they are left out. ``solve_milp_csc_py`` and ``solve_milp_relu_csc_py`` take optional
+``debug_hook`` / ``node_bound_hook`` callbacks (wrapped in
+``_timing.as_interpreted`` at every call site). ``nvs05`` sets neither, so here
+they are callback-free.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from discopt.modeling.core import from_nl
 
 CORPUS = Path(__file__).parent / "data" / "minlplib_nl"
 
-#: Native entry points that never call back into Python.
+#: Native entry points that are callback-free when no hook is passed (none is, here).
 CALLBACK_FREE = (
     "solve_lp_warm_csc_py",
     "solve_milp_csc_py",
@@ -63,8 +67,12 @@ def test_native_lp_time_is_charged_to_rust(monkeypatch):
 
     assert spent["calls"] > 0, "no native LP was observed; the spy measured nothing"
     rust_self = res.rust_time - (res.pounce_time or 0.0)
-    # 5 ms per call covers the spy's own wrapper (outside the charge region).
-    slack = 0.005 * spent["calls"] + 0.05
+    # The spy's own cost per call (two perf_counter() calls, a closure, and the
+    # charge region's enter/exit) is microseconds; 100 us/call is generous. Post-fix
+    # the charged time covers the measured time with no slack at all (1-3 ms of
+    # margin per solve). An earlier 5 ms/call let a 1.5 s pre-fix leak pass on a
+    # machine whose native calls average 3-5 ms (review of #2292).
+    slack = 1e-4 * spent["calls"] + 0.05
     assert spent["seconds"] <= rust_self + slack, (
         f"{spent['seconds']:.3f} s inside {spent['calls']} native LP/MILP calls but only "
         f"{rust_self:.3f} s charged to rust: native time is leaking into python_time"

@@ -1437,7 +1437,7 @@ def solve_milp(
                 # at once rather than run unbounded.
                 time_limit_s=None if budget is None else max(0.0, float(budget)),
                 initial_incumbent=seed,
-                debug_hook=_debug.rust_hook(),
+                debug_hook=_timing.as_interpreted(_debug.rust_hook()),
                 batched_search=bool(batched_search),
                 **cut_kwargs,
             )
