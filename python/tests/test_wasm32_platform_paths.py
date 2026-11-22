@@ -110,8 +110,9 @@ def test_varblock_repeat_sizes_cast_safely_to_wasm32_intp(monkeypatch, tmp_path)
     """#2295: ``from_nl`` of any file with linear rows raised ``TypeError: Cannot cast
     array data from dtype('int64') to dtype('int32')`` under Pyodide. ``VarBlock``
     passed int64 sizes as ``np.repeat``'s ``repeats``, which numpy casts to ``intp``
-    under the ``safe`` rule; ``intp`` is int32 on wasm32. Simulated here by a
-    ``np.repeat`` that enforces the wasm32 cast."""
+    under the ``safe`` rule; ``intp`` is int32 on wasm32. Simulated here by setting
+    ``np.intp`` to int32 (as on wasm32) and a ``np.repeat`` that enforces the cast.
+    On a 64-bit host ``intp`` is int64, so no dtype check alone can tell the two."""
     import numpy as np
     from discopt.modeling.core import VarBlock, from_nl
 
@@ -121,7 +122,7 @@ def test_varblock_repeat_sizes_cast_safely_to_wasm32_intp(monkeypatch, tmp_path)
     def wasm32_repeat(a, repeats, axis=None):
         calls["n"] += 1
         r = np.asarray(repeats)
-        if r.dtype.kind in "iu" and not np.can_cast(r.dtype, np.int32, "safe"):
+        if r.dtype.kind in "iu" and not np.can_cast(r.dtype, np.intp, "safe"):
             raise TypeError(
                 f"Cannot cast array data from dtype('{r.dtype}') to dtype('int32') "
                 "according to the rule 'safe'"
@@ -138,6 +139,7 @@ def test_varblock_repeat_sizes_cast_safely_to_wasm32_intp(monkeypatch, tmp_path)
     path = tmp_path / "lin.nl"
     m.to_nl(str(path))
 
+    monkeypatch.setattr(np, "intp", np.int32)
     monkeypatch.setattr(np, "repeat", wasm32_repeat)
     blk = VarBlock([x, y])
     pos, local = blk.columns()
