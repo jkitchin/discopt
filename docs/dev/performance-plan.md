@@ -16191,8 +16191,10 @@ one-node kernel calls were all reported as interpreted Python. `nvs02`, `prob02`
 all fifteen sites. The Python callbacks that native solves invoke (the lazy-MILP
 separator, node and debug hooks, and the spatial kernel's primal hook and incumbent
 pricer) now run under `_timing.interpreted()`, so they stay in the residual instead
-of being billed to Rust. Guard: `python/tests/test_2289_native_time_charged.py`
-(pre-fix: 3.10 s inside 157 native calls, 0.000 s charged).
+of being billed to Rust. Guard: `python/tests/test_2289_native_time_charged.py`.
+Against the pre-fix tree, six runs measured 3.10-4.67 s inside 157-354 native calls,
+with 0.000 s charged every time; the call count varies with the route the 4 s solve
+takes.
 
 A retraction from the same investigation: from cProfile shares I first bounded the
 correction at "at most ~0.07" (all `_rust` self time was 7 % of profiled time). It

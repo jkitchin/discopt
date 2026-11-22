@@ -53,9 +53,12 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any, Callable, Optional, TypeVar
 
 __all__ = ["charge", "interpreted", "as_interpreted", "snapshot", "since", "BUCKETS"]
 
+
+_T = TypeVar("_T")
 
 #: Boundary buckets. ``rust`` and ``python`` partition the wall clock; ``pounce``
 #: is a subset of ``rust`` and ``jax`` is a subset of ``python``.
@@ -160,20 +163,30 @@ def interpreted() -> "_Charge":
     callback here subtracts its elapsed time from the enclosing region and credits
     it to no bucket, so it lands in ``python_time`` -- the residual -- where it
     belongs. A ``charge`` nested inside it still records its own bucket.
+
+    Same-thread only: the region stack is per thread, so this works because the
+    native solves that take Python callbacks call them back on the thread that
+    entered the enclosing ``charge("rust")``. A callback invoked from a native
+    worker thread (rayon, say) would find an empty stack there, and the wrapper
+    would then credit nothing and subtract nothing -- the callback's time would
+    stay in the parent's Rust self time, exactly as it did before this existed.
     """
     return _Charge(None)
 
 
-def as_interpreted(fn):
+def as_interpreted(fn: Optional[Callable[..., _T]]) -> Optional[Callable[..., _T]]:
     """``fn`` wrapped to run under :func:`interpreted`; ``None`` passes through.
 
     For a Python callable handed to a native solve as a callback (a lazy
     separator, a primal hook), so its time is not billed to the native layer.
+    The same thread restriction as :func:`interpreted` applies.
     """
     if fn is None:
         return None
 
-    def _run(*args, **kwargs):
+    def _run(*args: Any, **kwargs: Any) -> _T:
+        # ``_Charge(None)`` directly rather than ``interpreted()``: this runs once
+        # per callback, the hottest boundary on some routes, so skip the extra call.
         with _Charge(None):
             return fn(*args, **kwargs)
 
