@@ -358,15 +358,19 @@ class TapeNLPEvaluator:
         self._residual_exprs = self._build_residual_exprs()
         self._shared_problem = self._new_problem() if _nlproblem_is_thread_safe() else None
         if self._shared_problem is not None:
-            # #2283: the shared NlProblem is the only consumer of these roots.
-            # Dropping them frees their Python wrappers and any node the problem
-            # does not reference. It does NOT free the whole DAG, as an earlier
-            # version of this comment claimed. #2293 measured pounce 0.18.0
-            # keeping ~0.75 KiB/row of the NlExpr DAG alive inside the NlProblem
-            # (229,376 linear rows, with malloc_trim so freed memory leaves RSS):
-            # deleting the roots after `build_nl_problem` freed 0.26 KiB/row of
-            # the 1.01 KiB/row they took, while deleting them without building
-            # freed all of it. That remainder is pounce's to release. The per-thread
+            # #2283: the shared NlProblem is the only consumer of these roots, and
+            # it has its own tapes -- POUNCE does not keep the NlExpr DAG alive
+            # (re-checked in #2293 on pounce 0.18.0: a pounce-only build of 200k
+            # rows frees the whole DAG once the roots are dropped).
+            #
+            # RSS after the release can still sit ~0.5 KiB/row above the problem's
+            # own size on glibc. That is fragmentation, not retention: the DAG's
+            # freed chunks are interleaved with the problem's live ones, so
+            # `malloc_trim` cannot return those pages, but a second DAG of the same
+            # size reuses them (it grew RSS by 0.50 KiB/row against 1.01 for the
+            # first, 229,376 linear rows). Holding the roots would add the whole
+            # DAG on top: #2283 measured 66 MiB (~2.3 KiB/row) on a 28,672-row
+            # method-of-lines model, freed by this release. The per-thread
             # fallback below still needs them, because it builds one problem per
             # thread on first use, so they are kept on that path. A rebuild
             # (`_ensure_fresh` -> `_build`) lowers them afresh from the model.
