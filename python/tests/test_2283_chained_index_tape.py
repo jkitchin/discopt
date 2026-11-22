@@ -227,3 +227,68 @@ def test_three_part_chains_arena_matches_walk(monkeypatch):
         assert np.array_equal(arena.evaluate_jacobian(xv), walk.evaluate_jacobian(xv))
         checks += 1
     assert checks == 12
+
+
+def test_shared_problem_releases_the_nlexpr_roots(monkeypatch):
+    """#2283: once the shared NlProblem is built, the evaluator drops its NlExpr roots.
+
+    POUNCE builds its own tapes and does not keep the NlExpr DAG alive, so holding
+    the roots pinned the whole DAG for the evaluator's lifetime: 66 MiB of live
+    heap on a 28,672-row method-of-lines model. The per-thread fallback still
+    needs them (it builds one problem per thread on first use) and must keep them.
+    Both paths must evaluate identically.
+    """
+    import discopt._tape_nlp_evaluator as T
+
+    m, _ = _stepped_model()
+    shared = T.TapeNLPEvaluator(m)
+    assert shared._shared_problem is not None, "probe should report thread-safe here"
+    assert shared._obj_expr is None and shared._con_exprs is None  # failing-before
+
+    monkeypatch.setattr(T, "_nlproblem_is_thread_safe", lambda: False)
+    fallback = T.TapeNLPEvaluator(m)
+    monkeypatch.undo()
+    assert fallback._shared_problem is None
+    assert fallback._obj_expr is not None and fallback._con_exprs is not None
+
+    rng = np.random.default_rng(2283)
+    lam = rng.normal(size=shared.n_constraints)
+    checks = 0
+    for _ in range(3):
+        xv = rng.uniform(-1.0, 1.0, shared.n_variables)
+        for name in ("evaluate_objective", "evaluate_gradient", "evaluate_constraints"):
+            assert np.array_equal(
+                np.asarray(getattr(shared, name)(xv)), np.asarray(getattr(fallback, name)(xv))
+            )
+            checks += 1
+        assert np.array_equal(shared.evaluate_jacobian(xv), fallback.evaluate_jacobian(xv))
+        assert np.array_equal(
+            shared.evaluate_hessian_values(xv, 0.7, lam),
+            fallback.evaluate_hessian_values(xv, 0.7, lam),
+        )
+        checks += 2
+    assert checks == 15
+
+
+def test_parameter_rebind_after_the_roots_are_released():
+    """A rebuild lowers the roots afresh from the model, so a released evaluator
+    still picks up a new ``Parameter.value`` -- and releases them again."""
+    m = dm.Model("released_rebind")
+    x = m.continuous("x", shape=(3, 2), lb=0.1, ub=5.0)
+    p = m.parameter("p", value=2.0)
+    for k in range(2):
+        y = x[k + 1]
+        m.subject_to(y[0] - x[k][0] - p * y[1] == 0)
+    m.minimize(p * x[2][0] * x[2][0])
+    import discopt._tape_nlp_evaluator as T
+
+    ev = T.TapeNLPEvaluator(m)
+    assert ev._con_exprs is None
+    pt = np.linspace(0.5, 1.5, ev.n_variables)
+    slot = 2 * 2 + 0  # x[2, 0]
+    assert ev.evaluate_objective(pt) == pytest.approx(2.0 * pt[slot] ** 2)
+    p.value = 7.0
+    assert ev.evaluate_objective(pt) == pytest.approx(7.0 * pt[slot] ** 2), "stale tape"
+    g = np.asarray(ev.evaluate_constraints(pt))
+    assert g[0] == pytest.approx(pt[2] - pt[0] - 7.0 * pt[3])
+    assert ev._con_exprs is None, "rebuild must release the roots again"

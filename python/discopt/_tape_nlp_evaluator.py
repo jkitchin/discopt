@@ -349,6 +349,17 @@ class TapeNLPEvaluator:
         self._chain_local = threading.local()
         self._residual_exprs = self._build_residual_exprs()
         self._shared_problem = self._new_problem() if _nlproblem_is_thread_safe() else None
+        if self._shared_problem is not None:
+            # #2283: the shared NlProblem is the only consumer of these roots, and
+            # it has its own tapes -- POUNCE does not keep the NlExpr DAG alive.
+            # Holding them pinned that whole DAG for the evaluator's lifetime:
+            # measured 66 MiB of live heap (~2.3 KiB/row) on a 28,672-row
+            # method-of-lines model, freed by this release. The per-thread
+            # fallback below still needs them, because it builds one problem per
+            # thread on first use, so they are kept on that path. A rebuild
+            # (`_ensure_fresh` -> `_build`) lowers them afresh from the model.
+            self._obj_expr = None
+            self._con_exprs = None
         # Only used on the per-thread fallback. thread-LOCAL storage rather than a
         # dict keyed by thread id: an unsendable pyclass also refuses to be
         # DROPPED on a foreign thread, and a dict outliving its threads hands
@@ -499,6 +510,15 @@ class TapeNLPEvaluator:
         """``(main, residual_or_None)``. The pair is built and cached together so
         the per-thread fallback below cannot hand one thread's aux tape to another.
         """
+        if self._obj_expr is None:
+            # The roots are released once the shared problem exists (see `_build`),
+            # and the shared problem is then the only one ever built. Reaching here
+            # without them is a logic error; building from `None` would be a tape
+            # of the wrong function, so refuse loudly instead.
+            raise RuntimeError(
+                "TapeNLPEvaluator._new_problem called after the NlExpr roots were "
+                "released; only the per-thread fallback may build more than one problem"
+            )
         main = self._pounce.build_nl_problem(
             self._n_tape,
             self._obj_expr,
