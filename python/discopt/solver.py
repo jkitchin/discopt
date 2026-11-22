@@ -40226,7 +40226,8 @@ def _solve_milp_simplex(
                 np.asarray(lp_data.x_l[:n_orig], dtype=np.float64),
                 np.asarray(lp_data.x_u[:n_orig], dtype=np.float64),
             )
-            _sel_kw["node_bound_hook"] = _lag.node_bound
+            # #2289: Python, called from inside the native tree's charge("rust").
+            _sel_kw["node_bound_hook"] = _timing.as_interpreted(_lag.node_bound)
             _sel_kw["node_bound_every"] = max(1, int(lagrangian_frequency))
     # ``milp_cuts=False`` (#1535): no root cut loop.
     if not root_cuts:
@@ -40272,7 +40273,7 @@ def _solve_milp_simplex(
             rel_gap_max_abs=_rel_gap_max_abs,
             initial_incumbent=_seed,
             time_limit_s=float(_run1_time),
-            debug_hook=_hook(),
+            debug_hook=_timing.as_interpreted(_hook()),
             **_cut_opts,
             **_frontier_opts,
             **_run1_stall,
@@ -40468,7 +40469,7 @@ def _solve_milp_simplex(
                     rel_gap_max_abs=_rel_gap_max_abs,
                     initial_incumbent=_seed2,
                     time_limit_s=float(_reentry_remaining),
-                    debug_hook=_hook(),
+                    debug_hook=_timing.as_interpreted(_hook()),
                     **_sel_kw,
                     **(
                         (_milp_root_cut_budget(_reentry_remaining) or {})
