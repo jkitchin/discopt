@@ -16154,3 +16154,61 @@ solve on exactly the nodes that already cost ~26 ms. The retry removes the tree-
 consequence; the engine-level fix stays #956's. Also measured and not shipped:
 `DISCOPT_PRIMAL_EXPAND_RESET` decides 16/40 of these LPs (it remains default OFF, and
 has no row in `flag-retirement-audit.md`, which this section does not settle).
+
+## 122. #2289: the phase1 `interop_overhead` miss is real; the instrument was leaking native time into it (2026-11-22)
+
+The `phase1` gate's `interop_overhead` criterion (`python_orchestration_fraction`
+<= 0.05, the per-instance mean of `python_time / wall_time`) failed at ~0.49 on every
+release run. The issue offered two readings: the target is right and Python
+orchestration is too large, or the metric is stale for small instances whose fixed
+Python overhead dominates a ~0.1 s solve.
+
+**Measured** (Linux, 4 cores, tree `0c7ae245` plus this change; `run_benchmarks.py
+--suite phase1` then `--gate phase1`; 80 instances, 78 solved and proved, 0 incorrect
+in both runs):
+
+| | before | after |
+|---|---|---|
+| `python_orchestration_fraction` (gate, per-instance mean) | 0.4919 | 0.3871 |
+| wall-weighted `sum(python_time) / sum(wall)` | 0.4993 | 0.2981 |
+| instances whose status, node count or objective changed | | 0 of 80 |
+
+**The small-instance hypothesis is falsified.** Before the change, the per-instance
+Python fraction was 0.53 / 0.49 / 0.51 / 0.44 / 0.44 in the wall buckets
+[0, 0.1) / [0.1, 0.5) / [0.5, 2) / [2, 10) / [10, inf) s, and the wall-weighted figure
+(0.499) equalled the unweighted mean. Restricting the metric to instances above a
+minimum wall time (>= 1 s: 0.394; >= 5 s: 0.450) would not have changed the verdict.
+The metric is not re-specified.
+
+**But the instrument was wrong.** `python_time` is a residual: wall minus the
+FFI-boundary counters of `discopt/_timing.py`. Only one of the eight
+`solve_lp_warm_csc_py` call sites was inside a `charge("rust")` region. OBBT's probe
+LPs (2.47 s of a 10 s `nvs05` solve, cProfile), the node-LP warm solve, the
+standard-form LP engine, the dual-bound refinement LPs, every `solve_milp_csc_py` /
+`solve_milp_relu_csc_py` / `solve_lp_batch_py` / `solve_convex_tree_py` call, and two
+one-node kernel calls were all reported as interpreted Python. `nvs02`, `prob02` and
+`nvs14` reported 0.996-0.998 Python. They are 0.175, 0.251 and 0.311. #2289 charges
+all fifteen sites. The Python callbacks that native solves invoke (the lazy-MILP
+separator, node and debug hooks, and the spatial kernel's primal hook and incumbent
+pricer) now run under `_timing.interpreted()`, so they stay in the residual instead
+of being billed to Rust. Guard: `python/tests/test_2289_native_time_charged.py`
+(pre-fix: 3.10 s inside 157 native calls, 0.000 s charged).
+
+A retraction from the same investigation: from cProfile shares I first bounded the
+correction at "at most ~0.07" (all `_rust` self time was 7 % of profiled time). It
+was 0.105. cProfile's per-call overhead inflates interpreted frames, which shrank
+every native share it reported. Use the solver's own counters for this metric, not a
+profiler.
+
+**Where the remaining 0.39 goes** (cProfile self time on the same 80 instances,
+60 s cap, each instance weighted equally like the gate): native/builtin 0.50 (POUNCE
+is most of it), numpy/scipy Python wrappers 0.11, then a long flat tail. No discopt
+module exceeds 0.04: `_relax/nonlinear_bound_tightening.py` 0.039,
+`_relax/term_classifier.py` 0.026, `_relax/convexity/interval.py` 0.024,
+`_timing.py` 0.020 (profiler-inflated), `_tape_nlp_evaluator.py` 0.019,
+`_relax/convexity/rules.py` 0.018, `_relax/uniform_relax.py` 0.018,
+`modeling/core.py` 0.017. No local fix reaches 0.05. The target describes an
+architecture in which per-node FBBT, convexity/interval reasoning and the relaxation
+build are native. That is the plan's direction (certification-gap-plan: 0.42 ->
+<= 0.10 -> 0.05 on global50). Until then the criterion is a measured FAIL, and the
+release notes say so, as RELEASE.md already requires.

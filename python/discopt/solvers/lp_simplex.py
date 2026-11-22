@@ -31,6 +31,7 @@ from typing import Any, Optional, Union, cast
 import numpy as np
 import scipy.sparse as sp
 
+from discopt import _timing
 from discopt.solvers import LPResult, SolveStatus
 
 try:
@@ -235,7 +236,6 @@ def solve_lp(
     # objective, like any non-optimal exit, so no caller can take a bound from it.
     if time_limit is not None:
         _warm_kw["time_limit_s"] = max(0.0, float(time_limit))
-    from discopt import _timing
 
     _t0 = time.perf_counter()
 
@@ -423,15 +423,16 @@ def solve_lp_batch(
             ub_stack[t, :n] = _LP_INF
         ub_stack[t, n:] = _LP_INF  # slacks in [0, inf)
 
-    statuses, xs, objs = solve_lp_batch_py(
-        np.ascontiguousarray(c_std),
-        np.ascontiguousarray(a_std),
-        np.ascontiguousarray(b_stack),
-        np.ascontiguousarray(lb_stack),
-        np.ascontiguousarray(ub_stack),
-        tol,
-        int(max_iter),
-    )
+    with _timing.charge("rust"):
+        statuses, xs, objs = solve_lp_batch_py(
+            np.ascontiguousarray(c_std),
+            np.ascontiguousarray(a_std),
+            np.ascontiguousarray(b_stack),
+            np.ascontiguousarray(lb_stack),
+            np.ascontiguousarray(ub_stack),
+            tol,
+            int(max_iter),
+        )
 
     status_map = {
         "optimal": SolveStatus.OPTIMAL,
