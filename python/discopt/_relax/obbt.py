@@ -17,6 +17,7 @@ from typing import Optional
 
 import numpy as np
 
+from discopt import _timing
 from discopt._flat_index import resolve_scalar_slot
 from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
 from discopt._relax.scalarize import scalar_leaf_value, sum_is_full_reduction
@@ -407,22 +408,23 @@ class _PersistentProbeLP:
             cs0 = None
             bv0 = None
         t0 = _time.perf_counter()
-        status, _x_full, obj, _iters, cs, bv, dual, _ray = solve_lp_warm_csc_py(
-            np.ascontiguousarray(c_std),
-            m,
-            n + m,
-            self._indptr,
-            self._indices,
-            self._data,
-            self._b,
-            np.ascontiguousarray(lb_std),
-            np.ascontiguousarray(ub_std),
-            cs0,
-            bv0,
-            1e-9,
-            100_000,
-            time_limit_s,
-        )
+        with _timing.charge("rust"):
+            status, _x_full, obj, _iters, cs, bv, dual, _ray = solve_lp_warm_csc_py(
+                np.ascontiguousarray(c_std),
+                m,
+                n + m,
+                self._indptr,
+                self._indices,
+                self._data,
+                self._b,
+                np.ascontiguousarray(lb_std),
+                np.ascontiguousarray(ub_std),
+                cs0,
+                bv0,
+                1e-9,
+                100_000,
+                time_limit_s,
+            )
         wall = _time.perf_counter() - t0
         status_map = {
             "optimal": SolveStatus.OPTIMAL,

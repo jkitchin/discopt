@@ -96,6 +96,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
+from discopt import _timing
 from discopt._flat_index import flat_index_in_shape
 from discopt.modeling.core import (
     BinaryOp,
@@ -1214,7 +1215,8 @@ def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg
         initial_incumbent=_init_inc,
         time_limit_s=time_limit_s,
     )
-    result: dict = dict(_rust.solve_convex_tree_py(**spec, **params))
+    with _timing.charge("rust"):
+        result: dict = dict(_rust.solve_convex_tree_py(**spec, **params))
     if obj_const:
         for _key in ("incumbent", "bound"):
             _v = result.get(_key)

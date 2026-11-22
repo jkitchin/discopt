@@ -31,6 +31,8 @@ from typing import Any, Callable, Optional, Protocol
 
 import numpy as np
 
+from discopt import _timing
+
 _HIGHS_STATUS = {
     "kOptimal": "optimal",
     "kInfeasible": "infeasible",
@@ -222,20 +224,21 @@ class RustEngine:
         kw: dict[str, Any] = {"max_iter": self.max_iter}
         if time_limit is not None:
             kw["time_limit_s"] = max(0.0, float(time_limit))
-        status, x, _obj, iters, _cs, _bv, dual, ray = solve_lp_warm_csc_py(
-            np.ascontiguousarray(c, dtype=np.float64),
-            m,
-            n,
-            np.ascontiguousarray(A.indptr, dtype=np.int64),
-            np.ascontiguousarray(A.indices, dtype=np.int64),
-            np.ascontiguousarray(A.data, dtype=np.float64),
-            np.ascontiguousarray(b, dtype=np.float64),
-            np.ascontiguousarray(xl, dtype=np.float64),
-            np.ascontiguousarray(xu, dtype=np.float64),
-            None,
-            None,
-            **kw,
-        )
+        with _timing.charge("rust"):
+            status, x, _obj, iters, _cs, _bv, dual, ray = solve_lp_warm_csc_py(
+                np.ascontiguousarray(c, dtype=np.float64),
+                m,
+                n,
+                np.ascontiguousarray(A.indptr, dtype=np.int64),
+                np.ascontiguousarray(A.indices, dtype=np.int64),
+                np.ascontiguousarray(A.data, dtype=np.float64),
+                np.ascontiguousarray(b, dtype=np.float64),
+                np.ascontiguousarray(xl, dtype=np.float64),
+                np.ascontiguousarray(xu, dtype=np.float64),
+                None,
+                None,
+                **kw,
+            )
         name = f"rust:{status}"
         if status == "iter_limit":
             # A deadline exit reports ``iter_limit`` short of the pivot cap (lp_simplex).
