@@ -239,8 +239,11 @@ def _static_scalar_slot(expr: IndexExpression, model: Model) -> int | None:
 
     * a **slice or partial** index (``x[1:]``, ``y[0]`` on a 2-D ``y``), which
       names many slots rather than one;
-    * a **non-Variable base** (``(x + y)[0]``, or a chained ``x[0][1]``), which
-      has no flat slot to name at all;
+    * a **non-Variable base** (``(x + y)[0]``), which has no flat slot to name
+      at all (a chain of integer indexes ending at a Variable, ``x[0][1]``, is
+      resolved -- see below);
+    * a chain with a **non-integer part anywhere** (``x[1:][0]``), whose parts
+      do not simply concatenate;
     * a **non-integer / exotic** index (boolean mask, fancy index, ``Ellipsis``,
       a symbolic index);
     * an **out-of-range** index. numpy raises where ``jnp`` silently clamps, so
@@ -256,15 +259,28 @@ def _static_scalar_slot(expr: IndexExpression, model: Model) -> int | None:
     O(size·leaves) over the build — the same quadratic root-setup cost issue #654
     removed from :func:`_compute_var_offset`.
     """
-    base = expr.base
+    # A CHAIN of integer indexes, ``x[k][s]`` -- what ``y = x[k]; ... y[s]``
+    # builds, the idiom of every time-stepped transcription -- is the single
+    # index ``x[k, s]``: an all-integer index of length ``r`` on an ``n``-d array
+    # selects the leading ``r`` axes and leaves the trailing ``n - r``, so the
+    # next all-integer index continues on axis ``r``. Concatenating the parts is
+    # therefore exact, and each part is still range-checked against its own axis
+    # below. Declining the chain instead (as this fast path did until #2283) sent
+    # every ``y[s]`` to the general path, which materialized the WHOLE variable
+    # -- one ``E.var`` per slot -- per row: O(rows * n_variables) build time.
+    parts: list[tuple] = []
+    base: Expression = expr
+    while isinstance(base, IndexExpression):
+        index = base.index
+        parts.append(index if isinstance(index, tuple) else (index,))
+        base = base.base
     if not isinstance(base, Variable):
         return None
     shape = tuple(base.shape or ())
     if not shape:
         return None
 
-    index = expr.index
-    idx = index if isinstance(index, tuple) else (index,)
+    idx = tuple(i for part in reversed(parts) for i in part)
     if len(idx) != len(shape):
         # Partial indexing leaves an array; over-indexing is invalid. Either way
         # this is not one slot.

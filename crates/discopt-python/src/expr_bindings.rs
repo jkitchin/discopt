@@ -543,6 +543,17 @@ impl PyModelRepr {
         let mut args_ptr: Vec<i64> = Vec::with_capacity(n + 1);
         // Which variable block a node denotes, so an Index above it resolves.
         let mut block_of: Vec<i64> = vec![-1; n];
+        // A PARTIAL all-integer index of a variable block -- `x[k]` on a 2-D `x`
+        // -- as `(block, leading subscripts)`, so a further all-integer index
+        // above it (`x[k][s]`, the `y = x[k]; y[s]` idiom of every time-stepped
+        // transcription) resolves to the one slot `x[k, s]` names (#2283).
+        // Concatenating the parts is exact: an all-integer index of length `r`
+        // selects the leading `r` axes and leaves the rest, so the next one
+        // continues on axis `r`. Each part is range-checked on its own axis.
+        // Without this the chained leaf was `OP_UNSUPPORTED`, which refused the
+        // whole model's arena tape.
+        let mut prefix_of: std::collections::HashMap<usize, (usize, Vec<usize>)> =
+            std::collections::HashMap::new();
 
         for i in 0..n {
             args_ptr.push(args_flat.len() as i64);
@@ -570,6 +581,32 @@ impl PyModelRepr {
                             if flat < vi.size {
                                 op[i] = OP_VAR;
                                 k[i] = (vi.offset + flat) as f64;
+                            }
+                        } else if let Some(idxs) = scalar_subscripts(index) {
+                            if !idxs.is_empty()
+                                && idxs.len() < vi.shape.len()
+                                && idxs.iter().zip(vi.shape.iter()).all(|(i, d)| i < d)
+                            {
+                                prefix_of.insert(i, (blk as usize, idxs));
+                            }
+                        }
+                    } else if let Some((pblk, prefix)) = prefix_of.get(&base.0) {
+                        if let Some(rest) = scalar_subscripts(index) {
+                            let vi = &self.inner.variables[*pblk];
+                            let mut idxs = prefix.clone();
+                            idxs.extend(rest);
+                            if idxs.len() == vi.shape.len() {
+                                if let Some(flat) = flat_slot(&vi.shape, &IndexSpec::Tuple(idxs)) {
+                                    if flat < vi.size {
+                                        op[i] = OP_VAR;
+                                        k[i] = (vi.offset + flat) as f64;
+                                    }
+                                }
+                            } else if idxs.len() < vi.shape.len()
+                                && idxs.iter().zip(vi.shape.iter()).all(|(i, d)| i < d)
+                            {
+                                let entry = (*pblk, idxs);
+                                prefix_of.insert(i, entry);
                             }
                         }
                     }
@@ -2639,8 +2676,10 @@ fn math_func_code(f: MathFunc) -> i32 {
 /// Returns `None` for slices, ellipsis, negative or out-of-range indices and any
 /// wrong-arity spec, so the caller emits `OP_UNSUPPORTED` rather than guessing a
 /// slot -- a wrong slot silently aliases a different variable.
-fn flat_slot(shape: &[usize], index: &IndexSpec) -> Option<usize> {
-    let idxs: Vec<usize> = match index {
+/// The subscripts of an all-integer index, or `None` if any part is a slice,
+/// `np.newaxis` or `...`.
+fn scalar_subscripts(index: &IndexSpec) -> Option<Vec<usize>> {
+    Some(match index {
         IndexSpec::Scalar(i) => vec![*i],
         IndexSpec::Tuple(v) => v.clone(),
         IndexSpec::Multi(elems) => {
@@ -2653,7 +2692,11 @@ fn flat_slot(shape: &[usize], index: &IndexSpec) -> Option<usize> {
             }
             out
         }
-    };
+    })
+}
+
+fn flat_slot(shape: &[usize], index: &IndexSpec) -> Option<usize> {
+    let idxs = scalar_subscripts(index)?;
     if shape.is_empty() {
         return if idxs.is_empty() { Some(0) } else { None };
     }
