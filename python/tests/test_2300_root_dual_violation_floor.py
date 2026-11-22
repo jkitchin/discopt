@@ -74,6 +74,10 @@ def test_floor_still_flags_the_1410_missolve() -> None:
 
 
 def test_rust_engine_solve_reports_round_off_and_gate_is_unchanged(monkeypatch) -> None:
+    # The root check lives in the HiGHS MILP route; pin it so a lane running
+    # DISCOPT_LP_ENGINE=rust (pure MILP on the Rust engine) still reaches it. The root
+    # LP's duals come from the in-house engine, which is the case under test.
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "rust")
     r = _set_cover().solve()
     st = r.solver_stats
