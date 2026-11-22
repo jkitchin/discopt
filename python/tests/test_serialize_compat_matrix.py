@@ -56,6 +56,7 @@ _WRITTEN_FROM = {
     (1, 3): "node atom tags",
     (1, 4): "state.nl_source",
     (1, 5): "complementarity lowering rows; disjunction-row indicators",
+    (1, 8): "int_default_sides on a variable record",
 }
 
 
@@ -72,6 +73,11 @@ def _normalize(doc: dict, written_by: str) -> dict:
         # Before 1.5 a lowering's rows were not written; a reload reads them as
         # untracked, which 1.5 writes as the two-element entry.
         doc["complementarities"]["lowered"] = [e[:2] for e in doc["complementarities"]["lowered"]]
+    if _key(written_by) < (1, 8):
+        # Before 1.8 a defaulted integer side was written as an ordinary bound
+        # (#2281): the box is the same, only the record that it was defaulted is new.
+        for var in doc["variables"]:
+            var.pop("int_default_sides", None)
     if _key(written_by) < (1, 4):
         doc.get("state", {}).pop("nl_source", None)
     if _key(written_by) < (1, 3):

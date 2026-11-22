@@ -48,6 +48,7 @@ only at the top level: the reader records which keys it read and refuses the res
 | 5 | `logical` rows; the rows a complementarity lowering emitted; `indicators` on a disjunction row |
 | 6 | `none` / `ellipsis` index kinds; a disjunction as a disjunct member |
 | 7 | `block_indicator` and `nested_disjunction` rows; `state._gdp_blocks` (Disjunct-block members, local variables) |
+| 8 | `int_default_sides` on a variable record: the integer sides `Model.integer` defaulted (#2281) |
 
 ## Top-level keys
 
