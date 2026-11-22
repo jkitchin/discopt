@@ -30,6 +30,7 @@ import functools
 import hashlib
 import json
 import pathlib
+import re
 
 import discopt.modeling as dm
 import pytest
@@ -151,14 +152,22 @@ def test_fixture_files_are_unchanged(version, case, entry):
 def test_corpus_inputs_are_unchanged():
     """The ``from_nl`` cases read today's data files; they must be the files the
     fixtures were written from, or the comparison below means nothing."""
-    checked = 0
+    checked = written = 0
     for version in VERSIONS:
         for case, entry in MANIFEST["versions"][version]["cases"].items():
+            if case in reg.NL_FILES and "file" in entry:
+                written += 1
             if "input_sha256" in entry:
                 data = pathlib.Path(reg.NL_FILES[case]).read_bytes()
                 assert hashlib.sha256(data).hexdigest() == entry["input_sha256"], (version, case)
                 checked += 1
-    assert checked >= 3 * len(VERSIONS)
+    # Every written ``from_nl`` document records its input. A retired case
+    # (``reg.RETIRED``) is unbuildable for every writer after its retirement, so
+    # it has no document, and no input, there.
+    assert checked == written
+    assert checked >= len(reg.NL_FILES) * len(VERSIONS) - len(reg.RETIRED) * (
+        len(VERSIONS) - VERSIONS.index("1.8")
+    )
 
 
 def test_unbuildable_cases_are_recorded_not_skipped():
@@ -199,6 +208,14 @@ def test_unbuildable_cases_are_recorded_not_skipped():
         if _key(v) < (1, 7)
         for case in ("gdp_nested_blocks", "gdp_or_block")
     }
+    # A case today's builder refuses by design (``reg.RETIRED``) is unbuildable for
+    # every writer since its retirement: 1.8 is the first schema written after
+    # #2056 retired ``from_nl_mpcc``. Its refusal must be the one RETIRED names.
+    retired = {(v, case) for v in VERSIONS if _key(v) >= (1, 8) for case in reg.RETIRED}
+    for v, case in retired:
+        why = MANIFEST["versions"][v]["cases"][case].get("unbuildable", "")
+        assert re.search(reg.RETIRED[case], why), (v, case, why)
+    expected |= retired
     assert unbuildable == expected, sorted(unbuildable ^ expected)
     # register_function arrived in 1.1, so 1.0 cannot build the atom case.
     assert (

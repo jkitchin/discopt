@@ -14,8 +14,13 @@ says to upgrade. Readers older than that (1.0–1.4) skip a key they do not know
 inside a record, so a few newer documents load into them without that content: the
 fixture manifest (`python/tests/data/serialize_fixtures/MANIFEST.json`, *forward*
 cells) records every case, and the one known misread is a 1.5 disjunction's
-`indicators` link. Every content added since is a new row kind or index kind, which
-every shipped reader refuses. `pickle` is same-version transport only: a pickle of
+`indicators` link. Every content added in 1.6 and 1.7 is a new row kind or index kind,
+which every shipped reader refuses. 1.8's `int_default_sides` (#2281) is a key on the
+variable record: 1.5–1.7 refuse it, and 1.0–1.4 skip it, loading the integer fallback
+box as a written bound, which is the same model those versions build from the same
+`Model.integer` call (none of them records the defaults or withholds the certificate).
+A document of 1.7 or earlier never carries the record, so all of its integer bounds
+read as written. `pickle` is same-version transport only: a pickle of
 another layout is refused, and one of another discopt version with the same layout
 warns.
 

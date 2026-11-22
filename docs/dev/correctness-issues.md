@@ -908,9 +908,11 @@ still holds its default value, as on the invented box: `optimal` becomes
 `ub=1e6`, or a bound assigned later, is honoured. Measured cost: with the
 lower-side check probed on, the full non-slow `python/tests` lane (21,719 passed)
 never hit it, and one pinned test (`test_850…::test_obs2_default_integer_box_optimal`,
-which asserted the false certificate) was revised. Known gap: `discopt.serialize`
-does not carry the record (it would need a schema minor), so a `loads(dumps(m))`
-model reads the default as a written bound. `pickle`/`clone` carry it.
+which asserted the false certificate) was revised. The record survives `clone`,
+`pickle` and `discopt.serialize`: schema 1.8 writes it as `int_default_sides` on the
+variable record (golden fixtures and forward cells recorded for readers 1.0–1.7), so
+`loads(dumps(m))` withholds the certificate exactly as `m` does. A document of 1.7
+or earlier never recorded the defaults, so its integer bounds read as written.
 
 ---
 
