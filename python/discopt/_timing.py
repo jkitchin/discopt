@@ -60,6 +60,9 @@ __all__ = ["charge", "interpreted", "as_interpreted", "snapshot", "since", "BUCK
 
 _T = TypeVar("_T")
 
+#: Attribute :func:`as_interpreted` sets on the wrappers it returns.
+INTERPRETED_MARKER = "_discopt_interpreted"
+
 #: Boundary buckets. ``rust`` and ``python`` partition the wall clock; ``pounce``
 #: is a subset of ``rust`` and ``jax`` is a subset of ``python``.
 BUCKETS = ("rust", "pounce", "jax")
@@ -190,6 +193,9 @@ def as_interpreted(fn: Optional[Callable[..., _T]]) -> Optional[Callable[..., _T
         with _Charge(None):
             return fn(*args, **kwargs)
 
+    # Lets a test check that every callable handed to a native solve was wrapped
+    # (test_2289_native_time_charged.py); nothing on the solve path reads it.
+    setattr(_run, INTERPRETED_MARKER, True)
     return _run
 
 
