@@ -2560,7 +2560,10 @@ def _kernel_lift_agrees_at(spec: dict, x_orig, declared: float, sign: float, off
         lo, hi = glo.copy(), ghi.copy()
         lo[:n] = np.maximum(glo[:n], xo - d)
         hi[:n] = np.minimum(ghi[:n], xo + d)
-        res = _rust.solve_spatial_tree_py(**{**spec, "global_lo": lo, "global_hi": hi}, max_nodes=1)
+        with _timing.charge("rust"):
+            res = _rust.solve_spatial_tree_py(
+                **{**spec, "global_lo": lo, "global_hi": hi}, max_nodes=1
+            )
         bound = res.get("bound")
         if bound is None or not math.isfinite(float(bound)):
             continue
@@ -3615,10 +3618,12 @@ def _try_native_spatial_kernel(
         solve_kwargs["initial_incumbent"] = float(initial_incumbent)
     # #1656: price every McCormick-tight point at the posed problem's objective.
     _pricer = _native_kernel_incumbent_value(model, source, sign, off, n_orig, spec=spec)
-    solve_kwargs["incumbent_value"] = _pricer
+    # #2289: both hooks are interpreted Python called from inside the kernel's
+    # ``charge("rust")`` region below; ``as_interpreted`` keeps them out of it.
+    solve_kwargs["incumbent_value"] = _timing.as_interpreted(_pricer)
     if _tuning().native_nlp_primal:
-        solve_kwargs["primal_hook"] = _native_kernel_primal_hook(
-            model, source, sign, off, n_orig, outer_deadline
+        solve_kwargs["primal_hook"] = _timing.as_interpreted(
+            _native_kernel_primal_hook(model, source, sign, off, n_orig, outer_deadline)
         )
     _t_phase = time.perf_counter()
     with _timing.charge("rust"):
@@ -9373,7 +9378,8 @@ def _kernel_root_undecided(spec: dict, outer_deadline: Optional[float]) -> bool:
     remaining = None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
     if remaining is not None and remaining <= 0.0:
         return False
-    res = _rust.solve_spatial_tree_py(**spec, max_nodes=1, time_limit_s=remaining)
+    with _timing.charge("rust"):
+        res = _rust.solve_spatial_tree_py(**spec, max_nodes=1, time_limit_s=remaining)
     return bool(res.get("root_status") == "undecided")
 
 
@@ -39798,20 +39804,21 @@ def _relu_native_engine(
         head, tail = args[:11], args[11:]
         for name, val in zip(named, tail):
             kwargs[name] = val
-        out = solve_milp_relu_csc_py(
-            *head,
-            y_cols,
-            q_cols,
-            np.ascontiguousarray(spec["bias"], dtype=np.float64),
-            np.ascontiguousarray(spec["ptr"], dtype=np.int64),
-            x_cols,
-            np.ascontiguousarray(spec["w"], dtype=np.float64),
-            np.ascontiguousarray(x_l),
-            np.ascontiguousarray(x_u),
-            rounds,
-            cap,
-            **kwargs,
-        )
+        with _timing.charge("rust"):
+            out = solve_milp_relu_csc_py(
+                *head,
+                y_cols,
+                q_cols,
+                np.ascontiguousarray(spec["bias"], dtype=np.float64),
+                np.ascontiguousarray(spec["ptr"], dtype=np.int64),
+                x_cols,
+                np.ascontiguousarray(spec["w"], dtype=np.float64),
+                np.ascontiguousarray(x_l),
+                np.ascontiguousarray(x_u),
+                rounds,
+                cap,
+                **kwargs,
+            )
         if counts is not None:
             counts["calls"] = counts.get("calls", 0) + int(out[6])
             counts["cuts"] = counts.get("cuts", 0) + int(out[7])
@@ -40219,7 +40226,8 @@ def _solve_milp_simplex(
                 np.asarray(lp_data.x_l[:n_orig], dtype=np.float64),
                 np.asarray(lp_data.x_u[:n_orig], dtype=np.float64),
             )
-            _sel_kw["node_bound_hook"] = _lag.node_bound
+            # #2289: Python, called from inside the native tree's charge("rust").
+            _sel_kw["node_bound_hook"] = _timing.as_interpreted(_lag.node_bound)
             _sel_kw["node_bound_every"] = max(1, int(lagrangian_frequency))
     # ``milp_cuts=False`` (#1535): no root cut loop.
     if not root_cuts:
@@ -40245,31 +40253,32 @@ def _solve_milp_simplex(
             return _cb_hook
         return lambda d: bool(dbg(d)) or bool(_cb_hook(d))
 
-    status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
-        np.ascontiguousarray(_drv.c, dtype=np.float64),
-        _A_m,
-        _A_n,
-        _A_ptr,
-        _A_idx,
-        _A_val,
-        np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
-        np.ascontiguousarray(_drv.x_l, dtype=np.float64),
-        np.ascontiguousarray(_drv.x_u, dtype=np.float64),
-        np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
-        n_orig,
-        float(lp_data.obj_const),
-        _run1_nodes,
-        float(gap_tolerance),
-        abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
-        rel_gap_max_abs=_rel_gap_max_abs,
-        initial_incumbent=_seed,
-        time_limit_s=float(_run1_time),
-        debug_hook=_hook(),
-        **_cut_opts,
-        **_frontier_opts,
-        **_run1_stall,
-        **_sel_kw,
-    )
+    with _timing.charge("rust"):
+        status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
+            np.ascontiguousarray(_drv.c, dtype=np.float64),
+            _A_m,
+            _A_n,
+            _A_ptr,
+            _A_idx,
+            _A_val,
+            np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+            np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+            np.ascontiguousarray(_drv.x_u, dtype=np.float64),
+            np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+            n_orig,
+            float(lp_data.obj_const),
+            _run1_nodes,
+            float(gap_tolerance),
+            abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+            rel_gap_max_abs=_rel_gap_max_abs,
+            initial_incumbent=_seed,
+            time_limit_s=float(_run1_time),
+            debug_hook=_timing.as_interpreted(_hook()),
+            **_cut_opts,
+            **_frontier_opts,
+            **_run1_stall,
+            **_sel_kw,
+        )
 
     def _driver_stats() -> dict[str, float]:
         """Total simplex iterations the driver spent over the whole tree.
@@ -40429,45 +40438,46 @@ def _solve_milp_simplex(
                 if _swap_seed is not None and _swap_seed.size == n_orig:
                     _seed2 = np.ascontiguousarray(_swap_seed.astype(np.float64).ravel())
             _t_run2 = time.perf_counter()
-            (
-                _status2,
-                _x2,
-                _obj2,
-                _bound2,
-                _nodes2,
-                _iters2,
-            ) = solve_milp_csc_py(
-                np.ascontiguousarray(_drv.c, dtype=np.float64),
-                _A_m,
-                _A_n,
-                _A_ptr,
-                _A_idx,
-                _A_val,
-                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
-                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
-                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
-                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
-                n_orig,
-                float(lp_data.obj_const),
-                _run2_nodes,
-                float(gap_tolerance),
-                # #1323: run 1 passes this; run 2 used not to, so a re-entry
-                # spent its whole budget on a tree the caller's absolute
-                # criterion had already closed, and returned `feasible` with
-                # |obj-bound| inside the requested tolerance.
-                abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
-                rel_gap_max_abs=_rel_gap_max_abs,
-                initial_incumbent=_seed2,
-                time_limit_s=float(_reentry_remaining),
-                debug_hook=_hook(),
-                **_sel_kw,
-                **(
-                    (_milp_root_cut_budget(_reentry_remaining) or {})
-                    if _milp_reentry_cuts_enabled()
-                    else {}
-                ),
-                **_frontier_opts,
-            )
+            with _timing.charge("rust"):
+                (
+                    _status2,
+                    _x2,
+                    _obj2,
+                    _bound2,
+                    _nodes2,
+                    _iters2,
+                ) = solve_milp_csc_py(
+                    np.ascontiguousarray(_drv.c, dtype=np.float64),
+                    _A_m,
+                    _A_n,
+                    _A_ptr,
+                    _A_idx,
+                    _A_val,
+                    np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                    np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                    np.ascontiguousarray(_drv.x_u, dtype=np.float64),
+                    np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+                    n_orig,
+                    float(lp_data.obj_const),
+                    _run2_nodes,
+                    float(gap_tolerance),
+                    # #1323: run 1 passes this; run 2 used not to, so a re-entry
+                    # spent its whole budget on a tree the caller's absolute
+                    # criterion had already closed, and returned `feasible` with
+                    # |obj-bound| inside the requested tolerance.
+                    abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+                    rel_gap_max_abs=_rel_gap_max_abs,
+                    initial_incumbent=_seed2,
+                    time_limit_s=float(_reentry_remaining),
+                    debug_hook=_timing.as_interpreted(_hook()),
+                    **_sel_kw,
+                    **(
+                        (_milp_root_cut_budget(_reentry_remaining) or {})
+                        if _milp_reentry_cuts_enabled()
+                        else {}
+                    ),
+                    **_frontier_opts,
+                )
             _split["milp/run2_ran"] = 1.0
             _split["milp/run2_wall"] = time.perf_counter() - _t_run2
             _split["milp/run2_nodes"] = float(_nodes2)
@@ -40649,23 +40659,24 @@ def _solve_milp_simplex(
         if _probe_tl <= 0.05:
             _lp_status, _lp_obj = "skipped", None
         elif relu_cuts is None:
-            _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
-                np.ascontiguousarray(_drv.c, dtype=np.float64),
-                _A_m,
-                _A_n,
-                _A_ptr,
-                _A_idx,
-                _A_val,
-                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
-                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
-                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
-                np.ascontiguousarray(np.empty(0, dtype=np.int64)),  # integers relaxed
-                n_orig,
-                float(lp_data.obj_const),
-                1000,  # a relaxed (integer-free) LP solves at the root; headroom to finalize
-                float(gap_tolerance),
-                time_limit_s=float(_probe_tl),
-            )
+            with _timing.charge("rust"):
+                _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
+                    np.ascontiguousarray(_drv.c, dtype=np.float64),
+                    _A_m,
+                    _A_n,
+                    _A_ptr,
+                    _A_idx,
+                    _A_val,
+                    np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                    np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                    np.ascontiguousarray(_drv.x_u, dtype=np.float64),
+                    np.ascontiguousarray(np.empty(0, dtype=np.int64)),  # integers relaxed
+                    n_orig,
+                    float(lp_data.obj_const),
+                    1000,  # a relaxed (integer-free) LP solves at the root; headroom to finalize
+                    float(gap_tolerance),
+                    time_limit_s=float(_probe_tl),
+                )
         else:
             # #2157: the integer-free LP above never reaches the fractional-node
             # hook (every point of an integer-free LP is "integral"), so it would
@@ -40674,28 +40685,29 @@ def _solve_milp_simplex(
             # integers kept, the separator attached, one node. Its returned bound
             # is the frontier minimum after the root's separation rounds, a valid
             # bound over the root box.
-            _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
-                np.ascontiguousarray(_drv.c, dtype=np.float64),
-                _A_m,
-                _A_n,
-                _A_ptr,
-                _A_idx,
-                _A_val,
-                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
-                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
-                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
-                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
-                n_orig,
-                float(lp_data.obj_const),
-                # The loop stops once the tree holds this many nodes, so 1 would
-                # stop before the root is ever solved; 2 lets the root run all of
-                # its separation rounds and stops as soon as it branches.
-                2,
-                float(gap_tolerance),
-                time_limit_s=float(_probe_tl),
-                heuristics=False,
-                **_cut_opts,
-            )
+            with _timing.charge("rust"):
+                _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
+                    np.ascontiguousarray(_drv.c, dtype=np.float64),
+                    _A_m,
+                    _A_n,
+                    _A_ptr,
+                    _A_idx,
+                    _A_val,
+                    np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                    np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                    np.ascontiguousarray(_drv.x_u, dtype=np.float64),
+                    np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+                    n_orig,
+                    float(lp_data.obj_const),
+                    # The loop stops once the tree holds this many nodes, so 1 would
+                    # stop before the root is ever solved; 2 lets the root run all of
+                    # its separation rounds and stops as soon as it branches.
+                    2,
+                    float(gap_tolerance),
+                    time_limit_s=float(_probe_tl),
+                    heuristics=False,
+                    **_cut_opts,
+                )
             _lp_obj = _lp_bound if np.isfinite(_lp_bound) else None
         root_time_val = time.perf_counter() - _t_root
         _root_probe_ok = _lp_status in ("optimal", "feasible") or (

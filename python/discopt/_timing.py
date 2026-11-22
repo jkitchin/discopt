@@ -53,9 +53,12 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any, Callable, Optional, TypeVar
 
-__all__ = ["charge", "snapshot", "since", "BUCKETS"]
+__all__ = ["charge", "interpreted", "as_interpreted", "snapshot", "since", "BUCKETS"]
 
+
+_T = TypeVar("_T")
 
 #: Boundary buckets. ``rust`` and ``python`` partition the wall clock; ``pounce``
 #: is a subset of ``rust`` and ``jax`` is a subset of ``python``.
@@ -94,7 +97,7 @@ class _Charge:
 
     __slots__ = ("bucket", "started", "child")
 
-    def __init__(self, bucket: str) -> None:
+    def __init__(self, bucket: "str | None") -> None:
         self.bucket = bucket
         self.child = 0.0
         self.started = 0.0
@@ -110,7 +113,8 @@ class _Charge:
         stack = _stack()
         stack.pop()
         elapsed = time.perf_counter() - self.started
-        _totals()[self.bucket] += elapsed - self.child  # minus children's claim
+        if self.bucket is not None:  # ``interpreted()`` regions claim no bucket
+            _totals()[self.bucket] += elapsed - self.child  # minus children's claim
         if stack:
             stack[-1].child += elapsed  # parent must not also count our wall
 
@@ -146,6 +150,47 @@ def charge(bucket: str) -> "_Charge":
     if bucket not in BUCKETS:
         raise ValueError(f"unknown timing bucket {bucket!r}; expected one of {BUCKETS}")
     return _Charge(bucket)
+
+
+def interpreted() -> "_Charge":
+    """Mark the enclosed block as **interpreted Python** inside a native region.
+
+    The mirror image of :func:`charge`, for the other direction of the same
+    boundary: a native solve that calls *back into Python* (the lazy-constraint
+    callback of ``solve_milp_lazy_csc_py``, for instance). Inside a
+    ``charge("rust")`` region that callback's time would be Rust self time and the
+    profile would bill interpreted Python to the native layer. Wrapping the
+    callback here subtracts its elapsed time from the enclosing region and credits
+    it to no bucket, so it lands in ``python_time`` -- the residual -- where it
+    belongs. A ``charge`` nested inside it still records its own bucket.
+
+    Same-thread only: the region stack is per thread, so this works because the
+    native solves that take Python callbacks call them back on the thread that
+    entered the enclosing ``charge("rust")``. A callback invoked from a native
+    worker thread (rayon, say) would find an empty stack there, and the wrapper
+    would then credit nothing and subtract nothing -- the callback's time would
+    stay in the parent's Rust self time, exactly as it did before this existed.
+    """
+    return _Charge(None)
+
+
+def as_interpreted(fn: Optional[Callable[..., _T]]) -> Optional[Callable[..., _T]]:
+    """``fn`` wrapped to run under :func:`interpreted`; ``None`` passes through.
+
+    For a Python callable handed to a native solve as a callback (a lazy
+    separator, a primal hook), so its time is not billed to the native layer.
+    The same thread restriction as :func:`interpreted` applies.
+    """
+    if fn is None:
+        return None
+
+    def _run(*args: Any, **kwargs: Any) -> _T:
+        # ``_Charge(None)`` directly rather than ``interpreted()``: this runs once
+        # per callback, the hottest boundary on some routes, so skip the extra call.
+        with _Charge(None):
+            return fn(*args, **kwargs)
+
+    return _run
 
 
 def snapshot() -> dict[str, float]:

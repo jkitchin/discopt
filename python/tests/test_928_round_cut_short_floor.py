@@ -160,6 +160,14 @@ def test_default_path_still_declines_an_uncertifiable_node(monkeypatch):
     assert res.lower_bound is None
 
 
+class _RootRoundRan(Exception):
+    """Raised by the spy once the first node-loop round has returned."""
+
+    def __init__(self, result):
+        super().__init__("root round ran")
+        self.result = result
+
+
 def test_root_round_is_never_declined_by_the_admission_check(monkeypatch):
     """#966's round admission must not decline the ROOT round (rule 1).
 
@@ -169,26 +177,48 @@ def test_root_round_is_never_declined_by_the_admission_check(monkeypatch):
     panel measured on contvar. Forcing the admission check to refuse every round
     (an expected build cost no grant can cover) must still let the ROOT round run.
     Pre-fix this counts zero node-loop rounds; post-fix, one.
+
+    #2290: the solve stops on the event under test, not on the wall clock. It used
+    to run with ``time_limit=5.0`` and count rounds afterwards, but the root round
+    fires only after root OBBT, ~2.4 s into the solve on a dev machine (measured on
+    ``nvs05``), so a ~3x slower instrumented coverage runner spent the whole 5 s
+    before the node loop began and reported "every round was declined". Nor can a
+    work budget alone end the run: with ``max_nodes=1`` (with or without
+    ``deterministic=True``) the solve still takes ~14 s, because the feasibility
+    pump, integer local search and a second root fixpoint all run after the tree
+    and are sized by ``time_limit``. So the spy raises once the first round returns
+    and the test reads that round's own result; ``time_limit`` is only a backstop.
     """
     monkeypatch.setenv("DISCOPT_NODE_ROUND_BUDGET", "1")
     monkeypatch.setattr(MccormickLPRelaxer, "expected_build_cost", lambda self: 1e6, raising=True)
 
     # Count the rounds the NODE LOOPS ran: those are the calls carrying a
-    # ``round_deadline`` (the one-off root LP probe passes None).
+    # ``round_deadline`` (the one-off root LP probe passes None). The first one
+    # is the root's; once it has returned there is nothing left to observe.
     rounds: list = []
     orig = MccormickLPRelaxer.solve_at_node
 
     def _spy(self, node_lb, node_ub, time_limit=None, **kw):
+        res = orig(self, node_lb, node_ub, time_limit, **kw)
         if kw.get("round_deadline") is not None:
-            rounds.append(kw["round_deadline"])
-        return orig(self, node_lb, node_ub, time_limit, **kw)
+            rounds.append(res)
+            raise _RootRoundRan(res)
+        return res
 
     monkeypatch.setattr(MccormickLPRelaxer, "solve_at_node", _spy)
 
     # nvs05 is the smallest in-repo instance whose solve actually reaches the
     # spatial node loop with an LP relaxer attached (``_bilinear_model`` closes at
     # the root and never gets there, so it cannot see this gate at all).
-    res = from_nl(str(CORPUS / "nvs05.nl")).solve(time_limit=5.0)
+    model = from_nl(str(CORPUS / "nvs05.nl"))
+    with pytest.raises(_RootRoundRan) as seen:
+        # Backstop only: the root round returns ~2.5 s in on a dev machine.
+        # Pre-fix no round ever runs, the solve completes, and ``pytest.raises``
+        # fails with "DID NOT RAISE" instead of a timing-dependent message.
+        model.solve(time_limit=60.0)
 
-    assert rounds, "every round was declined — the root was left with no bound source"
-    assert res.bound is not None and np.isfinite(res.bound)
+    assert len(rounds) == 1, "the spy did not stop the solve at the first round"
+    root = seen.value.result
+    assert root.lower_bound is not None and np.isfinite(root.lower_bound), (
+        f"the root round ran but left no bound source (status={root.status!r})"
+    )

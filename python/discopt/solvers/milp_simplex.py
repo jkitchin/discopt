@@ -29,6 +29,7 @@ from typing import Callable, NamedTuple, Optional, Union, cast
 import numpy as np
 import scipy.sparse as sp
 
+from discopt import _timing
 from discopt._relax.std_form import logical_block as _logical_block
 from discopt._relax.std_form import row_logicals_enabled as _row_logicals_enabled
 from discopt.solvers import MILPResult, SolveStatus
@@ -881,20 +882,21 @@ def _refined_safe_bound_regularized(
             break
         b_reg = np.ascontiguousarray(b_vec + tau)
         try:
-            _status, _x, _obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
-                c_c,
-                m,
-                n + m,
-                indptr,
-                indices,
-                data,
-                b_reg,
-                lb_c,
-                ub_c,
-                None,
-                None,
-                time_limit_s=_remaining,
-            )
+            with _timing.charge("rust"):
+                _status, _x, _obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
+                    c_c,
+                    m,
+                    n + m,
+                    indptr,
+                    indices,
+                    data,
+                    b_reg,
+                    lb_c,
+                    ub_c,
+                    None,
+                    None,
+                    time_limit_s=_remaining,
+                )
         except Exception as exc:  # noqa: BLE001 - the next perturbation is tried instead
             logger.debug(
                 "dual-bound refinement LP failed at tau=%g: %s: %s", tau, type(exc).__name__, exc
@@ -1407,37 +1409,38 @@ def solve_milp(
         seed: Optional[np.ndarray],
     ) -> MILPResult:
         """One call into the Rust driver, decoded into a :class:`MILPResult`."""
-        status, x_full, obj, bound, nodes, _iters = solve_milp_csc_py(
-            std.c,
-            m,
-            n + m,  # total columns: structural + one slack per row
-            std.col_ptr,
-            std.row_idx,
-            std.vals,
-            std.b,
-            std.lb,
-            std.ub,
-            std.int_cols,
-            n,  # n_struct: structural columns precede the slacks
-            0.0,  # obj_const: caller (MilpRelaxationModel) applies its own offset
-            int(node_cap),
-            float(gap_tolerance),
-            # #928: pass ``None`` for "no limit" and the number — INCLUDING an
-            # exact 0.0 — for a real budget. The previous
-            # ``0.0 if time_limit is None`` spelling collapsed the two: the
-            # binding mapped 0.0 back to "no deadline", so a caller whose shared
-            # budget was already spent by earlier attempts
-            # (``MilpRelaxationModel.solve`` under ``DISCOPT_LP_WARM_DEADLINE``)
-            # launched an *unbounded* B&B at the one moment it must not start at
-            # all. The escalation below relies on this too: its second attempt
-            # gets the budget the probe left, and an exhausted budget must return
-            # at once rather than run unbounded.
-            time_limit_s=None if budget is None else max(0.0, float(budget)),
-            initial_incumbent=seed,
-            debug_hook=_debug.rust_hook(),
-            batched_search=bool(batched_search),
-            **cut_kwargs,
-        )
+        with _timing.charge("rust"):
+            status, x_full, obj, bound, nodes, _iters = solve_milp_csc_py(
+                std.c,
+                m,
+                n + m,  # total columns: structural + one slack per row
+                std.col_ptr,
+                std.row_idx,
+                std.vals,
+                std.b,
+                std.lb,
+                std.ub,
+                std.int_cols,
+                n,  # n_struct: structural columns precede the slacks
+                0.0,  # obj_const: caller (MilpRelaxationModel) applies its own offset
+                int(node_cap),
+                float(gap_tolerance),
+                # #928: pass ``None`` for "no limit" and the number — INCLUDING an
+                # exact 0.0 — for a real budget. The previous
+                # ``0.0 if time_limit is None`` spelling collapsed the two: the
+                # binding mapped 0.0 back to "no deadline", so a caller whose shared
+                # budget was already spent by earlier attempts
+                # (``MilpRelaxationModel.solve`` under ``DISCOPT_LP_WARM_DEADLINE``)
+                # launched an *unbounded* B&B at the one moment it must not start at
+                # all. The escalation below relies on this too: its second attempt
+                # gets the budget the probe left, and an exhausted budget must return
+                # at once rather than run unbounded.
+                time_limit_s=None if budget is None else max(0.0, float(budget)),
+                initial_incumbent=seed,
+                debug_hook=_timing.as_interpreted(_debug.rust_hook()),
+                batched_search=bool(batched_search),
+                **cut_kwargs,
+            )
 
         if status == "infeasible":
             return MILPResult(status=SolveStatus.INFEASIBLE, node_count=int(nodes))
@@ -1785,45 +1788,47 @@ def _solve_lazy_tree(
         seed = np.ascontiguousarray(seed_arr)
 
     t0 = time.perf_counter()
-    (
-        status,
-        x_full,
-        obj,
-        bound,
-        nodes,
-        _iters,
-        lazy_calls,
-        lazy_requeues,
-        node_calls,
-        node_cuts_added,
-    ) = solve_milp_lazy_csc_py(
-        std.c,
-        m,
-        n + m,
-        std.col_ptr,
-        std.row_idx,
-        std.vals,
-        std.b,
-        std.lb,
-        std.ub,
-        std.int_cols,
-        n,
-        _separate,
-        0.0,  # obj_const
-        int(max_nodes),
-        float(gap_tolerance),
-        time_limit_s=None if time_limit is None else max(0.0, float(time_limit)),
-        initial_incumbent=seed,
-        debug_hook=_checkin_arg,
-        node_callback=_node_hook,
-        node_hook_rounds=int(node_hook_rounds) if _node_hook is not None else 0,
-        node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
-        **_capped_root_cut_time(
-            _lazy_root_cut_kwargs(std.lp_kwargs, time_limit), _root_cut_time_cap
-        ),
-        **_lazy_gap_kwargs(),
-        **({} if relaxable_std is None else {"relaxable_rows": relaxable_std}),
-    )
+    with _timing.charge("rust"):
+        (
+            status,
+            x_full,
+            obj,
+            bound,
+            nodes,
+            _iters,
+            lazy_calls,
+            lazy_requeues,
+            node_calls,
+            node_cuts_added,
+        ) = solve_milp_lazy_csc_py(
+            std.c,
+            m,
+            n + m,
+            std.col_ptr,
+            std.row_idx,
+            std.vals,
+            std.b,
+            std.lb,
+            std.ub,
+            std.int_cols,
+            n,
+            # #2289: callbacks are interpreted Python inside the native region.
+            _timing.as_interpreted(_separate),
+            0.0,  # obj_const
+            int(max_nodes),
+            float(gap_tolerance),
+            time_limit_s=None if time_limit is None else max(0.0, float(time_limit)),
+            initial_incumbent=seed,
+            debug_hook=_timing.as_interpreted(_checkin_arg),
+            node_callback=_timing.as_interpreted(_node_hook),
+            node_hook_rounds=int(node_hook_rounds) if _node_hook is not None else 0,
+            node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
+            **_capped_root_cut_time(
+                _lazy_root_cut_kwargs(std.lp_kwargs, time_limit), _root_cut_time_cap
+            ),
+            **_lazy_gap_kwargs(),
+            **({} if relaxable_std is None else {"relaxable_rows": relaxable_std}),
+        )
     wall_time = time.perf_counter() - t0
     # The binding counts calls the driver actually made; this side counts calls it
     # actually served. A mismatch means a call was lost between the two and the
@@ -2425,20 +2430,21 @@ def solve_lp_warm_std(
     cs0 = None if in_basis is None else np.ascontiguousarray(in_basis[0], dtype=np.int8)
     bv0 = None if in_basis is None else np.ascontiguousarray(in_basis[1], dtype=np.int64)
 
-    status, x_full, obj, _iters, cs, bv, dual, ray = solve_lp_warm_csc_py(
-        np.ascontiguousarray(c_std),
-        m,
-        n + m,
-        np.ascontiguousarray(a_std.indptr, dtype=np.int64),
-        np.ascontiguousarray(a_std.indices, dtype=np.int64),
-        np.ascontiguousarray(a_std.data, dtype=np.float64),
-        np.ascontiguousarray(b_vec),
-        np.ascontiguousarray(lb_std),
-        np.ascontiguousarray(ub_std),
-        cs0,
-        bv0,
-        time_limit_s=time_limit,
-    )
+    with _timing.charge("rust"):
+        status, x_full, obj, _iters, cs, bv, dual, ray = solve_lp_warm_csc_py(
+            np.ascontiguousarray(c_std),
+            m,
+            n + m,
+            np.ascontiguousarray(a_std.indptr, dtype=np.int64),
+            np.ascontiguousarray(a_std.indices, dtype=np.int64),
+            np.ascontiguousarray(a_std.data, dtype=np.float64),
+            np.ascontiguousarray(b_vec),
+            np.ascontiguousarray(lb_std),
+            np.ascontiguousarray(ub_std),
+            cs0,
+            bv0,
+            time_limit_s=time_limit,
+        )
 
     def _result_basis_cert():
         x_struct = np.asarray(x_full, dtype=np.float64)[:n]

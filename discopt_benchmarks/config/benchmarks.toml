@@ -226,6 +226,12 @@ description = "Phase 1 → Phase 2 gate (Month 14)"
   # metric — then this line passes on evidence.
   sparse_accuracy = { max = 1e-12, suite = "sparse_matrices", metric = "max_residual_vs_suitesparse" }
   relaxation_valid = { min = 1.0, suite = "phase1", metric = "relaxation_validity_rate" }
+  # A real miss, not a stale target (#2289, performance-plan §122). Measured 0.3871
+  # (wall-weighted 0.298) on 2026-11-22 after the FFI-boundary counters stopped
+  # leaking native LP/MILP time into python_time (0.4919 before). The miss is not
+  # fixed overhead on tiny instances: the fraction is ~0.44-0.53 in every wall-time
+  # bucket. The Python is spread thinly over FBBT, convexity and interval
+  # reasoning, and the relaxation build. Report it as FAIL. Do not wave it through.
   interop_overhead = { max = 0.05, suite = "phase1", metric = "python_orchestration_fraction" }
   zero_incorrect = { max = 0, suite = "phase1", metric = "incorrect_count" }
 
