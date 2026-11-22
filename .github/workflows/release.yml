@@ -131,7 +131,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist
-      - name: Install the wheel in a fresh venv and solve without, then with, HiGHS
+      - name: Install the wheel in a fresh venv and solve with, then without, HiGHS
         shell: bash
         run: |
           # The venv lives OUTSIDE the checkout and is named by an absolute
@@ -152,12 +152,13 @@ jobs:
           "$PY" -m pip install "${wheels[0]}"
           # Run from outside the checkout so `import discopt` cannot resolve to ./python.
           cd "$RUNNER_TEMP"
-          # highs-parity P6.3: highspy is the optional `discopt[highs]` extra. The bare
-          # wheel must not pull it in and must solve on the in-house engines...
-          "$PY" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" --no-highs
-          # ...and with the extra, the MILP must take the verified HiGHS route.
-          "$PY" -m pip install "${wheels[0]}[highs]"
+          # highspy is a core dependency again (2026-11-17 engine switch): the plain
+          # wheel pulls it in, and the LP and MILP must take the verified HiGHS route...
           "$PY" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" --highs
+          # ...and an install without it (Pyodide, --no-deps) must still solve on the
+          # in-house engines.
+          "$PY" -m pip uninstall -y highspy
+          "$PY" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" --no-highs
 
   publish:
     name: Publish to PyPI
