@@ -156,3 +156,74 @@ def test_chained_and_direct_spellings_build_identical_tapes(monkeypatch):
         assert np.array_equal(
             np.asarray(e1.evaluate_jacobian(xv)), np.asarray(e2.evaluate_jacobian(xv))
         )
+
+
+def _cube_model():
+    """A 3-D variable addressed through every chain split, so concatenating MORE than two
+    parts is pinned (the 2-D cases above only ever join two)."""
+    m = dm.Model("chained_index_3d")
+    x = m.continuous("x", shape=(2, 3, 4), lb=-1, ub=2)
+    w = m.continuous("w", lb=-1, ub=1)
+    for a in range(2):
+        for b in range(3):
+            for c in range(4):
+                m.subject_to(x[a][b][c] - w * x[a][b, c] + x[a, b][c] ** 2 == 0.1 * (a + b + c))
+    m.minimize(
+        dm.sum([x[a - 2][b - 3][c - 4] ** 2 for a in range(2) for b in range(3) for c in range(4)])
+    )
+    return m, x
+
+
+@pytest.mark.parametrize(
+    "chained",
+    [
+        lambda x, a, b, c: x[a][b][c],
+        lambda x, a, b, c: x[a][b, c],
+        lambda x, a, b, c: x[a, b][c],
+        lambda x, a, b, c: x[a - 2][b - 3][c - 4],
+    ],
+)
+def test_three_part_chains_name_the_direct_slot(chained):
+    m, x = _cube_model()
+    checks = 0
+    for a in range(2):
+        for b in range(3):
+            for c in range(4):
+                assert _static_scalar_slot(chained(x, a, b, c), m) == _static_scalar_slot(
+                    x[a, b, c], m
+                )
+                checks += 1
+    assert checks == 24
+
+
+@pytest.mark.parametrize(
+    "declined",
+    [
+        lambda x: x[0][1:][0],
+        lambda x: x[1:][0][0],
+        lambda x: x[0][0][0:1],
+        lambda x: x[0][None][0][0],
+    ],
+)
+def test_three_part_chain_with_a_non_integer_part_declines(declined):
+    m, x = _cube_model()
+    assert _static_scalar_slot(declined(x), m) is None
+
+
+def test_three_part_chains_arena_matches_walk(monkeypatch):
+    m, _ = _cube_model()
+    arena, used = _tape_evaluator(m, True, monkeypatch)
+    assert used == [True]  # tape_program resolved every 3-part chain
+    walk, _ = _tape_evaluator(m, False, monkeypatch)
+    rng = np.random.default_rng(22830)
+    checks = 0
+    for _ in range(3):
+        xv = rng.uniform(-1.0, 1.0, arena.n_variables)
+        for name in ("evaluate_objective", "evaluate_gradient", "evaluate_constraints"):
+            assert np.array_equal(
+                np.asarray(getattr(arena, name)(xv)), np.asarray(getattr(walk, name)(xv))
+            )
+            checks += 1
+        assert np.array_equal(arena.evaluate_jacobian(xv), walk.evaluate_jacobian(xv))
+        checks += 1
+    assert checks == 12

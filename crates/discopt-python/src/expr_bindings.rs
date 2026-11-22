@@ -585,7 +585,7 @@ impl PyModelRepr {
                         } else if let Some(idxs) = scalar_subscripts(index) {
                             if !idxs.is_empty()
                                 && idxs.len() < vi.shape.len()
-                                && idxs.iter().zip(vi.shape.iter()).all(|(i, d)| i < d)
+                                && idxs.iter().zip(vi.shape.iter()).all(|(j, d)| j < d)
                             {
                                 prefix_of.insert(i, (blk as usize, idxs));
                             }
@@ -603,7 +603,7 @@ impl PyModelRepr {
                                     }
                                 }
                             } else if idxs.len() < vi.shape.len()
-                                && idxs.iter().zip(vi.shape.iter()).all(|(i, d)| i < d)
+                                && idxs.iter().zip(vi.shape.iter()).all(|(j, d)| j < d)
                             {
                                 let entry = (*pblk, idxs);
                                 prefix_of.insert(i, entry);
@@ -2671,11 +2671,6 @@ fn math_func_code(f: MathFunc) -> i32 {
     }
 }
 
-/// C-order flat slot for a pure-integer index into `shape`, else `None`.
-///
-/// Returns `None` for slices, ellipsis, negative or out-of-range indices and any
-/// wrong-arity spec, so the caller emits `OP_UNSUPPORTED` rather than guessing a
-/// slot -- a wrong slot silently aliases a different variable.
 /// The subscripts of an all-integer index, or `None` if any part is a slice,
 /// `np.newaxis` or `...`.
 fn scalar_subscripts(index: &IndexSpec) -> Option<Vec<usize>> {
@@ -2695,6 +2690,11 @@ fn scalar_subscripts(index: &IndexSpec) -> Option<Vec<usize>> {
     })
 }
 
+/// C-order flat slot for a pure-integer index into `shape`, else `None`.
+///
+/// Returns `None` for slices, ellipsis, negative or out-of-range indices and any
+/// wrong-arity spec, so the caller emits `OP_UNSUPPORTED` rather than guessing a
+/// slot -- a wrong slot silently aliases a different variable.
 fn flat_slot(shape: &[usize], index: &IndexSpec) -> Option<usize> {
     let idxs = scalar_subscripts(index)?;
     if shape.is_empty() {
