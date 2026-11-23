@@ -1576,3 +1576,52 @@ Measured (highspy 1.15.1, `docs/dev/data/2183-fixed-int-bounded/`):
   5.0e6 over the declared box, and exact dual correction leaves 0.00139. The same LP,
   re-solved later in that solve, returns `optimal` with an FBBT-box gap of 4.3e-7 at the
   identical objective.
+
+**2026-11-23 — #2309: the root-dual gate stays the per-column #1410 test; the scale floor
+and the #2300 column skip are rejected, measured.** #2300 / #2305 added
+`milp/root_dual_violation_scaled` (each column's scale floored at
+`S = ‖c‖∞ + ‖A‖∞·‖y‖∞`) as a diagnostic and left the gate alone, because the #1410
+4200-LP panel behind the gate was never committed. `scripts/panel_2309_root_dual_gate.py`
+rebuilds it: 2 × 2100 badly scaled 5x2 integer programs (coefficients log-uniform over
+9 decades, cost scale 1 and 1e-3), 120 well-scaled 6x3, 60 knapsacks, 40 120x60 set
+covers. Truth is solver-independent: the MILP optimum by exact enumeration of the integer
+box (rational feasibility near the boundary) or DP, the root-LP optimum by rational
+vertex enumeration; set covers take `scipy.optimize.milp` and test false refusals only.
+Each instance is solved end to end by `Model.solve()` once per gate, with
+`box_dual_violation` patched to return that gate's value: (a) per-column, today;
+(b) scale-floored; (c) per-column skipping interior single-entry `c_j = 0` columns;
+(d) no filter, always the NS gap. Five arms on `a9b3d09`: highspy 1.11.0, 1.15.1,
+1.16.0 with the root LP on HiGHS, and 1.15.1, 1.16.0 on the in-house engine (88,400
+gate evaluations, every solve reached the gate).
+
+| arm (highspy / root LP) | wrong root pairs | (a) refuses | (b) refuses | (c) | (d) | trips a / b / c (bad1+bad3+cover) |
+|---|---|---|---|---|---|---|
+| 1.11.0 / HiGHS | 23 | 23 | **21** | 23 | 23 | 43 / 23 / 33 |
+| 1.15.1 / HiGHS | 26 | 26 | **24** | 26 | 26 | 46 / 26 / 36 |
+| 1.16.0 / HiGHS | 3 | 3 | 3 | 3 | 3 | 7 / 3 / 7 |
+| 1.15.1 / Rust | 16 | 16 | **15** | 16 | 16 | 209 / 23 / 49 |
+| 1.16.0 / Rust | 16 | 16 | **15** | 16 | 16 | 209 / 23 / 49 |
+
+Every one of the 84 wrong root pairs lies ABOVE the exact LP optimum (1.1e-6 to
+7.8e-2), the #1410 shape; the in-house engine mis-solves 16 of these LPs too. No gate
+certified a wrong MILP answer on any arm (the tree's answers were right even where the
+root LP was not), so the comparison is decided at the root. Findings:
+
+- (a) refuses 84/84. Its only refusal of a correct LP is bad3/1723 on the in-house
+  engine (objective within 7e-8, NS gap 1.0e-5 against a 1.0e-6 yardstick: the dual
+  does not certify it), and all four gates refuse it alike.
+- (b) lets 6 of the 84 through and certifies them: on bad1/702 and bad1/2024 under
+  1.15.1 the floored value is 2.9e-14 / 1.4e-14 against a 4.3e-14 tolerance on LPs wrong
+  by 6.9e-4 / 7.3e-5. **Rejected** (kill criterion). Pinned by
+  `test_2309_root_dual_gate_choice.py` (the recorded pairs, and an end-to-end route test
+  that fails if the gate is switched to the floored value).
+- (c) refuses 84/84 and certifies exactly what (a) does on every arm, but is unsound by
+  construction: `min -x1, x1 <= 1, x1 + x2 <= 3` with `x = (0.5, 0)`, `y = (-1, 0)` is
+  sign-correct on every structural column, wrong by 0.5, and its only violation is the
+  skipped basic slack. **Rejected** (same test).
+- (d) certifies exactly what (a) does on every arm (0 gained, 0 lost) and runs the NS
+  gap on every solve. Tied on false refusals, so the issue's rule (then fewer NS runs)
+  keeps (a).
+
+Outcome: no change to the route. The trips (a) takes on in-house-engine duals (209 per
+arm against 46 on HiGHS) cost an NS gap each and nothing else.

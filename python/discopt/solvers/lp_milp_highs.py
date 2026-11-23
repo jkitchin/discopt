@@ -1270,14 +1270,24 @@ def box_dual_violation(
     denominator both ``|a·y_i|`` and reads exactly 1.0 however small ``y_i`` is -- which
     the in-house LP engine's duals hit routinely (HiGHS returns exact zeros there).
     Measured on the #2300 set cover (highspy 1.16.0): Rust pair 1.0 -> 1.05e-15, HiGHS
-    pair 5.6e-17 -> 3.2e-17, against a round-off bound of 1.42e-13. The floor can also
-    UNDERSTATE a real violation: on a column whose coefficients are small next to the
-    LP's largest, a genuinely wrong reduced cost is divided by a scale that column never
-    saw. That is acceptable only because the floored value is reported
-    (``milp/root_dual_violation_scaled``) and never gated. The MILP route's gate uses the
-    per-column scale, and its value stays ``milp/root_dual_violation``: a floor makes the
-    cheap filter pass more often and so skip the NS gap, and the #1410
-    catch/false-refusal panel that would justify that has not been re-run against it.
+    pair 5.6e-17 -> 3.2e-17, against a round-off bound of 1.42e-13. The floor also
+    UNDERSTATES real violations, so the floored value is reported
+    (``milp/root_dual_violation_scaled``) and must never be gated on, nor read as "the
+    root pair is fine". The MILP route's gate uses the per-column scale, and its value
+    stays ``milp/root_dual_violation``.
+
+    #2309 measured the choice (``scripts/panel_2309_root_dual_gate.py``: 4420 badly
+    scaled / well-scaled / knapsack / set-cover MILPs x 5 arms, highspy 1.11.0, 1.15.1
+    and 1.16.0 with the root LP on HiGHS and on the in-house engine; truth by exact
+    enumeration and rational vertex enumeration). 84 root pairs were wrong against the
+    exact LP optimum, every one ABOVE it (the #1410 shape). The per-column gate, with the
+    NS-gap fall-through, refused 84/84 and refused one correct pair whose dual could not
+    certify it (NS gap 1.0e-5 against a 1.0e-6 yardstick). Gating on the floored value
+    let 6 of the 84 through (floored 1.4e-14 / 2.9e-14 against a 4.3e-14 tolerance on
+    two LPs wrong by 7.3e-5 / 6.9e-4; ``test_2309_root_dual_gate_choice``). Skipping
+    interior single-entry ``c_j = 0`` columns matched the per-column gate on the panel
+    but is unsound by construction (same test). Always running the NS gap certified
+    exactly what the per-column gate certifies on every arm, at an NS run per solve.
     """
     y = np.asarray(row_dual, dtype=np.float64).ravel()
     xv = np.asarray(x, dtype=np.float64).ravel()
@@ -4925,7 +4935,8 @@ def _solve_milp_std(
             stats["milp/root_dual_violation"] = dual_viol
             # #2300: the same test with the scale floored at the LP's own magnitude.
             # Reported only, never gated: it does not read 1.0 on a round-off slack
-            # dual (in-house engine duals), but it can understate a real violation.
+            # dual (in-house engine duals), but it understates real violations (#2309:
+            # 6 of 84 wrong root pairs read below tolerance on it).
             stats["milp/root_dual_violation_scaled"] = box_dual_violation(
                 sf, lp.x, lp.row_dual, problem_scale_floor=True
             )
