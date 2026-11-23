@@ -246,20 +246,31 @@ def _always(_a, _k):
 
 
 @pytest.mark.parametrize(
-    "module, attr, is_site",
+    "module, attr, is_site, env",
     [
         (
             "discopt._relax.nonlinear_bound_tightening",
             "tighten_nonlinear_bounds",
             _is_periodic_site,
+            {},
         ),
-        ("discopt._relax.dependent_vars", "find_functionally_dependent_names", _always),
-        ("discopt.solvers._root_presolve", "tighten_root_bounds_with_fbbt", _always),
+        # The default dependency scan (``DISCOPT_DEFINED_VARS``, default ON) and the
+        # legacy one it replaces, reached with the flag's ``=0`` opt-out.
+        ("discopt._relax.dependent_vars", "find_defined_variables", _always, {}),
+        (
+            "discopt._relax.dependent_vars",
+            "find_functionally_dependent_names",
+            _always,
+            {"DISCOPT_DEFINED_VARS": "0"},
+        ),
+        ("discopt.solvers._root_presolve", "tighten_root_bounds_with_fbbt", _always, {}),
     ],
 )
-def test_structure_pass_defect_fails_the_solve(monkeypatch, module, attr, is_site):
+def test_structure_pass_defect_fails_the_solve(monkeypatch, module, attr, is_site, env):
     import importlib
 
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     mod = importlib.import_module(module)
     real = getattr(mod, attr)
     calls: list[int] = []

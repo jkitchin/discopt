@@ -217,6 +217,37 @@ class SolverTuning:
     the same ``_node_point_feasible`` gate as a snapped one before injection. A
     wrong guess costs time, not correctness."""
 
+    # --- Defined-variable detection v2 (array elements + affine outputs) -------
+    defined_vars: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_DEFINED_VARS", default=True)
+    )
+    """Detect functionally dependent variables per array element, and give each
+    affine defining equality one output (``DISCOPT_DEFINED_VARS``, default ON
+    since 2026-11-22, ``=0`` restores the legacy detector; search-changing: it
+    reorders spatial branching and switches per-node OBBT on for the models it
+    marks, never a bound or relaxation change).
+
+    The legacy detector (``_relax/dependent_vars.find_functionally_dependent_names``)
+    considers only size-1 variables, so a model with array intermediates gets no
+    per-node OBBT and no deprioritisation (D1), and it reads an affine row over an
+    indexed reference ``x[0]`` as nonlinear (D2), so the same model marks different
+    variables depending on whether its inputs are scalars or array elements.
+    Measured on tanh surrogates embedded with ``discopt.ml`` full_space
+    (``docs/dev/nn-module-plan.md`` §6, E3 defect 1): the array build timed out at
+    300 s where the per-neuron build certified 2; 16 in 24-31 s, and with the
+    detector's marks reproduced on the array build its node counts matched the
+    per-neuron build exactly (19 / 117 / 165).
+
+    Graduated on its §5 panels (2026-11-22, deterministic, interleaved, fresh
+    subprocess per solve). Corpus, 74 in-repo MINLPLib instances at 30 s: 0
+    problems, 128 incumbent feasibility checks, certified 55 -> 56 (the gain,
+    ``cvxnonsep_nsig30``, is a 30 s edge flip: identical at 60 s), 70 instances
+    identical, the 3 that change all improve (``haverly`` 69 -> 35 nodes,
+    ``ex8_5_3`` 143 -> 137, ``nvs05`` bound 4.32 -> 5.07 against 5.47), wall
+    748.6 -> 747.1 s. Class, 12 tanh/sigmoid/softplus full_space nets at 120 s
+    (``surrogate_entry/defined_vars_nn_panel.py``): 54 checks clean, certified
+    6 -> 11, nodes over the 6 both certify 12,078 -> 352, wall 948 -> 380 s."""
+
     # --- #671 LP iterative refinement (RHS-regularized dual + rigorous NS) ------
     lp_iterative_refinement: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_LP_ITERATIVE_REFINEMENT", default=False)

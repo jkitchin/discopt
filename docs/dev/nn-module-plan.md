@@ -63,10 +63,10 @@ fail-before/pass-after for F1 (8 cases) and F2 (2 cases).
 | T-N1.2 sklearn semantics | 1 | **done** | — | F4. `out_activation_` handling; classifiers raise for trees/ensembles; single-leaf reshape crash fixed |
 | T-N1.3 torch bias=False | 1 | **done** | — | `_linear_wb` helper; bias=None → zeros |
 | T-N2.1 reduced_space honesty + bounds | 2 | **done** | — | Bounded intermediates (scaled domain), redundant final z removed, docstrings corrected |
-| T-N2.2 NNPresolvePass: park or wire | 2 | **done (parked)** | — | Truthful v0 docstring; bare except narrowed to ValueError + logger.debug; v1 wiring left as noted future work |
+| T-N2.2 NNPresolvePass: park or wire | 2 | **done (parked)** | — | Truthful v0 docstring; bare except narrowed to ValueError + logger.debug; v1 wiring left as noted future work. §6 E1 (2026-11-22): stable-neuron removal is low-value, LP tightening almost never fixes a neuron |
 | T-N2.3 add_predictor ergonomics | 2 | **done** | — | Bounds harvested from inputs var; length validation; missing file → FileNotFoundError |
 | T-N3.1 LeakyReLU/Clip activations | 3 | deferred (opt-in) | — | needs maintainer approval |
-| T-N3.2 LP/OBBT big-M tightening | 3 | deferred (opt-in + entry exp.) | — | |
+| T-N3.2 LP/OBBT big-M tightening | 3 | deferred (opt-in); **entry exp. passed** | — | §6 E1: median deep-layer big-M shrinkage 45–66%, faster on every net both arms certified. Production needs safe dual bounds |
 | T-N3.3 XGBoost/LightGBM readers | 3 | deferred (opt-in) | — | |
 | T-N3.4 Mišić split encoding + multi-output | 3 | deferred (opt-in + entry exp.) | — | |
 | T-N4.1 coverage omit removal | 4 | **done** | — | onnx_reader.py un-omitted; onnx/onnxruntime added to `[dev]` extra |
@@ -370,3 +370,205 @@ experiments.
 4. **`propagate_bounds` signature change** ripples to `tighten_network` and any
    external callers: additive keyword-only argument, default preserves current
    behavior.
+
+## 6. Entry experiments from PWLNet and the "MIP surrogates" post (2026-11-22)
+
+**Provenance.** The questions below are taken from two sources, and the credit is
+theirs: S. Sanyal, C. Demir, M. Türkay, E. Aydın, *PWLNet: A Framework for
+Linearized Neural Surrogates in Nonlinear Process Optimization*,
+arXiv:2611.25969v1 (2026), code at https://github.com/SunoySanyal/PWLNet; and
+J. Kitchin, *MIP surrogates* (2026-10-28),
+https://kitchingroup.cheme.cmu.edu/posts/mip-surrogates/, whose 2-D test function
+the panels use. The methods are older: LP-based neuron bounds (Tjeng, Xiao &
+Tedrake 2019; Grimstad & Andersson 2019), input-convex networks (Amos, Xu &
+Kolter 2017). No code was copied from either source; the claims were re-measured
+on discopt's own formulations.
+
+**Instruments.** `discopt_benchmarks/scripts/surrogate_entry/` (`e1_…`, `e2_…`,
+`e3_…`), measured at commit `015535b` on a 4-CPU container with the arms
+interleaved and nothing else running. Each script counts its executed checks and
+exits non-zero if none ran. The networks are sklearn MLPs (or a numpy-trained
+ICNN for E2) with fixed seeds, so the panels are reproducible from the scripts.
+Raw rows were kept out of the repo; the numbers below are the record.
+
+### E1 — LP big-M tightening (T-N3.2's entry experiment): **passes**
+
+Arms: `relu_bigm` with interval bounds, vs the same formulation with per-neuron
+bounds from a layer-by-layer LP over the triangle relaxation (scipy/HiGHS, pad
+1e-6(1+|v|)). 10 ReLU nets, 2–10 inputs, 2–3 hidden layers; 2 reps; 120 s limit.
+Soundness: 17,240,000 sampled pre-activations all fell inside the LP bounds, and
+all 9 objective comparisons between certifying arms agreed.
+
+* Median big-M shrinkage over layers ≥ 1 is **45–66% per net**, against the 20%
+  kill threshold. (Layer 0 is exact under interval arithmetic and is excluded.)
+* On every net both arms certified, LP tightening is faster, with its bound
+  computation included: 1.6→1.2 s, 8.9→4.8 s, 5.3→3.7 s, 17.3→15.3 s.
+* On 2; 64, 64, only the LP arm certifies in both reps (34 s, 4420 nodes). The
+  interval arm hit the limit once and took 95 s (8108 nodes) the other time.
+* On the 5 nets that time out either way, the LP arm always ends with the tighter
+  bound (e.g. −28.1 vs −41.4, −111.8 vs −139.1). On 2 of them, interval bounds
+  never find an incumbent and LP bounds do.
+* LP tightening costs 0.1–0.94 s.
+* **The unstable-neuron count barely moves.** The gain comes from smaller
+  constants, not from fixing neurons, so the T-N2.2 presolve v1 (which only
+  removes stable neurons) has little to offer.
+
+Before shipping: replace the pad with safe dual bounds (Neumaier–Shcherbina),
+and put it behind a flag with the §5 differential panel. It is bound-changing.
+
+### E2 — ICNN minimised as an LP with no binaries: **passes**
+
+Arms: default `relu_bigm` MILP, vs the epigraph LP `zhat = Wᵀz + b, z ≥ 0,
+z ≥ zhat`. This LP is exact only for an input-convex network whose output is
+minimised or bounded above. 8 sequential ICNNs (every weight after the first
+layer ≥ 0), 2–10 inputs; 3 reps. All 24 objective comparisons agreed.
+
+| net | MILP s | LP s | ratio |
+|---|---|---|---|
+| 2; 32, 16 | 0.42 | 0.03 | 14 |
+| 2; 64, 64 (seed 0 / 1) | 1.83 / 2.13 | 0.08 / 0.10 | 23 / 21 |
+| 2; 64, 64, 64 | 3.64 | 0.13 | 28 |
+| 5; 64, 64 (seed 0 / 1) | 2.35 / 1.84 | 0.10 / 0.08 | 24 / 23 |
+| 5; 128, 128 | 5.22 | 0.16 | 33 |
+| 10; 64, 64 | 1.38 | 0.09 | 15 |
+
+The spread is ≤ 0.09 s. The median ratio is ≈ 23 against a kill threshold of 2.
+The MILP closes in 0–1 nodes, so its cost is building and presolving the
+binaries, not branching. This reproduces the post's 0.47 s vs 0.06 s.
+
+Candidate: an ICNN route in `add_predictor`, chosen by structure (weights after
+the first layer ≥ 0, output used only as minimised or bounded above). It must
+refuse in the other direction, where the relaxation is not exact.
+
+### E3 — piecewise-linear tanh (PWLNet §4.4–4.5): certified route **killed**, chord route **heuristic only**
+
+Arms: `full_space` (library build), the same model written one scalar constraint
+per neuron with identical bounds, and `nonlinear_to_pwl` in `"outer"` (8
+segments, certified) and `"approximate"` (4 or 8 chords, PWLNet's interpolant,
+uncertified) modes. tanh nets, 2–5 inputs; 2 reps; 300 s limit. Every incumbent
+is re-evaluated through `forward`, and no certified bound may exceed the best
+incumbent. All 24 checks passed.
+
+| net | full_space | per-neuron | outer | approx4 | approx8 |
+|---|---|---|---|---|---|
+| 2; 8 | 6.5 s ✓ (131 nodes) | 2.6 s ✓ (19 nodes) | 38 s ✓ | 0.27 s, opt | 0.98 s, opt |
+| 2; 16 | TL, bnd −1.55 | 24 s ✓ | TL, bnd −1.494 | 0.79 s, opt | 1.3 s, opt |
+| 2; 32 | TL, bnd −12.9 | 140 s ✓ | TL, bnd −1.67 | 4.2 s, opt | 10 s, opt |
+| 2; 16, 16 | TL, bnd −11.0 | TL, bnd −7.95 | TL, bnd −2.34 | 5.1 s, **−1.109** | 15 s, opt |
+| 5; 16 | TL, bnd −9.25 | TL, bnd −6.1 | TL, bnd −3.691 | 1.4 s, opt | 3.3 s, opt |
+| 5; 16, 16 | TL, bnd −23.8 | TL, bnd −23.6 | TL, bnd −12.0, inc −2.43 | 12 s, **−3.144** | 108 s, opt |
+| 2; 16 (seed 1) | 296 s ✓ (25,543 nodes) | 31 s ✓ (165 nodes) | TL, bnd −1.561 | 1.0 s, opt | 2.8 s, opt |
+
+✓ = certified; TL = 300 s limit; "opt" = the approximate arm's point, checked
+through the exact network, equals the best-known optimum. On 2; 16, 16 the best-known
+value is −1.6147 (no arm certified it), so approx4 misses by 0.51, 17× the net's test RMSE of 0.029.
+On 5; 16, 16 (best-known −4.0512, uncertified) approx4 misses by 0.91, 4× the
+test RMSE of 0.226; `outer` never found a better incumbent than −2.43.
+
+* `outer` certifies only the smallest net, 15× slower than the per-neuron exact
+  solve. That is the kill. It does reach the tightest bound at the limit on every
+  timed-out net, which may be worth knowing for bounding-only use.
+* `approximate` is 5–70× faster and gives good points, but no bound, and 4 chords
+  can be badly wrong. If it is used at all, use it as a primal heuristic whose
+  point is verified through the exact network, never as the solve.
+
+**Two defects found along the way:**
+
+1. **`full_space` relaxes much more weakly than the per-neuron build of the same
+   model.** The bounds are identical, yet 2; 16 goes from certified in 24 s to
+   uncertified at 300 s, and 2; 32 from certified in 140 s to a bound of −12.9
+   at the limit. This is the same class as the `MatMulExpression` note in
+   `full_space.py` (#1215 §55): the bound depends on how the constraint is
+   written.
+
+   *Root-cause work (2026-11-22).* The root LP bound is identical (−7.1527 on
+   2; 8) whether the rows are written as arrays or per neuron, so the node LP is
+   not the weaker part. A search of the solve path found several stages that only
+   act on size-1 variables. The leading suspect,
+   `_relax/dependent_vars.find_functionally_dependent_names` skipping any
+   variable with `size != 1`, was tested by patching it to report the tanh-output
+   arrays. Kill criterion: patched array build within 1.5× of the scalar build's
+   node count.
+
+   | net | array build | + OBBT gate on | + OBBT + deprioritise | scalar build |
+   |---|---|---|---|---|
+   | 2; 8 | 131 | 33 | 51 | 19 |
+   | 2; 16 s0 | TL (29,871) | ✓ 913 (139 s) | ✓ 997 | ✓ 117 (27 s) |
+   | 2; 16 s1 | TL (24,771) | ✓ 1241 (194 s) | ✓ 1521 | ✓ 165 (32 s) |
+
+   **Falsified as the whole cause.** Turning on the per-node OBBT gate alone
+   turns both timeouts into certified solves, but it leaves a 3–9× node gap, and
+   deprioritising the tanh outputs slightly hurts.
+
+   *Localisation, continued.* Knocking out root FBBT, root cutoff-FBBT and the
+   per-node linear-row FBBT one at a time in the scalar build changes nothing
+   (node counts identical on 2; 8 and 2; 16). Variable order changes nothing
+   (interleaved vs block scalar build: 19/19, 117/117). With detection emptied,
+   the array build and the scalar build are **identical** (105 and 2,953 nodes,
+   identical bounds), and the root bound of array-affine and per-element-affine
+   rows is bit-identical on 12 random sub-boxes. So the relaxation, FBBT and
+   OBBT treat both forms the same; the **whole** difference is which variables
+   the detector marks.
+
+   On the scalar build the detector marks both the tanh outputs `z_j` *and* the
+   pre-activations `zh_j`. Marking exactly that set on the array build gives the
+   scalar build's node counts exactly (19 / 117 / 165 on 2; 8, 2; 16 s0, 2; 16
+   s1). Marking only the tanh outputs gives 51 / 997 / 1521. (The earlier "B"
+   column above marked only the outputs, which is why deprioritising looked
+   harmful.)
+
+   **But `zh_j` is marked by accident.** The detector is meant to mark only
+   variables pinned by a *nonlinear* equality; affine ones are left to presolve
+   by design. The row `zh_j − (w·x + b) == 0` is affine, yet
+   `_body_is_nonlinear` returns True because it has no `IndexExpression` case
+   (`x[0]` is an indexed reference to the array input) and treats an
+   unrecognised node as nonlinear. The same row over scalar inputs would be
+   classed affine and `zh_j` left unmarked. So there are two defects, and they
+   interact:
+
+   * **D1** — `find_functionally_dependent_names` / `dependent_columns_for_model`
+     skip every variable with `size != 1`. Any model with array intermediates
+     gets no per-node OBBT and no deprioritisation.
+   * **D2** — `_body_is_nonlinear` misclassifies affine rows that reference an
+     indexed variable, so whether a variable is deprioritised depends on whether
+     its neighbours are scalars or array elements.
+
+   The measurement also says the design rule behind D2's gate ("affine-pinned
+   outputs are presolve's job") does not hold here. Presolve keeps `zh_j`
+   (bounded, used in a nonlinear row), and deprioritising it is worth 3–9× in
+   nodes. A correct fix therefore needs a rule for *which side* of an affine
+   defining equality is the output (in `zh = Wx + b` either side can be solved
+   for, and marking the inputs too would deprioritise everything). That rule
+   changes branch order on every model, not only on arrays, so it needs the
+   corpus panel.
+
+   *Fixed 2026-11-22: `DISCOPT_DEFINED_VARS`, graduated default ON.*
+   `dependent_vars.find_defined_variables` keys array elements as
+   `(name, flat, size)` (D1), treats indexed references as affine leaves (D2),
+   and gives each affine `==` row one output: the unmarked candidate occurring in
+   strictly fewer scalar constraint rows than every other candidate (greedy
+   minimum degree; a tie marks nothing). `=0` restores the legacy detector. With
+   it, `full_space` and the per-neuron build run identical searches (15 / 79 /
+   107 nodes on 2; 8, 2; 16 s0, 2; 16 s1). Panels, deterministic and
+   interleaved: the in-repo corpus (74 instances, 30 s) is cert-clean with 70
+   instances identical and 3 improved (`haverly` 69 → 35 nodes, `ex8_5_3`
+   143 → 137, `nvs05` bound 4.32 → 5.07), wall 748.6 → 747.1 s; the class panel
+   (12 tanh / sigmoid / softplus `full_space` nets, 120 s) is clean over 54 checks
+   with certified 6 → 11 and wall 948 → 380 s. Full rows in
+   `docs/dev/flag-retirement-audit.md`.
+2. **`nonlinear_to_pwl` finds 0 terms and reports 0 skipped on array-valued
+   constraints** (`full_space`'s one-constraint-per-layer form). It is a silent
+   no-op; it must replace those terms or list them as skipped.
+
+   *Fixed 2026-11-23.* `_pwl_transform` now splits a non-affine array-valued
+   constraint into one scalar row per element (`scalarize.scalar_elements`) and
+   a full reduction `sum(f(v))` into `f(v[0]) + ...`, so each element is an
+   ordinary univariate term; affine array rows stay whole. A vector-valued node
+   that still cannot be expanded is reported in `skipped` with the reason
+   "vector-valued", never dropped. On the E3 2; 8 net, `full_space` now gives 8
+   terms in both modes (was 0), the same as the per-neuron build. On the 74
+   in-repo corpus instances (all scalar), terms, skipped, `fully_linear` and
+   the constraint count are identical before and after.
+
+Also seen once during E1: an overflow `RuntimeWarning` (inf × value) at
+`solvers/lp_milp_highs.py:820`. Not yet investigated.

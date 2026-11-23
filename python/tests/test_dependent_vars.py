@@ -348,3 +348,216 @@ class TestWorkCounter:
         assert w.spent > 10 * len(idx), (
             f"charged {w.spent} units for {len(idx)} nodes — the union work is not being counted"
         )
+
+
+# --------------------------------------------------------------------------- #
+# v2 detector (``DISCOPT_DEFINED_VARS``): per-element keys, indexed references
+# as affine leaves, and one output per affine defining equality.
+#
+# Regression for the full_space defect found in docs/dev/nn-module-plan.md §6
+# (E3 defect 1): an embedded tanh network built with array variables got no
+# dependent marks at all (D1), and the per-neuron build got its marks only
+# through an affine row misread as nonlinear because it indexed ``x[k]`` (D2).
+# --------------------------------------------------------------------------- #
+
+
+def _tanh_net(n_hidden: int, seed: int = 0):
+    import numpy as np
+    from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
+
+    rng = np.random.default_rng(seed)
+    layers = [
+        DenseLayer(rng.normal(0, 1.5, (2, n_hidden)), rng.normal(0, 1, n_hidden), Activation.TANH),
+        DenseLayer(rng.normal(0, 1, (n_hidden, 1)), rng.normal(0, 0.1, 1), Activation.LINEAR),
+    ]
+    return NetworkDefinition(layers, input_bounds=(np.full(2, -2.0), np.full(2, 2.0)))
+
+
+def _full_space_model(net):
+    from discopt.ml.formulations.base import NNFormulation
+
+    m = dm.Model("fs")
+    f = NNFormulation(m, net, strategy="full_space", prefix="nn")
+    f.formulate()
+    m.minimize(f.outputs[0])
+    return m
+
+
+def _per_neuron_model(net):
+    """The same rows as full_space, one scalar variable and constraint per neuron.
+
+    Declared block-wise (all pre-activations, then all tanh outputs) so the flat
+    column layout matches full_space exactly.
+    """
+    from discopt.ml.bounds import propagate_bounds
+
+    lbs = propagate_bounds(net)
+    lo, hi = net.input_bounds
+    m = dm.Model("pn")
+    x = m.continuous("x", shape=(2,), lb=lo, ub=hi)
+    prev = [x[0], x[1]]
+    for k, layer in enumerate(net.layers):
+        W, b, L = layer.weights, layer.biases, lbs[k]
+        n = W.shape[1]
+        zh = [m.continuous(f"zh{k}_{j}", lb=L.pre_lb[j], ub=L.pre_ub[j]) for j in range(n)]
+        tanh = layer.activation.value == "tanh"
+        if tanh:
+            z = [m.continuous(f"z{k}_{j}", lb=L.post_lb[j], ub=L.post_ub[j]) for j in range(n)]
+        for j in range(n):
+            m.subject_to(
+                zh[j] == sum(float(W[i, j]) * prev[i] for i in range(len(prev))) + float(b[j])
+            )
+            if tanh:
+                m.subject_to(z[j] == dm.tanh(zh[j]))
+        prev = z if tanh else zh
+    m.minimize(prev[0])
+    return m
+
+
+@pytest.mark.unit
+class TestDefinedVariablesV2:
+    def test_array_elements_are_detected(self):
+        """D1: the legacy detector marks nothing on array intermediates."""
+        m = _full_space_model(_tanh_net(4))
+        assert find_functionally_dependent_names(m) == set()
+        keys = dv.find_defined_variables(m)
+        assert {("nn_z_0", j, 4) for j in range(4)} <= keys
+        assert {("nn_zhat_0", j, 4) for j in range(4)} <= keys
+
+    def test_indexed_affine_row_is_affine(self):
+        """D2: ``zh - (2 x[0] + 3 x[1]) == 0`` is affine whatever indexes it."""
+        m = dm.Model("d2")
+        x = m.continuous("x", shape=(2,), lb=-1, ub=1)
+        zh = m.continuous("zh", lb=-10, ub=10)
+        m.subject_to(zh - (2.0 * x[0] + 3.0 * x[1]) == 0.0)
+        assert _body_is_nonlinear(m._constraints[0].body) is True  # the legacy misread
+        coeffs, nonlinear = dv._RowWalker(None).analyse(m._constraints[0].body)
+        assert nonlinear is False
+        assert coeffs == {"zh": 1.0, ("x", 0, 2): -2.0, ("x", 1, 2): -3.0}
+
+    def test_affine_output_is_the_least_connected_candidate(self):
+        m = dm.Model("aff")
+        x = m.continuous("x", lb=1, ub=5)
+        y = m.continuous("y", lb=1, ub=5)
+        z = m.continuous("z", lb=-100, ub=100)
+        m.subject_to(z - 2.0 * x - y == 0.0)  # z occurs once, x and y twice
+        m.subject_to(x * y <= 4.0)
+        m.minimize(z)
+        assert dv.find_defined_variables(m) == {"z"}
+
+    def test_affine_tie_marks_nothing(self):
+        """``z - 2x == 0`` alone: either side could be the output, so abstain."""
+        m = dm.Model("tie")
+        x = m.continuous("x", lb=1, ub=5)
+        z = m.continuous("z", lb=-100, ub=100)
+        m.subject_to(z - 2.0 * x == 0.0)
+        m.minimize(z)
+        assert dv.find_defined_variables(m) == set()
+
+    def test_nonlinear_rule_matches_legacy_on_scalar_models(self):
+        m = dm.Model("pinned")
+        x = m.continuous("x", lb=1, ub=5)
+        y = m.continuous("y", lb=1, ub=5)
+        z = m.continuous("z", lb=-100, ub=100)
+        m.subject_to(z - x * y == 0.0)
+        m.minimize(z)
+        assert dv.find_defined_variables(m) == find_functionally_dependent_names(m) == {"z"}
+
+    def test_columns_do_not_depend_on_how_the_network_is_written(self):
+        net = _tanh_net(6)
+        a, b = _full_space_model(net), _per_neuron_model(net)
+        cols_a = dependent_columns_for_model(a, dv.find_defined_variables(a))
+        cols_b = dependent_columns_for_model(b, dv.find_defined_variables(b))
+        assert cols_a == cols_b
+        assert len(cols_a) == 13  # 6 pre-activations + 6 tanh outputs + the output
+
+    def test_element_key_needs_a_matching_size(self):
+        m = dm.Model("size")
+        m.continuous("v", shape=(3,), lb=0, ub=1)
+        assert dependent_columns_for_model(m, {("v", 1, 3)}) == [1]
+        assert dependent_columns_for_model(m, {("v", 1, 4)}) == []
+
+    def test_deep_scalar_chain_does_not_recurse(self):
+        """MINLPLib sum chains exceed the recursion limit; the v2 walk is iterative."""
+        m = _chain_model(5000)
+        assert "z" in dv.find_defined_variables(m)
+
+
+@pytest.mark.unit
+def test_full_space_solves_like_the_per_neuron_build(monkeypatch):
+    """With the flag on, the two builds of one tanh net run the same search."""
+    monkeypatch.setenv("DISCOPT_DEFINED_VARS", "1")
+    calls = []
+    real = dv.find_defined_variables
+    monkeypatch.setattr(
+        dv, "find_defined_variables", lambda *a, **k: calls.append(1) or real(*a, **k)
+    )
+    net = _tanh_net(4)
+    ra = _full_space_model(net).solve(time_limit=60, deterministic=True)
+    rb = _per_neuron_model(net).solve(time_limit=60, deterministic=True)
+    assert len(calls) == 2, "the flag did not reach the detector"
+    assert ra.status == rb.status == "optimal"
+    assert ra.objective == pytest.approx(rb.objective, abs=1e-6)
+    assert ra.node_count == rb.node_count
+
+
+@pytest.mark.unit
+def test_defined_vars_is_the_default_and_zero_opts_out(monkeypatch):
+    from discopt.solver_tuning import SolverTuning
+
+    monkeypatch.delenv("DISCOPT_DEFINED_VARS", raising=False)
+    assert SolverTuning().defined_vars is True
+    monkeypatch.setenv("DISCOPT_DEFINED_VARS", "0")
+    assert SolverTuning().defined_vars is False
+
+
+def _dense_tanh_rows(n: int) -> dm.Model:
+    """``y == tanh(A @ x)`` with a dense ``(n, n)`` ``A`` (review of #2308, M2)."""
+    import numpy as np
+
+    A = np.random.default_rng(0).normal(size=(n, n))
+    m = dm.Model("dense")
+    x = m.continuous("x", shape=(n,), lb=-1, ub=1)
+    y = m.continuous("y", shape=(n,), lb=-1, ub=1)
+    m.subject_to(A @ x <= 1)
+    m.subject_to(y == dm.tanh(A @ x))
+    m.minimize(dm.sum(y))
+    return m
+
+
+@pytest.mark.unit
+class TestDefinedVariablesWorkBudget:
+    """The v2 scan's element expansion is charged to ``_SCAN_WORK_BUDGET``.
+
+    Before this, every array row was expanded by ``scalar_elements`` before one
+    unit was charged: on ``_dense_tanh_rows(400)`` it built 642,400 nodes and
+    took 15 s, and at n = 800 it ran out of memory, on the default path. Counted
+    in node constructions, not seconds, so the test is deterministic.
+    """
+
+    def _count_built(self, monkeypatch):
+        import discopt._relax.scalarize as sc
+
+        built = {"n": 0}
+        real = sc._elem
+
+        def counted(expr, idx):
+            built["n"] += 1
+            return real(expr, idx)
+
+        monkeypatch.setattr(sc, "_elem", counted)
+        return built
+
+    def test_an_unaffordable_array_row_abstains_after_one_row(self, monkeypatch):
+        built = self._count_built(monkeypatch)
+        assert dv.find_defined_variables(_dense_tanh_rows(400)) == set()
+        assert 0 < built["n"] <= 4 * 400, f"built {built['n']} nodes before abstaining"
+
+    def test_a_small_budget_bounds_the_expansion(self, monkeypatch):
+        built = self._count_built(monkeypatch)
+        assert dv.find_defined_variables(_dense_tanh_rows(60), work_budget=50_000) == set()
+        assert built["n"] <= 4 * 60
+
+    def test_an_affordable_array_row_is_still_detected(self):
+        keys = dv.find_defined_variables(_dense_tanh_rows(40))
+        assert {("y", j, 40) for j in range(40)} <= keys

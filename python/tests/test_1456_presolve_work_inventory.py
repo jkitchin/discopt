@@ -351,6 +351,12 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "_SCAN_WORK_BUDGET",
     ),
     (
+        "discopt._relax.dependent_vars",
+        "find_defined_variables",
+        "bounded",
+        "_SCAN_WORK_BUDGET",
+    ),
+    (
         "discopt._relax.disjunctive_config_bound",
         "compute_disjunctive_config_bound",
         "bounded",

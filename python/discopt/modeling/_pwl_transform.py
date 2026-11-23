@@ -59,10 +59,14 @@ A subexpression is replaced when it is scalar, nonlinear, depends on exactly one
 scalar variable element (``x`` or ``v[i]``) whose declared bounds are finite, and
 contains no :class:`Parameter` (a mutable value would be baked into the table).
 The *maximal* such subexpression is taken, so ``exp(x) + x**2`` becomes one term.
-Everything else -- multivariate terms such as ``x*y``, vector-valued nodes,
-opaque calls -- is left exactly as written; the transformed model then still
-contains those nonlinearities and discopt's global solver handles them, which
-keeps the result sound. Skipped univariate terms are reported with the reason.
+A non-affine array-valued constraint (``z == tanh(zhat)`` over arrays) is first
+split into one scalar row per element, and a full reduction ``sum(f(v))`` into
+``f(v[0]) + f(v[1]) + ...``, so each element is a term like any other.
+Everything else -- multivariate terms such as ``x*y``, vector-valued nodes that
+cannot be expanded, opaque calls -- is left exactly as written; the transformed
+model then still contains those nonlinearities and discopt's global solver
+handles them, which keeps the result sound. Skipped univariate and unexpanded
+vector-valued terms are reported with the reason.
 """
 
 from __future__ import annotations
@@ -809,7 +813,11 @@ class PWLTransformation:
             if id(n) in replaced:
                 return replaced[id(n)]
             keys, flags = an.deps(n)
-            if len(keys) != 1 or _known_shape(n) != () or an.affine(n):
+            if an.affine(n):
+                return None
+            if _FLAG_VECTOR in flags:
+                return vector_term(n)
+            if len(keys) != 1 or _known_shape(n) != ():
                 return None
             if flags:
                 if _FLAG_PARAM in flags and not (flags - {_FLAG_PARAM}):
@@ -930,10 +938,72 @@ class PWLTransformation:
             replaced[id(n)] = w
             return w
 
+        def vector_term(n):
+            """A non-affine node that touches an array whole (not one element).
+
+            A full reduction ``sum(f(v))`` is expanded into ``f(v[0]) + ...`` and the
+            elements are transformed like any scalar term. ``+``/``-``/``neg`` are
+            descended into so a scalar sibling (``exp(y) + sum(...)``) is still
+            handled. Anything else is reported in ``skipped``: before this, such a
+            node was neither replaced nor reported, so a model written with array
+            variables came back with no terms and no reason (nn-module-plan §6).
+            """
+            from discopt._relax.scalarize import scalar_elements, sum_is_full_reduction
+            from discopt.modeling.core import BinaryOp, SumExpression, UnaryOp
+
+            if isinstance(n, BinaryOp) and n.op in ("+", "-"):
+                return None
+            if isinstance(n, UnaryOp) and n.op == "neg":
+                return None
+            if isinstance(n, SumExpression) and sum_is_full_reduction(n):
+                elems = scalar_elements(n.operand)
+                if elems:
+                    total = elems[0]
+                    for e in elems[1:]:
+                        total = total + e
+                    out = _rebuild(total, candidate)
+                    replaced[id(n)] = out
+                    return out
+            skipped.append(
+                PWLSkippedTerm(
+                    location[0],
+                    _short(n),
+                    "vector-valued: it uses an array variable or a computed array that "
+                    "could not be expanded into per-element scalar terms",
+                )
+            )
+            replaced[id(n)] = n
+            return n
+
+        def expand_rows(cons):
+            """Split each non-affine array-valued constraint into scalar rows.
+
+            ``z == tanh(zhat)`` over arrays becomes ``z[j] - tanh(zhat[j]) == 0``, so
+            each element is a univariate term. Affine array rows are kept whole; a
+            body ``scalar_elements`` cannot expand stays as written, and
+            :func:`vector_term` reports it.
+            """
+            from discopt._relax.scalarize import scalar_elements
+
+            out = []
+            for i, c in enumerate(cons):
+                shape = _known_shape(c.body)
+                if shape not in ((), None) and not an.affine(c.body):
+                    elems = scalar_elements(c.body)
+                    if elems is not None:
+                        base = c.name or f"constraint[{i}]"
+                        out.extend(
+                            Constraint(e, c.sense, c.rhs, f"{base}[{j}]")
+                            for j, e in enumerate(elems)
+                        )
+                        continue
+                out.append(c)
+            return out
+
         obj = work._objective
         assert obj is not None  # checked at construction; loads() preserves it
         placeholder = getattr(obj, "_is_placeholder", False)
-        originals = list(work._constraints)
+        originals = expand_rows(list(work._constraints))
         work._constraints = []
         new_obj = obj
         if not placeholder:

@@ -430,20 +430,425 @@ def dependent_columns_for_model(model, names: set) -> list:
     model) onto the flat columns of ``model`` (typically the lifted/solved
     model). Only continuous columns are emitted — integer variables are handled
     by integer branching and are skipped by the spatial selector anyway.
+
+    ``names`` may also hold array-element keys ``(name, flat, size)`` from
+    :func:`find_defined_variables`. One maps to column ``offset + flat`` only when
+    ``model`` still has a continuous variable ``name`` of exactly ``size``
+    elements; a reformulation that reshaped it maps to nothing (the safe side:
+    the element is simply not deprioritised).
     """
     if not names:
         return []
+    elements: dict = {}
+    for key in names:
+        if isinstance(key, tuple):
+            elements.setdefault(key[0], []).append(key)
     cols: list = []
     off = 0
     for v in getattr(model, "_variables", []):
         size = int(getattr(v, "size", 1))
-        if getattr(v, "var_type", None) == VarType.CONTINUOUS and v.name in names and size == 1:
-            cols.append(off)
+        if getattr(v, "var_type", None) == VarType.CONTINUOUS:
+            if v.name in names and size == 1:
+                cols.append(off)
+            for _, flat, ksize in elements.get(v.name, ()):
+                if ksize == size and 0 <= flat < size:
+                    cols.append(off + flat)
         off += size
-    return cols
+    return sorted(set(cols))
+
+
+# --------------------------------------------------------------------------- #
+# v2: per-element detection with one output per affine defining equality
+# (``DISCOPT_DEFINED_VARS``; see ``SolverTuning.defined_vars``).
+# --------------------------------------------------------------------------- #
+
+
+class _Opaque(Exception):
+    """A row holds a node the v2 walk cannot analyse; the caller abstains."""
+
+
+def _element_flat(var, index):
+    """Flat position of ``var[index]`` when it selects exactly one element, else None."""
+    try:
+        pos = np.asarray(np.arange(int(var.size)).reshape(var.shape)[index])
+    except (IndexError, TypeError, ValueError):
+        return None
+    return int(pos) if pos.ndim == 0 else None
+
+
+def _var_key(var, flat):
+    """The detector's key for element ``flat`` of ``var``: its name when scalar."""
+    size = int(var.size)
+    return var.name if size == 1 else (var.name, int(flat), size)
+
+
+class _RowWalker:
+    """Keys, affine coefficients and nonlinearity of one *scalar* constraint row.
+
+    Keys are variable names for size-1 variables and ``(name, flat, size)`` for an
+    element of an array variable. Unlike the legacy walk, an indexed reference
+    ``x[k]`` is an ordinary affine leaf (defect D2 in ``SolverTuning.defined_vars``)
+    and a full reduction over an array operand is expanded element by element.
+    Anything unrecognised raises :class:`_Opaque`; every caller treats that as
+    "nothing provable about this row".
+    """
+
+    def __init__(self, work):
+        self._work = work
+        self._keys: dict[int, tuple[object, frozenset]] = {}
+
+    def forget(self) -> None:
+        """Drop the memo. Expanded rows are fresh trees, so keeping one row's
+        nodes alive while walking the next only holds memory (n^2 nodes for an
+        ``(n, n)`` matrix row)."""
+        self._keys = {}
+
+    def _spend(self):
+        if self._work is not None and not self._work.spend(1):
+            raise _Opaque("work budget exhausted")
+
+    def _operand_elements(self, operand):
+        from discopt._relax.scalarize import scalar_elements, static_shape
+
+        if static_shape(operand) == ():
+            return [operand]
+        elems = scalar_elements(operand)
+        if elems is None:
+            raise _Opaque("reduction operand cannot be scalarised")
+        return elems
+
+    @staticmethod
+    def _children(node):
+        if isinstance(node, (Constant, Parameter, Variable)):
+            return ()
+        if isinstance(node, IndexExpression):
+            return () if isinstance(node.base, Variable) else (node.base,)
+        if isinstance(node, UnaryOp):
+            return (node.operand,)
+        if isinstance(node, BinaryOp):
+            return (node.left, node.right)
+        if isinstance(node, FunctionCall):
+            return tuple(node.args)
+        if isinstance(node, SumExpression):
+            return (node.operand,)
+        if isinstance(node, SumOverExpression):
+            return tuple(node.terms)
+        raise _Opaque(f"unrecognised node {type(node).__name__}")
+
+    def keys(self, root) -> frozenset:
+        """Keys of every variable element under ``root`` (memoised, iterative).
+
+        Iterative because MINLPLib sum chains are deeper than the recursion
+        limit (the reason the legacy walk is iterative too).
+        """
+        memo = self._keys
+        if id(root) in memo:
+            return memo[id(root)][1]
+        stack = [(root, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if id(node) in memo:
+                continue
+            kids = self._children(node)
+            if not expanded and kids:
+                stack.append((node, True))
+                stack.extend((k, False) for k in kids if id(k) not in memo)
+                continue
+            self._spend()
+            if isinstance(node, (Constant, Parameter)):
+                out: frozenset = frozenset()
+            elif isinstance(node, Variable):
+                out = frozenset(_var_key(node, k) for k in range(int(node.size)))
+            elif isinstance(node, IndexExpression) and isinstance(node.base, Variable):
+                flat = _element_flat(node.base, node.index)
+                if flat is None:
+                    raise _Opaque("index selects more than one element")
+                out = frozenset([_var_key(node.base, flat)])
+            else:
+                out = frozenset().union(*(memo[id(k)][1] for k in kids))
+                # Charge the union, not just the node: on a sum chain the sets
+                # grow along it, so per-node charging would under-count by the
+                # factor that dominates (as VarNameIndex does for the legacy scan).
+                if self._work is not None and not self._work.spend(len(out)):
+                    raise _Opaque("work budget exhausted")
+            memo[id(node)] = (node, out)  # hold ``node`` so its id stays unique
+        return memo[id(root)][1]
+
+    def analyse(self, row):
+        """``(coeffs, nonlinear)`` for a scalar row; raises :class:`_Opaque`.
+
+        ``coeffs[key]`` is the constant coefficient of ``key`` when it occurs only
+        affinely, ``None`` when it also occurs nonlinearly. ``nonlinear`` is True
+        when the row contains any nonlinear operation over variables.
+        """
+        coeffs: dict = {}
+        bad: set = set()
+        nonlinear = False
+        stack = [(row, 1.0)]
+        while stack:
+            self._spend()
+            node, mult = stack.pop()
+            ks = self.keys(node)
+            if not ks:
+                continue
+            if isinstance(node, Variable):
+                if int(node.size) != 1:
+                    raise _Opaque("unindexed array variable in a scalar row")
+                coeffs[node.name] = coeffs.get(node.name, 0.0) + mult
+                continue
+            if isinstance(node, IndexExpression):
+                if not isinstance(node.base, Variable):
+                    raise _Opaque("index of a compound expression")
+                (key,) = ks
+                coeffs[key] = coeffs.get(key, 0.0) + mult
+                continue
+            if isinstance(node, UnaryOp):
+                if node.op in ("-", "neg"):
+                    stack.append((node.operand, -mult))
+                elif node.op in ("+", "pos"):
+                    stack.append((node.operand, mult))
+                else:
+                    bad |= ks
+                    nonlinear = True
+                continue
+            if isinstance(node, BinaryOp):
+                op = node.op
+                if op in ("+", "-"):
+                    stack.append((node.left, mult))
+                    stack.append((node.right, mult if op == "+" else -mult))
+                    continue
+                if op == "*":
+                    lk, rk = self.keys(node.left), self.keys(node.right)
+                    if lk and rk:
+                        bad |= ks
+                        nonlinear = True
+                        continue
+                    k = _const_value(node.right if lk else node.left)
+                    if k is None:
+                        bad |= ks  # unanalysed constant factor: abstain, as legacy
+                        nonlinear = True
+                        continue
+                    stack.append((node.left if lk else node.right, mult * k))
+                    continue
+                if op == "/":
+                    if self.keys(node.right):
+                        bad |= ks
+                        nonlinear = True
+                        continue
+                    k = _const_value(node.right)
+                    if k is None or k == 0.0:
+                        bad |= ks  # unanalysed divisor: abstain, as legacy
+                        nonlinear = True
+                        continue
+                    stack.append((node.left, mult / k))
+                    continue
+                bad |= ks  # ``**`` and any other binary op over variables
+                nonlinear = True
+                continue
+            if isinstance(node, SumExpression):
+                if not sum_is_full_reduction(node):
+                    raise _Opaque("axis reduction in a scalar row")
+                for e in self._operand_elements(node.operand):
+                    stack.append((e, mult))
+                continue
+            if isinstance(node, SumOverExpression):
+                for t in node.terms:
+                    stack.append((t, mult))
+                continue
+            bad |= ks  # FunctionCall over variables
+            nonlinear = True
+        for key in bad:
+            coeffs[key] = None
+        return coeffs, nonlinear
+
+
+def _plainly_scalar(body, work=None) -> bool:
+    """True when ``body`` is scalar with no array-valued node anywhere (iterative).
+
+    Such a body needs no element expansion. Checked before calling
+    :func:`scalarize.scalar_elements`, whose shape inference is recursive and
+    overflows on MINLPLib-depth scalar sum chains; array-valued bodies (one per
+    layer or block) are shallow.
+    """
+    stack = [body]
+    seen: set = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if work is not None and not work.spend(1):
+            raise _Opaque("work budget exhausted")
+        if isinstance(node, (Constant, Parameter)):
+            if np.asarray(node.value).size != 1:
+                return False
+        elif isinstance(node, Variable):
+            if int(node.size) != 1:
+                return False
+        elif isinstance(node, IndexExpression):
+            if not isinstance(node.base, Variable) or _element_flat(node.base, node.index) is None:
+                return False
+        elif isinstance(node, UnaryOp):
+            stack.append(node.operand)
+        elif isinstance(node, BinaryOp):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, FunctionCall):
+            stack.extend(node.args)
+        elif isinstance(node, SumOverExpression):
+            stack.extend(node.terms)
+        else:
+            return False  # reductions, matmul, anything else: let scalarize decide
+    return True
+
+
+class _OverBudget(Exception):
+    """The scan cannot finish inside its work allowance; the caller abstains."""
+
+
+def _stream_rows(body, work):
+    """``(n_rows, rows)``: the scalar rows of ``body``, built one at a time.
+
+    ``scalarize.scalar_elements`` builds every element up front, and that
+    construction is not visible to the work counter: on ``y == tanh(A @ x)`` with
+    a dense ``(n, n)`` ``A`` it builds ``n^2`` nodes before one is charged (2.2 s
+    at n = 200, 15 s at n = 400, out of memory at n = 800, measured on this
+    branch before the change). Here each element is built only when the caller
+    asks for it, so the construction is at most one row ahead of the charges the
+    caller's walk makes. A plainly scalar body never reaches ``static_shape``,
+    whose recursion overflows on MINLPLib-depth sum chains. Raises
+    :class:`_Opaque` when the body has no static per-element form.
+    """
+    from discopt._relax.scalarize import (
+        MAX_SCALAR_ELEMENTS,
+        _elem,
+        _Unscalarizable,
+        static_shape,
+    )
+
+    if _plainly_scalar(body, work):
+        return 1, iter((body,))
+    shape = static_shape(body)
+    if shape is None:
+        raise _Opaque("no static shape")
+    if shape == ():
+        return 1, iter((body,))
+    n = int(np.prod(shape))
+    if n > MAX_SCALAR_ELEMENTS:
+        raise _Opaque("too many elements to expand")
+
+    def rows():
+        for idx in np.ndindex(*shape):
+            try:
+                yield _elem(body, idx)
+            except _Unscalarizable as exc:
+                raise _Opaque(str(exc)) from exc
+
+    return n, rows()
+
+
+def find_defined_variables(model, work_budget: int | None = None) -> set:
+    """v2 detector: dependent variables per element, plus affine-defined outputs.
+
+    Returns keys as described in :func:`dependent_columns_for_model`. Two rules:
+
+    1. **Nonlinear rule** (the legacy rule, now per element): a continuous key
+       occurring affinely with a constant nonzero coefficient in a nonlinear
+       ``==`` row is marked.
+    2. **Affine-output rule** (new): an affine ``==`` row marks at most one key,
+       its *output*. In ``zh = W x + b`` any variable can be solved for, so the
+       row alone does not say which is the output; the rule takes the unmarked
+       candidate that occurs in strictly fewer scalar constraint rows than every
+       other candidate of the row (a greedy minimum-degree output assignment, the
+       usual tearing heuristic in structural analysis). A tie marks nothing. The
+       rule is skipped for the whole model when any constraint is opaque, since
+       occurrence counts are then unknown.
+
+    Every refusal leaves a key unmarked, and a mark only reorders spatial
+    branching (module docstring, *Soundness*), so any answer is sound.
+    """
+    work = WorkCounter(_SCAN_WORK_BUDGET if work_budget is None else work_budget)
+    continuous = {
+        v.name
+        for v in getattr(model, "_variables", [])
+        if getattr(v, "var_type", None) == VarType.CONTINUOUS
+    }
+
+    def candidate(key) -> bool:
+        return (key[0] if isinstance(key, tuple) else key) in continuous
+
+    walker = _RowWalker(work)
+    occ: dict = {}
+    analysed: list = []  # (coeffs, nonlinear) for equality rows
+    affine_rule = True
+
+    def visit(sense, row) -> None:
+        nonlocal affine_rule
+        try:
+            ks = walker.keys(row)
+        except _Opaque:
+            affine_rule = False
+            return
+        for k in ks:
+            occ[k] = occ.get(k, 0) + 1
+        if sense == "==":
+            try:
+                analysed.append(walker.analyse(row))
+            except _Opaque:
+                pass
+
+    try:
+        for c in getattr(model, "_constraints", []):
+            if not isinstance(c, Constraint):
+                continue
+            if work.exhausted:
+                raise _OverBudget
+            try:
+                n_rows, rows = _stream_rows(c.body, work)
+                for k, row in enumerate(rows):
+                    before = work.spent
+                    visit(c.sense, row)
+                    walker.forget()
+                    if work.exhausted:
+                        raise _OverBudget
+                    # One row's measured cost times the rows still to come:
+                    # abstain now rather than build what cannot be paid for.
+                    if k == 0 and (work.spent - before) * (n_rows - 1) > work.remaining:
+                        raise _OverBudget
+            except _Opaque:
+                affine_rule = False  # occurrence counts unknown for this constraint
+    except _OverBudget:
+        return set()  # partial counts would bias rule 2; abstain entirely
+    if work.exhausted:
+        return set()
+
+    marked: set = set()
+    for coeffs, nonlinear in analysed:
+        if not nonlinear:
+            continue
+        for key, a in coeffs.items():
+            if a is not None and a != 0.0 and np.isfinite(a) and candidate(key):
+                marked.add(key)
+
+    if affine_rule:
+        for coeffs, nonlinear in analysed:
+            if nonlinear:
+                continue
+            cands = [
+                k
+                for k, a in coeffs.items()
+                if a is not None and a != 0.0 and np.isfinite(a) and candidate(k)
+            ]
+            free = [k for k in cands if k not in marked]
+            if not free:
+                continue
+            best = min(free, key=lambda k: occ.get(k, 0))
+            if all(occ.get(best, 0) < occ.get(k, 0) for k in cands if k != best):
+                marked.add(best)
+    return marked
 
 
 __all__ = [
     "find_functionally_dependent_names",
+    "find_defined_variables",
     "dependent_columns_for_model",
 ]

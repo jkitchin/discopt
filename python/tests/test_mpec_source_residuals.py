@@ -638,8 +638,12 @@ def test_indicator_source_residual_refuses_undefined_selector_semantics(
     pair = complementarity(0.0 * x, 1.0 + 0.0 * x, name="harmless")
     m._complementarities.append(pair)
     point = np.concatenate([np.array([0.5]), np.asarray(selector_values, dtype=float).reshape(-1)])
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ValueError, match=error) as refused:
         source_residual_report(m, [pair], x_flat=point)
+    # Counted like every other check in this module: this was the only test that
+    # never fed ASSERTIONS_EXECUTED, so a pytest-xdist worker that drew only its
+    # cases failed teardown_module's "ZERO comparisons" guard.
+    _checked(refused.type is ValueError, f"the refusal must be a ValueError, got {refused.type}")
 
 
 # ──────────── B. the distinct terminal status, and what it may claim ────────────
