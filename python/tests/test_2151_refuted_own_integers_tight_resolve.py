@@ -39,6 +39,10 @@ def _highs_milp_route(monkeypatch):
     HiGHS explicitly, the optional ``discopt[highs]`` extra."""
     pytest.importorskip("highspy")
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+    # The recorded instance is the network with interval big-M constants; the
+    # LP-tightened constants (DISCOPT_NN_LP_BIGM, default ON for relu_bigm since
+    # T-N3.2) give a different MILP that HiGHS certifies without the refutation.
+    monkeypatch.setenv("DISCOPT_NN_LP_BIGM", "0")
 
 
 DATA = Path(__file__).parent / "data" / "issue_2151" / "net.json"
