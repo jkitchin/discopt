@@ -11242,6 +11242,24 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     )
 
 
+def _relabel_convex_route_master(reason: str, engine: Any) -> str:
+    """Rewrite the ``master=<engine>`` suffix of a convex-route reason (#2301).
+
+    :func:`_convex_minlp_auto_route` labels the reason with the master *it* picked
+    (``DISCOPT_CONVEX_ROUTE_OA_MASTER``), but ``solve_model`` merges the route's
+    options with ``setdefault``, so an explicit ``milp_solver=`` runs instead. The
+    label must name the engine that ran -- ``algorithm_route`` is what callers and
+    benchmark scripts read to tell which master produced a number. Raises when the
+    suffix is missing: a reason this helper cannot relabel is a format drift that
+    would otherwise silently leave a wrong label in place.
+    """
+    head, sep, tail = reason.rpartition("master=")
+    if not sep or not tail.endswith(")") or ")" in tail[:-1]:
+        raise ValueError(f"convex-route reason has no trailing 'master=...)': {reason!r}")
+    label = str(engine).strip().lower() if engine is not None else "auto"
+    return f"{head}master={label or 'auto'})"
+
+
 #: The MIP-NLP methods the convex-MINLP route may target (#1658).
 _CONVEX_ROUTE_METHODS = ("oa", "lp_nlp_bb")
 
@@ -16662,6 +16680,22 @@ def solve_model(
             # outranks the route's pick.
             for _route_opt, _route_val in _auto_route_options.items():
                 kwargs.setdefault(_route_opt, _route_val)
+            # #2301: the reason was labelled with the route's pick; label it with
+            # the master the MIP-NLP call actually receives.
+            # A value the selector does not know is left for the MIP-NLP call to
+            # reject; the label then names the request.
+            if (
+                "milp_solver" in _auto_route_options
+                and kwargs.get("milp_solver") != _auto_route_options["milp_solver"]
+            ):
+                from discopt.solvers.lp_backend import resolve_milp_backend
+
+                _requested = str(kwargs.get("milp_solver")).strip().lower()
+                try:
+                    _received = resolve_milp_backend(_requested)
+                except (ValueError, ImportError):
+                    _received = _requested
+                _auto_route_reason = _relabel_convex_route_master(_auto_route_reason, _received)
 
     # --- MIP-NLP decomposition solver family ---
     if _solver == "mip-nlp":
@@ -16882,6 +16916,12 @@ def solve_model(
         # knows what they asked for) and the field reads as "the router chose
         # this" wherever it is populated.
         if _auto_route_reason is not None and _mip_nlp_result is not None:
+            # #2301: where the method resolved the request to a concrete master
+            # (``lp_nlp_bb`` maps ``"auto"`` to ``"simplex"``) and traced it, that
+            # is the engine that ran; name it.
+            _ran_master = (_mip_nlp_result.mip_nlp_trace or {}).get("milp_backend")
+            if _ran_master is not None and _auto_route_reason.startswith("mip-nlp/"):
+                _auto_route_reason = _relabel_convex_route_master(_auto_route_reason, _ran_master)
             _mip_nlp_result.algorithm_route = _auto_route_reason
 
         # #1059: this family returns no multipliers, but every other exit in this
