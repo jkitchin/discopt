@@ -495,7 +495,7 @@ class _RowWalker:
 
     def __init__(self, work):
         self._work = work
-        self._keys: dict = {}
+        self._keys: dict[int, tuple[object, frozenset]] = {}
 
     def _spend(self):
         if self._work is not None and not self._work.spend(1):
