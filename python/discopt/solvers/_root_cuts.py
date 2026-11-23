@@ -238,7 +238,8 @@ class RootCutResult:
     bound_trace: list = field(default_factory=list)
     #: Rounds whose bound gain cleared the quality gate's own per-unit tolerance.
     improving_rounds: int = 0
-    #: Why the loop stopped: "budget" | "rounds" | "no_lp" | "no_cuts" | "stall".
+    #: Why the loop stopped: "budget" | "rounds" | "no_lp" | "no_cuts" | "stall" |
+    #: "progress" (#2303, ``DISCOPT_NLPBB_ROOT_CUTS_PROGRESS_EXIT``).
     stop_reason: str = ""
 
 
@@ -445,6 +446,33 @@ class _RootLP:
             s = self.senses[i]
             out[i] = g[i] if s == "<=" else (-g[i] if s == ">=" else abs(g[i]))
         return out
+
+
+#: #2303 relative-progress exit: window K (rounds) and fraction of the gap closed so
+#: far that the last K rounds must reach for the loop to continue.
+PROGRESS_EXIT_ROUNDS = 10
+PROGRESS_EXIT_FRACTION = 0.01
+
+
+def root_cuts_progress_exit() -> tuple[int, float] | None:
+    """``DISCOPT_NLPBB_ROOT_CUTS_PROGRESS_EXIT``: stop the root cut loop once the last
+    ``K`` rounds closed less than ``frac`` of the bound the stage has closed so far.
+
+    #2303: the stall exit (``STALL_ROUNDS``) never fires while every round gains a
+    little, and on #2303's GDP the loop then runs 102-162 rounds depending on the BLAS
+    kernel's round-off. Default OFF (bound-changing: it can only stop earlier, so the
+    root bound it reports is valid but may be weaker) until its §5 panel.
+    ``DISCOPT_NLPBB_ROOT_CUTS_PROGRESS_K`` / ``_FRAC`` override ``K`` / ``frac`` for
+    measurement; both are refused unless positive.
+    """
+    raw = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS_PROGRESS_EXIT", "0").strip().lower()
+    if raw in ("0", "", "false", "off", "no"):
+        return None
+    k = int(os.environ.get("DISCOPT_NLPBB_ROOT_CUTS_PROGRESS_K", PROGRESS_EXIT_ROUNDS))
+    frac = float(os.environ.get("DISCOPT_NLPBB_ROOT_CUTS_PROGRESS_FRAC", PROGRESS_EXIT_FRACTION))
+    if k < 1 or not frac > 0.0:
+        raise ValueError(f"progress exit needs K >= 1 and frac > 0, got K={k}, frac={frac}")
+    return k, frac
 
 
 def root_cuts_engine() -> str:
@@ -1104,6 +1132,7 @@ def generate_root_cuts(
     improving = 0
     stalled = 0
     stop_reason = "rounds"
+    progress_exit = root_cuts_progress_exit()
     # Per-round progress is judged against the SAME tolerance the end-of-loop
     # quality gate uses, so "not improving" here means "on track to be
     # discarded there" rather than a second, unrelated notion of progress.
@@ -1206,6 +1235,18 @@ def generate_root_cuts(
         if stalled >= STALL_ROUNDS:
             stop_reason = "stall"
             break
+        if progress_exit is not None and len(trace) > progress_exit[0]:
+            # #2303: the last K rounds closed less than ``frac`` of what the stage
+            # has closed so far. Stopping only drops cuts that were never added, so
+            # every bound reported stays valid; it is bound-changing (weaker), hence
+            # default OFF until its §5 panel.
+            k_win, frac = progress_exit
+            sgn = -1.0 if root.sense_max else 1.0
+            closed = sgn * (trace[-1] - trace[0])
+            recent = sgn * (trace[-1] - trace[-1 - k_win])
+            if closed > gate_tol and recent < frac * closed:
+                stop_reason = "progress"
+                break
 
     # Quality gate: keep the stage's output only when the cutting loop actually
     # MOVED the root LP bound past the OA-only baseline. On instances where the
