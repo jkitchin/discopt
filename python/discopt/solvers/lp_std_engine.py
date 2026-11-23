@@ -56,6 +56,11 @@ class LpRaw:
     #: The primal readback on an unbounded exit, when the engine says it is feasible.
     x_primal: Optional[np.ndarray] = None
     iters: float = 0.0
+    #: The Rust engine's final basis on an optimal exit (``basic_vars``, ``col_status``
+    #: as ``solve_lp_warm_csc_py`` returns them), else ``None`` (#2303). Invariant
+    #: under the exact equilibration retry, a positive diagonal scaling.
+    basic_vars: Optional[np.ndarray] = None
+    col_status: Optional[np.ndarray] = None
     run_error: bool = False
     pass_warning: bool = False
     pass_error: str = ""
@@ -212,6 +217,8 @@ class RustEngine:
             out.x = C * scaled.x
             out.y = R * scaled.y
             out.rc = np.asarray(sf.c, dtype=np.float64) - sf.A.T @ out.y
+            # x = C x' with C > 0 diagonal: the same columns are basic, at the same sides.
+            out.basic_vars, out.col_status = scaled.basic_vars, scaled.col_status
         elif scaled.x_primal is not None:
             out.x_primal = C * scaled.x_primal
         return out
@@ -225,7 +232,7 @@ class RustEngine:
         if time_limit is not None:
             kw["time_limit_s"] = max(0.0, float(time_limit))
         with _timing.charge("rust"):
-            status, x, _obj, iters, _cs, _bv, dual, ray = solve_lp_warm_csc_py(
+            status, x, _obj, iters, cs, bv, dual, ray = solve_lp_warm_csc_py(
                 np.ascontiguousarray(c, dtype=np.float64),
                 m,
                 n,
@@ -259,6 +266,8 @@ class RustEngine:
             raw.x = np.asarray(x, dtype=np.float64)
             raw.y = dual_a.copy()
             raw.rc = np.asarray(c, dtype=np.float64) - A.T @ raw.y
+            raw.basic_vars = np.asarray(bv, dtype=np.int64)
+            raw.col_status = np.asarray(cs, dtype=np.int8)
         elif st == "unbounded" and np.asarray(x).shape == (n,):
             # A candidate; ``solve_lp_std`` re-checks it as a primal point before use.
             raw.x_primal = np.asarray(x, dtype=np.float64)

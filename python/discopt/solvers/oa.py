@@ -6211,6 +6211,35 @@ def _oa_node_cuts_enabled() -> bool:
     return os.environ.get("DISCOPT_OA_NODE_CUTS", "1") not in ("0", "", "false", "False")
 
 
+def _oa_master_nlp_incumbent_enabled() -> bool:
+    """``DISCOPT_OA_MASTER_NLP_INCUMBENT``: hand the in-house lazy master the
+    fixed-NLP incumbent its separator finds (#2302), so the tree prunes on it.
+
+    LP/NLP-BB (Quesada and Grossmann 1992) prunes every master node whose bound
+    reaches the best NLP value. The in-house tree only knew the master points its
+    separator *accepted*; a vetoed point whose fixed NLP produced a better
+    incumbent left the tree without an upper bound, so it went on diving to
+    integer points the NLP had already beaten. Measured on the #2302 gate-sizing
+    model: 114 of the 119 points it offered had a master objective at or above the
+    running NLP incumbent. The HiGHS master gets the pruning implicitly (HiGHS keeps
+    a vetoed point as its own incumbent until the restart).
+
+    The offer is the verified incumbent (``accept_incumbent``) lifted to the
+    master's columns by :func:`_extend_master_mip_start`. The driver checks it
+    against the box, integrality and every current row, then re-separates it, and
+    adopts it only if it improves; the master stays a relaxation, and its incumbent
+    is never what this driver reports (only ``master_result.bound`` is read). So
+    this changes which nodes are explored, never the validity of a bound.
+    ``=0`` restores the pre-#2302 tree exactly (no offer is wired).
+    """
+    return os.environ.get("DISCOPT_OA_MASTER_NLP_INCUMBENT", "1") not in (
+        "0",
+        "",
+        "false",
+        "False",
+    )
+
+
 def _oa_master_relax_cut_noise_enabled() -> bool:
     """``DISCOPT_OA_MASTER_RELAX_CUT_NOISE``: let the in-house lazy master relax
     gradient-noise entries of the OA cut rows past the absolute cap (#2223).
@@ -7584,8 +7613,50 @@ def solve_lp_nlp_bb(
             rows.extend(collect_split_row_epigraph_rows(master_x))
         return rows
 
+    #: #2302: the verified NLP incumbent, lifted to the master's columns, waiting to
+    #: be offered to the in-house tree after the veto that produced it.
+    offer_nlp_incumbent = (
+        lazy_backend == "simplex" and master_bound_valid and _oa_master_nlp_incumbent_enabled()
+    )
+    pending_offer: list[Optional[np.ndarray]] = [None]
+    nlp_incumbent_offered = [0]
+    nlp_incumbent_adopted = [0]
+
+    def _is_pending_offer(master_x: np.ndarray) -> bool:
+        """Is ``master_x`` the verified incumbent this separator just offered (#2302)?
+
+        The driver hands it back rounded and clamped, so equality is judged on the
+        integers exactly and on the rest to round-off.
+        """
+        cand = pending_offer[0]
+        if cand is None:
+            return False
+        got = np.asarray(master_x, dtype=np.float64).ravel()
+        if got.shape != cand.shape:
+            return False
+        ints = np.asarray(master.integrality, dtype=bool)
+        if not np.array_equal(np.round(got[ints]), np.round(cand[ints])):
+            return False
+        return bool(np.allclose(got[~ints], cand[~ints], rtol=1e-12, atol=1e-9))
+
+    def incumbent_offer() -> Optional[np.ndarray]:
+        cand = pending_offer[0]
+        if cand is not None:
+            nlp_incumbent_offered[0] += 1
+        return cand
+
     def lazy_callback(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
         nonlocal nlp_subproblem_count
+        if _is_pending_offer(master_x):
+            # #2302: our own verified NLP incumbent, handed back by the driver. It
+            # is accepted when no OA row (old or new) cuts it; no NLP is re-solved
+            # for it. A row that does cut it rejects it like any other point.
+            pending_offer[0] = None
+            mx = np.asarray(master_x, dtype=np.float64)
+            rows = collect_new_lazy_cuts(0, mx, at_incumbent=True)
+            if not rows:
+                nlp_incumbent_adopted[0] += 1
+            return rows
         x_master = np.asarray(master_x[:n_vars], dtype=np.float64)
         cuts_start = len(oa_A_rows)
         provenance_start = len(cut_provenance.records)
@@ -7637,7 +7708,20 @@ def solve_lp_nlp_bb(
         fixed_nlp_status = _fixed_nlp_status_label(fixed_attempt)
         if x_nlp is not None:
             if obj_nlp is not None:
+                obj_before = incumbent_obj
                 accept_incumbent(x_nlp, obj_nlp)
+                if (
+                    offer_nlp_incumbent
+                    and incumbent is not None
+                    and incumbent_obj is not None
+                    and (obj_before is None or incumbent_obj < obj_before)
+                ):
+                    pending_offer[0] = _extend_master_mip_start(
+                        master,
+                        n_vars=n_vars,
+                        mip_start=incumbent,
+                        mip_start_objective=_master_objective_from_evaluator(incumbent_obj),
+                    )
                 _record_interior_point(
                     x_nlp,
                     "callback_fixed_nlp",
@@ -7774,6 +7858,11 @@ def solve_lp_nlp_bb(
             solve_milp_with_lazy_cuts as solve_milp_with_lazy_cuts,
         )
 
+    if offer_nlp_incumbent:
+        lazy_kwargs_offer: dict[str, object] = {"incumbent_callback": incumbent_offer}
+    else:
+        lazy_kwargs_offer = {}
+
     master_mip_start = None
     if shot_profile and incumbent is not None:
         master_mip_start = _extend_master_mip_start(
@@ -7879,6 +7968,7 @@ def solve_lp_nlp_bb(
         gap_tolerance=gap_tolerance,
         lazy_callback=lazy_callback,
         mip_start=master_mip_start,
+        **lazy_kwargs_offer,
     )
     # All three masters now carry the progress check-in; only the fractional-node
     # hook is backend-specific.
@@ -8052,6 +8142,12 @@ def solve_lp_nlp_bb(
     # means it never got a check-in -- a master that never separated -- and NOT
     # that it kept saying continue (CLAUDE.md §6).
     callback_stats["termination_hook_calls"] = int(hook_calls[0])
+    # #2302: offers handed to the in-house tree, and those it adopted after the
+    # driver's row check and the re-separation. Zero offers with the offer wired
+    # means no fixed NLP improved the incumbent after a veto, NOT that offers failed.
+    callback_stats["nlp_incumbent_offer_wired"] = bool(offer_nlp_incumbent)
+    callback_stats["nlp_incumbent_offered"] = int(nlp_incumbent_offered[0])
+    callback_stats["nlp_incumbent_adopted"] = int(nlp_incumbent_adopted[0])
     # Distinguish "the early exit never had a bound to judge" from "it judged and
     # kept going" -- only the HiGHS backend reports a dual bound at check-in, so
     # on any other master this count is 0 and the exit is inert by construction.

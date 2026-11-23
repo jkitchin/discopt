@@ -475,14 +475,48 @@ def root_cuts_engine() -> str:
     return val
 
 
+#: Process-wide counts of which basis the Rust arm's GMI separation read (#2303):
+#: ``lp_basis`` (the simplex's own) or ``recovered`` (re-derived at the vertex).
+GMI_BASIS_STATS: dict[str, int] = {"lp_basis": 0, "recovered": 0}
+
+
+def root_gmi_lp_basis_enabled() -> bool:
+    """``DISCOPT_NLPBB_ROOT_GMI_LP_BASIS``: separate the Rust arm's GMI rows from the
+    basis the in-house simplex ended on, not one recovered at its vertex (#2303).
+
+    GMI rows are defined from the optimal tableau, and the HiGHS arm reads HiGHS's
+    optimal basis. The Rust arm used to discard its simplex's basis and call
+    ``recover_basis`` at the vertex, which at a degenerate vertex picks a basis by
+    column order (interior columns, then rank completion in index order), not the
+    dual-feasible one. Both give valid cuts; the cut STRENGTH differs. Measured on
+    #2303's reactor/separator GDP (big-M, NLP-BB): the stage ran 162 rounds (5.6 s,
+    stop ``stall``, root bound 551.55) from the recovered basis and stops on
+    ``no_cuts`` from the simplex's basis.
+
+    Default OFF until the §5 panel.
+    """
+    return os.environ.get("DISCOPT_NLPBB_ROOT_GMI_LP_BASIS", "0") not in (
+        "0",
+        "",
+        "false",
+        "off",
+        "no",
+    )
+
+
 class _RustRootBasis:
     """The Rust root LP's vertex in standard form ``[A_le I; A_eq 0] z = b``, ``z = [x, s]``,
     which ``separate_gmi`` hands to ``gomory_cuts_py`` (it recovers the basis at ``z``)."""
 
-    def __init__(self, a_std, b_std, c_std, lo, hi, is_int_std, z, n, a_le, b_le):
+    def __init__(
+        self, a_std, b_std, c_std, lo, hi, is_int_std, z, n, a_le, b_le,
+        basic_vars=None, col_status=None,
+    ):  # fmt: skip
         self.a_std, self.b_std, self.c_std = a_std, b_std, c_std
         self.lo, self.hi, self.is_int_std, self.z = lo, hi, is_int_std, z
         self.n, self.a_le, self.b_le = n, a_le, b_le
+        #: The simplex's own final basis (#2303), ``None`` when the engine gave none.
+        self.basic_vars, self.col_status = basic_vars, col_status
 
 
 def _solve_lp_rust(root: _RootLP, a_ub, b_ub, time_limit):
@@ -512,7 +546,10 @@ def _solve_lp_rust(root: _RootLP, a_ub, b_ub, time_limit):
         return None
     z = np.asarray(raw.x, float)
     is_int_std = np.concatenate([np.asarray(root.is_int, bool), np.zeros(n_le, bool)])
-    basis = _RustRootBasis(a_std, b_std, c_std, lo, hi, is_int_std, z, n, a_ub, b_ub)
+    basis = _RustRootBasis(
+        a_std, b_std, c_std, lo, hi, is_int_std, z, n, a_ub, b_ub,
+        basic_vars=raw.basic_vars, col_status=raw.col_status,
+    )  # fmt: skip
     return z[:n].copy(), np.abs(np.asarray(raw.y, float))[:n_le], basis
 
 
@@ -805,6 +842,21 @@ def _separate_gmi_rust(h: _RustRootBasis, x, a_all, b_all, max_cuts):
     """
     from discopt._rust import gomory_cuts_py
 
+    basis_kw = {}
+    if (
+        root_gmi_lp_basis_enabled()
+        and h.basic_vars is not None
+        and h.col_status is not None
+        # A short basis (a degenerate phase-2 exit) is left to recovery, as before.
+        and len(h.basic_vars) == int(h.a_std.shape[0])
+    ):
+        basis_kw = {
+            "basic_vars": np.ascontiguousarray(h.basic_vars, dtype=np.int64),
+            "col_status": np.ascontiguousarray(h.col_status, dtype=np.int8),
+        }
+        GMI_BASIS_STATS["lp_basis"] += 1
+    else:
+        GMI_BASIS_STATS["recovered"] += 1
     if int(a_all.shape[0]) != int(h.a_le.shape[0]):
         raise ValueError(
             f"separate_gmi: row system has {int(a_all.shape[0])} '<=' rows but the Rust "
@@ -813,7 +865,7 @@ def _separate_gmi_rust(h: _RustRootBasis, x, a_all, b_all, max_cuts):
     out = gomory_cuts_py(
         np.ascontiguousarray(h.z), np.ascontiguousarray(h.a_std), np.ascontiguousarray(h.b_std),
         np.ascontiguousarray(h.c_std), np.ascontiguousarray(h.lo), np.ascontiguousarray(h.hi),
-        np.ascontiguousarray(h.is_int_std), max_dynamism=GMI_DYNAMISM_MAX,
+        np.ascontiguousarray(h.is_int_std), max_dynamism=GMI_DYNAMISM_MAX, **basis_kw,
     )  # fmt: skip
     if out is None:
         return []

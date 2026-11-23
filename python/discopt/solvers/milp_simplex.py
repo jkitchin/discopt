@@ -1624,6 +1624,7 @@ def _solve_lazy_tree(
     terminate_callback: Optional[Callable[[dict[str, object]], bool]] = None,
     mip_start: Optional[np.ndarray] = None,
     relaxable_ub_rows: Optional[np.ndarray] = None,
+    incumbent_callback: Optional[Callable[[], Optional[np.ndarray]]] = None,
     _restarts_so_far: int = 0,
     _root_cut_time_cap: Optional[float] = None,
 ) -> MILPResult:
@@ -1674,6 +1675,8 @@ def _solve_lazy_tree(
         "terminated": False,
         "terminate_context": None,
         "relaxable_rows": 0 if relaxable_std is None else int(sum(relaxable_std)),
+        "incumbent_offer_calls": 0,
+        "incumbent_offers": 0,
     }
 
     def _separate(x_full: np.ndarray) -> list[tuple[np.ndarray, float]]:
@@ -1725,6 +1728,22 @@ def _solve_lazy_tree(
         return out
 
     _node_hook = None if node_callback is None else _separate_node
+
+    def _offer_incumbent() -> Optional[np.ndarray]:
+        # #2302: a structural point the caller verified, asked for after a veto. The
+        # driver validates it against the rows and re-separates it before adopting it.
+        assert incumbent_callback is not None  # only wired when supplied
+        stats["incumbent_offer_calls"] = int(cast(int, stats["incumbent_offer_calls"])) + 1
+        pt = incumbent_callback()
+        if pt is None:
+            return None
+        arr = np.ascontiguousarray(np.asarray(pt, dtype=np.float64).ravel())
+        if arr.shape[0] != n:
+            raise ValueError(
+                f"incumbent_callback returned {arr.shape[0]} entries for {n} structural columns"
+            )
+        stats["incumbent_offers"] = int(cast(int, stats["incumbent_offers"])) + 1
+        return arr
 
     # The driver has ONE hook slot and the interactive debugger already owns it,
     # so a caller's ``terminate_callback`` COMPOSES with it rather than replacing
@@ -1828,6 +1847,11 @@ def _solve_lazy_tree(
             ),
             **_lazy_gap_kwargs(),
             **({} if relaxable_std is None else {"relaxable_rows": relaxable_std}),
+            **(
+                {}
+                if incumbent_callback is None
+                else {"lazy_incumbent_callback": _timing.as_interpreted(_offer_incumbent)}
+            ),
         )
     wall_time = time.perf_counter() - t0
     # The binding counts calls the driver actually made; this side counts calls it
@@ -1977,6 +2001,7 @@ def solve_milp_with_lazy_cuts(
     terminate_callback: Optional[Callable[[dict[str, object]], bool]] = None,
     mip_start: Optional[np.ndarray] = None,
     relaxable_ub_rows: Optional[np.ndarray] = None,
+    incumbent_callback: Optional[Callable[[], Optional[np.ndarray]]] = None,
 ) -> MILPResult:
     """Single-tree MILP solve with a lazy-constraint separator, on the Rust simplex.
 
@@ -2044,6 +2069,17 @@ def solve_milp_with_lazy_cuts(
     a marked row's relaxation reach the returned incumbent.
     ``None`` or an all-false mask is the unmasked solve, bit for bit.
 
+    ``incumbent_callback`` (#2302) is asked, after each veto, for a structural point
+    the caller has verified feasible for the problem the separator guards, or
+    ``None``. The driver checks the point against the box, integrality and every
+    current row, hands it to ``lazy_callback``, and adopts it as the tree's incumbent
+    only if that accepts it and it improves. It is how an LP/NLP-BB master learns
+    the fixed-NLP incumbent its separator found, so the tree prunes on it as
+    Quesada--Grossmann prescribe; without it the tree only knows the points it
+    accepted. ``callback_stats`` reports ``incumbent_offer_calls`` and
+    ``incumbent_offers`` (the calls that returned a point). ``None`` is the
+    unhooked search, bit for bit.
+
     ``callback_stats`` reports ``mipsol_calls`` (separator invocations),
     ``lazy_cuts`` (rows the separator returned), ``driver_lazy_calls`` (the same
     count as the driver saw it) and ``lazy_requeues`` (vetoed nodes put back in
@@ -2079,6 +2115,7 @@ def solve_milp_with_lazy_cuts(
             terminate_callback=terminate_callback,
             mip_start=mip_start,
             relaxable_ub_rows=relaxable_ub_rows,
+            incumbent_callback=incumbent_callback,
         )
     return _solve_lazy_restarting(
         common,
@@ -2092,11 +2129,14 @@ def solve_milp_with_lazy_cuts(
         mip_start=mip_start,
         relaxable_ub_rows=relaxable_ub_rows,
         max_restarts=max_restarts,
+        incumbent_callback=incumbent_callback,
     )
 
 
 #: ``callback_stats`` counters summed over the trees of a restarting call.
 _SUMMED_LAZY_STATS = (
+    "incumbent_offer_calls",
+    "incumbent_offers",
     "mipsol_calls",
     "mipnode_calls",
     "lazy_cuts",
@@ -2121,6 +2161,7 @@ def _solve_lazy_restarting(
     mip_start,
     relaxable_ub_rows,
     max_restarts: int,
+    incumbent_callback=None,
 ) -> MILPResult:
     """The ``DISCOPT_MILP_LAZY_RESTARTS > 0`` arm of :func:`solve_milp_with_lazy_cuts`;
     the contract is in :func:`_lazy_restarts`."""
@@ -2234,6 +2275,7 @@ def _solve_lazy_restarting(
             terminate_callback=_term,
             mip_start=seed,
             relaxable_ub_rows=mask_cur,
+            incumbent_callback=incumbent_callback,
             _restarts_so_far=restarts,
             _root_cut_time_cap=carve_cap,
         )
