@@ -135,7 +135,7 @@ NOT_A_GATE = {
     ),
     "DISCOPT_NN_LP_BIGM": (
         "a three-state override (T-N3.2): unset defers to the ReLU formulation's "
-        "LP_BIGM_DEFAULT (ON for relu_bigm/relu_partition, OFF for relu_extended), so it "
+        "LP_BIGM_DEFAULT (ON for relu_bigm, OFF for relu_partition/relu_extended), so it "
         "has no single default polarity. Tracked as a solver-math gate below."
     ),
 }

@@ -13,7 +13,7 @@ It is a bound-changing change (CLAUDE.md §5), so the tests are:
 * feasible-point sampling -- with the flag on, fixing the input to any sampled
   point leaves the embedding feasible and its output equal to ``forward``;
 * ``=0`` is the interval path, byte for byte; unset is ON for ``relu_bigm``
-  and ``relu_partition`` and OFF for ``relu_extended``.
+  and OFF for ``relu_partition`` and ``relu_extended``.
 
 Each test counts what it checked and fails if it checked nothing (§6).
 """
@@ -158,10 +158,11 @@ def _uses_lp(obj, net):
 
 
 # (env value, strategy) -> LP-tightened? Unset is each formulation's default:
-# ON for relu_bigm / relu_partition, OFF for relu_extended (its spread panel).
+# ON for relu_bigm, OFF for relu_partition and relu_extended (their panels).
 FLAG_TABLE = [
     (None, "relu_bigm", True),
-    (None, "relu_partition", True),
+    (None, "relu_partition", False),
+    ("1", "relu_partition", True),
     (None, "relu_extended", False),
     ("1", "relu_bigm", True),
     ("1", "relu_extended", True),
