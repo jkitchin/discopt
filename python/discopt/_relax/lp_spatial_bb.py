@@ -623,11 +623,23 @@ def solve_lp_spatial_bb(
     # 17-column node LP -> IndexError, which the caller swallowed as "engine failed"
     # and silently fell back). A product map is only meaningful for the exact LP it
     # came from.
+    # No node LP is handed a zero/negative duration (the backend rejects one), so a
+    # node that starts with the engine's budget already spent still gets a floor and
+    # exits on it rather than erroring.
+    _NODE_LP_FLOOR_S = 0.05
+
+    def _lp_budget():
+        """Seconds this engine has left, for ONE LP (#2316). Every LP solved here
+        takes it: the deadline polls in ``dive``, the pump and the node loop only
+        fire BETWEEN LPs, so an LP without a limit of its own outlived the engine
+        (1017 s for a 600 s ``Model.solve`` on sonet24v2)."""
+        return max(_own_deadline - time.perf_counter(), _NODE_LP_FLOOR_S)
+
     if _inc.ok:
         info = {"bilinear": _inc.bilinear, "monomial": _inc.monomial}
 
         def relax(lb, ub, basis):
-            b_, x_, bas = _inc.solve(lb, ub, in_basis=basis)
+            b_, x_, bas = _inc.solve(lb, ub, in_basis=basis, time_limit=_lp_budget())
             return b_, x_, bas, info
     else:
         _r0 = _relax_bound(model, terms, lb0, ub0, deadline=t0 + time_limit)
@@ -647,10 +659,6 @@ def solve_lp_spatial_bb(
     # on the incremental path (needs the explicit row system).
     cut_enabled = _inc.ok
     _MAX_INHERITED_CUTS = 400
-    # No node LP is handed a zero/negative duration (the backend rejects one), so a
-    # node that starts with the engine's budget already spent still gets a floor and
-    # exits on it rather than erroring.
-    _NODE_LP_FLOOR_S = 0.05
 
     def node_relax(lb, ub, basis, inherited, rounds):
         """Solve the node LP with inherited cuts, then run ``rounds`` of cut
@@ -694,7 +702,7 @@ def solve_lp_spatial_bb(
             b,
             bounds,
             in_basis=basis,
-            time_limit=max(_own_deadline - time.perf_counter(), _NODE_LP_FLOOR_S),
+            time_limit=_lp_budget(),
         )
         if b_ is None:
             _verdict = "fathom" if (_st == "infeasible" and _farkas) else "unresolved"
@@ -707,7 +715,7 @@ def solve_lp_spatial_bb(
                 break
             cuts.extend(new)
             A, b, bounds = _inc.assemble(lb, ub, cuts)
-            nb, nx, nbas = _inc.solve_assembled(A, b, bounds, in_basis=bas)
+            nb, nx, nbas = _inc.solve_assembled(A, b, bounds, in_basis=bas, time_limit=_lp_budget())
             if nb is None or nx is None:
                 break
             improved = nb > b_ + 1e-7 * (1 + abs(b_))
@@ -910,7 +918,7 @@ def solve_lp_spatial_bb(
             # minimize -> pull the integer coordinates toward xhat; leave the
             # continuous ones with zero cost so the LP places them freely.
             c_fp[:n] = np.where(is_int, np.where(x[:n] > xhat, 1.0, -1.0), 0.0)
-            _b, x_, _bas = _inc.solve(lb, ub, c_override=c_fp)
+            _b, x_, _bas = _inc.solve(lb, ub, c_override=c_fp, time_limit=_lp_budget())
             if x_ is None:
                 return None
             x = x_

@@ -1231,13 +1231,16 @@ class IncrementalMcCormickLP:
             b = np.concatenate([b, extra_b])
         return A, b, bounds
 
-    def solve_assembled(self, A, b, bounds, in_basis=None, c_override=None):
+    def solve_assembled(self, A, b, bounds, in_basis=None, c_override=None, *, time_limit=None):
         """Solve a pre-assembled LP ``min c·x s.t. A x <= b, bounds``.
 
         The returned value is the RELAXATION's objective, ``c·x + obj_offset`` — the
         same scale ``MilpRelaxationModel.solve`` reports on the cold path. A
         ``c_override`` solve is a surrogate (feasibility pump), not a bound, so the
-        offset is not applied to it."""
+        offset is not applied to it.
+
+        ``time_limit`` (seconds, ``None`` = unbounded) bounds this one LP (#2316). A
+        spent budget returns ``(None, None, None)``, like any other non-optimal exit."""
         from discopt.solvers import SolveStatus
         from discopt.solvers.milp_simplex import solve_lp_warm_std
 
@@ -1246,7 +1249,9 @@ class IncrementalMcCormickLP:
         # #1520: no except. ``solve_lp_warm_std`` declines by return value (``None``
         # on an iteration/numerical/deadline exit); it raises only on invalid input
         # (a NaN bound, a negative time limit), which is a caller defect.
-        result, out_basis = solve_lp_warm_std(cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis)
+        result, out_basis = solve_lp_warm_std(
+            cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis, time_limit=time_limit
+        )
         if result is None or result.status != SolveStatus.OPTIMAL or result.objective is None:
             return None, None, None
         if c_override is not None:
@@ -1341,11 +1346,13 @@ class IncrementalMcCormickLP:
             cert,
         )
 
-    def solve(self, lb, ub, in_basis=None, c_override=None, cut_rows=None):
+    def solve(self, lb, ub, in_basis=None, c_override=None, cut_rows=None, *, time_limit=None):
         """Solve the McCormick LP over [lb,ub] (plus optional cut rows); return
         (bound, x, out_basis) or (None, None, None). Warm-starts from ``in_basis``.
         The bound is the relaxation objective ``c·x + obj_offset`` (cold-path scale).
         ``c_override`` replaces the objective (feasibility pump) — the returned bound
         is then the surrogate, not a dual bound, and carries no offset."""
         A, b, bounds = self.assemble(lb, ub, cut_rows)
-        return self.solve_assembled(A, b, bounds, in_basis=in_basis, c_override=c_override)
+        return self.solve_assembled(
+            A, b, bounds, in_basis=in_basis, c_override=c_override, time_limit=time_limit
+        )
