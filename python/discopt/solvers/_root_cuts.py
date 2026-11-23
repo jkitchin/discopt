@@ -498,16 +498,20 @@ def root_gmi_lp_basis_enabled() -> bool:
     first reported was the SkylakeX kernel alone; CI's runner matches Haswell (113
     rounds, ``stall``, bound 557.6537, reproduced exactly).
 
-    **Graduated default ON (2026-11-23) as neutral**, under CLAUDE.md §5 bar 2 (a):
-    a faithful port of the reference arm, which separates from HiGHS's optimal basis.
-    Panel over the P6 population (18 instance-configurations where the stage fires, 2
-    interleaved reps, 60 s, ``root_cuts_engine_panel.py`` with its arms on this
-    flag), all on the SkylakeX host: 72 solves, 320 bound/feasibility checks, **0
-    violations**, certification unchanged on every row; the rows that differed
-    (flay02m, syn05m, tls2 @nlpbb) are not claimed as gains given the round-off
-    sensitivity above. ``=0`` restores the recovered basis.
+    **Default OFF: a documented opt-in, not a graduation.** Panel over the P6
+    population (18 instance-configurations where the stage fires, 2 interleaved reps,
+    60 s, ``root_cuts_engine_panel.py`` with its arms on this flag), one AVX-512 host:
+    72 solves, 320 bound/feasibility checks, **0 violations**, certification unchanged
+    on every row. It is not the default because the panel shows no gain that survives
+    the round-off sensitivity above, and on #2303's GDP the root bound from the
+    simplex basis is looser on the SkylakeX kernel (599.05 against 551.55 recovered
+    and 557.08 on HiGHS; a maximization), which the owner's review (#2307) weighed
+    against the faithful-port reason. What would make it the default: a panel run on
+    more than one BLAS kernel (``OPENBLAS_CORETYPE``) showing it not harmful, or the
+    #2303 round-count fix landing with it as a measured prerequisite.
+    ``=1`` turns it on.
     """
-    return os.environ.get("DISCOPT_NLPBB_ROOT_GMI_LP_BASIS", "1") not in (
+    return os.environ.get("DISCOPT_NLPBB_ROOT_GMI_LP_BASIS", "0") not in (
         "0",
         "",
         "false",

@@ -48,7 +48,8 @@ def test_pinned_binary_big_m_certifies(big_m, monkeypatch):
     assert r.status == "optimal"
     assert r.gap_certified is True
     assert r.objective == pytest.approx(8.0, abs=1e-9)
-    assert "coefficient-tightened form (#1654)" in r.algorithm_route
+    # Nothing here is a free binary, so only the fold ran, and the route says so.
+    assert "fixed-column-folded form (#2304)" in r.algorithm_route
 
 
 def test_fold_is_exact_on_the_reproducer():

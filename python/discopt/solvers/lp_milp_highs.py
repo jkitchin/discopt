@@ -2752,6 +2752,14 @@ def _coefficient_tightening_rescue(
     out.stats["milp/coef_tightened_entries"] = float(n_rw)
     if n_fold:
         out.stats["milp/fixed_entries_folded"] = float(n_fold)
+    # Name the form that was actually solved: a fold with nothing tightened is not the
+    # #1654 form, and the route string is read as a statement of what ran.
+    if n_rw and n_fold:
+        form = "coefficient-tightened, fixed-column-folded form (#1654, #2304)"
+    elif n_rw:
+        form = "coefficient-tightened form (#1654)"
+    else:
+        form = "fixed-column-folded form (#2304)"
     kw2 = dict(kw)
     if kw["time_limit"] is not None:
         kw2["time_limit"] = float(kw["time_limit"]) - (time.monotonic() - t0)
@@ -2810,10 +2818,9 @@ def _coefficient_tightening_rescue(
                 ct.status, ct.gap_certified = "feasible", False
                 ct.labels["milp/certificate"] = "declined"
             ct.labels["milp/bound_provenance"] = (
-                f"{ct.labels.get('milp/bound_provenance', 'highs-fp')} on the "
-                "coefficient-tightened form (#1654)"
+                f"{ct.labels.get('milp/bound_provenance', 'highs-fp')} on the {form}"
             )
-            ct.message = ct.message or "certified on the coefficient-tightened form (#1654)"
+            ct.message = ct.message or f"certified on the {form}"
             ct = merged(ct, out)
             # The primary's decline is superseded; only the tightened solve's own
             # verdict may label the result.

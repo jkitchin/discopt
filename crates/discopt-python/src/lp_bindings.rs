@@ -17,7 +17,7 @@ use discopt_core::bnb::milp_driver::{
     MilpNodeVerdict, MilpOptions, MilpStatus,
 };
 use discopt_core::bnb::relu_ideal::ReluIdealSeparator;
-use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
+use discopt_core::lp::basis::{recover_basis, Basis, AT_UPPER, BASIC};
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::{separate_gomory, GomoryCut};
 use discopt_core::lp::mir::separate_mir;
@@ -211,7 +211,9 @@ pub fn recover_basis_py<'py>(
 /// recovered one. At a degenerate vertex many bases exist, and recovery picks one by
 /// column order, not the optimal (dual-feasible) basis whose tableau GMI is defined
 /// from; a GMI row is valid from any basis, so only cut strength differs. Both or
-/// neither must be given; a malformed basis raises.
+/// neither must be given; a malformed basis raises. A well-formed basis that does not
+/// describe `x` with finite bounds (a nonbasic column off its named bound, or at a
+/// `>= 1e20` sentinel bound) is ignored and recovery is used instead.
 #[pyfunction]
 #[pyo3(signature = (x, a, b, c, lb, ub, integrality, tol=1e-7, max_dynamism=1e7,
                     basic_vars=None, col_status=None))]
@@ -285,6 +287,27 @@ pub fn gomory_cuts_py<'py>(
         u: ub.as_slice()?,
     };
     let xs = x.as_slice()?;
+    // A supplied basis is used only where it describes THIS vertex with finite bounds:
+    // every nonbasic column must sit at the bound its status names, and that bound must
+    // be finite (below the `1e20` sentinel). The separator places a nonbasic column at
+    // `u[j]` when AT_UPPER and at `l[j]` otherwise, so a nonbasic FREE column (which the
+    // in-house simplex can produce, and which arrives as AT_LOWER) would put `-1e20`
+    // into the reconstructed vertex. Otherwise fall back to recovery, which never makes
+    // an interior column nonbasic.
+    let given = given.filter(|bs| {
+        (0..n).all(|j| {
+            let st = bs.col_status[j];
+            if st == BASIC {
+                return true;
+            }
+            let bound = if st == AT_UPPER { lp.u[j] } else { lp.l[j] };
+            bound.is_finite()
+                && bound.abs() < 1e20
+                && xs
+                    .get(j)
+                    .is_some_and(|&v| (v - bound).abs() <= tol * (1.0 + bound.abs()))
+        })
+    });
     let basis = match given {
         Some(bs) => bs,
         None => match recover_basis(xs, &lp, tol) {

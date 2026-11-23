@@ -132,7 +132,7 @@ def _synthesis_gdp() -> dm.Model:
 def test_synthesis_gdp_root_stage_reads_the_simplex_basis(monkeypatch):
     monkeypatch.setenv("DISCOPT_CONVEX_KERNEL", "0")
     monkeypatch.delenv("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", raising=False)
-    monkeypatch.delenv("DISCOPT_NLPBB_ROOT_GMI_LP_BASIS", raising=False)
+    monkeypatch.setenv("DISCOPT_NLPBB_ROOT_GMI_LP_BASIS", "1")  # a default-OFF opt-in
     got = {}
     real = RC.generate_root_cuts
 
@@ -149,3 +149,45 @@ def test_synthesis_gdp_root_stage_reads_the_simplex_basis(monkeypatch):
     assert RC.GMI_BASIS_STATS["lp_basis"] > before["lp_basis"]
     rc = got["r"]
     assert rc.rounds_run >= 1 and rc.stop_reason in {"no_cuts", "stall", "rounds", "budget"}
+
+
+def test_supplied_basis_with_a_sentinel_bound_falls_back_to_recovery():
+    """A nonbasic column whose named bound is the 1e20 sentinel (a nonbasic FREE
+    column arrives as AT_LOWER) must never reach the separator: the binding falls
+    back to recovery, exactly as if no basis had been supplied (#2307 review)."""
+    a, b, c, lo, hi, is_int = _small_ip_lp()
+    st, x, _obj, _it, cs, bv, _y, _ray = _solve(a, b, c, lo, hi)
+    cs = np.asarray(cs, dtype=np.int8).copy()
+    bv = np.asarray(bv, dtype=np.int64)
+    nonbasic = [j for j in range(a.shape[1]) if cs[j] != 1]
+    assert nonbasic, "the probe needs a nonbasic column (CLAUDE.md §6)"
+    j = nonbasic[0]
+    lo2 = lo.copy()
+    lo2[j] = -1e20  # the column is now free below; its status still says AT_LOWER
+    cs[j] = 0
+    own = gomory_cuts_py(x, a, b, c, lo2, hi, is_int, basic_vars=bv, col_status=cs)
+    rec = gomory_cuts_py(x, a, b, c, lo2, hi, is_int)
+    if rec is None:
+        assert own is None
+    else:
+        assert own is not None
+        np.testing.assert_array_equal(own[0], rec[0])
+        np.testing.assert_array_equal(own[1], rec[1])
+        assert np.all(np.abs(own[0]) < 1e10)
+
+
+def test_supplied_basis_off_the_vertex_falls_back_to_recovery():
+    """A basis whose nonbasic column is not at the bound it names describes another
+    vertex: it is ignored, not used."""
+    a, b, c, lo, hi, is_int = _small_ip_lp()
+    st, x, _obj, _it, cs, bv, _y, _ray = _solve(a, b, c, lo, hi)
+    cs = np.asarray(cs, dtype=np.int8)
+    bv = np.asarray(bv, dtype=np.int64)
+    x_off = np.asarray(x, dtype=float).copy()
+    j = next(j for j in range(a.shape[1]) if cs[j] != 1)
+    x_off[j] += 0.25
+    own = gomory_cuts_py(x_off, a, b, c, lo, hi, is_int, basic_vars=bv, col_status=cs)
+    rec = gomory_cuts_py(x_off, a, b, c, lo, hi, is_int)
+    assert (own is None) == (rec is None)
+    if own is not None:
+        np.testing.assert_array_equal(own[0], rec[0])
