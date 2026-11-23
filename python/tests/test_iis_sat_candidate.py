@@ -212,3 +212,75 @@ def test_candidate_stage_share_starts_when_the_stage_starts(monkeypatch):
     assert res.sat_conflicts > 0, "the stage was skipped: its share was spent before it began"
     assert res.sat_rows is None  # PHP: no candidate within the share
     assert elapsed < budget + 4.0, elapsed
+
+
+def test_candidate_is_a_complete_result_wherever_the_clock_cuts(monkeypatch):
+    """#2318: the clock may choose only between results the stage produces
+    COMPLETE -- no candidate, the first core, or the fully refined core. It used
+    to keep a partly refined core when the share ran out mid-refinement (#912
+    role 2: the candidate, and the IIS the filter starts from, a function of
+    machine speed). A fake clock that ticks once per solver call puts the cut at
+    every solver call of a real refinement in turn."""
+    from types import SimpleNamespace
+
+    import discopt._iis_milp as im
+    from discopt import _rust as rust
+
+    # The stage's own inputs, captured from a real call on an UNSAT clause model
+    # whose core refinement takes several solver calls.
+    rng = np.random.default_rng(7)
+    captured: list[tuple] = []
+    real_core = im._binary_core
+
+    def capture(*a):
+        captured.append(a[:-1])
+        return real_core(*a)
+
+    monkeypatch.setattr(im, "_binary_core", capture)
+    for _ in range(80):
+        mod, cls = _clause_model(rng, 8, 45)
+        if _is_unsat(8, cls):
+            milp_iis(mod, time_limit=10)
+            break
+    monkeypatch.undo()
+    assert captured, "no UNSAT model drawn: the probe measured nothing"
+    args = captured[0]
+
+    clock = {"now": 0}
+    calls = {"n": 0}
+    real_solver = rust.PySatSolver
+
+    class Ticking:
+        def __init__(self, n):
+            self._s = real_solver(n)
+
+        def solve(self, assumptions, conflict_limit=None):
+            verdict = self._s.solve(assumptions, conflict_limit)
+            calls["n"] += 1
+            clock["now"] += 1
+            return verdict
+
+        def __getattr__(self, name):
+            return getattr(self._s, name)
+
+    monkeypatch.setattr(im, "time", SimpleNamespace(perf_counter=lambda: clock["now"]))
+    monkeypatch.setattr(rust, "PySatSolver", Ticking)
+
+    full, _ = im._binary_core(*args, None)
+    n_calls = calls["n"]
+    assert full is not None and n_calls >= 4, (full, n_calls)  # several refinement calls
+
+    outcomes = set()
+    for stop in range(1, n_calls + 1):
+        clock["now"] = 0
+        cand, _ = im._binary_core(*args, stop)
+        outcomes.add(None if cand is None else frozenset(cand))
+    complete = outcomes - {None}
+    # At most two complete results: the first core and the fully refined one,
+    # which it contains. Before the fix, every cut mid-refinement kept a
+    # different partial set here.
+    assert len(complete) <= 2, sorted(map(sorted, complete))
+    assert frozenset(full) in complete
+    first = max(complete, key=len)
+    assert frozenset(full) <= first
+    assert len(outcomes) >= 2, outcomes  # the sweep did cut somewhere

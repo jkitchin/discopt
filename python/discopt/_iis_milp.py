@@ -931,34 +931,61 @@ def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at)
     def out_of_time() -> bool:
         return stop_at is not None and time.perf_counter() >= stop_at
 
+    class _Abandon(Exception):
+        """The stage's share ran out: drop the work in hand, keep nothing partial."""
+
     def solve_sliced(assumptions: list[int], conflicts: int) -> Optional[bool]:
-        """``sat.solve`` in slices, stopping at ``stop_at``: None when undecided."""
+        """``sat.solve`` in slices of ``_SAT_SLICE_CONFLICTS``: the verdict, or
+        None when ``conflicts`` are spent undecided. Raises :class:`_Abandon` at
+        ``stop_at`` -- time never turns into a verdict (#2318)."""
         spent0 = sat.stats()[0]
         while True:
             verdict: Optional[bool] = sat.solve(assumptions, _SAT_SLICE_CONFLICTS)
             if verdict is not None:
                 return verdict
-            if out_of_time() or sat.stats()[0] - spent0 >= conflicts:
+            if sat.stats()[0] - spent0 >= conflicts:
                 return None
+            if out_of_time():
+                raise _Abandon
 
-    if solve_sliced(sel, _SAT_FIRST_CONFLICTS) is not False:
-        return None, sat.stats()[0]  # SAT, or no proof in budget/time: no candidate
-    rem = {abs(lit) - (n + 1) for lit in sat.core()}
+    # The clock may only choose between results this stage produces COMPLETE --
+    # no candidate, the first core, or the fully refined core -- each fixed by
+    # conflict counts alone (the CDCL solver is deterministic). It used to keep a
+    # partly refined core when the share ran out mid-refinement, and a refinement
+    # trial the clock cut short kept its element as if it were needed, so the
+    # candidate's size -- and the IIS the filter starts from -- was a function of
+    # machine speed (#912 role 2; #2318). Measured on the in-repo IIS tests before
+    # the change: 41 candidates, none changed when re-run with no time limit, so
+    # this is bound-neutral there; it matters only where refinement overruns.
+    try:
+        if solve_sliced(sel, _SAT_FIRST_CONFLICTS) is not False:
+            return None, sat.stats()[0]  # SAT, or no proof in budget: no candidate
+    except _Abandon:
+        return None, sat.stats()[0]  # no proof in time: no candidate
+    first_core = {abs(lit) - (n + 1) for lit in sat.core()}
+    rem = set(first_core)
     kept: set[int] = set()
-    for gi in sorted(rem):
-        if out_of_time():
-            break
-        if gi not in rem:
-            continue
-        trial = rem - {gi}
-        verdict = solve_sliced([sel[j] for j in trial | kept], _SAT_REFINE_CONFLICTS)
-        if verdict is False:
-            core = {abs(lit) - (n + 1) for lit in sat.core()}
-            kept &= core
-            rem = core - kept
-        else:  # needed (SAT) or undecided within budget: keep it
-            kept.add(gi)
-            rem.discard(gi)
+    try:
+        for gi in sorted(rem):
+            if gi not in rem:
+                continue
+            # Checked only before a trial runs: an element already dropped
+            # costs nothing, so a refinement whose last trial is done is done.
+            if out_of_time():
+                raise _Abandon
+            trial = rem - {gi}
+            verdict = solve_sliced([sel[j] for j in trial | kept], _SAT_REFINE_CONFLICTS)
+            if verdict is False:
+                core = {abs(lit) - (n + 1) for lit in sat.core()}
+                kept &= core
+                rem = core - kept
+            else:  # needed (SAT) or undecided within its conflict budget: keep it
+                kept.add(gi)
+                rem.discard(gi)
+    except _Abandon:
+        # Refinement did not finish in the share: the first core, complete and
+        # unsatisfiable, not the half-refined set in hand.
+        return {groups[gi] for gi in first_core}, sat.stats()[0]
     return {groups[gi] for gi in rem | kept}, sat.stats()[0]
 
 
