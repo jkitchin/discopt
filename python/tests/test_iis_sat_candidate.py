@@ -181,3 +181,34 @@ def test_candidate_stage_respects_the_time_budget():
     assert elapsed < budget + 4.0, elapsed  # CI-safe slack; ~budget locally
     assert res.sat_rows is None  # no candidate in time: engine ran without one
     assert res.sat_conflicts > 0  # the SAT stage did run (and was cut off)
+
+
+def test_candidate_stage_share_starts_when_the_stage_starts(monkeypatch):
+    """#2318: the stage's share (``_SAT_STAGE_FRACTION`` of ``total_time_limit``) was
+    counted from the start of ``milp_iis``, so model extraction, first-call imports
+    and ``_parity_core`` were charged to it. When they outlasted the share the stage
+    started past its own deadline, did no work and reported ``sat_conflicts == 0``
+    (CI, PR #2311's Rust-engine lane). Slow the step just before the stage past the
+    whole share: the stage must still run, and the overall budget must still hold."""
+    import time
+
+    import discopt._iis_milp as im
+
+    budget = 3.0
+    share = im._SAT_STAGE_FRACTION * budget
+    real_parity_core = im._parity_core
+    slept = []
+
+    def slow_parity_core(*args, **kwargs):
+        time.sleep(share + 0.2)
+        slept.append(True)
+        return real_parity_core(*args, **kwargs)
+
+    monkeypatch.setattr(im, "_parity_core", slow_parity_core)
+    t0 = time.perf_counter()
+    res = milp_iis(_pigeonhole_model(10, 9), time_limit=10, total_time_limit=budget)
+    elapsed = time.perf_counter() - t0
+    assert slept, "the patched step never ran: the probe measured nothing"
+    assert res.sat_conflicts > 0, "the stage was skipped: its share was spent before it began"
+    assert res.sat_rows is None  # PHP: no candidate within the share
+    assert elapsed < budget + 4.0, elapsed

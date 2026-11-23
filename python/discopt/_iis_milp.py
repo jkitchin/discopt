@@ -1290,7 +1290,16 @@ def _milp_iis_arrays(
             if deadline is None
             else min(_SAT_STAGE_FRACTION * float(total_time_limit or 0.0), _SAT_STAGE_CAP_S)
         )
-        sat_stop = t_start + sat_budget
+        # The share starts when the stage does, as every later stage's does
+        # (``min(deadline, now + budget)``), and the overall deadline still caps
+        # it. It used to start at ``t_start``, which charged model extraction,
+        # first-call imports and ``_parity_core`` to it: where those outlasted
+        # the share, the stage began past its own deadline and did no work at
+        # all, so whether the candidate ran depended on machine speed (#2318,
+        # CI on PR #2311; #912 role 2).
+        sat_stop = time.perf_counter() + sat_budget
+        if deadline is not None:
+            sat_stop = min(sat_stop, deadline)
         cand, sat_conflicts = _binary_core(
             A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, sat_stop
         )
