@@ -178,7 +178,9 @@ in the audit.
 
 **Terminology (PR #2196 review).** A "dual loss" (`d2_flag_panel.py`) is an instance neither arm certified whose ON median final gap at the time limit is worse than OFF's by more than OFF's own run-to-run spread: a performance measure. Bound validity is bar 1 (no bound past the oracle), checked separately.
 
-<!-- live-solver-math-gates: 66 -->
+<!-- live-solver-math-gates: 67 -->
+
+_66 -> 67 (2026-11-23, #2303/#2307): `NLPBB_ROOT_GMI_LP_BASIS` added and kept default OFF as a documented opt-in on its §5 panel and the #2307 review (row below). `OA_MASTER_NLP_INCUMBENT` (#2302) was added and graduated to default ON in the same PR, so it never counted here._
 
 _66 -> 66 (2026-11-19, #2225): `MILP_TOL_ROBUST_SIDED` added and graduated to default ON in the same PR on its §5 panel (row below); `=0` restores the symmetric bound box. Cert-clean and not harmful (bar 2 as relaxed 2026-11-14), graduated as a completeness fix like its parent `MILP_TOL_ROBUST`._
 
