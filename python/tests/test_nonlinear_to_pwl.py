@@ -417,3 +417,84 @@ def test_valve_point_dispatch_bound_brackets_the_literature_optimum():
     assert ra.bound is None and not ra.gap_certified
     if ra.objective is not None:
         assert ra.objective >= opt - 0.01
+
+
+# --------------------------------------------------------------------------- #
+# Array-valued constraints and reductions (docs/dev/nn-module-plan.md §6, E3).
+# Before: ``z == tanh(zhat)`` over arrays was neither replaced nor reported, so a
+# model written with array variables (discopt.ml full_space) came back with 0
+# terms and 0 skipped -- a silent no-op.
+# --------------------------------------------------------------------------- #
+
+
+def _array_tanh_model(n=4):
+    m = dm.Model("arr")
+    x = m.continuous("x", shape=(n,), lb=-2.0, ub=2.0)
+    z = m.continuous("z", shape=(n,), lb=-1.0, ub=1.0)
+    m.subject_to(z == dm.tanh(x))
+    m.minimize(dm.sum(z) + 0.1 * dm.sum(x))
+    return m
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("mode", ["outer", "approximate"])
+def test_array_constraint_is_expanded_per_element(mode):
+    t = dm.nonlinear_to_pwl(_array_tanh_model(4), mode=mode, segments=4)
+    assert len(t.terms) == 4
+    assert t.skipped == []
+    assert sorted(term.input for term in t.terms) == [f"x[{i}]" for i in range(4)]
+    assert t.fully_linear
+
+
+@pytest.mark.smoke
+def test_full_reduction_objective_is_expanded():
+    m = dm.Model("red")
+    x = m.continuous("x", shape=(3,), lb=-2.0, ub=2.0)
+    m.minimize(dm.sum(dm.tanh(x)))
+    t = dm.nonlinear_to_pwl(m, mode="outer", segments=4)
+    assert len(t.terms) == 3
+    assert t.skipped == []
+    assert t.fully_linear
+
+
+@pytest.mark.smoke
+def test_unexpandable_vector_term_is_reported(monkeypatch):
+    """When a body cannot be split per element it is reported, never dropped."""
+    import discopt._relax.scalarize as sc
+
+    monkeypatch.setattr(sc, "scalar_elements", lambda expr: None)
+    t = dm.nonlinear_to_pwl(_array_tanh_model(3), mode="outer", segments=4)
+    assert t.terms == []
+    assert len(t.skipped) >= 1
+    assert all("vector-valued" in s.reason for s in t.skipped)
+    assert not t.fully_linear
+
+
+@pytest.mark.smoke
+def test_affine_array_rows_are_left_whole():
+    from discopt.modeling.core import _known_shape
+
+    m = dm.Model("aff")
+    x = m.continuous("x", shape=(3,), lb=-2.0, ub=2.0)
+    y = m.continuous("y", shape=(3,), lb=-10.0, ub=10.0)
+    m.subject_to(y == 2.0 * x + 1.0)
+    m.minimize(dm.sum(y) + dm.exp(x[0]))
+    t = dm.nonlinear_to_pwl(m, mode="outer", segments=4)
+    assert len(t.terms) == 1
+    assert sum(_known_shape(c.body) == (3,) for c in t.model._constraints) == 1
+
+
+@pytest.mark.slow
+def test_array_build_solves_like_the_scalar_build():
+    """The array and per-element writings give the same approximate solve."""
+    ma = _array_tanh_model(3)
+    mb = dm.Model("sc")
+    xb = [mb.continuous(f"x{i}", lb=-2.0, ub=2.0) for i in range(3)]
+    zb = [mb.continuous(f"z{i}", lb=-1.0, ub=1.0) for i in range(3)]
+    for xi, zi in zip(xb, zb, strict=True):
+        mb.subject_to(zi == dm.tanh(xi))
+    mb.minimize(sum(zb) + 0.1 * sum(xb))
+    ra = dm.nonlinear_to_pwl(ma, mode="outer", segments=4).solve(time_limit=60)
+    rb = dm.nonlinear_to_pwl(mb, mode="outer", segments=4).solve(time_limit=60)
+    assert ra.status == rb.status == "optimal"
+    assert ra.objective == pytest.approx(rb.objective, abs=1e-5)
