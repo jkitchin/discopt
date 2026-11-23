@@ -493,9 +493,15 @@ def root_gmi_lp_basis_enabled() -> bool:
     stop ``stall``, root bound 551.55) from the recovered basis and stops on
     ``no_cuts`` from the simplex's basis.
 
-    Default OFF until the §5 panel.
+    **Graduated default ON (2026-11-23)** on the §5 panel over the P6 population (18
+    instance-configurations where the stage fires, 2 interleaved reps, 60 s, the
+    ``root_cuts_engine_panel.py`` harness with the arms on this flag): 72 solves, 320
+    bound/feasibility checks, **0 violations**, certification unchanged on every row.
+    Faster with it ON on ``flay02m@nlpbb`` (4.8 -> 1.0 s), ``syn05m@nlpbb`` (5 -> 3
+    nodes, 2.5 -> 0.9 s) and ``tls2@nlpbb`` (uncertified at 60 s in both, bound 2.729 ->
+    3.177, 131 -> 351 nodes); equal elsewhere. ``=0`` restores the recovered basis.
     """
-    return os.environ.get("DISCOPT_NLPBB_ROOT_GMI_LP_BASIS", "0") not in (
+    return os.environ.get("DISCOPT_NLPBB_ROOT_GMI_LP_BASIS", "1") not in (
         "0",
         "",
         "false",
