@@ -16682,13 +16682,20 @@ def solve_model(
                 kwargs.setdefault(_route_opt, _route_val)
             # #2301: the reason was labelled with the route's pick; label it with
             # the master the MIP-NLP call actually receives.
+            # A value the selector does not know is left for the MIP-NLP call to
+            # reject; the label then names the request.
             if (
                 "milp_solver" in _auto_route_options
                 and kwargs.get("milp_solver") != _auto_route_options["milp_solver"]
             ):
-                _auto_route_reason = _relabel_convex_route_master(
-                    _auto_route_reason, kwargs.get("milp_solver")
-                )
+                from discopt.solvers.lp_backend import resolve_milp_backend
+
+                _requested = str(kwargs.get("milp_solver")).strip().lower()
+                try:
+                    _received = resolve_milp_backend(_requested)
+                except (ValueError, ImportError):
+                    _received = _requested
+                _auto_route_reason = _relabel_convex_route_master(_auto_route_reason, _received)
 
     # --- MIP-NLP decomposition solver family ---
     if _solver == "mip-nlp":

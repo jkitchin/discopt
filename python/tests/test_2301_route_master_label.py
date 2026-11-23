@@ -94,17 +94,44 @@ def test_label_without_keyword_follows_the_variable(monkeypatch, env_master):
 
 
 @pytest.mark.requires_highs
-@pytest.mark.parametrize("milp_solver", ["highs", "simplex"])
+@pytest.mark.parametrize("milp_solver", ["highs", "simplex", "auto"])
 def test_label_on_the_oa_method(monkeypatch, milp_solver):
-    """``DISCOPT_CONVEX_ROUTE_METHOD=oa``: the keyword is what the master receives,
-    so the label names it (the variable is set to the other engine)."""
+    """``DISCOPT_CONVEX_ROUTE_METHOD=oa``: multi-tree OA takes its master from
+    ``get_milp_solver(backend=milp_solver)`` and traces no ``milp_backend``, so the
+    label is that selector's pick (``"auto"`` -> ``"simplex"``), whatever the
+    variable says (set here to the other engine)."""
     monkeypatch.setenv(METHOD_ENV, "oa")
     monkeypatch.setenv(MASTER_ENV, "simplex" if milp_solver == "highs" else "highs")
     r = _synthes1().solve(milp_solver=milp_solver, time_limit=60)
     route = r.algorithm_route or ""
     assert route.startswith("mip-nlp/oa:"), route
-    ran = (r.mip_nlp_trace or {}).get("milp_backend")
-    assert _label(route) == (ran if ran is not None else milp_solver), (route, ran)
+    assert _label(route) == ("simplex" if milp_solver == "auto" else milp_solver), route
+    assert r.status == "optimal" and r.gap_certified
+    assert r.objective == pytest.approx(SYNTHES1_OPT, abs=1e-5)
+
+
+@pytest.mark.parametrize(
+    "backend, name",
+    [("auto", "simplex"), ("simplex", "simplex"), ("pounce", "simplex"), ("highs", "highs")],
+)
+def test_resolve_milp_backend_matches_the_selector(backend, name):
+    """The name comes from the selector ``get_milp_solver`` itself."""
+    import warnings
+
+    from discopt.solvers.lp_backend import get_milp_solver, resolve_milp_backend
+
+    assert resolve_milp_backend(backend) == name
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        picked = get_milp_solver(backend=backend)
+    assert (
+        resolve_milp_backend(backend)
+        == {
+            "discopt.solvers.milp_simplex": "simplex",
+            "discopt.solvers.milp_pounce": "simplex",
+            "discopt.solvers.milp_highs": "highs",
+        }[picked.__module__]
+    )
 
 
 def test_relabel_helper():
