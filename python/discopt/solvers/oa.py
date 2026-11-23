@@ -7619,6 +7619,10 @@ def solve_lp_nlp_bb(
         lazy_backend == "simplex" and master_bound_valid and _oa_master_nlp_incumbent_enabled()
     )
     pending_offer: list[Optional[np.ndarray]] = [None]
+    #: Whether ``pending_offer`` has been handed to the driver since it was set, so
+    #: ``nlp_incumbent_adopted`` counts adopted OFFERS only (the tree can also reach
+    #: the same point by its own search, which the shortcut recognises too).
+    offer_outstanding = [False]
     nlp_incumbent_offered = [0]
     nlp_incumbent_adopted = [0]
 
@@ -7643,6 +7647,7 @@ def solve_lp_nlp_bb(
         cand = pending_offer[0]
         if cand is not None:
             nlp_incumbent_offered[0] += 1
+            offer_outstanding[0] = True
         return cand
 
     def lazy_callback(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
@@ -7652,9 +7657,10 @@ def solve_lp_nlp_bb(
             # is accepted when no OA row (old or new) cuts it; no NLP is re-solved
             # for it. A row that does cut it rejects it like any other point.
             pending_offer[0] = None
+            was_offered, offer_outstanding[0] = offer_outstanding[0], False
             mx = np.asarray(master_x, dtype=np.float64)
             rows = collect_new_lazy_cuts(0, mx, at_incumbent=True)
-            if not rows:
+            if not rows and was_offered:
                 nlp_incumbent_adopted[0] += 1
             return rows
         x_master = np.asarray(master_x[:n_vars], dtype=np.float64)
@@ -7716,6 +7722,7 @@ def solve_lp_nlp_bb(
                     and incumbent_obj is not None
                     and (obj_before is None or incumbent_obj < obj_before)
                 ):
+                    offer_outstanding[0] = False
                     pending_offer[0] = _extend_master_mip_start(
                         master,
                         n_vars=n_vars,
