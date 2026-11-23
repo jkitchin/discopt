@@ -9,7 +9,12 @@ import numpy as np
 
 import discopt.modeling as dm
 from discopt.ml.activations import symbolic
-from discopt.ml.bounds import LayerBounds, propagate_bounds, scaled_output_bounds
+from discopt.ml.bounds import (
+    LayerBounds,
+    lp_tighten_bounds,
+    propagate_bounds,
+    scaled_output_bounds,
+)
 from discopt.ml.formulations.full_space import _family_name
 from discopt.ml.network import Activation, NetworkDefinition
 from discopt.ml.scaling import OffsetScaling
@@ -71,6 +76,10 @@ class ReluBigMFormulation:
     interval arithmetic bound propagation.
     """
 
+    #: Whether ``DISCOPT_NN_LP_BIGM`` unset means LP-tightened bounds for this
+    #: formulation (T-N3.2; see ``SolverTuning.nn_lp_bigm`` for the panel).
+    LP_BIGM_DEFAULT: bool = True
+
     def __init__(
         self,
         model: Model,
@@ -104,7 +113,23 @@ class ReluBigMFormulation:
     def _propagate(
         self, *, input_bounds: tuple[np.ndarray, np.ndarray] | None
     ) -> list[LayerBounds]:
-        """Per-layer interval bounds over ``input_bounds`` (default: the network's)."""
+        """Per-layer bounds over ``input_bounds`` (default: the network's).
+
+        LP-tightened bounds of :func:`~discopt.ml.bounds.lp_tighten_bounds`
+        (T-N3.2), which are never looser than interval arithmetic, when
+        ``DISCOPT_NN_LP_BIGM`` is ``1``, or unset and ``LP_BIGM_DEFAULT`` is
+        true; interval arithmetic otherwise. ``relu_partition`` and ``relu_extended`` inherit this
+        (each with its own ``LP_BIGM_DEFAULT = False``);
+        ``relu_complementarity`` overrides it (it has no big-M constants).
+        """
+        from discopt.solver_tuning import current as _tuning
+
+        flag = _tuning().nn_lp_bigm
+        if self.LP_BIGM_DEFAULT if flag is None else flag:
+            self.lp_bound_stats: dict = {}
+            return lp_tighten_bounds(
+                self._network, input_bounds=input_bounds, stats=self.lp_bound_stats
+            )
         return propagate_bounds(self._network, input_bounds=input_bounds)
 
     def build(self) -> tuple[Variable, Variable]:

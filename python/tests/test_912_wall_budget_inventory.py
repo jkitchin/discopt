@@ -133,6 +133,7 @@ residuals stay wall-clock and stay listed here.
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import re
 from pathlib import Path
@@ -295,7 +296,8 @@ def _contains_elapsed(node: ast.AST) -> bool:
     return False
 
 
-def _scan_carved_slice() -> set[tuple[str, str]]:
+@functools.cache
+def _scan_carved_slice() -> frozenset[tuple[str, str]]:
     """Budgets carved as a FRACTION or CAPPED PIECE of the wall time left (#1187).
 
     The third construction, and the one that let #1187 through. The two patterns
@@ -329,26 +331,22 @@ def _scan_carved_slice() -> set[tuple[str, str]]:
             # Not wrapped: an unparseable file must fail loudly, never be skipped
             # into an "all clear" (rule 7).
             tree = ast.parse(path.read_text(), filename=str(path))
-            for parent in ast.walk(tree):
-                for child in ast.iter_child_nodes(parent):
-                    child.parent = parent  # type: ignore[attr-defined]
-            for node in ast.walk(tree):
-                if not _carves(node):
-                    continue
-                k: ast.AST | None = node
-                exempt = False
-                while k is not None:
-                    if (
-                        isinstance(k, ast.Call)
-                        and isinstance(k.func, ast.Name)
-                        and k.func.id.startswith("_role2_")
-                    ):
-                        exempt = True
-                        break
-                    k = getattr(k, "parent", None)
-                if not exempt:
+            # One depth-first pass that carries "inside a ``_role2_*(...)`` call"
+            # down to the children, instead of annotating parent pointers and
+            # walking each candidate back up (the same exemption, about half the
+            # scan's time: the fast lane's 15 s budget, #2323).
+            stack: list[tuple[ast.AST, bool]] = [(tree, False)]
+            while stack:
+                node, exempt = stack.pop()
+                exempt = exempt or (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id.startswith("_role2_")
+                )
+                if not exempt and _carves(node):
                     found.add((str(path.relative_to(_PKG)), ast.unparse(node)))
-    return found
+                stack.extend((child, exempt) for child in ast.iter_child_nodes(node))
+    return frozenset(found)
 
 
 # (module-relative path, ``ast.unparse`` of the carved slice, category).

@@ -260,9 +260,15 @@ def _cut_closure_bound(net, rounds=50):
     raise AssertionError("cut loop did not converge")
 
 
+@pytest.mark.parametrize("lp_bigm", ["0", "1"])
 @pytest.mark.parametrize("sizes", SIZES)
 @pytest.mark.parametrize("seed", SEEDS)
-def test_root_lp_bound_ordering(sizes, seed):
+def test_root_lp_bound_ordering(sizes, seed, lp_bigm, monkeypatch):
+    # The ordering is a statement about formulations over one common box, so every
+    # formulation must get the same bounds: interval (=0) or LP-tightened (=1). Unset,
+    # DISCOPT_NN_LP_BIGM gives relu_bigm/relu_partition LP bounds and relu_extended
+    # interval bounds (T-N3.2), which compares different boxes.
+    monkeypatch.setenv("DISCOPT_NN_LP_BIGM", lp_bigm)
     net = _net(sizes, seed)
     b = {}
     for key, strategy, opts in [
@@ -281,7 +287,14 @@ def test_root_lp_bound_ordering(sizes, seed):
     assert b["bigm"] <= b["P2"] + tol <= b["ext"] + 2 * tol
     assert b["bigm"] <= b["P3"] + tol <= b["ext"] + 2 * tol
     closure, _ = _cut_closure_bound(net)
-    assert abs(closure - b["ext"]) <= 1e-6 * max(1.0, abs(b["ext"]))
+    if lp_bigm == "0":
+        assert abs(closure - b["ext"]) <= 1e-6 * max(1.0, abs(b["ext"]))
+    else:
+        # The cuts are over each neuron's proved pre-activation box [L, U], which
+        # past the first hidden layer is tighter than the box relu_extended's hull
+        # is taken over, so the closure can only be at least as tight. Measured
+        # 2026-11-23 on these nets: never above the exact MILP optimum.
+        assert closure >= b["ext"] - 1e-6 * max(1.0, abs(b["ext"]))
 
 
 def test_ordering_is_strict_somewhere():

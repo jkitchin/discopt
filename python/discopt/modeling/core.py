@@ -6499,6 +6499,51 @@ _SOLVE_DEPTH: _contextvars.ContextVar[int] = _contextvars.ContextVar(
 )
 
 
+#: Whether a result-check boundary (:func:`_runs_solve_result_checks`) is already
+#: on the stack. A ContextVar for the same reason as :data:`_SOLVE_DEPTH`.
+_RESULT_CHECKS_OWNED: _contextvars.ContextVar[bool] = _contextvars.ContextVar(
+    "discopt_result_checks_owned", default=False
+)
+
+
+def _runs_solve_result_checks(fn):
+    """Run the model's declared result checks at the outermost solve entry.
+
+    ``Model._solve_result_checks`` holds plain-data objects with a
+    ``check(model, result)`` method that a formulation registers when its rows
+    are a relaxation that is exact only under a condition the rows cannot
+    express (``discopt.ml.formulations.relu_icnn``). Each check either leaves
+    the result standing (possibly repaired onto the exact model) or raises.
+
+    Applied to *both* public entries, ``Model.solve`` and
+    :func:`discopt.solver.solve_model` (``fn(model, ...)`` either way). The
+    boundary is every solve, not ``Model.solve``: the differentiable-solve paths
+    and the primal heuristics call ``solve_model`` directly, and with the check
+    only on ``Model.solve`` a direct ``solve_model`` certified the relaxation's
+    optimum as the network's (#2323 review; the same lesson as
+    ``docs/complementarity_semantics.md``). Only the outermost entry judges: a
+    sub-solve the solver runs on a derived model is not the caller's answer, and
+    a check could not judge it. Outermost of the decorators on each entry, so it
+    judges the model with the box its caller declared (after
+    ``_solve_leaves_model_unchanged`` restored it).
+    """
+
+    @_functools.wraps(fn)
+    def wrapper(model, *args, **kwargs):
+        if _RESULT_CHECKS_OWNED.get():
+            return fn(model, *args, **kwargs)
+        token = _RESULT_CHECKS_OWNED.set(True)
+        try:
+            result = fn(model, *args, **kwargs)
+        finally:
+            _RESULT_CHECKS_OWNED.reset(token)
+        for check in getattr(model, "_solve_result_checks", None) or ():
+            check.check(model, result)
+        return result
+
+    return wrapper
+
+
 def _counts_solve_depth(fn):
     """Track ``Model.solve`` nesting so a pass meant for the caller's own model
     (recentring) can tell the user's top-level call from the solver's sub-solves."""
@@ -7067,6 +7112,10 @@ class Model:
         # recorded for introspection and bound tightening (see ``discopt.mpec``),
         # and forwarded by every model-rebuilding pass (#1147).
         self._complementarities: list = []
+        # Result checks a formulation registered (``_runs_solve_result_checks``):
+        # plain-data objects with ``check(model, result)``, run on each top-level
+        # solve. ``relu_icnn`` registers one per embedded network.
+        self._solve_result_checks: list = []
         # The subset of those whose generated rows THIS model already carries,
         # mapped to the method that lowered them — an identity map
         # (``Complementarity`` is identity-hashed). Model-owned so it deep-copies
@@ -10174,6 +10223,7 @@ class Model:
 
     # ── Solve ──
 
+    @_runs_solve_result_checks
     @_counts_solve_depth
     @_solve_leaves_model_unchanged
     def solve(

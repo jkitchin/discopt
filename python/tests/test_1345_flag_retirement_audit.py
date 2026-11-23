@@ -133,6 +133,11 @@ NOT_A_GATE = {
         "a three-state override: unset defers to the caller's `require_incremental`, "
         "so it has no single default polarity. Tracked as a solver-math gate below."
     ),
+    "DISCOPT_NN_LP_BIGM": (
+        "a three-state override (T-N3.2): unset defers to the ReLU formulation's "
+        "LP_BIGM_DEFAULT (ON for relu_bigm, OFF for relu_partition/relu_extended), so it "
+        "has no single default polarity. Tracked as a solver-math gate below."
+    ),
 }
 
 
@@ -159,11 +164,11 @@ def _gates(sites: dict[str, list]) -> dict[str, str]:
         if polarity_of(s) != "off" or flag in OUT_OF_SCOPE:
             continue
         gates[flag] = s[0].where
-    # LP_SPATIAL_PLUNGE has no single default polarity (see NOT_A_GATE) but is
-    # unambiguously a solver-math gate whose docstring says "Opt in with =1", so it is
-    # audited as one rather than falling through the classification.
+    # LP_SPATIAL_PLUNGE and NN_LP_BIGM have no single default polarity (see NOT_A_GATE)
+    # but are unambiguously solver-math gates with a default-OFF route opted into with
+    # =1, so they are audited as such rather than falling through the classification.
     for flag, s in sites.items():
-        if flag == "DISCOPT_LP_SPATIAL_PLUNGE":
+        if flag in ("DISCOPT_LP_SPATIAL_PLUNGE", "DISCOPT_NN_LP_BIGM"):
             gates[flag] = s[0].where
     return gates
 

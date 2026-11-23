@@ -66,7 +66,8 @@ fail-before/pass-after for F1 (8 cases) and F2 (2 cases).
 | T-N2.2 NNPresolvePass: park or wire | 2 | **done (parked)** | — | Truthful v0 docstring; bare except narrowed to ValueError + logger.debug; v1 wiring left as noted future work. §6 E1 (2026-11-22): stable-neuron removal is low-value, LP tightening almost never fixes a neuron |
 | T-N2.3 add_predictor ergonomics | 2 | **done** | — | Bounds harvested from inputs var; length validation; missing file → FileNotFoundError |
 | T-N3.1 LeakyReLU/Clip activations | 3 | deferred (opt-in) | — | needs maintainer approval |
-| T-N3.2 LP/OBBT big-M tightening | 3 | deferred (opt-in); **entry exp. passed** | — | §6 E1: median deep-layer big-M shrinkage 45–66%, faster on every net both arms certified. Production needs safe dual bounds |
+| T-N3.2 LP/OBBT big-M tightening | 3 | **done** (`DISCOPT_NN_LP_BIGM`) | — | `ml.bounds.lp_tighten_bounds`, Neumaier–Shcherbina-safe LP bounds. §5 panels (2026-11-23): default ON for `relu_bigm` (each certified net faster, every uncertified bound tighter); OFF for `relu_extended`, whose spread panel showed an incumbent loss, and for `relu_partition`, whose own panel showed a 2x slower certification and two looser bounds (opt-in `=1`). Numbers in `flag-retirement-audit.md` |
+| T-N3.5 ICNN as an LP (`relu_icnn`) | 3 | **done** | — | §6 E2: no binaries, exactness checked per result (repair onto the graph + `verify_point`), refused otherwise. Median 8.6× over `relu_bigm` on E2's ICNNs |
 | T-N3.3 XGBoost/LightGBM readers | 3 | deferred (opt-in) | — | |
 | T-N3.4 Mišić split encoding + multi-output | 3 | deferred (opt-in + entry exp.) | — | |
 | T-N4.1 coverage omit removal | 4 | **done** | — | onnx_reader.py un-omitted; onnx/onnxruntime added to `[dev]` extra |
@@ -416,6 +417,20 @@ all 9 objective comparisons between certifying arms agreed.
 Before shipping: replace the pad with safe dual bounds (Neumaier–Shcherbina),
 and put it behind a flag with the §5 differential panel. It is bound-changing.
 
+**Shipped (2026-11-23)** as `DISCOPT_NN_LP_BIGM`, with both done. The §5
+class panel (`nn_lp_bigm_panel.py`) confirmed E1 on `relu_bigm`: certified 5 =
+5, each faster (101 → 27.8 s on the slowest), every uncertified bound tighter,
+2 incumbents gained. On `relu_extended` it was mixed, and since that panel is
+deterministic, a spread panel (`nn_lp_bigm_perturb_panel.py`) solved both arms
+under three sound 1e-9..1e-8 widenings. HiGHS's search alone moves a
+`relu_extended` solve from 19 to 321 nodes under such a widening. Against that
+spread, the bound stays better on 5 of 7 uncertified nets. But on the d5_32x32
+pair the incumbents get worse (s0: OFF −3.35..−3.48, ON −1.21..−2.81), and the
+wide nets stall at the root bound. So the default is ON for `relu_bigm` and
+OFF for `relu_extended` (`=1` opts in). The primal loss is unexplained.
+
+`relu_partition` has its own class panel (`nn_lp_bigm_panel.py --strategies relu_partition --time-limit 120`, at `3a6fa89` plus the #2323 review fixes, which do not touch this path; E1's 10 nets, 36 checks clean). It certified 5 = 5 with identical objectives. With the flag on it was faster on 3 (11.2->9.1, 107->50, 8.0->6.5 s), level on 1 (2.9->3.0 s) and 2x slower on d5_32x32 s0 (27.6->55.0 s, 10,709->19,292 nodes). At the 120 s limit the dual bound was tighter on 3 of 5 (-9.29->-7.60, -36.1->-29.1, -27.2->-26.4) but looser on 2 (d5_64x64 -51.8->-61.0, d10_50x50 -133.6->-167.1), and incumbents were better on 3 (-1.099->-1.196, -2.845->-2.986, none->+1.30). A looser bound on 2 nets and a 2x slower certification fail bar 2, so `relu_partition` keeps interval bounds by default (`=1` opts in). It had been graduated ON by inheritance from `relu_bigm` without this panel; the #2323 review caught it.
+
 ### E2 — ICNN minimised as an LP with no binaries: **passes**
 
 Arms: default `relu_bigm` MILP, vs the epigraph LP `zhat = Wᵀz + b, z ≥ 0,
@@ -439,6 +454,37 @@ binaries, not branching. This reproduces the post's 0.47 s vs 0.06 s.
 Candidate: an ICNN route in `add_predictor`, chosen by structure (weights after
 the first layer ≥ 0, output used only as minimised or bounded above). It must
 refuse in the other direction, where the relaxation is not exact.
+
+**Shipped (2026-11-23) as `strategy="relu_icnn"`**
+(`ml/formulations/relu_icnn.py`), opt-in rather than auto-selected. How the
+output is used is a property of the rest of the model, which is not known when
+the rows are built. So exactness is checked on each result instead of assumed.
+`Model.solve` runs the check the formulation registers
+(`Model._solve_result_checks`, top-level solves only). It puts every network
+variable at its forward value at the reported input and re-verifies the whole
+model with `verify_point`, requiring the objective to be unchanged. That is
+sufficient because the rows are a relaxation of the graph: a point that is
+optimal for the relaxation and also on the graph is optimal for the network.
+Any failure raises `ICNNExactnessError`, as does an `unbounded` relaxation;
+`infeasible` stands, since it proves the network model infeasible. The check
+judges the answer, not the use. With `y >= c` (which rewards a larger
+output) the solve is refused when the relaxation's point is off the graph, and
+answered when it happens to be on it, as for 3.0 on the test net. A
+non-input-convex network is refused at build. A model carrying the check
+refuses `serialize.dumps`, which has no section for it. The rows are one array
+row `z >= zhat` per layer, with `z` boxed in `[max(lb,0), max(ub,0)]`. That
+single row is the epigraph for unstable and stable neurons alike.
+
+Panel (`icnn_strategy_panel.py`, E2's 8 ICNNs; `min` the output, and `cap` =
+minimise `sum(x)` subject to `y <= min + 0.5`; 3 interleaved reps; load ≤ 2.4 on
+4 CPUs; 48 checks clean). Speedup over `relu_bigm`: median **8.6×** on `min`
+and **9.1×** on `cap`, range 5.6–27×. Every objective lies inside the other
+arm's [bound, objective] window. `relu_bigm` stops at the default 1e-4 gap: on
+`d10_64x64 cap` it reported −5.128406 against the LP's exact −5.128788, and
+its 1e-9 run reproduces the LP. The 8.6× is lower than E2's 23× against a
+hand-built LP. Per-neuron scalar rows had it at about 5×, and the array row
+recovered part of the difference. The result check costs nothing measurable
+(0.156 vs 0.153 s and 0.475 vs 0.465 s, interleaved, sd 0.01–0.05).
 
 ### E3 — piecewise-linear tanh (PWLNet §4.4–4.5): certified route **killed**, chord route **heuristic only**
 
@@ -569,6 +615,44 @@ test RMSE of 0.226; `outer` never found a better incumbent than −2.43.
    terms in both modes (was 0), the same as the per-neuron build. On the 74
    in-repo corpus instances (all scalar), terms, skipped, `fully_linear` and
    the constraint count are identical before and after.
+
+**Re-run after both fixes (2026-11-23, at `98916c8`): heuristic not built.**
+The case for a PWL primal heuristic was measured against the slow
+`full_space`, so E3 was re-run unchanged (2 reps, 300 s). It ran on the first 6
+nets; 5; 16, 16's second rep was cut by the job limit (rep 0 complete), and
+2; 16 (seed 1) was not re-run. The arms are deterministic: every repeated
+arm returned the same objective, so one rep stands.
+
+| net | full_space | outer | approx4 | approx8 |
+|---|---|---|---|---|
+| 2; 8 | 4.2 s ✓ (15 nodes) | 37 s ✓ | 0.3 s, opt | 0.7 s, opt |
+| 2; 16 | 18 s ✓ (79) | TL, bnd −1.4945 | 0.6 s, opt | 2.7 s, opt |
+| 2; 32 | 93 s ✓ (147) | TL, bnd −1.673 | 3.2 s, opt | 18 s, opt |
+| 2; 16, 16 | TL, bnd −1.616, inc −1.6147 | TL, bnd −2.34 | 5.5 s, **−1.109** | 15 s, opt |
+| 5; 16 | TL, bnd −4.515, inc −3.6846 | TL, bnd −3.691 | 1.2 s, opt | 2.8 s, opt |
+| 5; 16, 16 | TL, bnd −20.7, inc −4.0512 | TL, bnd −12.3, inc −3.359 | 18 s, **−3.144** | 91 s, opt |
+
+Every incumbent was re-evaluated through `forward` (the `forward_obj` field
+matches each objective to 1e-9). `full_space` now certifies 3 of 6, where it had
+certified 1 of 6 on the same nets, and on 2; 16, 16 its bound went from −11.0 to −1.616.
+
+* **The primal heuristic has nothing to add.** On all 6 nets `full_space`'s own
+  incumbent at the limit equals the best point any arm found. The approximate
+  arm never found a better one, and 4 chords still miss on the same two nets.
+  Where `full_space` times out, what is missing is the bound, which a heuristic
+  cannot supply. One case would reopen it: `full_space` finding its incumbent
+  late in the run. Time-to-incumbent was not recorded, so that is the
+  measurement to take first.
+* **`outer` as a bound source is open, not established.** On the two 5-input
+  nets its bound at the limit is tighter than `full_space`'s (−3.691 vs
+  −4.515; −12.3 vs −20.7). On the 2-input nets it is looser, and it never
+  certifies faster. An entry experiment would compare root and limit bounds on
+  more 5+-input nets before any flag.
+* The `pwl_outer` arm printed "HiGHS MILP route: the … certificate is refuted
+  by a presolve-free HiGHS solve; reporting the verified point uncertified
+  (#1634)" on 2; 16 and 2; 32. That is the HiGHS route's own certificate check
+  firing and failing closed. It is not a wrong answer: those arms are reported
+  uncertified above.
 
 Also seen once during E1: an overflow `RuntimeWarning` (inf × value) at
 `solvers/lp_milp_highs.py:820`. Not yet investigated.

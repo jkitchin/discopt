@@ -234,6 +234,11 @@ class ReluPartitionFormulation(ReluBigMFormulation):
         See :func:`partition_indices`.
     """
 
+    #: Interval big-M constants unless ``DISCOPT_NN_LP_BIGM=1``: on its own T-N3.2
+    #: class panel the LP-tightened box was 2x slower to certify one net and gave
+    #: a looser dual bound at the limit on two (see ``SolverTuning.nn_lp_bigm``).
+    LP_BIGM_DEFAULT = False
+
     def __init__(
         self,
         model: Model,
@@ -354,6 +359,11 @@ class ReluExtendedFormulation(ReluPartitionFormulation):
     unstable neuron. Big-M plus :class:`AndersonCutSeparator` reaches the same
     hull in the original space, adding only the inequalities a node violates.
     """
+
+    #: Interval big-M constants unless ``DISCOPT_NN_LP_BIGM=1``: on the T-N3.2
+    #: spread panel the LP-tightened box lost incumbents here (see
+    #: ``SolverTuning.nn_lp_bigm``).
+    LP_BIGM_DEFAULT = False
 
     def __init__(
         self,

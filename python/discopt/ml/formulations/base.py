@@ -10,6 +10,7 @@ from discopt.ml.formulations.full_space import FullSpaceFormulation
 from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
 from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
 from discopt.ml.formulations.relu_complementarity import ReluComplementarityFormulation
+from discopt.ml.formulations.relu_icnn import ReluICNNFormulation
 from discopt.ml.formulations.relu_partition import (
     AndersonCutSeparator,
     PartitionFn,
@@ -44,6 +45,7 @@ _STRATEGIES: dict[str, _StrategyCls] = {
     "relu_partition": ReluPartitionFormulation,
     "relu_extended": ReluExtendedFormulation,
     "relu_complementarity": ReluComplementarityFormulation,
+    "relu_icnn": ReluICNNFormulation,
 }
 
 #: Strategies that encode ReLU neurons with indicator binaries, and so can carry
@@ -79,6 +81,13 @@ class NNFormulation:
         :func:`discopt.mpec.solve_mpec` with ``method="sos1"``/``"gdp"`` (exact)
         or ``"scholtes"`` (local, no certificate). ``Model.solve()`` refuses the
         model until then.
+        ``"relu_icnn"`` embeds an input-convex ReLU network (every weight after
+        the first layer >= 0) as an LP with no binaries: the epigraph rows
+        ``z >= 0, z >= zhat``, exact where a smaller output is preferred.
+        ``Model.solve()`` checks each result against the network and raises
+        :class:`~discopt.ml.formulations.relu_icnn.ICNNExactnessError` when the
+        model rewards a larger output instead; see
+        :mod:`discopt.ml.formulations.relu_icnn`.
     prefix : str
         Name prefix for created variables and constraints.
     scaling : OffsetScaling or None

@@ -34,7 +34,11 @@ import numpy as np
 
 from discopt.constants import bound_is_open
 from discopt.export import _arrays
-from discopt.export._common import refuse_non_algebraic_relations, variable_flat_offsets
+from discopt.export._common import (
+    refuse_non_algebraic_relations,
+    refuse_result_checks,
+    variable_flat_offsets,
+)
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -127,6 +131,7 @@ def to_nl(
     str or None
         The .nl text if *path* is ``None``, otherwise ``None``.
     """
+    refuse_result_checks(model, ".nl")
     if block_structure_file is not None:
         return _to_nl_with_block_structure(
             model,

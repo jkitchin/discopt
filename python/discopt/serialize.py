@@ -1292,6 +1292,17 @@ def _refuse_unsupported(model: Model) -> None:
         # error so a caller catching `SerializationError` sees the refusal (it is a
         # `ValueError` subclass, so callers catching that are unaffected).
         raise SerializationError(f"cannot serialize: {exc}") from exc
+    # A formulation's result check (``relu_icnn``) is what makes its rows exact; a
+    # document without it reloads as a bare relaxation that ``solve`` would answer
+    # unchecked. There is no section for it, so refuse.
+    if getattr(model, "_solve_result_checks", None):
+        kinds = sorted({type(c).__name__ for c in model._solve_result_checks})
+        raise SerializationError(
+            f"cannot serialize: the model carries result checks ({', '.join(kinds)}), "
+            "registered by an embedding whose rows are exact only when checked "
+            "(e.g. strategy='relu_icnn'); this format has no section for them. "
+            "Build the embedding with strategy='relu_bigm' to save the model."
+        )
     _refuse_unclassified_attributes(model)
 
 
@@ -2382,8 +2393,11 @@ _STATE_DERIVED = frozenset({"_names", "_builder", "_flat_var_offsets_cache", "_i
 #: describes the source file, not the model: a document carries the model (variables
 #: by name), and re-reading the file rebuilds it. A reloaded model has
 #: ``file_columns = None``; carrying it would need a schema minor of its own.
+#: ``_solve_result_checks`` (``relu_icnn``) is never written: a model with any
+#: is refused by ``_refuse_unsupported``, so only the empty list reaches here.
 _STATE_NOT_CARRIED = frozenset(
     {
+        "_solve_result_checks",
         "_last_solve_result",
         "_gdp_factory_disjunctions",
         "_gdp_factory_disjuncts",
