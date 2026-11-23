@@ -70,6 +70,7 @@ from discopt.modeling.core import (
     Model,
     SolveResult,
     VarType,
+    _runs_solve_result_checks,
     _solve_leaves_model_unchanged,
     builder_row_of,
     objective_sense_sign,
@@ -15302,6 +15303,7 @@ def _validate_gdp_options(gdp_method: str, gdp_options: object) -> dict[str, Any
     return dict(gdp_options)
 
 
+@_runs_solve_result_checks
 @_solve_leaves_model_unchanged
 @_refusing_on_callback_failure
 @_scoped_fallback_warnings

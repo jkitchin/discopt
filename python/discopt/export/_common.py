@@ -329,6 +329,35 @@ def refuse_non_algebraic_relations(model: Model, fmt: str) -> None:
         )
 
 
+def refuse_result_checks(model: Model, fmt: str) -> None:
+    """Refuse a model whose rows are a relaxation that only a result check makes exact.
+
+    ``Model._solve_result_checks`` is registered by a formulation whose rows are
+    exact only under a condition they cannot express
+    (``discopt.ml.formulations.relu_icnn``: exact only where a smaller network
+    output is preferred). ``Model.solve`` and ``solve_model`` judge every answer
+    with those checks; an exported file carries the rows without the check, so
+    another solver (BARON, SCIP, ...) reading it would answer the bare
+    relaxation, e.g. a maximised ICNN output above the network's true maximum
+    (#2323 review). The same reason ``serialize.dumps`` refuses such a model.
+
+    Raises
+    ------
+    ValueError
+        When the model carries any result check.
+    """
+    checks = getattr(model, "_solve_result_checks", None)
+    if checks:
+        kinds = ", ".join(sorted({type(c).__name__ for c in checks}))
+        raise ValueError(
+            f"{fmt} export: the model carries result checks ({kinds}). Its rows "
+            "are a relaxation that discopt's solve makes exact by checking each "
+            "answer; a file holds the rows without the check, so another solver "
+            "would answer the bare relaxation. Embed the network with an exact "
+            "formulation (e.g. strategy='relu_bigm') to export it."
+        )
+
+
 def binary_box_is_default(lb, ub) -> bool:
     """True if a binary variable still carries its full declared ``[0, 1]`` box.
 

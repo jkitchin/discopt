@@ -15,7 +15,11 @@ import numpy as np
 
 from discopt.constants import DEFAULT_VARIABLE_BOUND, bound_is_open
 from discopt.export import _arrays
-from discopt.export._common import binary_box_is_default, refuse_non_algebraic_relations
+from discopt.export._common import (
+    binary_box_is_default,
+    refuse_non_algebraic_relations,
+    refuse_result_checks,
+)
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -200,6 +204,7 @@ def to_gams(
     # A disjunction/indicator/SOS/logic row is not an algebraic row; refuse it
     # by name rather than die on ``con.body`` in the equation writer (#1218).
     # This writer emits plain GAMS equations, not an EMP/JAMS disjunctive model.
+    refuse_result_checks(model, "GAMS")
     refuse_non_algebraic_relations(model, "GAMS")
     if initial_point is None:
         point = dict(getattr(model, "_initial_point", None) or {})

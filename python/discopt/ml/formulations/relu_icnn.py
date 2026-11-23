@@ -28,7 +28,8 @@ Soundness
 Whether a smaller output is preferred is a property of how the *rest of the
 model* uses it, which this module cannot see when it builds the rows. So it is
 not assumed; it is checked on each result by :meth:`ICNNEpigraph.check`, which
-``Model.solve`` runs. The check rests on two facts about a relaxation:
+the outermost of ``Model.solve`` / :func:`discopt.solver.solve_model` runs. The
+check rests on two facts about a relaxation:
 
 * its bound is a valid bound on the network's model, and its infeasibility proves
   the network's model infeasible;
@@ -40,10 +41,15 @@ reported input (``zhat``, ``z`` and the output, as ``forward`` computes them),
 re-verifies the *whole* model at the repaired point, and requires the objective
 to be unchanged. If any of that fails, the output was used where a larger value
 helps (maximised, bounded below, or inside an expression that rewards it). Then
-the relaxation's answer says nothing about the network, and ``Model.solve``
-raises :class:`ICNNExactnessError` rather than return it. An ``unbounded``
-relaxation is refused for the same reason. ``relu_bigm`` encodes the graph
-exactly and is the formulation to use for such a model.
+the relaxation's answer says nothing about the network, and the solve raises
+:class:`ICNNExactnessError` rather than return it. An ``unbounded`` relaxation
+is refused for the same reason. ``relu_bigm`` encodes the graph exactly and is
+the formulation to use for such a model.
+
+Outside a solve the check cannot run, so the model refuses to leave discopt
+with its rows alone: ``serialize.dumps`` and the ``.nl`` / LP / MPS / GAMS
+writers raise rather than write a file another solver would answer as the bare
+relaxation.
 """
 
 from __future__ import annotations
@@ -175,7 +181,12 @@ class ICNNEpigraph:
                 "model rewards a larger one somewhere. Use strategy='relu_bigm', "
                 "which encodes the network exactly."
             )
+        # Report the repaired point with its own objective, so ``x`` and
+        # ``objective`` describe the same point (they differ by at most
+        # OBJECTIVE_RTOL, checked above).
         result.x = repaired
+        if verdict.objective is not None:
+            result.objective = float(verdict.objective)
 
 
 class ReluICNNFormulation(ReluBigMFormulation):

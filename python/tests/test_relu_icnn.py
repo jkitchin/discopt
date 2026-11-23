@@ -258,3 +258,43 @@ def test_add_predictor_accepts_the_method():
     xs = np.asarray(r.x["x"], float)
     assert r.objective == pytest.approx(float(net.forward(xs[None, :])[0, 0]), abs=1e-6)
     assert not any(v.var_type == VarType.BINARY for v in m._variables)
+
+
+def test_solve_model_directly_runs_the_check():
+    """#2323 review: the check was only on ``Model.solve``; a direct
+    ``solve_model`` (the route the differentiable-solve paths and the primal
+    heuristics take) returned the maximised relaxation as a certified
+    ``optimal``, above the network's true maximum."""
+    from discopt.solver import solve_model
+
+    net = _icnn(2, (6,), 0)
+    m, f = _embed(net, "relu_icnn")
+    m.maximize(f.outputs[0])
+    with pytest.raises(ICNNExactnessError, match="relu_bigm"):
+        solve_model(m, time_limit=60)
+
+
+def test_solve_model_directly_answers_an_exact_use():
+    """The boundary judges, it does not refuse: a minimised output solved
+    through ``solve_model`` is repaired onto the graph and stands, with
+    ``objective`` evaluated at the reported point."""
+    from discopt.solver import solve_model
+
+    net = _icnn(2, (16, 16), 0)
+    m, f = _embed(net, "relu_icnn")
+    m.minimize(f.outputs[0])
+    r = solve_model(m, time_limit=60)
+    assert r.status == "optimal"
+    _on_graph(f, net, r)
+    xs = np.asarray(r.x[f.inputs.name], float)
+    assert r.objective == pytest.approx(float(net.forward(xs[None, :])[0, 0]), rel=0, abs=1e-9)
+
+
+@pytest.mark.parametrize("fmt", ["to_nl", "to_lp", "to_mps", "to_gams"])
+def test_exporting_the_model_is_refused(fmt):
+    """#2323 review: a file holds the epigraph rows without the check, so
+    another solver reading it would answer the bare relaxation."""
+    m, f = _embed(_icnn(2, (8,), 0), "relu_icnn")
+    m.maximize(f.outputs[0])
+    with pytest.raises(ValueError, match="result checks"):
+        getattr(m, fmt)()
