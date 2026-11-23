@@ -615,5 +615,43 @@ test RMSE of 0.226; `outer` never found a better incumbent than −2.43.
    in-repo corpus instances (all scalar), terms, skipped, `fully_linear` and
    the constraint count are identical before and after.
 
+**Re-run after both fixes (2026-11-23, at `98916c8`): heuristic not built.**
+The case for a PWL primal heuristic was measured against the slow
+`full_space`, so E3 was re-run unchanged (2 reps, 300 s). It ran on the first 6
+nets; 5; 16, 16's second rep was cut by the job limit (rep 0 complete), and
+2; 16 (seed 1) was not re-run. The arms are deterministic: every repeated
+arm returned the same objective, so one rep stands.
+
+| net | full_space | outer | approx4 | approx8 |
+|---|---|---|---|---|
+| 2; 8 | 4.2 s ✓ (15 nodes) | 37 s ✓ | 0.3 s, opt | 0.7 s, opt |
+| 2; 16 | 18 s ✓ (79) | TL, bnd −1.4945 | 0.6 s, opt | 2.7 s, opt |
+| 2; 32 | 93 s ✓ (147) | TL, bnd −1.673 | 3.2 s, opt | 18 s, opt |
+| 2; 16, 16 | TL, bnd −1.616, inc −1.6147 | TL, bnd −2.34 | 5.5 s, **−1.109** | 15 s, opt |
+| 5; 16 | TL, bnd −4.515, inc −3.6846 | TL, bnd −3.691 | 1.2 s, opt | 2.8 s, opt |
+| 5; 16, 16 | TL, bnd −20.7, inc −4.0512 | TL, bnd −12.3, inc −3.359 | 18 s, **−3.144** | 91 s, opt |
+
+Every incumbent was re-evaluated through `forward` (the `forward_obj` field
+matches each objective to 1e-9). `full_space` now certifies 3 of 6, where it had
+certified 1 of 6 on the same nets, and on 2; 16, 16 its bound went from −11.0 to −1.616.
+
+* **The primal heuristic has nothing to add.** On all 6 nets `full_space`'s own
+  incumbent at the limit equals the best point any arm found. The approximate
+  arm never found a better one, and 4 chords still miss on the same two nets.
+  Where `full_space` times out, what is missing is the bound, which a heuristic
+  cannot supply. One case would reopen it: `full_space` finding its incumbent
+  late in the run. Time-to-incumbent was not recorded, so that is the
+  measurement to take first.
+* **`outer` as a bound source is open, not established.** On the two 5-input
+  nets its bound at the limit is tighter than `full_space`'s (−3.691 vs
+  −4.515; −12.3 vs −20.7). On the 2-input nets it is looser, and it never
+  certifies faster. An entry experiment would compare root and limit bounds on
+  more 5+-input nets before any flag.
+* The `pwl_outer` arm printed "HiGHS MILP route: the … certificate is refuted
+  by a presolve-free HiGHS solve; reporting the verified point uncertified
+  (#1634)" on 2; 16 and 2; 32. That is the HiGHS route's own certificate check
+  firing and failing closed. It is not a wrong answer: those arms are reported
+  uncertified above.
+
 Also seen once during E1: an overflow `RuntimeWarning` (inf × value) at
 `solvers/lp_milp_highs.py:820`. Not yet investigated.
