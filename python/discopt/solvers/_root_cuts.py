@@ -344,11 +344,20 @@ class _RootLP:
         self.c0 = -_c0a if negate else _c0a
         self.c0_negate = negate
 
-        ja = evaluator.evaluate_jacobian(xa)
-        jb = evaluator.evaluate_jacobian(xb)
-        lin_rows = np.all(np.isclose(ja, jb, atol=1e-9), axis=1)
+        ja = np.asarray(evaluator.evaluate_jacobian(xa), float)
+        jb = np.asarray(evaluator.evaluate_jacobian(xb), float)
         g0 = np.asarray(evaluator.evaluate_constraints(xa), float)
-        const = g0 - ja @ xa
+        # #2317: a row is linear only if its value and BOTH sampled Jacobian rows
+        # are finite. ``np.isclose`` calls equal infinities close, and a fixed
+        # column is sampled at the same value twice, so ``sqrt(x)`` with ``x``
+        # fixed at 0 (infinite slope since #1491) was classed linear with
+        # ``A = [-inf, -1]``, ``b = -inf * 0 = nan``. Any other row stays in
+        # ``nl_rows``, where ``oa_tangent`` already refuses a non-finite
+        # linearization, so the LP only loses that row.
+        finite = np.isfinite(g0) & np.all(np.isfinite(ja), axis=1) & np.all(np.isfinite(jb), axis=1)
+        lin_rows = finite & np.all(np.isclose(ja, jb, atol=1e-9), axis=1)
+        const = np.zeros(ja.shape[0])
+        const[lin_rows] = g0[lin_rows] - ja[lin_rows] @ xa
         self.nl_rows = [i for i in range(ja.shape[0]) if not lin_rows[i]]
 
         a_le, b_le, a_eq, b_eq = [], [], [], []
