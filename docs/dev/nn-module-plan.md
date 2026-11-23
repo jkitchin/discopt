@@ -560,5 +560,15 @@ test RMSE of 0.226; `outer` never found a better incumbent than −2.43.
    constraints** (`full_space`'s one-constraint-per-layer form). It is a silent
    no-op; it must replace those terms or list them as skipped.
 
+   *Fixed 2026-11-23.* `_pwl_transform` now splits a non-affine array-valued
+   constraint into one scalar row per element (`scalarize.scalar_elements`) and
+   a full reduction `sum(f(v))` into `f(v[0]) + ...`, so each element is an
+   ordinary univariate term; affine array rows stay whole. A vector-valued node
+   that still cannot be expanded is reported in `skipped` with the reason
+   "vector-valued", never dropped. On the E3 2; 8 net, `full_space` now gives 8
+   terms in both modes (was 0), the same as the per-neuron build. On the 74
+   in-repo corpus instances (all scalar), terms, skipped, `fully_linear` and
+   the constraint count are identical before and after.
+
 Also seen once during E1: an overflow `RuntimeWarning` (inf × value) at
 `solvers/lp_milp_highs.py:820`. Not yet investigated.
