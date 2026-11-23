@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -326,7 +327,7 @@ def lp_tighten_bounds(
     lb = np.asarray(lb, dtype=np.float64)
     ub = np.asarray(ub, dtype=np.float64)
     budget = LP_TIGHTEN_WORK_BUDGET if work_budget is None else int(work_budget)
-    st = {"lps": 0, "declined": 0, "tightened": 0, "stopped_at": None}
+    st: dict[str, Any] = {"lps": 0, "declined": 0, "tightened": 0, "stopped_at": None}
 
     lp = _LayerLP(lb, ub)
     result: list[LayerBounds] = []
