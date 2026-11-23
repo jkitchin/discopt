@@ -35039,6 +35039,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         row_scale = np.asarray(abs(A_ub) @ absx, dtype=np.float64).ravel()
         thresh = _matrix_row_threshold(A_ub, row_scale, tol, rtol)
         bad = _rows_to_retest(viol, thresh, row_scale)
+        thresh = _exact_overflowed_thresholds(A_ub, x, thresh, row_scale, bad, tol, rtol)
         if bad.size and _any_row_truly_violated(A_ub, x, b_ub, bad, thresh, signed=True):
             return False
     if A_eq is not None and b_eq is not None and len(b_eq):
@@ -35047,6 +35048,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         row_scale = np.asarray(abs(A_eq) @ absx, dtype=np.float64).ravel()
         thresh = _matrix_row_threshold(A_eq, row_scale, tol, rtol)
         bad = _rows_to_retest(viol, thresh, row_scale)
+        thresh = _exact_overflowed_thresholds(A_eq, x, thresh, row_scale, bad, tol, rtol)
         if bad.size and _any_row_truly_violated(A_eq, x, b_eq, bad, thresh, signed=False):
             return False
     if bounds is not None:
@@ -35203,6 +35205,55 @@ def _matrix_row_threshold(A, row_scale, tol: float, rtol: float) -> np.ndarray:
         grad_inf = np.abs(np.asarray(A, dtype=np.float64)).max(axis=1)
     capped = np.minimum(tol + rtol * row_scale, _feas_distance_cap(grad_inf))
     return np.asarray(capped, dtype=np.float64)
+
+
+def _exact_overflowed_thresholds(A, x, thresh, row_scale, rows, tol: float, rtol: float):
+    """Restore the term-scaled allowance on rows whose float ``row_scale`` overflowed.
+
+    :func:`_matrix_row_threshold` takes ``min(tol + rtol·row_scale, cap)`` in floats,
+    so a row whose term magnitudes sum past ``f64`` max (every term finite) got
+    ``min(inf, cap) = cap`` -- the distance cap alone, a far LARGER allowance than
+    its own rule gives (#2315: terms ``[2**1023, 2**1023, 0]`` allowed ~9e303 where
+    the rule gives ~1.8e299). :func:`_rows_to_retest` already sends such a row to
+    the re-test; this recomputes its threshold first, from the EXACT term sum
+    (``Fraction``, as :func:`_row_truly_violated_exact` does for the products), as
+    ``min(tol + rtol·exact_scale, cap)``. The old value IS the cap for exactly
+    these rows, so the min is taken against it. Rows with a finite scale, and rows
+    not being re-tested, are returned unchanged; never loosens a threshold.
+    """
+    from fractions import Fraction
+
+    row_scale = np.asarray(row_scale, dtype=np.float64)
+    over = [int(i) for i in rows if not np.isfinite(row_scale[int(i)])]
+    if not over:
+        return thresh
+    thresh = np.array(thresh, dtype=np.float64, copy=True)
+    sparse = _sp_issparse(A)
+    if sparse:
+        A = A.tocsr()
+    else:
+        A = np.asarray(A, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    for i in over:
+        t_old = float(thresh[i])
+        if np.isnan(t_old):
+            continue
+        a_i = np.asarray(A[[i]].toarray(), dtype=np.float64).ravel() if sparse else A[i]
+        nz = np.nonzero(a_i)[0]
+        if not (np.all(np.isfinite(a_i[nz])) and np.all(np.isfinite(x[nz]))):
+            # No exact scale exists; the re-test decides such a row on its own.
+            continue
+        scale = sum(
+            (abs(Fraction(float(a_i[j]))) * abs(Fraction(float(x[j]))) for j in nz),
+            Fraction(0),
+        )
+        allowed = Fraction(float(tol)) + Fraction(float(rtol)) * scale
+        if t_old != np.inf and allowed >= Fraction(t_old):
+            continue
+        # Round-to-nearest, as the float threshold on an ordinary row is; a value
+        # beyond f64 range cannot be below a finite ``t_old`` and was skipped above.
+        thresh[i] = float(allowed)
+    return thresh
 
 
 def _any_row_truly_violated(A, x, b, rows, thresh, *, signed: bool) -> bool:
