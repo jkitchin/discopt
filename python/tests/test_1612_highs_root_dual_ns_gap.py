@@ -159,6 +159,8 @@ def test_set_cover_witness_certifies_with_a_valid_bound(seed: int, monkeypatch) 
     st = r.solver_stats
     # The witness still trips the per-column test -- that is the case under test.
     assert st["milp/root_dual_violation"] > H._DUAL_CERT_SAFETY * 4 * np.finfo(float).eps
+    # #2300: the scale-floored diagnostic reads this round-off slack dual as round-off.
+    assert st["milp/root_dual_violation_scaled"] < 1e-12, st
     assert st.get("milp/root_dual_certified_by_ns") == 1.0, st
     assert r.status == "optimal" and r.gap_certified, (r.status, r.algorithm_route)
     assert r.bound <= truth + 1e-6, (r.bound, truth)
