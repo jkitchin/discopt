@@ -67,6 +67,7 @@ fail-before/pass-after for F1 (8 cases) and F2 (2 cases).
 | T-N2.3 add_predictor ergonomics | 2 | **done** | — | Bounds harvested from inputs var; length validation; missing file → FileNotFoundError |
 | T-N3.1 LeakyReLU/Clip activations | 3 | deferred (opt-in) | — | needs maintainer approval |
 | T-N3.2 LP/OBBT big-M tightening | 3 | **done** (`DISCOPT_NN_LP_BIGM`) | — | `ml.bounds.lp_tighten_bounds`, Neumaier–Shcherbina-safe LP bounds. §5 panels (2026-11-23): default ON for `relu_bigm`/`relu_partition` (each certified net faster, every uncertified bound tighter); OFF for `relu_extended`, whose spread panel showed an incumbent loss (opt-in `=1`). Numbers in `flag-retirement-audit.md` |
+| T-N3.5 ICNN as an LP (`relu_icnn`) | 3 | **done** | — | §6 E2: no binaries, exactness checked per result (repair onto the graph + `verify_point`), refused otherwise. Median 8.6× over `relu_bigm` on E2's ICNNs |
 | T-N3.3 XGBoost/LightGBM readers | 3 | deferred (opt-in) | — | |
 | T-N3.4 Mišić split encoding + multi-output | 3 | deferred (opt-in + entry exp.) | — | |
 | T-N4.1 coverage omit removal | 4 | **done** | — | onnx_reader.py un-omitted; onnx/onnxruntime added to `[dev]` extra |
@@ -452,6 +453,37 @@ binaries, not branching. This reproduces the post's 0.47 s vs 0.06 s.
 Candidate: an ICNN route in `add_predictor`, chosen by structure (weights after
 the first layer ≥ 0, output used only as minimised or bounded above). It must
 refuse in the other direction, where the relaxation is not exact.
+
+**Shipped (2026-11-23) as `strategy="relu_icnn"`**
+(`ml/formulations/relu_icnn.py`), opt-in rather than auto-selected. How the
+output is used is a property of the rest of the model, which is not known when
+the rows are built. So exactness is checked on each result instead of assumed.
+`Model.solve` runs the check the formulation registers
+(`Model._solve_result_checks`, top-level solves only). It puts every network
+variable at its forward value at the reported input and re-verifies the whole
+model with `verify_point`, requiring the objective to be unchanged. That is
+sufficient because the rows are a relaxation of the graph: a point that is
+optimal for the relaxation and also on the graph is optimal for the network.
+Any failure raises `ICNNExactnessError`, as does an `unbounded` relaxation;
+`infeasible` stands, since it proves the network model infeasible. The check
+judges the answer, not the use. With `y >= c` (which rewards a larger
+output) the solve is refused when the relaxation's point is off the graph, and
+answered when it happens to be on it, as for 3.0 on the test net. A
+non-input-convex network is refused at build. A model carrying the check
+refuses `serialize.dumps`, which has no section for it. The rows are one array
+row `z >= zhat` per layer, with `z` boxed in `[max(lb,0), max(ub,0)]`. That
+single row is the epigraph for unstable and stable neurons alike.
+
+Panel (`icnn_strategy_panel.py`, E2's 8 ICNNs; `min` the output, and `cap` =
+minimise `sum(x)` subject to `y <= min + 0.5`; 3 interleaved reps; load ≤ 2.4 on
+4 CPUs; 48 checks clean). Speedup over `relu_bigm`: median **8.6×** on `min`
+and **9.1×** on `cap`, range 5.6–27×. Every objective lies inside the other
+arm's [bound, objective] window. `relu_bigm` stops at the default 1e-4 gap: on
+`d10_64x64 cap` it reported −5.128406 against the LP's exact −5.128788, and
+its 1e-9 run reproduces the LP. The 8.6× is lower than E2's 23× against a
+hand-built LP. Per-neuron scalar rows had it at about 5×, and the array row
+recovered part of the difference. The result check costs nothing measurable
+(0.156 vs 0.153 s and 0.475 vs 0.465 s, interleaved, sd 0.01–0.05).
 
 ### E3 — piecewise-linear tanh (PWLNet §4.4–4.5): certified route **killed**, chord route **heuristic only**
 

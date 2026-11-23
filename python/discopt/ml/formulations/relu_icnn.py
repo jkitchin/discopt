@@ -161,7 +161,9 @@ class ICNNEpigraph:
         why = None
         if not verdict.ok:
             why = f"the repaired point is infeasible ({verdict.reason})"
-        elif result.objective is not None:
+        elif result.objective is not None and verdict.objective is None:
+            why = "the repaired point's objective could not be evaluated"
+        elif result.objective is not None and verdict.objective is not None:
             obj, rep = float(result.objective), float(verdict.objective)
             if abs(rep - obj) > OBJECTIVE_RTOL * max(1.0, abs(obj)):
                 why = f"the objective changes from {obj!r} to {rep!r}"
