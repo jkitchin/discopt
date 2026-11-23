@@ -523,6 +523,23 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "stop_l = min(deadline, time.perf_counter() + base_budget)",
         "contract",
     ),
+    # The SAT-candidate stage's share (#1153): ``_SAT_STAGE_FRACTION`` of the
+    # caller's ``total_time_limit``, capped at ``_SAT_STAGE_CAP_S``. Not a new
+    # gate, a newly *visible* one (#2318): it was ``t_start + sat_budget``, whose
+    # clock read sat on another line, so the scanner could not see it; #2318
+    # moved its origin to stage entry, which put the read on this line. It is
+    # ``residual``, not ``contract`` like the two confirmation budgets above:
+    # ``_binary_core``'s refinement loop keeps a PARTLY refined core when the
+    # share runs out, so the candidate's size -- and so the IIS the filter starts
+    # from -- depends on machine speed. The core is unsatisfiable however far it
+    # got, and the returned IIS is confirmed and certified either way. Not
+    # converted: the conflict budget alone does not bound time (PHP(10,9) ran
+    # > 280 s inside it), which is why the wall-clock share exists.
+    (
+        "_iis_milp.py",
+        "sat_stop = time.perf_counter() + sat_budget",
+        "residual",
+    ),
     # The exact-reduction second route (``_Engine._reduced``) runs inside a
     # confirmation and takes the confirmation's own ``stop_at``; without one it
     # gets one probe's limit, exactly as a presolve-free solve would. The clock
@@ -950,8 +967,12 @@ def test_residual_count_is_visible():
     # panel). A wall-clock observation by design -- it races two exact formulations
     # because no structural predictor survived -- and off under ``deterministic``;
     # see its KNOWN entry.
-    assert len(residual) == 23, (
-        f"the #912 residual inventory changed ({len(residual)} entries, expected 23). "
+    # 23 -> 24: the IIS SAT-candidate stage's share (#2318). Like
+    # ``_gdp_config_deadline`` at 19 -> 20, not a new gate, a newly *visible* one:
+    # it was ``t_start + sat_budget``, which the scanner could not see; see its
+    # KNOWN entry.
+    assert len(residual) == 24, (
+        f"the #912 residual inventory changed ({len(residual)} entries, expected 24). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
         "one, convert it instead. This count is a deliberate resting point, not a "
         "backlog — see the module docstring for the evidence and the condition that "
