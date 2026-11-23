@@ -17,7 +17,7 @@ use discopt_core::bnb::milp_driver::{
     MilpNodeVerdict, MilpOptions, MilpStatus,
 };
 use discopt_core::bnb::relu_ideal::ReluIdealSeparator;
-use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
+use discopt_core::lp::basis::{recover_basis, Basis, AT_UPPER, BASIC};
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::{separate_gomory, GomoryCut};
 use discopt_core::lp::mir::separate_mir;
@@ -205,8 +205,19 @@ pub fn recover_basis_py<'py>(
 /// Returns `(coeffs, rhs)` — `coeffs` is a `k × n` array and `rhs` length `k`,
 /// the cuts `coeffs[i] · x ≥ rhs[i]` over the standard-form variables — or
 /// `None` when `x` is not a basic feasible solution (basis recovery declined).
+///
+/// `basic_vars`/`col_status` (#2303), when given, are the basis the simplex that
+/// produced `x` ended on (`solve_lp_warm*_py`'s 5th/6th returns), used instead of a
+/// recovered one. At a degenerate vertex many bases exist, and recovery picks one by
+/// column order, not the optimal (dual-feasible) basis whose tableau GMI is defined
+/// from; a GMI row is valid from any basis, so only cut strength differs. Both or
+/// neither must be given; a malformed basis raises. A well-formed basis that does not
+/// describe `x` with finite bounds (a nonbasic column off its named bound, or at a
+/// `>= 1e20` sentinel bound) is ignored and recovery is used instead.
 #[pyfunction]
-#[pyo3(signature = (x, a, b, c, lb, ub, integrality, tol=1e-7, max_dynamism=1e7))]
+#[pyo3(signature = (x, a, b, c, lb, ub, integrality, tol=1e-7, max_dynamism=1e7,
+                    basic_vars=None, col_status=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn gomory_cuts_py<'py>(
     py: Python<'py>,
     x: PyReadonlyArray1<'py, f64>,
@@ -218,9 +229,52 @@ pub fn gomory_cuts_py<'py>(
     integrality: PyReadonlyArray1<'py, bool>,
     tol: f64,
     max_dynamism: f64,
+    basic_vars: Option<PyReadonlyArray1<'py, i64>>,
+    col_status: Option<PyReadonlyArray1<'py, i8>>,
 ) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)>> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
+    let given = match (basic_vars, col_status) {
+        (None, None) => None,
+        (Some(bv), Some(cs)) => {
+            let bv: Vec<i64> = bv.as_slice()?.to_vec();
+            let cs: Vec<i8> = cs.as_slice()?.to_vec();
+            // A basis short of `m` columns (a degenerate phase-2 exit) is passed on:
+            // `separate_gomory` completes it or declines, as for a recovered one.
+            if bv.len() > m || cs.len() != n {
+                return Err(PyValueError::new_err(format!(
+                    "basis has {} basic variables and {} statuses for an {m} x {n} LP",
+                    bv.len(),
+                    cs.len()
+                )));
+            }
+            let mut seen = vec![false; n];
+            let mut basic = Vec::with_capacity(m);
+            for &j in &bv {
+                if j < 0 || (j as usize) >= n || seen[j as usize] || cs[j as usize] != BASIC {
+                    return Err(PyValueError::new_err(format!(
+                        "basic variable {j} is out of range, repeated, or not marked BASIC"
+                    )));
+                }
+                seen[j as usize] = true;
+                basic.push(j as usize);
+            }
+            if cs.iter().filter(|&&st| st == BASIC).count() != basic.len() {
+                return Err(PyValueError::new_err(
+                    "col_status marks a different number of columns BASIC than basic_vars",
+                ));
+            }
+            Some(Basis {
+                col_status: cs,
+                basic_vars: basic,
+            })
+        }
+        _ => {
+            return Err(PyValueError::new_err(
+                "pass both basic_vars and col_status, or neither",
+            ))
+        }
+    };
     let a_flat = a
         .as_slice()
         .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?;
@@ -233,9 +287,33 @@ pub fn gomory_cuts_py<'py>(
         u: ub.as_slice()?,
     };
     let xs = x.as_slice()?;
-    let basis = match recover_basis(xs, &lp, tol) {
+    // A supplied basis is used only where it describes THIS vertex with finite bounds:
+    // every nonbasic column must sit at the bound its status names, and that bound must
+    // be finite (below the `1e20` sentinel). The separator places a nonbasic column at
+    // `u[j]` when AT_UPPER and at `l[j]` otherwise, so a nonbasic FREE column (which the
+    // in-house simplex can produce, and which arrives as AT_LOWER) would put `-1e20`
+    // into the reconstructed vertex. Otherwise fall back to recovery, which never makes
+    // an interior column nonbasic.
+    let given = given.filter(|bs| {
+        (0..n).all(|j| {
+            let st = bs.col_status[j];
+            if st == BASIC {
+                return true;
+            }
+            let bound = if st == AT_UPPER { lp.u[j] } else { lp.l[j] };
+            bound.is_finite()
+                && bound.abs() < 1e20
+                && xs
+                    .get(j)
+                    .is_some_and(|&v| (v - bound).abs() <= tol * (1.0 + bound.abs()))
+        })
+    });
+    let basis = match given {
         Some(bs) => bs,
-        None => return Ok(None),
+        None => match recover_basis(xs, &lp, tol) {
+            Some(bs) => bs,
+            None => return Ok(None),
+        },
     };
     let cuts = separate_gomory(
         &lp,
@@ -948,6 +1026,9 @@ impl MilpDebugHook for PyMilpHook {
 /// inspection-only and can safely continue after an error.
 struct PyMilpLazyHook {
     callback: Py<PyAny>,
+    /// #2302: optional `f() -> ndarray | None`, asked after a veto for a point the
+    /// caller has verified (`MilpLazyHook::incumbent_candidate`).
+    candidate: Option<Py<PyAny>>,
     /// Structural width; a returned row may not be longer (a longer row would
     /// spill into the driver's slack columns and mean something else entirely).
     n_struct: usize,
@@ -1010,6 +1091,43 @@ impl MilpLazyHook for PyMilpLazyHook {
                 });
             }
             MilpLazyVerdict::Reject(cuts)
+        })
+    }
+
+    fn incumbent_candidate(&self) -> Option<Vec<f64>> {
+        let cb = self.candidate.as_ref()?;
+        Python::with_gil(|py| {
+            let ret = match cb.bind(py).call0() {
+                Ok(r) => r,
+                Err(e) => {
+                    // Recorded and re-raised after the search, like a separator
+                    // failure; the offer itself is simply not made.
+                    let _ = self.fail(e);
+                    return None;
+                }
+            };
+            if ret.is_none() {
+                return None;
+            }
+            match ret.extract::<Vec<f64>>() {
+                Ok(v) if v.len() == self.n_struct => Some(v),
+                Ok(v) => {
+                    let _ = self.fail(PyValueError::new_err(format!(
+                        "lazy_incumbent_callback returned {} entries for {} structural \
+                         columns",
+                        v.len(),
+                        self.n_struct
+                    )));
+                    None
+                }
+                Err(e) => {
+                    let _ = self.fail(PyValueError::new_err(format!(
+                        "lazy_incumbent_callback must return None or a 1-D float \
+                         sequence ({e})"
+                    )));
+                    None
+                }
+            }
         })
     }
 }
@@ -1485,6 +1603,7 @@ pub fn solve_milp_csc_py<'py>(
             bound_hook_every: node_bound_every,
             relaxable_rows: None,
             batched_search,
+            lazy_candidate: None,
         },
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
@@ -1856,6 +1975,7 @@ pub fn solve_milp_relu_csc_py<'py>(
             bound_hook_every: 1,
             relaxable_rows: None,
             batched_search: false,
+            lazy_candidate: None,
         },
     )?;
     Ok((
@@ -1923,7 +2043,8 @@ pub fn solve_milp_relu_csc_py<'py>(
                     root_cut_prune=true,
                     debug_hook=None,
                     node_callback=None, node_hook_rounds=0, node_hook_cut_cap=0,
-                    abs_gap_tol=None, rel_gap_max_abs=false, relaxable_rows=None))]
+                    abs_gap_tol=None, rel_gap_max_abs=false, relaxable_rows=None,
+                    lazy_incumbent_callback=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_lazy_csc_py<'py>(
     py: Python<'py>,
@@ -1968,6 +2089,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
     abs_gap_tol: Option<f64>,
     rel_gap_max_abs: bool,
     relaxable_rows: Option<Vec<bool>>,
+    lazy_incumbent_callback: Option<Py<PyAny>>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1982,6 +2104,13 @@ pub fn solve_milp_lazy_csc_py<'py>(
 )> {
     if !lazy_callback.bind(py).is_callable() {
         return Err(PyValueError::new_err("lazy_callback must be callable"));
+    }
+    if let Some(cb) = lazy_incumbent_callback.as_ref() {
+        if !cb.bind(py).is_callable() {
+            return Err(PyValueError::new_err(
+                "lazy_incumbent_callback must be callable",
+            ));
+        }
     }
     if let Some(mask) = relaxable_rows.as_ref() {
         // #2223: one flag per standard-form row; the driver asserts the same.
@@ -2069,6 +2198,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
         MilpExtra {
             rel_gap_max_abs,
             relaxable_rows,
+            lazy_candidate: lazy_incumbent_callback,
             ..MilpExtra::default()
         },
     )
@@ -2088,6 +2218,8 @@ struct MilpExtra {
     relaxable_rows: Option<Vec<bool>>,
     /// #2235: `MilpOptions::batched_search`.
     batched_search: bool,
+    /// #2302: the lazy separator's incumbent offer (lazy entry only).
+    lazy_candidate: Option<Py<PyAny>>,
 }
 
 impl Default for MilpExtra {
@@ -2104,6 +2236,7 @@ impl Default for MilpExtra {
             bound_hook_every: 1,
             relaxable_rows: None,
             batched_search: false,
+            lazy_candidate: None,
         }
     }
 }
@@ -2400,8 +2533,10 @@ fn run_milp_hooked<'py>(
     let hook_ref: Option<&dyn MilpDebugHook> = hook.as_ref().map(|h| h as &dyn MilpDebugHook);
     // Same shape for the lazy separator (#1060): absent means the driver runs
     // its untouched, bound-neutral path.
+    let lazy_candidate = extra.lazy_candidate;
     let lazy = lazy_callback.map(|cb| PyMilpLazyHook {
         callback: cb,
+        candidate: lazy_candidate,
         n_struct,
         pending: std::sync::Mutex::new(None),
     });

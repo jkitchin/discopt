@@ -325,6 +325,19 @@ pub enum MilpLazyVerdict {
 pub trait MilpLazyHook: Sync {
     /// Separate `x` (length `n_struct`) against the caller's lazy constraints.
     fn separate(&self, x: &[f64]) -> MilpLazyVerdict;
+
+    /// #2302: after a [`MilpLazyVerdict::Reject`], a point the separator itself has
+    /// verified feasible for the problem it guards (an LP/NLP-BB master's fixed-NLP
+    /// solution, lifted to the master's columns), offered as an incumbent. The
+    /// driver checks it against the box, integrality and every current row, then
+    /// hands it to [`Self::separate`], and adopts it only if that accepts and it
+    /// improves; so a wrong offer costs a separation, never soundness. Without it a
+    /// separator's own incumbents never reach the tree, which then explores every
+    /// node the separator has already beaten (Quesada--Grossmann prune on the NLP
+    /// upper bound). Default `None`: the search is unchanged.
+    fn incumbent_candidate(&self) -> Option<Vec<f64>> {
+        None
+    }
 }
 
 /// What a [`MilpNodeHook`] says about a **fractional** node relaxation solution.
@@ -6323,6 +6336,47 @@ fn solve_milp_node_search(
         }};
     }
 
+    // #2302: after a veto, ask the separator for a point it has verified on its
+    // own terms (the LP/NLP-BB master's fixed-NLP solution). The point is held to
+    // the same terms as a seed -- integral, in the box, every current row within
+    // tolerance -- and then to the separator itself, and becomes the incumbent only
+    // if all three accept it and it improves. A hook without the method returns
+    // `None`, so a search without it is unchanged to the instruction.
+    macro_rules! offer_lazy_candidate {
+        ($h:expr) => {{
+            if let Some(cand) = $h.incumbent_candidate() {
+                if let Some((sx, sobj)) = validate_seed_incumbent(
+                    &cand,
+                    ns,
+                    &heur_is_int,
+                    &csc_w,
+                    &b_w,
+                    &c_w,
+                    &l_w,
+                    &u_w,
+                    m_w,
+                    n_w,
+                ) {
+                    let improves = tm.incumbent().is_none_or(|(_, v)| sobj + obj_const < v);
+                    if improves {
+                        lazy_calls += 1;
+                        match $h.separate(&sx) {
+                            MilpLazyVerdict::Accept => {
+                                tm.inject_incumbent(sx, sobj + obj_const);
+                            }
+                            MilpLazyVerdict::Reject(cuts) => {
+                                let _ = stage_lazy_cuts!(cuts);
+                            }
+                            MilpLazyVerdict::Failed => {
+                                lazy_failed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }};
+    }
+
     // Dedup + record a batch of fractional-separator rows into `node_pending`,
     // honouring `node_hook_cut_cap`. Shares `lazy_sigs` with the lazy separator
     // so a row already in the relaxation is never added twice, whichever hook
@@ -6428,6 +6482,7 @@ fn solve_milp_node_search(
                         MilpLazyVerdict::Accept => true,
                         MilpLazyVerdict::Reject(cuts) => {
                             let _ = stage_lazy_cuts!(cuts);
+                            offer_lazy_candidate!(h);
                             false
                         }
                         MilpLazyVerdict::Failed => {
@@ -8757,6 +8812,7 @@ fn solve_milp_node_search(
                             MilpLazyVerdict::Accept => true,
                             MilpLazyVerdict::Reject(cuts) => {
                                 let _ = stage_lazy_cuts!(cuts);
+                                offer_lazy_candidate!(h);
                                 false
                             }
                             MilpLazyVerdict::Failed => {
@@ -8965,6 +9021,7 @@ fn solve_milp_node_search(
                             // first veto left the master at a 0.7 % gap). The node keeps
                             // its own LP bound, valid over its box; the cuts are staged.
                             let _ = stage_lazy_cuts!(cuts);
+                            offer_lazy_candidate!(h);
                             let (j, _) = off.expect("guarded");
                             crate::profile::incr(crate::profile::Ctr::LazyNearIntegralBranch);
                             out.result.is_feasible = false;
@@ -8973,6 +9030,7 @@ fn solve_milp_node_search(
                         }
                         MilpLazyVerdict::Reject(cuts) => {
                             let _ = stage_lazy_cuts!(cuts);
+                            offer_lazy_candidate!(h);
                             let seen = lazy_requeues.entry(id).or_insert(0);
                             *seen += 1;
                             if *seen <= LAZY_REQUEUE_CAP {
@@ -17769,6 +17827,73 @@ mod lazy_separation {
                 MilpLazyVerdict::Accept
             }
         }
+    }
+
+    /// #2302: vetoes `x0 = 1` like [`VetoItemZero`] and, after each veto, offers
+    /// `offer` as a point it has verified, recording every point it is asked about.
+    struct VetoAndOffer {
+        offer: Vec<f64>,
+        asks: AtomicUsize,
+        seen: std::sync::Mutex<Vec<Vec<f64>>>,
+    }
+
+    impl MilpLazyHook for VetoAndOffer {
+        fn separate(&self, x: &[f64]) -> MilpLazyVerdict {
+            self.seen.lock().unwrap().push(x.to_vec());
+            if x.first().copied().unwrap_or(0.0) > 0.5 {
+                let mut coeffs = vec![0.0; 4];
+                coeffs[0] = -1.0;
+                MilpLazyVerdict::Reject(vec![GomoryCut { coeffs, rhs: 0.0 }])
+            } else {
+                MilpLazyVerdict::Accept
+            }
+        }
+
+        fn incumbent_candidate(&self) -> Option<Vec<f64>> {
+            self.asks.fetch_add(1, Ordering::SeqCst);
+            Some(self.offer.clone())
+        }
+    }
+
+    /// #2302: a feasible offer reaches the separator and the answer is the true
+    /// optimum; an offer violating a row never reaches it and changes nothing.
+    #[test]
+    fn lazy_incumbent_offer_is_checked_then_separated() {
+        let k = Knapsack::new();
+        let good = VetoAndOffer {
+            offer: vec![0.0, 1.0, 0.0, 0.0],
+            asks: AtomicUsize::new(0),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        let r = k.solve_with(Some(&good));
+        assert!(
+            good.asks.load(Ordering::SeqCst) > 0,
+            "the driver never asked"
+        );
+        assert_eq!(r.status, MilpStatus::Optimal);
+        assert!((r.obj - (-9.0)).abs() < 1e-6, "obj {}", r.obj);
+        assert!(
+            good.seen.lock().unwrap().iter().any(|p| p == &good.offer),
+            "the feasible offer was never handed to the separator"
+        );
+
+        // 5 * (1 + 1) = 10 > 9: outside the knapsack row, so the row check drops it.
+        let bad = VetoAndOffer {
+            offer: vec![1.0, 1.0, 0.0, 0.0],
+            asks: AtomicUsize::new(0),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        let r = k.solve_with(Some(&bad));
+        assert!(
+            bad.asks.load(Ordering::SeqCst) > 0,
+            "the driver never asked"
+        );
+        assert_eq!(r.status, MilpStatus::Optimal);
+        assert!((r.obj - (-9.0)).abs() < 1e-6, "obj {}", r.obj);
+        assert!(
+            !bad.seen.lock().unwrap().iter().any(|p| p == &bad.offer),
+            "an infeasible offer reached the separator"
+        );
     }
 
     /// Rejects every point and returns nothing that separates it — the
