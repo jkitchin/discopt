@@ -4,8 +4,8 @@ The flag (T-N3.2, ``discopt.ml.bounds.lp_tighten_bounds``) changes only the
 big-M constants and variable boxes of ReLU embeddings; the in-repo MINLPLib
 corpus contains none, so this class is the panel (as for #2187's ReLU panel).
 Networks are E1's (``e1_lp_bigm_tightening.PANEL``: sklearn ReLU MLPs of the
-Kitchin 2026 test function), each embedded as ``relu_bigm`` and as
-``relu_extended`` and minimised over the input box. The question comes from
+Kitchin 2026 test function), each embedded as ``relu_bigm``, ``relu_extended``
+and ``relu_partition`` and minimised over the input box. The question comes from
 PWLNet (Sanyal, Demir, Türkay, Aydın, arXiv:2611.25969v1), which uses interval
 big-M constants; the method is Tjeng, Xiao & Tedrake 2019 and Grimstad &
 Andersson 2019.
@@ -37,7 +37,7 @@ from ._common import loaded_code_banner
 from .e1_lp_bigm_tightening import PANEL as NETS
 
 FLAG = "DISCOPT_NN_LP_BIGM"
-STRATEGIES = ("relu_bigm", "relu_extended")
+STRATEGIES = ("relu_bigm", "relu_extended", "relu_partition")
 
 CHILD = r"""
 import json, sys
@@ -65,10 +65,9 @@ print("RESULT " + json.dumps(out))
 
 def run_arm(item, on: bool, tl: float) -> dict:
     env = dict(os.environ)
-    if on:
-        env[FLAG] = "1"
-    else:
-        env.pop(FLAG, None)
+    # Explicit both ways: since graduation an unset flag means the
+    # formulation's own default, which is ON for relu_bigm/relu_partition.
+    env[FLAG] = "1" if on else "0"
     repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
     p = subprocess.run(
         [sys.executable, "-W", "ignore", "-c", CHILD, json.dumps([*item, tl])],
@@ -88,10 +87,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--time-limit", type=float, default=120.0)
     ap.add_argument("--only", type=int, default=None)
+    ap.add_argument("--strategies", default=",".join(STRATEGIES))
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     print(loaded_code_banner(), flush=True)
-    items = [(d, list(h), s, strat) for d, h, s in NETS for strat in STRATEGIES]
+    items = [(d, list(h), s, strat) for d, h, s in NETS for strat in a.strategies.split(",")]
     if a.only is not None:
         items = [items[a.only]]
     n_checks = 0
