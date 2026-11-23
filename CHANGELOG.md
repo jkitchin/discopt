@@ -24,6 +24,30 @@ The release procedure that produces these entries is documented in
   Rows with a nonlinear part are unchanged. With an older POUNCE every row is taped
   as before.
 
+### Fixed
+
+- **`y = x[k]; ... y[s]` no longer exhausts memory in a solve (#2293).** The
+  time-stepped indexing idiom built a nested `x[k][s]` node that the structure layers
+  (relaxation canonicalizer, multilinear split, linear extractors, OBBT) did not
+  recognize as a variable reference, so each one became an opaque relaxation node,
+  with no envelope and an interval-cache key holding a copy of the whole variable box.
+  On the issue's model at 14,336 rows a full `Model.solve()` passed 14 GB and was
+  killed; written `x[k, s]` the same model peaked at 310 MiB. Three changes:
+  - The `[]` operator builds an all-integer chain on a variable as the single node
+    `x[k, s]`, so every layer sees one spelling. Chains with a slice, mask, `None` or
+    `Ellipsis` are left as before.
+  - `resolve_scalar_slot` also resolves a genuine nested chain (one built with
+    `IndexExpression(...)` directly), and the tape's fast path now delegates to it.
+  - Interval-cache keys over the full box share one bytes object per distinct box,
+    instead of a copy per node. Keys compare exactly as before.
+
+  The issue's model as written now peaks at 259 MiB (N=512) and 973 MiB (N=2048,
+  57,344 rows). A model written with `x[k][s]` now solves identically to the same model
+  written `x[k, s]`. Before, it could take a different route: on a small kinetics
+  model the chained spelling was declined by the native spatial kernel and needed 5
+  nodes instead of 1. No in-repo corpus instance contains such a chain, so corpus
+  results are unchanged.
+
 ## [0.13.0] - 2026-11-22
 
 ### Added

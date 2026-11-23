@@ -84,14 +84,30 @@ def flat_index_in_shape(index: Any, shape: tuple[int, ...]) -> int | None:
 def resolve_scalar_slot(expr: Expression, model: Model) -> int | None:
     """Flat ``x`` slot named by ``expr``, or ``None`` if it does not name exactly one.
 
-    Resolves two forms:
+    Resolves three forms:
 
-    * a scalar :class:`~discopt.modeling.core.Variable` (``size == 1``), and
+    * a scalar :class:`~discopt.modeling.core.Variable` (``size == 1``),
     * an :class:`~discopt.modeling.core.IndexExpression` whose base is a
-      ``Variable`` and whose index selects a single element.
+      ``Variable`` and whose index selects a single element, and
+    * a **chain** of all-integer ``IndexExpression`` nodes ending at a ``Variable``
+      that together select a single element: ``x[k][s]``, which is what
+      ``y = x[k]; ... y[s]`` builds in every time-stepped transcription (#2293).
 
     Everything else — a multi-element ``Variable`` with no index, a slice, a
-    partial or out-of-range index, a non-``Variable`` base — returns ``None``.
+    partial or out-of-range index, a non-``Variable`` base, a chain with a
+    non-integer part anywhere — returns ``None``.
+
+    **Why a chain is exact.** An all-integer index of length ``r`` on an
+    ``n``-d array selects the leading ``r`` axes and leaves the trailing
+    ``n - r``, so the next all-integer index continues on axis ``r``: the parts
+    concatenate to one full index. Each element is still normalized and
+    range-checked against *its own* axis. A slice, ``None``/newaxis, ``Ellipsis``
+    or mask in any part breaks the concatenation, so it is refused, not guessed.
+    The tape lowering applies the same rule (``_nl_expr_compiler.
+    _static_scalar_slot``, #2283); before #2293 this resolver refused the chain,
+    so every structure layer saw ``y[s]`` as an opaque subexpression -- no
+    envelope in the relaxation, and a full-box interval-cache key per node,
+    measured at 2.9 GB on a 14,336-row model.
 
     Deliberately arithmetic rather than probe-based: indexing an
     ``np.arange(size).reshape(shape)`` probe would match numpy semantics by
@@ -111,14 +127,28 @@ def resolve_scalar_slot(expr: Expression, model: Model) -> int | None:
 
     if not isinstance(expr, IndexExpression):
         return None
-    base = expr.base
+    base: Expression = expr
+    parts: list[tuple] = []
+    while isinstance(base, IndexExpression):
+        index = base.index
+        parts.append(index if isinstance(index, tuple) else (index,))
+        base = base.base
     if not isinstance(base, Variable):
         return None
     shape = tuple(base.shape or ())
     if not shape:
         return None
 
-    flat = flat_index_in_shape(expr.index, shape)
+    if len(parts) == 1:
+        flat = flat_index_in_shape(expr.index, shape)
+    else:
+        # Every part of a chain must be all-integer for the parts to
+        # concatenate; `flat_index_in_shape` then range-checks each element
+        # against its own axis and refuses a partial or over-long result.
+        joined = tuple(i for part in reversed(parts) for i in part)
+        if any(isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in joined):
+            return None
+        flat = flat_index_in_shape(joined, shape)
     if flat is None:
         return None
     return model._flat_var_offset(base) + flat

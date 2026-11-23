@@ -1279,6 +1279,9 @@ class Expression:
             err = _integer_index_out_of_range(base_shape, idx)
             if err is not None:
                 raise err
+        joined = _join_integer_index_chain(self, idx)
+        if joined is not None:
+            return joined
         return IndexExpression(self, idx)
 
     # ── Shape / length / iteration for array-valued expressions (issue #816) ──
@@ -2338,6 +2341,56 @@ class IndexExpression(Expression):
 
     def __repr__(self):
         return f"{self.base}[{self.index}]"
+
+
+def _all_integer_index_parts(idx) -> Optional[tuple]:
+    """``idx`` as a tuple of plain integers, or ``None`` if any part is not one.
+
+    ``bool`` is refused: numpy reads ``x[True]`` as a mask, not as ``x[1]``.
+    """
+    parts = idx if isinstance(idx, tuple) else (idx,)
+    if not parts:
+        return None
+    for i in parts:
+        if isinstance(i, bool) or not isinstance(i, (int, np.integer)):
+            return None
+    return parts
+
+
+def _join_integer_index_chain(node: "Expression", idx) -> Optional["IndexExpression"]:
+    """``x[a][b]`` as the single node ``x[a, b]``, when that is exact (#2293).
+
+    ``y = x[k]; ... y[s]`` -- the idiom of every time-stepped transcription --
+    otherwise builds ``IndexExpression(IndexExpression(x, k), s)``, and every
+    structure layer that recognizes a scalar variable reference by
+    ``isinstance(e.base, Variable)`` (63 sites when #2293 was measured, from the
+    relaxation canonicalizer to the multilinear split that admits a model to the
+    native spatial kernel) saw an opaque subexpression instead of ``x[k, s]``.
+    Measured on the issue's 14,336-row model: a full solve passed 14 GB and was
+    killed, against 310 MiB for the same model written ``x[k, s]``, and on a
+    small kinetics model the chained spelling ran a different solver route.
+
+    Exact by the rule ``_flat_index.resolve_scalar_slot`` states: an all-integer
+    index of length ``r`` selects the leading ``r`` axes, so the next all-integer
+    index continues on axis ``r`` and the parts concatenate. Only a chain on a
+    ``Variable`` whose parts are all plain integers is joined, and only within the
+    variable's rank; anything else (a slice, a mask, ``None``, ``Ellipsis``, an
+    expression base, over-indexing) keeps the nested node exactly as before.
+    Applied by the ``[]`` operator only, so the graph machinery that builds
+    ``IndexExpression`` nodes directly is untouched.
+    """
+    if not isinstance(node, IndexExpression) or not isinstance(node.base, Variable):
+        return None
+    outer = _all_integer_index_parts(node.index)
+    inner = _all_integer_index_parts(idx)
+    if outer is None or inner is None:
+        return None
+    joined = outer + inner
+    base = node.base
+    if len(joined) > len(tuple(base.shape or ())):
+        return None
+    out = base[joined[0] if len(joined) == 1 else joined]
+    return out if isinstance(out, IndexExpression) else None
 
 
 def _known_shape(node: "Expression") -> Optional[tuple[int, ...]]:

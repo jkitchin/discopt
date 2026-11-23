@@ -83,6 +83,7 @@ from typing import Any, Optional, cast
 
 import numpy as np
 
+from discopt._flat_index import resolve_scalar_slot
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -261,42 +262,11 @@ def _static_scalar_slot(expr: IndexExpression, model: Model) -> int | None:
     """
     # A CHAIN of integer indexes, ``x[k][s]`` -- what ``y = x[k]; ... y[s]``
     # builds, the idiom of every time-stepped transcription -- is the single
-    # index ``x[k, s]``: an all-integer index of length ``r`` on an ``n``-d array
-    # selects the leading ``r`` axes and leaves the trailing ``n - r``, so the
-    # next all-integer index continues on axis ``r``. Concatenating the parts is
-    # therefore exact, and each part is still range-checked against its own axis
-    # below. Declining the chain instead (as this fast path did until #2283) sent
-    # every ``y[s]`` to the general path, which materialized the WHOLE variable
-    # -- one ``E.var`` per slot -- per row: O(rows * n_variables) build time.
-    parts: list[tuple] = []
-    base: Expression = expr
-    while isinstance(base, IndexExpression):
-        index = base.index
-        parts.append(index if isinstance(index, tuple) else (index,))
-        base = base.base
-    if not isinstance(base, Variable):
-        return None
-    shape = tuple(base.shape or ())
-    if not shape:
-        return None
-
-    idx = tuple(i for part in reversed(parts) for i in part)
-    if len(idx) != len(shape):
-        # Partial indexing leaves an array; over-indexing is invalid. Either way
-        # this is not one slot.
-        return None
-
-    flat = 0
-    for i, dim in zip(idx, shape):
-        if isinstance(i, bool) or not isinstance(i, (int, np.integer)):
-            return None
-        i = int(i)
-        if i < 0:
-            i += dim
-        if not 0 <= i < dim:
-            return None
-        flat = flat * dim + i
-    return _compute_var_offset(base, model) + flat
+    # index ``x[k, s]`` (#2283). Declining the chain sent every ``y[s]`` to the
+    # general path, which materialized the WHOLE variable per row. The rule now
+    # lives in the one resolver every structure layer uses (#2293), so the tape
+    # and the relaxation cannot disagree about which slot an index names.
+    return resolve_scalar_slot(expr, model)
 
 
 def compile_to_nl_array(expr: Expression, model: Model) -> np.ndarray:
