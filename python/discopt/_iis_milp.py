@@ -954,7 +954,10 @@ def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at)
     # partly refined core when the share ran out mid-refinement, and a refinement
     # trial the clock cut short kept its element as if it were needed, so the
     # candidate's size -- and the IIS the filter starts from -- was a function of
-    # machine speed (#912 role 2; #2318). Measured on the in-repo IIS tests before
+    # machine speed (#912 role 2; #2318). That dependence is quantized, not gone:
+    # which of the three results comes back still depends on whether refinement
+    # finishes inside the share, so the gate stays ``residual`` in the #912
+    # inventory (``test_912_wall_budget_inventory``). Measured on the in-repo IIS tests before
     # the change: 41 candidates, none changed when re-run with no time limit, so
     # this is bound-neutral there; it matters only where refinement overruns.
     try:

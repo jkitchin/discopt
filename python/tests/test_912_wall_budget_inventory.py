@@ -524,20 +524,24 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "contract",
     ),
     # The SAT-candidate stage's share (#1153): ``_SAT_STAGE_FRACTION`` of the
-    # caller's ``total_time_limit``, capped at ``_SAT_STAGE_CAP_S``. Newly
-    # *visible*, not new (#2318): it was ``t_start + sat_budget``, whose clock
-    # read sat on another line where the scanner could not see it. #2318 also
-    # made it ``contract`` like the two confirmation budgets above. It used to be
-    # role 2 in fact -- a mid-refinement cut kept a PARTLY refined core, so the
-    # candidate's size was a function of machine speed -- and ``_binary_core``
-    # now abandons a cut refinement for the first core. The clock decides only
-    # WHICH complete result the stage yields (none, the first core, the refined
-    # core), each fixed by conflict counts; pinned by
-    # ``test_iis_sat_candidate.test_candidate_is_a_complete_result_wherever_the_clock_cuts``.
+    # caller's ``total_time_limit``, capped at ``_SAT_STAGE_CAP_S`` -- a fraction
+    # and a constant-capped piece, so role 2 by this file's rule, and still
+    # ``residual``: whether refinement finishes inside the share picks the IIS the
+    # filter starts from. Newly *visible*, not new (#2318): it was
+    # ``t_start + sat_budget``, whose clock read sat on another line where the
+    # scanner could not see it. #2318 QUANTIZED its influence without removing it:
+    # ``_binary_core`` used to keep a PARTLY refined core when the share ran out
+    # (any subset, a function of machine speed); it now abandons a cut refinement
+    # for the first core, so the clock picks only among three complete results
+    # (none, the first core, the refined core), each fixed by conflict counts.
+    # Pinned by ``test_iis_sat_candidate``'s
+    # ``test_candidate_is_a_complete_result_wherever_the_clock_cuts``.
+    # Not converted: the conflict budget alone does not bound time (PHP(10,9) ran
+    # > 280 s inside it), which is why the share exists.
     (
         "_iis_milp.py",
         "sat_stop = time.perf_counter() + sat_budget",
-        "contract",
+        "residual",
     ),
     # The exact-reduction second route (``_Engine._reduced``) runs inside a
     # confirmation and takes the confirmation's own ``stop_at``; without one it
@@ -966,11 +970,13 @@ def test_residual_count_is_visible():
     # panel). A wall-clock observation by design -- it races two exact formulations
     # because no structural predictor survived -- and off under ``deterministic``;
     # see its KNOWN entry.
-    # 23 -> 23 across #2318: the IIS SAT-candidate stage's share became visible
-    # to the scanner and was made ``contract`` in the same change (a cut
-    # refinement is abandoned, not kept half-built); see its KNOWN entry.
-    assert len(residual) == 23, (
-        f"the #912 residual inventory changed ({len(residual)} entries, expected 23). "
+    # 23 -> 24: the IIS SAT-candidate stage's share (#2318). Like
+    # ``_gdp_config_deadline`` at 19 -> 20, not a new gate, a newly *visible* one:
+    # it was ``t_start + sat_budget``, which the scanner could not see. #2318
+    # quantized it (a cut refinement is abandoned, not kept half-built) but the
+    # clock still picks which complete result the stage yields; see its KNOWN entry.
+    assert len(residual) == 24, (
+        f"the #912 residual inventory changed ({len(residual)} entries, expected 24). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
         "one, convert it instead. This count is a deliberate resting point, not a "
         "backlog — see the module docstring for the evidence and the condition that "
