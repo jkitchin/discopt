@@ -5871,6 +5871,7 @@ def _nonlinear_point_excess(
     box=None,
     tol=_NLPBB_EXIT_ABS_TOL,
     rtol=_NLPBB_EXIT_RTOL,
+    certify=False,
 ):
     """How far ``x`` sits outside nonlinear rows + a box, net of term-scaled noise.
 
@@ -5900,6 +5901,18 @@ def _nonlinear_point_excess(
     those rows are valid for integer-feasible points but deliberately tight, and
     they are not rows the user declared, so a gate must not judge a returned point
     by them.
+
+    A row whose term scale is not finite gets NO relative allowance (#2314): an
+    infinite Jacobian entry -- ``d/dx sqrt(x)`` at 0 -- made the scale ``inf * 0 =
+    nan`` (the excess came back ``nan``, which ``excess > tol`` accepts) or ``inf``
+    (``viol - rtol*inf = -inf``, forgiving the row whatever its violation). A
+    non-finite net residual counts as an infinite violation. That is right for a
+    SCREEN, which may only reject more. It is not a proof that a point is
+    infeasible, because the zeroed scale ignores the row's evaluation error, so a
+    caller that turns ``excess > tol`` into an infeasibility CERTIFICATE passes
+    ``certify=True``: then any compared row whose scale or net residual is not
+    finite, or an unevaluable Jacobian, raises instead (``FloatingPointError`` /
+    the Jacobian's own exception), and the caller must defer.
     """
     x = np.asarray(x, dtype=np.float64)
     excess = -np.inf
@@ -5965,8 +5978,13 @@ def _nonlinear_point_excess(
             # it rather than trust it, and fall back to the strict path if not.
             if jac.ndim != 2 or jac.shape[0] < n:
                 raise TypeError(f"expected a dense (m, n) Jacobian, got shape {jac.shape}")
-            scale = np.asarray(np.abs(jac[:n]) @ np.abs(x), dtype=np.float64).ravel()[:n]
+            # ``inf * 0`` (an infinite slope at a zero coordinate) is NaN and an
+            # overflowing product is inf; both are handled below, not warned on.
+            with np.errstate(invalid="ignore", over="ignore"):
+                scale = np.asarray(np.abs(jac[:n]) @ np.abs(x), dtype=np.float64).ravel()[:n]
         except Exception as exc:
+            if certify:
+                raise
             # An unevaluable Jacobian is not a licence to forgive: fall back to
             # the raw (stricter) violation rather than silently passing a point.
             # #1520: kept as a sound (stricter) fallback, now visible.
@@ -5974,7 +5992,21 @@ def _nonlinear_point_excess(
                 "#954 feasibility gate: constraint Jacobian", exc, "using raw residuals"
             )
             scale = np.zeros(n, dtype=np.float64)
-        net = viol - rtol * scale
+        # #2314: a non-finite scale earns no allowance, and a non-finite net
+        # residual is a violation -- never a NaN that compares False, never a
+        # ``-inf`` that forgives the row.
+        scale = np.array(scale, dtype=np.float64, copy=True)
+        unreliable = ~np.isfinite(scale)
+        scale[unreliable] = 0.0
+        with np.errstate(invalid="ignore", over="ignore"):
+            net = viol - rtol * scale
+        unreliable |= ~np.isfinite(net)
+        if certify and bool(unreliable.any()):
+            raise FloatingPointError(
+                f"constraint row {int(np.argmax(unreliable))}: term scale is not finite; "
+                "the excess is no proof of infeasibility"
+            )
+        net[~np.isfinite(net)] = np.inf
         excess = float(net.max())
         where = f"constraint row {int(net.argmax())}"
     if box_viol.size:
@@ -31886,11 +31918,15 @@ def _solve_node_nlp(
         _pt_ub = np.asarray(node_ub, dtype=np.float64)
         if _pt_lb.size > 0 and np.all(np.isfinite(_pt_lb)) and np.array_equal(_pt_lb, _pt_ub):
             try:
+                # ``certify=True`` (#2314): this turns the excess into an
+                # INFEASIBLE certificate, so a row whose scale cannot be trusted
+                # raises and the node NLP decides instead.
                 _pt_excess, _, _pt_cmp = _nonlinear_point_excess(
                     evaluator,
                     _pt_lb,
                     [cl for cl, _ in constraint_bounds],
                     [cu for _, cu in constraint_bounds],
+                    certify=True,
                 )
                 if _pt_cmp > 0 and _pt_excess > _NLPBB_EXIT_ABS_TOL:
                     return NLPResult(
