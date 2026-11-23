@@ -355,6 +355,11 @@ class ReluExtendedFormulation(ReluPartitionFormulation):
     hull in the original space, adding only the inequalities a node violates.
     """
 
+    #: Interval big-M constants unless ``DISCOPT_NN_LP_BIGM=1``: on the T-N3.2
+    #: spread panel the LP-tightened box lost incumbents here (see
+    #: ``SolverTuning.nn_lp_bigm``).
+    LP_BIGM_DEFAULT = False
+
     def __init__(
         self,
         model: Model,

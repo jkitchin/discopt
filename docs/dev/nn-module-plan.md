@@ -66,7 +66,7 @@ fail-before/pass-after for F1 (8 cases) and F2 (2 cases).
 | T-N2.2 NNPresolvePass: park or wire | 2 | **done (parked)** | — | Truthful v0 docstring; bare except narrowed to ValueError + logger.debug; v1 wiring left as noted future work. §6 E1 (2026-11-22): stable-neuron removal is low-value, LP tightening almost never fixes a neuron |
 | T-N2.3 add_predictor ergonomics | 2 | **done** | — | Bounds harvested from inputs var; length validation; missing file → FileNotFoundError |
 | T-N3.1 LeakyReLU/Clip activations | 3 | deferred (opt-in) | — | needs maintainer approval |
-| T-N3.2 LP/OBBT big-M tightening | 3 | deferred (opt-in); **entry exp. passed** | — | §6 E1: median deep-layer big-M shrinkage 45–66%, faster on every net both arms certified. Production needs safe dual bounds |
+| T-N3.2 LP/OBBT big-M tightening | 3 | **done** (`DISCOPT_NN_LP_BIGM`) | — | `ml.bounds.lp_tighten_bounds`, Neumaier–Shcherbina-safe LP bounds. §5 panels (2026-11-23): default ON for `relu_bigm`/`relu_partition` (each certified net faster, every uncertified bound tighter); OFF for `relu_extended`, whose spread panel showed an incumbent loss (opt-in `=1`). Numbers in `flag-retirement-audit.md` |
 | T-N3.3 XGBoost/LightGBM readers | 3 | deferred (opt-in) | — | |
 | T-N3.4 Mišić split encoding + multi-output | 3 | deferred (opt-in + entry exp.) | — | |
 | T-N4.1 coverage omit removal | 4 | **done** | — | onnx_reader.py un-omitted; onnx/onnxruntime added to `[dev]` extra |
@@ -415,6 +415,19 @@ all 9 objective comparisons between certifying arms agreed.
 
 Before shipping: replace the pad with safe dual bounds (Neumaier–Shcherbina),
 and put it behind a flag with the §5 differential panel. It is bound-changing.
+
+**Shipped (2026-11-23)** as `DISCOPT_NN_LP_BIGM`, with both done. The §5
+class panel (`nn_lp_bigm_panel.py`) confirmed E1 on `relu_bigm`: certified 5 =
+5, each faster (101 → 27.8 s on the slowest), every uncertified bound tighter,
+2 incumbents gained. On `relu_extended` it was mixed, and since that panel is
+deterministic, a spread panel (`nn_lp_bigm_perturb_panel.py`) solved both arms
+under three sound 1e-9..1e-8 widenings. HiGHS's search alone moves a
+`relu_extended` solve from 19 to 321 nodes under such a widening. Against that
+spread, the bound stays better on 5 of 7 uncertified nets. But on the d5_32x32
+pair the incumbents get worse (s0: OFF −3.35..−3.48, ON −1.21..−2.81), and the
+wide nets stall at the root bound. So the default is ON for `relu_bigm` and
+`relu_partition`, and OFF for `relu_extended` (`=1` opts in). The primal loss
+is unexplained.
 
 ### E2 — ICNN minimised as an LP with no binaries: **passes**
 

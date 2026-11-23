@@ -61,7 +61,11 @@ def _point(m, res):
 # ── structure ──
 
 
-def test_emits_relations_no_binaries_no_bigm():
+def test_emits_relations_no_binaries_no_bigm(monkeypatch):
+    # relu_complementarity classifies neurons on interval bounds; relu_bigm must too
+    # for its indicator count to be comparable (DISCOPT_NN_LP_BIGM is ON for it by
+    # default and can stabilise neurons, T-N3.2).
+    monkeypatch.setenv("DISCOPT_NN_LP_BIGM", "0")
     net = _relu_net(hidden=(4, 3))
     m, nn = _embed(net, "relu_complementarity")
     assert not any(v.var_type == VarType.BINARY for v in m._variables)

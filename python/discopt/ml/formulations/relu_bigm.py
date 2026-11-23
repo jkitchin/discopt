@@ -76,6 +76,10 @@ class ReluBigMFormulation:
     interval arithmetic bound propagation.
     """
 
+    #: Whether ``DISCOPT_NN_LP_BIGM`` unset means LP-tightened bounds for this
+    #: formulation (T-N3.2; see ``SolverTuning.nn_lp_bigm`` for the panel).
+    LP_BIGM_DEFAULT: bool = True
+
     def __init__(
         self,
         model: Model,
@@ -111,14 +115,16 @@ class ReluBigMFormulation:
     ) -> list[LayerBounds]:
         """Per-layer bounds over ``input_bounds`` (default: the network's).
 
-        Interval arithmetic, or with ``DISCOPT_NN_LP_BIGM`` the LP-tightened
-        bounds of :func:`~discopt.ml.bounds.lp_tighten_bounds` (T-N3.2), which
-        are never looser. ``relu_partition`` and ``relu_extended`` inherit this;
+        LP-tightened bounds of :func:`~discopt.ml.bounds.lp_tighten_bounds`
+        (T-N3.2), which are never looser than interval arithmetic, when
+        ``DISCOPT_NN_LP_BIGM`` is ``1``, or unset and ``LP_BIGM_DEFAULT`` is
+        true; interval arithmetic otherwise. ``relu_partition`` and ``relu_extended`` inherit this;
         ``relu_complementarity`` overrides it (it has no big-M constants).
         """
         from discopt.solver_tuning import current as _tuning
 
-        if _tuning().nn_lp_bigm:
+        flag = _tuning().nn_lp_bigm
+        if self.LP_BIGM_DEFAULT if flag is None else flag:
             self.lp_bound_stats: dict = {}
             return lp_tighten_bounds(
                 self._network, input_bounds=input_bounds, stats=self.lp_bound_stats

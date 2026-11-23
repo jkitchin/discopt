@@ -12,7 +12,8 @@ It is a bound-changing change (CLAUDE.md §5), so the tests are:
   (solved exactly as a MILP on small nets);
 * feasible-point sampling -- with the flag on, fixing the input to any sampled
   point leaves the embedding feasible and its output equal to ``forward``;
-* the flag-off path is the interval path, byte for byte.
+* ``=0`` is the interval path, byte for byte; unset is ON for ``relu_bigm``
+  and ``relu_partition`` and OFF for ``relu_extended``.
 
 Each test counts what it checked and fails if it checked nothing (§6).
 """
@@ -116,7 +117,7 @@ def test_sampled_points_stay_inside(widths, seed):
     assert checked
 
 
-@pytest.mark.parametrize("strategy", ["relu_bigm", "relu_partition"])
+@pytest.mark.parametrize("strategy", ["relu_bigm", "relu_partition", "relu_extended"])
 def test_fixed_input_reproduces_forward_with_the_flag(monkeypatch, strategy):
     """Feasible-point sampling through the embedding: tightened constants must
     not cut any input's true network output."""
@@ -137,24 +138,50 @@ def test_fixed_input_reproduces_forward_with_the_flag(monkeypatch, strategy):
     assert checked == 4
 
 
-def test_flag_reaches_the_formulation_and_off_is_interval(monkeypatch):
-    net = _relu_net((12, 8, 6), 1)
+def _strategy_obj(net, strategy):
+    m = discopt.Model("f")
+    f = NNFormulation(m, net, strategy=strategy, prefix="nn")
+    f.formulate()
+    return f._strategy
 
-    def build():
-        m = discopt.Model("f")
-        f = NNFormulation(m, net, strategy="relu_bigm", prefix="nn")
-        f.formulate()
-        return f._strategy
 
-    monkeypatch.delenv("DISCOPT_NN_LP_BIGM", raising=False)
-    off = build()
-    assert not hasattr(off, "lp_bound_stats")
-    for a, b in zip(off.layer_bounds, propagate_bounds(net), strict=True):
+def _uses_lp(obj, net):
+    """True if ``obj`` was built on LP-tightened bounds, False if on interval
+    bounds (asserted byte for byte)."""
+    if hasattr(obj, "lp_bound_stats"):
+        assert obj.lp_bound_stats["lps"] > 0
+        return True
+    for a, b in zip(obj.layer_bounds, propagate_bounds(net), strict=True):
         np.testing.assert_array_equal(a.pre_lb, b.pre_lb)
         np.testing.assert_array_equal(a.pre_ub, b.pre_ub)
-    monkeypatch.setenv("DISCOPT_NN_LP_BIGM", "1")
-    on = build()
-    assert on.lp_bound_stats["lps"] > 0
+    return False
+
+
+# (env value, strategy) -> LP-tightened? Unset is each formulation's default:
+# ON for relu_bigm / relu_partition, OFF for relu_extended (its spread panel).
+FLAG_TABLE = [
+    (None, "relu_bigm", True),
+    (None, "relu_partition", True),
+    (None, "relu_extended", False),
+    ("1", "relu_bigm", True),
+    ("1", "relu_extended", True),
+    ("0", "relu_bigm", False),
+    ("0", "relu_partition", False),
+    ("0", "relu_extended", False),
+]
+
+
+def test_flag_default_and_overrides_per_formulation(monkeypatch):
+    net = _relu_net((12, 8, 6), 1)
+    checked = 0
+    for env, strategy, expect in FLAG_TABLE:
+        if env is None:
+            monkeypatch.delenv("DISCOPT_NN_LP_BIGM", raising=False)
+        else:
+            monkeypatch.setenv("DISCOPT_NN_LP_BIGM", env)
+        assert _uses_lp(_strategy_obj(net, strategy), net) is expect, (env, strategy)
+        checked += 1
+    assert checked == len(FLAG_TABLE)
 
 
 def test_on_and_off_certify_the_same_optimum(monkeypatch):
