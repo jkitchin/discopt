@@ -653,6 +653,11 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
                 continue
 
             if isinstance(node, IndexExpression):
+                # A chained integer index (`x[k][s]`) names one slot too (#2293).
+                chained = resolve_scalar_slot(node, model)
+                if chained is not None and not isinstance(node.base, Variable):
+                    _add(chained, scale)
+                    continue
                 if isinstance(node.base, Variable):
                     # One resolver for every index form (#1952, the #941 pattern):
                     # the old fast path computed ``offset + int(idx)``, so ``a[-1]``
@@ -1112,9 +1117,10 @@ def _try_extract_const_var(expr, model: Model):
     if isinstance(expr, (Variable, IndexExpression)):
         if isinstance(expr, Variable) and expr.size != 1:
             return None
-        if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        if isinstance(expr, IndexExpression):
             # resolve_scalar_slot normalises negative indices and refuses partial,
-            # out-of-range and gather subscripts (#1952, the #941 pattern).
+            # out-of-range and gather subscripts (#1952, the #941 pattern); it
+            # also resolves a chained integer index, `x[k][s]` (#2293).
             slot = resolve_scalar_slot(expr, model)
             return None if slot is None else (1.0, slot)
         if isinstance(expr, Variable):
