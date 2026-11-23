@@ -58,7 +58,12 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 import numpy as np
 
-from discopt._arena_tape import arena_tape_enabled, try_build_arena_tape
+from discopt._arena_tape import (
+    LinearCSR,
+    arena_tape_enabled,
+    try_build_arena_tape,
+    try_build_arena_tape_split,
+)
 from discopt._nl_expr_compiler import (
     UnsupportedForTape,
     compile_builder_row,
@@ -137,6 +142,19 @@ def tape_backend_requested() -> bool:
     if os.environ.get("DISCOPT_NLP_EVAL", "tape").strip().lower() == "jax":
         return False
     return pounce_usable()
+
+
+def pounce_takes_con_linear() -> bool:
+    """Does this POUNCE's ``build_nl_problem`` take ``con_linear=`` (#2293)?
+
+    Read off the signature rather than a version string, for the reason
+    :func:`_nlproblem_is_thread_safe` gives: a dev build and a release can share
+    a version number on either side of the change. Without it, every row is
+    taped as before.
+    """
+    import pounce
+
+    return "con_linear" in (getattr(pounce.build_nl_problem, "__text_signature__", None) or "")
 
 
 _THREAD_SAFE_NLPROBLEM: Optional[bool] = None
@@ -327,6 +345,9 @@ class TapeNLPEvaluator:
         # (`issue1215_arena_tape_differential.py`), so this is a marshaling
         # change, not a numerical one.
         self._holes: list[Hole] = []
+        # Rows the arena lowering handed back as coefficients (#2293); `None`
+        # when every row is taped.
+        self._con_linear: Optional[LinearCSR] = None
         obj, cons, sizes = self._build_tape_nodes(model)
         if self._negate:
             obj = -obj
@@ -376,6 +397,7 @@ class TapeNLPEvaluator:
             # (`_ensure_fresh` -> `_build`) lowers them afresh from the model.
             self._obj_expr = None
             self._con_exprs = None
+            self._con_linear = None
         # Only used on the per-thread fallback. thread-LOCAL storage rather than a
         # dict keyed by thread id: an unsendable pyclass also refuses to be
         # DROPPED on a foreign thread, and a dict outliving its threads hands
@@ -406,7 +428,18 @@ class TapeNLPEvaluator:
         """
         built = None
         if arena_tape_enabled():
-            built = try_build_arena_tape(model, self._pounce.NlExpr)
+            # #2293: an affine row goes to POUNCE as coefficients rather than a
+            # taped expression when this POUNCE can take them. Bit-identical
+            # (`_arena_tape._linear_row`), so this is a memory change only:
+            # measured on 229,376 three-term linear rows, ~600 B of problem
+            # and ~600 B of transient `NlExpr` nodes per row become ~270 B.
+            if pounce_takes_con_linear():
+                split = try_build_arena_tape_split(model, self._pounce.NlExpr)
+                if split is not None:
+                    built = (split[0], split[1])
+                    self._con_linear = split[2]
+            else:
+                built = try_build_arena_tape(model, self._pounce.NlExpr)
         if built is not None:
             # Named apart from the `cons` the Python walk below builds: that one
             # is annotated `list[Any]`, and re-using one name for both makes the
@@ -535,12 +568,14 @@ class TapeNLPEvaluator:
                 "TapeNLPEvaluator._new_problem called after the NlExpr roots were "
                 "released; only the per-thread fallback may build more than one problem"
             )
+        extra = {} if self._con_linear is None else {"con_linear": self._con_linear}
         main = self._pounce.build_nl_problem(
             self._n_tape,
             self._obj_expr,
             constraints=self._con_exprs or None,
             x_l=self._tape_lo,
             x_u=self._tape_hi,
+            **extra,
         )
         residual = None
         if self._residual_exprs is not None:

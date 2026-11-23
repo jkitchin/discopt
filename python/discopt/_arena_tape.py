@@ -170,6 +170,18 @@ def _chain_leaves(prog: _Program, root: int) -> Optional[list[tuple[int, int]]]:
     lowering) and its explicit stack -- the shape being flattened is precisely
     the one deep enough to overflow a recursive walk.
     """
+    out = _signed_leaves(prog, root)
+    if len(out) < _FLATTEN_MIN_TERMS:
+        return None
+    return out
+
+
+def _signed_leaves(prog: _Program, root: int) -> list[tuple[int, int]]:
+    """Every signed leaf of the ``+``/``-`` tree at *root*, left-to-right.
+
+    :func:`_chain_leaves` without its length threshold: a lone non-sum root is
+    one leaf with sign ``+1``.
+    """
     op, a, b = prog.op, prog.a, prog.b
     out: list[tuple[int, int]] = []
     stack: list[tuple[int, int]] = [(root, 1)]
@@ -183,9 +195,73 @@ def _chain_leaves(prog: _Program, root: int) -> Optional[list[tuple[int, int]]]:
             stack.append((int(a[nid]), sign))
         else:
             out.append((sign, int(nid)))
-    if len(out) < _FLATTEN_MIN_TERMS:
-        return None
     return out
+
+
+def _affine_leaf(prog: _Program, leaf: int) -> Optional[tuple[int, float]]:
+    """``(slot, coefficient)`` when *leaf* is ``x``, ``-x``, ``c*x`` or ``x*c``.
+
+    Deliberately not ``x/c``: ``x/c`` and ``(1/c)*x`` differ in the last bit,
+    and the split this feeds is admitted only where it is bit-identical.
+    """
+    op, a, b, k = prog.op, prog.a, prog.b, prog.k
+    o = op[leaf]
+    if o == OP_VAR:
+        return int(k[leaf]), 1.0
+    if o == OP_NEG and op[a[leaf]] == OP_VAR:
+        return int(k[a[leaf]]), -1.0
+    if o == OP_MUL:
+        lhs, rhs = int(a[leaf]), int(b[leaf])
+        if op[lhs] == OP_CONST and op[rhs] == OP_VAR:
+            return int(k[rhs]), float(k[lhs])
+        if op[lhs] == OP_VAR and op[rhs] == OP_CONST:
+            return int(k[lhs]), float(k[rhs])
+    return None
+
+
+def _linear_row(prog: _Program, root: int) -> Optional[tuple[list[int], list[float], float]]:
+    """``(slots, coefficients, constant)`` when the row at *root* is affine, else ``None``.
+
+    Admitted shape (#2293): a ``+``/``-`` tree whose leaves are all affine
+    (:func:`_affine_leaf`), optionally followed by ONE trailing nonzero constant
+    leaf and then any number of zero constants. The
+    shape is chosen so that handing the leaves to POUNCE as the row's linear
+    segment evaluates **bit-identically** to taping them:
+
+    * The tape sums a row's summands left to right from ``0.0``; the linear
+      segment sums ``c * x`` in the same order. ``c * x`` equals what the tape
+      computes for each leaf exactly: ``1*x`` is ``x``, ``-1*x`` is ``-x``, and
+      ``(-c)*x`` is ``-(c*x)``, because IEEE negation is exact.
+    * A trailing constant ``c`` stays as the row's expression, so the row is
+      ``c + (a + b + ...)`` where the tape computed ``(a + b + ...) + c`` -- one
+      addition, and IEEE addition is commutative. A constant anywhere *else*
+      would reassociate the sum, so such a row is not split.
+    * The Jacobian entries are the coefficients either way, accumulated in the
+      same order, and the rows contribute nothing to the Hessian.
+
+    Mixed rows (some leaf nonlinear) are left whole: splitting them would
+    reassociate the sum, which is a bound-changing change, not this one.
+    ``test_2293_linear_rows.py`` checks the bit-identity on the evaluator.
+    """
+    leaves = _signed_leaves(prog, root)
+    # Trailing zero constants first -- every body ends in one, the ``- rhs`` the
+    # modelling layer appends with ``rhs = 0``. Adding a zero is exact (it can
+    # only turn a ``-0.0`` result into ``+0.0``, which compares equal).
+    while len(leaves) > 1 and prog.op[leaves[-1][1]] == OP_CONST and prog.k[leaves[-1][1]] == 0.0:
+        leaves.pop()
+    constant = 0.0
+    if prog.op[leaves[-1][1]] == OP_CONST:
+        sign, leaf = leaves.pop()
+        constant = float(prog.k[leaf]) if sign > 0 else -float(prog.k[leaf])
+    slots: list[int] = []
+    coefs: list[float] = []
+    for sign, leaf in leaves:
+        term = _affine_leaf(prog, leaf)
+        if term is None:
+            return None
+        slots.append(term[0])
+        coefs.append(term[1] if sign > 0 else -term[1])
+    return slots, coefs, constant
 
 
 #: Node budget for one structural-equality test in :func:`_arena_sum_of_squares`.
@@ -449,6 +525,39 @@ def try_build_arena_tape(model: Any, E: Any) -> Optional[tuple[Any, list]]:
     The objective is returned *unnegated*; the caller applies the maximise
     negation exactly as it does on the Python path.
     """
+    built = _build_arena_tape(model, E, split_linear=False)
+    return None if built is None else (built[0], built[1])
+
+
+#: CSR triple ``(indptr, indices, data)`` of every row's linear segment.
+LinearCSR = tuple[np.ndarray, np.ndarray, np.ndarray]
+
+
+def try_build_arena_tape_split(model: Any, E: Any) -> Optional[tuple[Any, list, LinearCSR]]:
+    """:func:`try_build_arena_tape`, with affine rows handed back as coefficients.
+
+    Returns ``(objective_node, constraint_nodes, linear_csr)``. A row
+    :func:`_linear_row` admits contributes its leaves to ``linear_csr`` and a
+    plain ``float`` (its trailing constant, usually ``0.0``) to
+    ``constraint_nodes`` in place of a tape node; every other row is lowered
+    exactly as :func:`try_build_arena_tape` lowers it, with an empty CSR row.
+
+    This is for POUNCE's ``build_nl_problem(..., con_linear=linear_csr)``, which
+    stores a linear segment as ``(var, coef)`` pairs with no expression tree and
+    no AD tape. #2293 measured a three-term linear row at ~600 B of problem plus
+    ~600 B of transient ``NlExpr`` nodes taped, against ~270 B passed this way.
+    The admitted rows evaluate bit-identically either way (see
+    :func:`_linear_row`), so the choice is a memory decision, not a numerical one.
+    """
+    built = _build_arena_tape(model, E, split_linear=True)
+    if built is None or built[2] is None:
+        return None
+    return built[0], built[1], built[2]
+
+
+def _build_arena_tape(
+    model: Any, E: Any, *, split_linear: bool
+) -> Optional[tuple[Any, list, Optional[LinearCSR]]]:
     if not arena_tape_enabled():
         return None
     # Builder rows would land ahead of the expression rows in the arena while the
@@ -517,14 +626,40 @@ def try_build_arena_tape(model: Any, E: Any) -> Optional[tuple[Any, list]]:
     if obj_id < 0 or obj_id >= prog.n:
         return None
 
-    cache = lower(prog, [obj_id, *con_ids], E)
+    linear: dict[int, tuple[list[int], list[float], float]] = {}
+    if split_linear:
+        for row, cid in enumerate(con_ids):
+            if cid < 0 or cid >= prog.n:
+                return None
+            lin = _linear_row(prog, cid)
+            if lin is not None:
+                linear[row] = lin
+
+    # A split row's leaves are not lowered unless something else reaches them,
+    # so the `NlExpr` nodes they would have cost are never built (#2293).
+    taped_ids = [cid for row, cid in enumerate(con_ids) if row not in linear]
+    cache = lower(prog, [obj_id, *taped_ids], E)
     obj = cache[obj_id]
     if obj is None:
         return None
-    cons = [cache[cid] for cid in con_ids]
+    cons: list[Any] = []
+    for row, cid in enumerate(con_ids):
+        lin = linear.get(row)
+        cons.append(cache[cid] if lin is None else lin[2])
     if any(c is None for c in cons):
         return None
-    return obj, cons
+    if not split_linear:
+        return obj, cons, None
+    indptr = np.zeros(len(con_ids) + 1, dtype=np.int64)
+    for row, (slots, _, _) in linear.items():
+        indptr[row + 1] = len(slots)
+    np.cumsum(indptr, out=indptr)
+    indices = np.empty(int(indptr[-1]), dtype=np.int64)
+    data = np.empty(int(indptr[-1]), dtype=np.float64)
+    for row, (slots, coefs, _) in linear.items():
+        indices[indptr[row] : indptr[row + 1]] = slots
+        data[indptr[row] : indptr[row + 1]] = coefs
+    return obj, cons, (indptr, indices, data)
 
 
 def try_build_expanded_tape(model: Any, E: Any) -> Optional[tuple[Any, list, list[int]]]:
