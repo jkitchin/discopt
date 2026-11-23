@@ -2523,8 +2523,8 @@ def fold_fixed_columns(sf: StdForm) -> tuple[Optional[StdForm], int]:
     b_exact: dict[int, Fraction] = {}
     folded = np.zeros(sf.n, dtype=bool)
     n_folded = 0
-    for j in np.flatnonzero(fixed):
-        j = int(j)
+    for j_np in np.flatnonzero(fixed):
+        j = int(j_np)
         lo, hi = int(csc.indptr[j]), int(csc.indptr[j + 1])
         v = Fraction(float(sf.xl[j]))
         trial: dict[int, Fraction] = {}

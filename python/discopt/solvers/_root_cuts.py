@@ -488,18 +488,24 @@ def root_gmi_lp_basis_enabled() -> bool:
     optimal basis. The Rust arm used to discard its simplex's basis and call
     ``recover_basis`` at the vertex, which at a degenerate vertex picks a basis by
     column order (interior columns, then rank completion in index order), not the
-    dual-feasible one. Both give valid cuts; the cut STRENGTH differs. Measured on
-    #2303's reactor/separator GDP (big-M, NLP-BB): the stage ran 162 rounds (5.6 s,
-    stop ``stall``, root bound 551.55) from the recovered basis and stops on
-    ``no_cuts`` from the simplex's basis.
+    dual-feasible one. Both give valid cuts; the cut STRENGTH differs.
 
-    **Graduated default ON (2026-11-23)** on the §5 panel over the P6 population (18
-    instance-configurations where the stage fires, 2 interleaved reps, 60 s, the
-    ``root_cuts_engine_panel.py`` harness with the arms on this flag): 72 solves, 320
-    bound/feasibility checks, **0 violations**, certification unchanged on every row.
-    Faster with it ON on ``flay02m@nlpbb`` (4.8 -> 1.0 s), ``syn05m@nlpbb`` (5 -> 3
-    nodes, 2.5 -> 0.9 s) and ``tls2@nlpbb`` (uncertified at 60 s in both, bound 2.729 ->
-    3.177, 131 -> 351 nodes); equal elsewhere. ``=0`` restores the recovered basis.
+    **This does not fix #2303's round count.** RETRACTED 2026-11-23: the stage's round
+    count on #2303's GDP is set by round-off, not by this choice. Measured on one
+    AVX-512 host across ``OPENBLAS_CORETYPE`` values (same build, same model): OFF
+    162 / 102 / 102 / 102 / 102 / 102 rounds (SkylakeX / Haswell / Sandybridge /
+    Nehalem / Core2 / Prescott), ON 38 / 113 / 125 / 74 / 125 / 125. The "162 -> 38"
+    first reported was the SkylakeX kernel alone; CI's runner matches Haswell (113
+    rounds, ``stall``, bound 557.6537, reproduced exactly).
+
+    **Graduated default ON (2026-11-23) as neutral**, under CLAUDE.md §5 bar 2 (a):
+    a faithful port of the reference arm, which separates from HiGHS's optimal basis.
+    Panel over the P6 population (18 instance-configurations where the stage fires, 2
+    interleaved reps, 60 s, ``root_cuts_engine_panel.py`` with its arms on this
+    flag), all on the SkylakeX host: 72 solves, 320 bound/feasibility checks, **0
+    violations**, certification unchanged on every row; the rows that differed
+    (flay02m, syn05m, tls2 @nlpbb) are not claimed as gains given the round-off
+    sensitivity above. ``=0`` restores the recovered basis.
     """
     return os.environ.get("DISCOPT_NLPBB_ROOT_GMI_LP_BASIS", "1") not in (
         "0",
