@@ -1270,11 +1270,14 @@ def box_dual_violation(
     denominator both ``|a·y_i|`` and reads exactly 1.0 however small ``y_i`` is -- which
     the in-house LP engine's duals hit routinely (HiGHS returns exact zeros there).
     Measured on the #2300 set cover (highspy 1.16.0): Rust pair 1.0 -> 1.05e-15, HiGHS
-    pair 5.6e-17 -> 3.2e-17, against a round-off bound of 1.42e-13. The flag is used for
-    the *reported* statistic only; the MILP route's gate still uses the per-column scale,
-    because a floor makes the cheap filter pass more often and so skip the NS gap, and
-    the #1410 catch/false-refusal panel that would justify that has not been re-run
-    against it.
+    pair 5.6e-17 -> 3.2e-17, against a round-off bound of 1.42e-13. The floor can also
+    UNDERSTATE a real violation: on a column whose coefficients are small next to the
+    LP's largest, a genuinely wrong reduced cost is divided by a scale that column never
+    saw. That is acceptable only because the floored value is reported
+    (``milp/root_dual_violation_scaled``) and never gated. The MILP route's gate uses the
+    per-column scale, and its value stays ``milp/root_dual_violation``: a floor makes the
+    cheap filter pass more often and so skip the NS gap, and the #1410
+    catch/false-refusal panel that would justify that has not been re-run against it.
     """
     y = np.asarray(row_dual, dtype=np.float64).ravel()
     xv = np.asarray(x, dtype=np.float64).ravel()
@@ -4819,10 +4822,12 @@ def _solve_milp_std(
         if lp.x is not None and lp.row_dual is not None:
             dual_viol = box_dual_violation(sf, lp.x, lp.row_dual)
             dual_tol = dual_violation_tolerance(sf)
-            # #2300: report the problem-scale-floored value, which does not read 1.0 on
-            # a round-off slack dual (in-house engine duals); gate on the per-column
-            # value as before, so certify/refuse decisions are unchanged.
-            stats["milp/root_dual_violation"] = box_dual_violation(
+            # The value the gate below tests, so a trip is visible in the stats.
+            stats["milp/root_dual_violation"] = dual_viol
+            # #2300: the same test with the scale floored at the LP's own magnitude.
+            # Reported only, never gated: it does not read 1.0 on a round-off slack
+            # dual (in-house engine duals), but it can understate a real violation.
+            stats["milp/root_dual_violation_scaled"] = box_dual_violation(
                 sf, lp.x, lp.row_dual, problem_scale_floor=True
             )
             if dual_viol > dual_tol:

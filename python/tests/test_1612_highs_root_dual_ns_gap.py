@@ -157,11 +157,10 @@ def test_set_cover_witness_certifies_with_a_valid_bound(seed: int, monkeypatch) 
     r = m.solve()
     assert fired, "MEASURED NOTHING: no root LP pair carried the injected round-off"
     st = r.solver_stats
-    # The witness still trips the per-column gate -- that is the case under test. The NS
-    # gap is recorded only when it trips. Since #2300 the *reported* violation is
-    # floored at the LP's own scale, so this round-off slack dual no longer reads 1.0.
-    assert "milp/root_dual_ns_gap" in st, st
-    assert st["milp/root_dual_violation"] < 1e-12, st
+    # The witness still trips the per-column test -- that is the case under test.
+    assert st["milp/root_dual_violation"] > H._DUAL_CERT_SAFETY * 4 * np.finfo(float).eps
+    # #2300: the scale-floored diagnostic reads this round-off slack dual as round-off.
+    assert st["milp/root_dual_violation_scaled"] < 1e-12, st
     assert st.get("milp/root_dual_certified_by_ns") == 1.0, st
     assert r.status == "optimal" and r.gap_certified, (r.status, r.algorithm_route)
     assert r.bound <= truth + 1e-6, (r.bound, truth)

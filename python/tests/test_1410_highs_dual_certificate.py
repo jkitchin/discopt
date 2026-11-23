@@ -20,6 +20,8 @@ feasibility in unscaled doubles: 7.87e-17 on well-scaled LPs against 1.0 here.
 """
 
 import itertools
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -35,32 +37,13 @@ def _pin_highs_engine(monkeypatch):
     monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "highs")
 
 
-# The counterexample, verbatim from the probe that found it.
-C = [
-    0.6866774929690818,
-    -0.005713836158671233,
-    11740.059150860803,
-    0.007721491930584785,
-    21.9371989038807,
-]
-A = [
-    [
-        10.023552111631327,
-        -554709.2273055869,
-        -31120.64874492787,
-        0.0019316280314185673,
-        -731961.352263406,
-    ],
-    [
-        1445.4625401493574,
-        21007.7074712139,
-        -20275.753039620417,
-        -499143.4063638526,
-        -0.24860654636723628,
-    ],
-]
-B = [-77796.72865470266, 19089.22626419994]
-UB = [3, 4, 3, 2, 4]
+# The counterexample, verbatim from the probe that found it. Shared with #2300's test
+# through a data fixture rather than a cross-test import.
+_DATA = json.loads((Path(__file__).parent / "data" / "issue_1410" / "missolve.json").read_text())
+C = _DATA["C"]
+A = _DATA["A"]
+B = _DATA["B"]
+UB = _DATA["UB"]
 
 
 def _enumerated_optimum() -> float:
@@ -137,8 +120,8 @@ def test_rust_backend_is_correct_on_the_same_model(monkeypatch: pytest.MonkeyPat
 #: slack ``s_0`` (at its lower bound 0) at ``d = -1.03e-8``, a wrong-signed reduced cost
 #: of relative size 1.0, and the pair's NS gap is 0.0221. highspy 1.16 solves this LP
 #: correctly (relative violation 5.6e-17), so the guard is pinned on the recorded pair.
-MISSOLVED_ROOT_X = [0.0, 0.140247763738469, 0.0, 0.0, 0.0, 0.0, 16142.942270090263]
-MISSOLVED_ROOT_Y = [1.030059692070618e-08, -0.0]
+MISSOLVED_ROOT_X = _DATA["MISSOLVED_ROOT_X"]
+MISSOLVED_ROOT_Y = _DATA["MISSOLVED_ROOT_Y"]
 
 
 def test_box_dual_violation_separates_this_matrix_from_a_well_scaled_one() -> None:
