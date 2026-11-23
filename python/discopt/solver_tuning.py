@@ -233,7 +233,7 @@ class SolverTuning:
     has no big-M.
 
     Tri-state. Unset (``None``): each formulation's default, ON for
-    ``relu_bigm`` and ``relu_partition`` and OFF for ``relu_extended``
+    ``relu_bigm`` and OFF for ``relu_partition`` and ``relu_extended``
     (``ReluBigMFormulation.LP_BIGM_DEFAULT``). ``=1``: ON for all three.
     ``=0``: OFF for all three (the legacy interval path).
 
@@ -246,8 +246,7 @@ class SolverTuning:
     §5 class panel (``surrogate_entry/nn_lp_bigm_panel.py``, E1's 10 nets, 120 s,
     65 checks clean). ``relu_bigm``: certified 5 = 5, each faster (101 -> 27.8 s
     on the slowest), dual bound tighter on all 5 uncertified, 2 incumbents
-    gained. Graduated ON for it, and for ``relu_partition``, which shares its
-    constants. ``relu_extended``: certified 3 = 3, dual bound tighter on 7/7, but
+    gained. Graduated ON for it. ``relu_extended``: certified 3 = 3, dual bound tighter on 7/7, but
     the spread panel (``nn_lp_bigm_perturb_panel.py``, both arms under three
     sound 1e-9..1e-8 bound widenings, 87 checks clean) shows worse incumbents
     outside the OFF spread on the d5_32x32 pair (s0: OFF -3.35..-3.48, ON
@@ -255,7 +254,14 @@ class SolverTuning:
     in 120 s, OFF 18-713). It stays OFF there, opt-in via ``=1``, until the
     primal loss is understood (unexplained; the class panel's controls put
     most single-run differences down to HiGHS search sensitivity, but not
-    this one)."""
+    this one).
+
+    ``relu_partition``, its own class panel (``--strategies relu_partition``,
+    36 checks clean): certified 5 = 5, faster on 3 but 2x slower on d5_32x32
+    s0 (27.6 -> 55.0 s, 10,709 -> 19,292 nodes); at the limit the dual bound
+    is tighter on 3 of 5 but looser on 2 (d5_64x64 -51.8 -> -61.0, d10_50x50
+    -133.6 -> -167.1). Not harmless, so OFF there too, opt-in via ``=1``.
+    (It was first graduated ON by inheritance, unmeasured; #2323 review.)"""
 
     # --- Defined-variable detection v2 (array elements + affine outputs) -------
     defined_vars: bool = field(

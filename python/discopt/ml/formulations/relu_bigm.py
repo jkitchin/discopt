@@ -118,7 +118,8 @@ class ReluBigMFormulation:
         LP-tightened bounds of :func:`~discopt.ml.bounds.lp_tighten_bounds`
         (T-N3.2), which are never looser than interval arithmetic, when
         ``DISCOPT_NN_LP_BIGM`` is ``1``, or unset and ``LP_BIGM_DEFAULT`` is
-        true; interval arithmetic otherwise. ``relu_partition`` and ``relu_extended`` inherit this;
+        true; interval arithmetic otherwise. ``relu_partition`` and ``relu_extended`` inherit this
+        (each with its own ``LP_BIGM_DEFAULT = False``);
         ``relu_complementarity`` overrides it (it has no big-M constants).
         """
         from discopt.solver_tuning import current as _tuning

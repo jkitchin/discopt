@@ -66,7 +66,7 @@ fail-before/pass-after for F1 (8 cases) and F2 (2 cases).
 | T-N2.2 NNPresolvePass: park or wire | 2 | **done (parked)** | — | Truthful v0 docstring; bare except narrowed to ValueError + logger.debug; v1 wiring left as noted future work. §6 E1 (2026-11-22): stable-neuron removal is low-value, LP tightening almost never fixes a neuron |
 | T-N2.3 add_predictor ergonomics | 2 | **done** | — | Bounds harvested from inputs var; length validation; missing file → FileNotFoundError |
 | T-N3.1 LeakyReLU/Clip activations | 3 | deferred (opt-in) | — | needs maintainer approval |
-| T-N3.2 LP/OBBT big-M tightening | 3 | **done** (`DISCOPT_NN_LP_BIGM`) | — | `ml.bounds.lp_tighten_bounds`, Neumaier–Shcherbina-safe LP bounds. §5 panels (2026-11-23): default ON for `relu_bigm`/`relu_partition` (each certified net faster, every uncertified bound tighter); OFF for `relu_extended`, whose spread panel showed an incumbent loss (opt-in `=1`). Numbers in `flag-retirement-audit.md` |
+| T-N3.2 LP/OBBT big-M tightening | 3 | **done** (`DISCOPT_NN_LP_BIGM`) | — | `ml.bounds.lp_tighten_bounds`, Neumaier–Shcherbina-safe LP bounds. §5 panels (2026-11-23): default ON for `relu_bigm` (each certified net faster, every uncertified bound tighter); OFF for `relu_extended`, whose spread panel showed an incumbent loss, and for `relu_partition`, whose own panel showed a 2x slower certification and two looser bounds (opt-in `=1`). Numbers in `flag-retirement-audit.md` |
 | T-N3.5 ICNN as an LP (`relu_icnn`) | 3 | **done** | — | §6 E2: no binaries, exactness checked per result (repair onto the graph + `verify_point`), refused otherwise. Median 8.6× over `relu_bigm` on E2's ICNNs |
 | T-N3.3 XGBoost/LightGBM readers | 3 | deferred (opt-in) | — | |
 | T-N3.4 Mišić split encoding + multi-output | 3 | deferred (opt-in + entry exp.) | — | |
@@ -427,8 +427,9 @@ under three sound 1e-9..1e-8 widenings. HiGHS's search alone moves a
 spread, the bound stays better on 5 of 7 uncertified nets. But on the d5_32x32
 pair the incumbents get worse (s0: OFF −3.35..−3.48, ON −1.21..−2.81), and the
 wide nets stall at the root bound. So the default is ON for `relu_bigm` and
-`relu_partition`, and OFF for `relu_extended` (`=1` opts in). The primal loss
-is unexplained.
+OFF for `relu_extended` (`=1` opts in). The primal loss is unexplained.
+
+`relu_partition` has its own class panel (`nn_lp_bigm_panel.py --strategies relu_partition --time-limit 120`, at `3a6fa89` plus the #2323 review fixes, which do not touch this path; E1's 10 nets, 36 checks clean). It certified 5 = 5 with identical objectives. With the flag on it was faster on 3 (11.2->9.1, 107->50, 8.0->6.5 s), level on 1 (2.9->3.0 s) and 2x slower on d5_32x32 s0 (27.6->55.0 s, 10,709->19,292 nodes). At the 120 s limit the dual bound was tighter on 3 of 5 (-9.29->-7.60, -36.1->-29.1, -27.2->-26.4) but looser on 2 (d5_64x64 -51.8->-61.0, d10_50x50 -133.6->-167.1), and incumbents were better on 3 (-1.099->-1.196, -2.845->-2.986, none->+1.30). A looser bound on 2 nets and a 2x slower certification fail bar 2, so `relu_partition` keeps interval bounds by default (`=1` opts in). It had been graduated ON by inheritance from `relu_bigm` without this panel; the #2323 review caught it.
 
 ### E2 — ICNN minimised as an LP with no binaries: **passes**
 
