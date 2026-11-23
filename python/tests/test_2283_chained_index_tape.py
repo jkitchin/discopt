@@ -93,14 +93,19 @@ def _tape_evaluator(model, arena: bool, monkeypatch):
     import discopt._tape_nlp_evaluator as T
 
     used = []
-    real = T.try_build_arena_tape
 
-    def spy(*a):
-        out = real(*a)
-        used.append(out is not None)
-        return out
+    # Both arena entry points: the evaluator takes the `_split` one when its
+    # POUNCE accepts `con_linear=` (#2293), the plain one otherwise.
+    def spying(real):
+        def spy(*a):
+            out = real(*a)
+            used.append(out is not None)
+            return out
 
-    monkeypatch.setattr(T, "try_build_arena_tape", spy)
+        return spy
+
+    monkeypatch.setattr(T, "try_build_arena_tape", spying(T.try_build_arena_tape))
+    monkeypatch.setattr(T, "try_build_arena_tape_split", spying(T.try_build_arena_tape_split))
     monkeypatch.setenv("DISCOPT_ARENA_TAPE", "1" if arena else "0")
     ev = T.TapeNLPEvaluator(model)
     monkeypatch.undo()

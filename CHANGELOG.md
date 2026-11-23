@@ -10,6 +10,20 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **Affine constraint rows reach POUNCE as coefficients, not taped expressions
+  (#2293).** When the installed POUNCE's `build_nl_problem` takes `con_linear=`, the
+  tape evaluator's arena lowering hands each purely affine row (`x`, `-x`, `c*x`
+  leaves, optionally one trailing constant) to it as a sparse linear segment. The
+  row then has no `NlExpr` nodes, no expression tree and no AD tape. Bit-identical
+  by construction: constraint values, Jacobian and Hessian match the taped path
+  exactly on every in-repo corpus instance (`test_2293_linear_rows.py`). On the
+  issue's 229,376-row implicit-Euler reproducer, linear rows go from 2227 to 1201
+  B/row resident and from 2644 to 1766 B/row at the build peak (Linux, glibc).
+  Rows with a nonlinear part are unchanged. With an older POUNCE every row is taped
+  as before.
+
 ## [0.13.0] - 2026-11-22
 
 ### Added
