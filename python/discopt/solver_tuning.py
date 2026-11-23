@@ -217,6 +217,23 @@ class SolverTuning:
     the same ``_node_point_feasible`` gate as a snapped one before injection. A
     wrong guess costs time, not correctness."""
 
+    # --- T-N3.2 LP-tightened ReLU big-M constants -----------------------------
+    nn_lp_bigm: bool = field(default_factory=lambda: _env_flag("DISCOPT_NN_LP_BIGM", default=False))
+    """Tighten the pre-activation bounds behind every ReLU MILP embedding
+    (``relu_bigm``, ``relu_partition``, ``relu_extended``; not
+    ``relu_complementarity``, which has no big-M) by LP over the triangle
+    relaxation of the earlier
+    layers, instead of interval arithmetic alone (``DISCOPT_NN_LP_BIGM``,
+    default OFF, bound-changing: the bounds become the big-M constants and the
+    variable boxes of the embedded network). ``discopt.ml.bounds.lp_tighten_bounds``.
+
+    Each bound is the Neumaier-Shcherbina bound of its LP from that LP's duals,
+    capped by the Rust enclosed evaluation, so it holds whatever the LP
+    solver's accuracy, and it is intersected with the interval bound, so the box
+    only shrinks. Entry experiment E1 (docs/dev/nn-module-plan.md §6): median
+    deep-layer big-M shrinkage 45-66% on 10 ReLU nets, faster on every net both
+    arms certified. Default OFF until its §5 class panel runs."""
+
     # --- Defined-variable detection v2 (array elements + affine outputs) -------
     defined_vars: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_DEFINED_VARS", default=True)

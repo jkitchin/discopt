@@ -178,7 +178,9 @@ in the audit.
 
 **Terminology (PR #2196 review).** A "dual loss" (`d2_flag_panel.py`) is an instance neither arm certified whose ON median final gap at the time limit is worse than OFF's by more than OFF's own run-to-run spread: a performance measure. Bound validity is bar 1 (no bound past the oracle), checked separately.
 
-<!-- live-solver-math-gates: 67 -->
+<!-- live-solver-math-gates: 68 -->
+
+_67 -> 68 (2026-11-23): `NN_LP_BIGM` added default OFF, its §5 class panel running (row under "Rows added 2026-11-23")._
 
 _66 -> 67 (2026-11-23, #2303/#2307): `NLPBB_ROOT_GMI_LP_BASIS` added and kept default OFF as a documented opt-in on its §5 panel and the #2307 review (row below). `OA_MASTER_NLP_INCUMBENT` (#2302) was added and graduated to default ON in the same PR, so it never counted here._
 
@@ -952,3 +954,9 @@ Two things are worth carrying forward:
 | flag | what | evidence | state |
 |---|---|---|---|
 | `DISCOPT_DEFINED_VARS` (`SolverTuning.defined_vars`) | Swaps the dependent-variable detector for `dependent_vars.find_defined_variables`: per-element keys for array variables (D1), indexed references treated as affine leaves (D2), and one output per affine defining equality by greedy minimum degree. Search-changing only: it reorders spatial branching and switches on per-node OBBT for the models it marks. | `docs/dev/nn-module-plan.md` §6, E3 defect 1. On embedded tanh nets the legacy detector marks nothing on `full_space`'s arrays; with the flag, `full_space` and the per-neuron build run identical searches (15 / 79 / 107 nodes on 2;8, 2;16 s0, 2;16 s1, vs legacy 131 / time limit / 25,543). Panels 2026-11-22 (deterministic, interleaved, fresh subprocess per solve; data in the scratchpad, not the repo). **Corpus**, 74 in-repo MINLPLib instances, 30 s, `flag_onoff_corpus_panel.py` against `minlplib.solu`: 0 problems, 128 incumbent feasibility checks, certified 55 -> 56, 0 lost; the gain (`cvxnonsep_nsig30`) is a 30 s edge flip, identical in both arms at 60 s over 2 reps. 70 instances identical in nodes, bound and status; the 3 that change all improve: `haverly` 69 -> 35 nodes, `ex8_5_3` 143 -> 137, `nvs05` bound 4.32 -> 5.07 (optimum 5.47). Wall 748.6 -> 747.1 s. **Class**, 12 tanh/sigmoid/softplus `full_space` nets, 120 s, `surrogate_entry/defined_vars_nn_panel.py`: 54 checks (forward-pass objective, bound vs best verified incumbent, certified agreement), 0 violations; certified 6 -> 11; nodes over the 6 both certify 12,078 -> 352; wall 948 -> 380 s; the one uncertified net ends tighter (-10.43 -> -9.71). | **GRADUATED on introduction** -- default ON, `=0` restores the legacy detector. Bar 1 cert-clean on both panels; bar 2 helpful on its class and not harmful on the corpus. |
+
+### Rows added 2026-11-23 (T-N3.2 LP-tightened ReLU big-M)
+
+| flag | what | evidence | state |
+|---|---|---|---|
+| `DISCOPT_NN_LP_BIGM` (`SolverTuning.nn_lp_bigm`; `ml/formulations/relu_bigm.ReluBigMFormulation._propagate`) | The pre-activation bounds behind `relu_bigm`, `relu_partition` and `relu_extended` (big-M constants and variable boxes) come from `ml.bounds.lp_tighten_bounds`: per neuron, min and max over the triangle relaxation of the earlier layers, each proved by the Neumaier-Shcherbina bound of its LP's duals (`_relax.obbt._ns_safe_lp_lower_bound`, capped by the Rust enclosure), intersected with the interval bound. Bound-changing. Deterministic work budget `LP_TIGHTEN_WORK_BUDGET` (LP nonzeros), no clock. | Entry experiment E1 (`docs/dev/nn-module-plan.md` §6, prompted by PWLNet, arXiv:2611.25969): median deep-layer big-M shrinkage 45-66% on 10 nets, faster on every net both arms certified. Soundness probe on the E1 nets: 358,592,070 sampled pre-activations inside the bounds, none looser than interval, exact MILP min/max oracle held on 3 nets. `test_nn_lp_bigm.py`: differential bounds, oracle, fixed-input feasible-point sampling through the embedding. | **Default OFF, §5 class panel running** (`surrogate_entry/nn_lp_bigm_panel.py`, E1's 10 nets x {`relu_bigm`, `relu_extended`}, 120 s). The in-repo corpus has no ReLU embedding, so it cannot fire the flag. |
