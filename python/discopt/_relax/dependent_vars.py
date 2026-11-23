@@ -497,6 +497,12 @@ class _RowWalker:
         self._work = work
         self._keys: dict[int, tuple[object, frozenset]] = {}
 
+    def forget(self) -> None:
+        """Drop the memo. Expanded rows are fresh trees, so keeping one row's
+        nodes alive while walking the next only holds memory (n^2 nodes for an
+        ``(n, n)`` matrix row)."""
+        self._keys = {}
+
     def _spend(self):
         if self._work is not None and not self._work.spend(1):
             raise _Opaque("work budget exhausted")
@@ -560,6 +566,11 @@ class _RowWalker:
                 out = frozenset([_var_key(node.base, flat)])
             else:
                 out = frozenset().union(*(memo[id(k)][1] for k in kids))
+                # Charge the union, not just the node: on a sum chain the sets
+                # grow along it, so per-node charging would under-count by the
+                # factor that dominates (as VarNameIndex does for the legacy scan).
+                if self._work is not None and not self._work.spend(len(out)):
+                    raise _Opaque("work budget exhausted")
             memo[id(node)] = (node, out)  # hold ``node`` so its id stays unique
         return memo[id(root)][1]
 
@@ -651,7 +662,7 @@ class _RowWalker:
         return coeffs, nonlinear
 
 
-def _plainly_scalar(body) -> bool:
+def _plainly_scalar(body, work=None) -> bool:
     """True when ``body`` is scalar with no array-valued node anywhere (iterative).
 
     Such a body needs no element expansion. Checked before calling
@@ -666,6 +677,8 @@ def _plainly_scalar(body) -> bool:
         if id(node) in seen:
             continue
         seen.add(id(node))
+        if work is not None and not work.spend(1):
+            raise _Opaque("work budget exhausted")
         if isinstance(node, (Constant, Parameter)):
             if np.asarray(node.value).size != 1:
                 return False
@@ -688,6 +701,51 @@ def _plainly_scalar(body) -> bool:
     return True
 
 
+class _OverBudget(Exception):
+    """The scan cannot finish inside its work allowance; the caller abstains."""
+
+
+def _stream_rows(body, work):
+    """``(n_rows, rows)``: the scalar rows of ``body``, built one at a time.
+
+    ``scalarize.scalar_elements`` builds every element up front, and that
+    construction is not visible to the work counter: on ``y == tanh(A @ x)`` with
+    a dense ``(n, n)`` ``A`` it builds ``n^2`` nodes before one is charged (2.2 s
+    at n = 200, 15 s at n = 400, out of memory at n = 800, measured on this
+    branch before the change). Here each element is built only when the caller
+    asks for it, so the construction is at most one row ahead of the charges the
+    caller's walk makes. A plainly scalar body never reaches ``static_shape``,
+    whose recursion overflows on MINLPLib-depth sum chains. Raises
+    :class:`_Opaque` when the body has no static per-element form.
+    """
+    from discopt._relax.scalarize import (
+        MAX_SCALAR_ELEMENTS,
+        _elem,
+        _Unscalarizable,
+        static_shape,
+    )
+
+    if _plainly_scalar(body, work):
+        return 1, iter((body,))
+    shape = static_shape(body)
+    if shape is None:
+        raise _Opaque("no static shape")
+    if shape == ():
+        return 1, iter((body,))
+    n = int(np.prod(shape))
+    if n > MAX_SCALAR_ELEMENTS:
+        raise _Opaque("too many elements to expand")
+
+    def rows():
+        for idx in np.ndindex(*shape):
+            try:
+                yield _elem(body, idx)
+            except _Unscalarizable as exc:
+                raise _Opaque(str(exc)) from exc
+
+    return n, rows()
+
+
 def find_defined_variables(model, work_budget: int | None = None) -> set:
     """v2 detector: dependent variables per element, plus affine-defined outputs.
 
@@ -708,8 +766,6 @@ def find_defined_variables(model, work_budget: int | None = None) -> set:
     Every refusal leaves a key unmarked, and a mark only reorders spatial
     branching (module docstring, *Soundness*), so any answer is sound.
     """
-    from discopt._relax.scalarize import scalar_elements
-
     work = WorkCounter(_SCAN_WORK_BUDGET if work_budget is None else work_budget)
     continuous = {
         v.name
@@ -720,36 +776,48 @@ def find_defined_variables(model, work_budget: int | None = None) -> set:
     def candidate(key) -> bool:
         return (key[0] if isinstance(key, tuple) else key) in continuous
 
-    rows: list = []  # (sense, row)
-    affine_rule = True
-    for c in getattr(model, "_constraints", []):
-        if not isinstance(c, Constraint):
-            continue
-        elems = [c.body] if _plainly_scalar(c.body) else scalar_elements(c.body)
-        if elems is None:
-            affine_rule = False  # occurrence counts unknown for this constraint
-            continue
-        rows.extend((c.sense, r) for r in elems)
-
     walker = _RowWalker(work)
     occ: dict = {}
     analysed: list = []  # (coeffs, nonlinear) for equality rows
-    for sense, row in rows:
-        if work.exhausted:
-            return set()  # partial counts would bias rule 2; abstain entirely
+    affine_rule = True
+
+    def visit(sense, row) -> None:
+        nonlocal affine_rule
         try:
             ks = walker.keys(row)
         except _Opaque:
             affine_rule = False
-            continue
+            return
         for k in ks:
             occ[k] = occ.get(k, 0) + 1
-        if sense != "==":
-            continue
-        try:
-            analysed.append(walker.analyse(row))
-        except _Opaque:
-            continue
+        if sense == "==":
+            try:
+                analysed.append(walker.analyse(row))
+            except _Opaque:
+                pass
+
+    try:
+        for c in getattr(model, "_constraints", []):
+            if not isinstance(c, Constraint):
+                continue
+            if work.exhausted:
+                raise _OverBudget
+            try:
+                n_rows, rows = _stream_rows(c.body, work)
+                for k, row in enumerate(rows):
+                    before = work.spent
+                    visit(c.sense, row)
+                    walker.forget()
+                    if work.exhausted:
+                        raise _OverBudget
+                    # One row's measured cost times the rows still to come:
+                    # abstain now rather than build what cannot be paid for.
+                    if k == 0 and (work.spent - before) * (n_rows - 1) > work.remaining:
+                        raise _OverBudget
+            except _Opaque:
+                affine_rule = False  # occurrence counts unknown for this constraint
+    except _OverBudget:
+        return set()  # partial counts would bias rule 2; abstain entirely
     if work.exhausted:
         return set()
 

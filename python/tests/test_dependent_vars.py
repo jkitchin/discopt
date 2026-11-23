@@ -509,3 +509,55 @@ def test_defined_vars_is_the_default_and_zero_opts_out(monkeypatch):
     assert SolverTuning().defined_vars is True
     monkeypatch.setenv("DISCOPT_DEFINED_VARS", "0")
     assert SolverTuning().defined_vars is False
+
+
+def _dense_tanh_rows(n: int) -> dm.Model:
+    """``y == tanh(A @ x)`` with a dense ``(n, n)`` ``A`` (review of #2308, M2)."""
+    import numpy as np
+
+    A = np.random.default_rng(0).normal(size=(n, n))
+    m = dm.Model("dense")
+    x = m.continuous("x", shape=(n,), lb=-1, ub=1)
+    y = m.continuous("y", shape=(n,), lb=-1, ub=1)
+    m.subject_to(A @ x <= 1)
+    m.subject_to(y == dm.tanh(A @ x))
+    m.minimize(dm.sum(y))
+    return m
+
+
+@pytest.mark.unit
+class TestDefinedVariablesWorkBudget:
+    """The v2 scan's element expansion is charged to ``_SCAN_WORK_BUDGET``.
+
+    Before this, every array row was expanded by ``scalar_elements`` before one
+    unit was charged: on ``_dense_tanh_rows(400)`` it built 642,400 nodes and
+    took 15 s, and at n = 800 it ran out of memory, on the default path. Counted
+    in node constructions, not seconds, so the test is deterministic.
+    """
+
+    def _count_built(self, monkeypatch):
+        import discopt._relax.scalarize as sc
+
+        built = {"n": 0}
+        real = sc._elem
+
+        def counted(expr, idx):
+            built["n"] += 1
+            return real(expr, idx)
+
+        monkeypatch.setattr(sc, "_elem", counted)
+        return built
+
+    def test_an_unaffordable_array_row_abstains_after_one_row(self, monkeypatch):
+        built = self._count_built(monkeypatch)
+        assert dv.find_defined_variables(_dense_tanh_rows(400)) == set()
+        assert 0 < built["n"] <= 4 * 400, f"built {built['n']} nodes before abstaining"
+
+    def test_a_small_budget_bounds_the_expansion(self, monkeypatch):
+        built = self._count_built(monkeypatch)
+        assert dv.find_defined_variables(_dense_tanh_rows(60), work_budget=50_000) == set()
+        assert built["n"] <= 4 * 60
+
+    def test_an_affordable_array_row_is_still_detected(self):
+        keys = dv.find_defined_variables(_dense_tanh_rows(40))
+        assert {("y", j, 40) for j in range(40)} <= keys
