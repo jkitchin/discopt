@@ -27,7 +27,7 @@ import os
 import weakref
 from typing import Optional
 
-import numpy as np
+from discopt._relax._directed import add_down, add_up, mul_down, mul_up, next_up, sub_down, sub_up
 
 #: Interval branch-and-bound budget per univariate minimum (leaves popped).
 _UNIVARIATE_BB_STEPS = 64
@@ -64,26 +64,24 @@ def separable_poly_bound_enabled() -> bool:
 # ── outward-rounded scalar interval arithmetic ──
 
 
-def _down(x: float) -> float:
-    return float(np.nextafter(x, -np.inf)) if np.isfinite(x) else x
-
-
-def _up(x: float) -> float:
-    return float(np.nextafter(x, np.inf)) if np.isfinite(x) else x
+# Directed rounding from ``_directed``, which leaves an EXACT result alone. A
+# blanket one-ulp step on every product and sum (the original ``_down``/``_up``)
+# turned an exact 0 into a negative subnormal that reached ``SolveResult.bound``
+# (``-3e-323`` on ex8_1_4, #2313; the #957 pattern).
 
 
 def _imul(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
-    prods = [a[0] * b[0], a[0] * b[1], a[1] * b[0], a[1] * b[1]]
-    if any(math.isnan(p) for p in prods):  # 0 * inf
+    pairs = [(a[0], b[0]), (a[0], b[1]), (a[1], b[0]), (a[1], b[1])]
+    if any(math.isnan(x * y) for x, y in pairs):  # 0 * inf
         return (-math.inf, math.inf)
-    return (_down(min(prods)), _up(max(prods)))
+    return (min(mul_down(x, y) for x, y in pairs), max(mul_up(x, y) for x, y in pairs))
 
 
 def _iadd(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
     lo, hi = a[0] + b[0], a[1] + b[1]
     if math.isnan(lo) or math.isnan(hi):
         return (-math.inf, math.inf)
-    return (_down(lo), _up(hi))
+    return (add_down(a[0], b[0]), add_up(a[1], b[1]))
 
 
 def _horner(coeffs: list[float], x: tuple[float, float]) -> tuple[float, float]:
@@ -105,7 +103,7 @@ def _enclose(coeffs: list[float], dcoeffs: list[float], a: float, b: float) -> f
     m = 0.5 * (a + b)
     qm = _horner(coeffs, (m, m))
     dq = _horner(dcoeffs, (a, b))
-    mv = _iadd(qm, _imul(dq, (_down(a - m), _up(b - m))))[0]
+    mv = _iadd(qm, _imul(dq, (sub_down(a, m), sub_up(b, m))))[0]
     return max(nat, mv)
 
 
@@ -128,7 +126,7 @@ def _univariate_min(coeffs: list[float], lb: float, ub: float) -> float:
     if len(dcoeffs) == 1 or dlead == 0.0:
         radius = 0.0
     else:
-        radius = _up(1.0 + max(abs(c / dlead) for c in dcoeffs[:-1]))
+        radius = next_up(1.0 + max(abs(c / dlead) for c in dcoeffs[:-1]))
     candidates: list[float] = []
     for e in (lb, ub):
         if math.isfinite(e):

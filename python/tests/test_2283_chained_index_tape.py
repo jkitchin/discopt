@@ -13,6 +13,11 @@ Before #2283 neither tape lowering resolved it:
 
 Both are bound-neutral marshaling changes, so the bar is exact equality with the
 ``x[k, s]`` spelling and between the two paths, not a tolerance.
+
+Since #2293 the ``[]`` operator itself builds ``x[k][s]`` as ``x[k, s]``, so a
+user-written chain no longer reaches these lowerings as a chain. They still meet
+genuine nested nodes built with ``IndexExpression(...)`` directly (graph
+machinery, deserialization), so the chains here are built that way: ``_ix``.
 """
 
 from __future__ import annotations
@@ -31,6 +36,14 @@ from discopt._nl_expr_compiler import (  # noqa: E402
     _static_scalar_slot,
     compile_to_nl_expr,
 )
+from discopt.modeling.core import IndexExpression  # noqa: E402
+
+
+def _ix(base, *parts):
+    """A genuine nested index chain (the ``[]`` operator now joins integer chains)."""
+    for part in parts:
+        base = IndexExpression(base, part)
+    return base
 
 
 def _stepped_model(n_steps: int = 6, n_states: int = 5):
@@ -40,9 +53,13 @@ def _stepped_model(n_steps: int = 6, n_states: int = 5):
     p = m.continuous("p", shape=(3,), lb=-1, ub=1)
     for k in range(n_steps):
         y = x[k + 1]
+
+        def at(s, y=y):
+            return IndexExpression(y, s)  # genuine chain, not joined by `[]`
+
         for s in range(n_states):
-            rhs = dm.exp(p[s % 3]) * y[s] * y[(s + 1) % n_states] - y[(s + 2) % n_states]
-            m.subject_to(y[s] - x[k, s] - 0.1 * rhs == 0)
+            rhs = dm.exp(p[s % 3]) * at(s) * at((s + 1) % n_states) - at((s + 2) % n_states)
+            m.subject_to(at(s) - x[k, s] - 0.1 * rhs == 0)
     m.minimize(dm.sum([(x[n_steps, s] - 0.5) ** 2 for s in range(n_states)]))
     return m, x
 
@@ -50,10 +67,10 @@ def _stepped_model(n_steps: int = 6, n_states: int = 5):
 @pytest.mark.parametrize(
     "chained, direct",
     [
-        (lambda x: x[2][3], lambda x: x[2, 3]),
-        (lambda x: x[-1][-2], lambda x: x[6, 3]),
-        (lambda x: x[(4,)][(0,)], lambda x: x[4, 0]),
-        (lambda x: x[np.int64(1)][2], lambda x: x[1, 2]),
+        (lambda x: _ix(x, 2, 3), lambda x: x[2, 3]),
+        (lambda x: _ix(x, -1, -2), lambda x: x[6, 3]),
+        (lambda x: _ix(x, (4,), (0,)), lambda x: x[4, 0]),
+        (lambda x: _ix(x, np.int64(1), 2), lambda x: x[1, 2]),
     ],
 )
 def test_chained_index_names_the_same_slot(chained, direct):
@@ -69,7 +86,7 @@ def test_chained_index_does_not_materialize_the_variable():
     """
     m, x = _stepped_model()
     budget = _Budget()
-    _lower(x[3][1], m, pounce.NlExpr, {}, budget)
+    _lower(_ix(x, 3, 1), m, pounce.NlExpr, {}, budget)
     assert budget.count == 0
     # Control: a SLICE in the chain must still decline (its parts do not simply
     # concatenate: x[1:][0] is x[1], not x[1:, 0]) and so does materialize.
@@ -93,14 +110,19 @@ def _tape_evaluator(model, arena: bool, monkeypatch):
     import discopt._tape_nlp_evaluator as T
 
     used = []
-    real = T.try_build_arena_tape
 
-    def spy(*a):
-        out = real(*a)
-        used.append(out is not None)
-        return out
+    # Both arena entry points: the evaluator takes the `_split` one when its
+    # POUNCE accepts `con_linear=` (#2293), the plain one otherwise.
+    def spying(real):
+        def spy(*a):
+            out = real(*a)
+            used.append(out is not None)
+            return out
 
-    monkeypatch.setattr(T, "try_build_arena_tape", spy)
+        return spy
+
+    monkeypatch.setattr(T, "try_build_arena_tape", spying(T.try_build_arena_tape))
+    monkeypatch.setattr(T, "try_build_arena_tape_split", spying(T.try_build_arena_tape_split))
     monkeypatch.setenv("DISCOPT_ARENA_TAPE", "1" if arena else "0")
     ev = T.TapeNLPEvaluator(model)
     monkeypatch.undo()
@@ -167,9 +189,14 @@ def _cube_model():
     for a in range(2):
         for b in range(3):
             for c in range(4):
-                m.subject_to(x[a][b][c] - w * x[a][b, c] + x[a, b][c] ** 2 == 0.1 * (a + b + c))
+                m.subject_to(
+                    _ix(x, a, b, c) - w * _ix(x, a, (b, c)) + _ix(x, (a, b), c) ** 2
+                    == 0.1 * (a + b + c)
+                )
     m.minimize(
-        dm.sum([x[a - 2][b - 3][c - 4] ** 2 for a in range(2) for b in range(3) for c in range(4)])
+        dm.sum(
+            [_ix(x, a - 2, b - 3, c - 4) ** 2 for a in range(2) for b in range(3) for c in range(4)]
+        )
     )
     return m, x
 
@@ -177,10 +204,10 @@ def _cube_model():
 @pytest.mark.parametrize(
     "chained",
     [
-        lambda x, a, b, c: x[a][b][c],
-        lambda x, a, b, c: x[a][b, c],
-        lambda x, a, b, c: x[a, b][c],
-        lambda x, a, b, c: x[a - 2][b - 3][c - 4],
+        lambda x, a, b, c: _ix(x, a, b, c),
+        lambda x, a, b, c: _ix(x, a, (b, c)),
+        lambda x, a, b, c: _ix(x, (a, b), c),
+        lambda x, a, b, c: _ix(x, a - 2, b - 3, c - 4),
     ],
 )
 def test_three_part_chains_name_the_direct_slot(chained):

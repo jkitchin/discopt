@@ -120,12 +120,14 @@ def _affine_terms(
                 return None
             return {_compute_var_offset(node, model): scale}, 0.0
 
-        if isinstance(node, IndexExpression) and isinstance(node.base, Variable):
-            # Normalises negative indices, refuses partial/out-of-range (#1952).
+        if isinstance(node, IndexExpression):
+            # Normalises negative indices, refuses partial/out-of-range (#1952),
+            # and resolves a chained integer index, `x[k][s]` (#2293).
             slot = resolve_scalar_slot(node, model)
-            if slot is None:
+            if slot is not None:
+                return {slot: scale}, 0.0
+            if isinstance(node.base, Variable):
                 return None
-            return {slot: scale}, 0.0
 
         if isinstance(node, UnaryOp):
             if node.op == "neg":

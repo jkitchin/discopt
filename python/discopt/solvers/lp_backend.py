@@ -218,21 +218,41 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     # ``prefer_pounce`` no longer changes the engine: the POUNCE matrix MILP backend is
     # retired (R11), so every default order is the Rust simplex engine.
     del prefer_pounce
-    base = (_milp_simplex,)
+    return _select_milp_solver(backend)[1]
+
+
+def resolve_milp_backend(backend: str = "auto") -> str:
+    """The engine :func:`get_milp_solver` selects for ``backend``, by name.
+
+    One of ``"simplex"``, ``"highs"`` or ``"gurobi"`` -- ``"auto"`` and the retired
+    ``"pounce"`` alias are ``"simplex"``. Used to report which master ran (#2301) from the
+    same selector the master is taken from, so the name cannot drift from the engine.
+    """
+    return _select_milp_solver(backend)[0]
+
+
+def _select_milp_solver(backend: str) -> tuple[str, Callable]:
+    valid = {"auto", "pounce", "simplex", "gurobi", "highs"}
+    if backend not in valid:
+        raise ValueError(f"Unknown MILP backend {backend!r}; choose from {sorted(valid)}.")
+    Factory = tuple[str, Callable[[], Callable | None]]
+    base: tuple[Factory, ...] = (("simplex", _milp_simplex),)
+    order: tuple[Factory, ...]
     if backend == "simplex":
-        order: tuple[Callable[[], Callable | None], ...] = (_milp_simplex, *base)
+        order = (("simplex", _milp_simplex), *base)
     elif backend == "highs":
-        order = (_milp_highs,)
+        order = (("highs", _milp_highs),)
     elif backend == "gurobi":
-        order = (_milp_gurobi, *base)
+        order = (("gurobi", _milp_gurobi), *base)
     elif backend == "pounce":
-        order = (_milp_pounce, *base)
+        # The retired alias runs the simplex engine (R11), so that is its name.
+        order = (("simplex", _milp_pounce), *base)
     else:
         order = base
-    for factory in order:
+    for name, factory in order:
         solver = factory()
         if solver is not None:
-            return solver
+            return name, solver
     raise ImportError(
         "No MILP backend available. Install one of:\n"
         "  pip install pounce-solver   (POUNCE, via the self-hosted B&B)\n"

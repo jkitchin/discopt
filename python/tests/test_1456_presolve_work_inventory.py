@@ -519,6 +519,9 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("discopt.solvers._root_presolve", "coef_tighten_enabled", "trivial", "env read"),
     ("discopt.solvers.amp", "_apply_flat_bounds_to_model", "trivial", "one pass over bounds"),
+    # #2301: names the MILP engine a caller's milp_solver= selects, for the
+    # convex route's master= label: a fixed lookup plus one module import.
+    ("discopt.solvers.lp_backend", "resolve_milp_backend", "trivial", "selector name lookup"),
     ("discopt.warm_start", "_prepare_warm_start", "trivial", "one pass over x0"),
     ("discopt.warm_start", "prepare_warm_start", "trivial", "one pass over x0"),
     # --- residual: role 3, real structural work, nothing bounds it ------------

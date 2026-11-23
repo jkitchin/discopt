@@ -812,6 +812,9 @@ _EMPTY_BOX = np.empty(0, dtype=np.float64)
 # deep tree can accumulate many distinct support-boxes; the per-build ``self._bounds``
 # memo still absorbs the within-build hits after a clear).
 _BOUNDS_CACHE_CAP = 500_000
+# Distinct full boxes whose bytes ``_shared_box_bytes`` keeps canonical. Clearing
+# only loses sharing for later keys (never correctness); B&B revisits few boxes.
+_BOX_BYTES_CAP = 256
 # Cap on the per-node proven/abstained curvature-box lists (drop-oldest).
 _CERT_LIST_CAP = 8
 # Indefinite-point witnesses short-circuit curvature proofs that must abstain
@@ -907,6 +910,7 @@ class _ModelAnalysisCache:
         "hessian_witness",
         "linear_rows",
         "implied_by_box",
+        "box_bytes",
     )
 
     def __init__(self, model: Model, dag: CanonicalDAG):
@@ -938,6 +942,9 @@ class _ModelAnalysisCache:
         # and (id(cnode), lb.tobytes(), ub.tobytes()) -> proved implied range.
         self.linear_rows: Any = None
         self.implied_by_box: dict[tuple, tuple[float, float]] = {}
+        # Full-box bytes, canonicalized: one shared object per distinct box.
+        # See ``_shared_box_bytes``.
+        self.box_bytes: dict[bytes, bytes] = {}
 
 
 def _get_analysis_cache(
@@ -1606,6 +1613,35 @@ class _Builder:
 
         return (value_fn, grad_fn)
 
+    def _shared_box_bytes(self) -> tuple[bytes, bytes]:
+        """``(lb.tobytes(), ub.tobytes())`` of the full box, as shared objects (#2293).
+
+        A cache key over the full box (a node whose support hides behind an
+        ``opaque`` subtree, and the implied-range cache) used to carry its own
+        copy of these bytes, ``2 * 8 * n`` of them per *node*. On a 14,336-row
+        model that was 230 KB a key and 2.9 GB for one root build. Canonicalizing
+        the bytes through a dict makes every key over the same box hold the same
+        object: the keys compare and hash exactly as before (same bytes), so every
+        cache hit and miss is unchanged, and the box is stored once per distinct
+        box instead of once per node.
+
+        Computed per call, as the bytes always were, rather than cached on the
+        builder: ``np.asarray`` does not copy, so the box is read as it stands.
+        The canonical map only drops sharing when it is cleared at its cap; keys
+        already in a cache keep the objects they hold, so clearing it can never
+        make two different boxes compare equal.
+        """
+        canon = self._analysis.box_bytes
+        out = []
+        for raw in (self._flat_lb.tobytes(), self._flat_ub.tobytes()):
+            shared = canon.get(raw)
+            if shared is None:
+                if len(canon) >= _BOX_BYTES_CAP:
+                    canon.clear()
+                canon[raw] = shared = raw
+            out.append(shared)
+        return out[0], out[1]
+
     def _support_box_key(self, node: CNode) -> tuple:
         """Box-dependent cache key ``(id(node), lb.bytes, ub.bytes)`` restricted to
         the node's support columns (full box for opaque-hiding subtrees)."""
@@ -1616,7 +1652,7 @@ class _Builder:
             cols = _node_support_cols(node)
             sc[nid] = cols
         if cols is None:
-            lb, ub = self._flat_lb, self._flat_ub
+            return (nid, *self._shared_box_bytes())
         elif cols:
             idx = np.asarray(cols, dtype=np.intp)
             lb, ub = self._flat_lb[idx], self._flat_ub[idx]
@@ -1780,7 +1816,7 @@ class _Builder:
         n = self.n_orig
         if max(n, len(self.model._constraints)) > _LP_RANGE_MAX_SIZE:
             return lo, hi
-        key = (id(node), self._flat_lb.tobytes(), self._flat_ub.tobytes())
+        key = (id(node), *self._shared_box_bytes())
         rng = self._analysis.implied_by_box.get(key)
         if rng is None:
             from discopt._relax.problem_classifier import (

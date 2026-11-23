@@ -854,12 +854,14 @@ def _extract_linear_objective_with_offset(
             if inner is None:
                 return None
             return {k: -v for k, v in inner[0].items()}, -inner[1]
-        if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
-            # #941: see the note in the sibling extractor above.
+        if isinstance(expr, IndexExpression):
+            # #941: see the note in the sibling extractor above. Also resolves a
+            # chained integer index, `x[k][s]` (#2293).
             slot = resolve_scalar_slot(expr, model)
             if slot is not None:
                 return {slot: 1.0}, 0.0
-            return None
+            if isinstance(expr.base, Variable):
+                return None
         if isinstance(expr, SumExpression):
             # See the sibling extractor above: an axis reduction is several rows,
             # not one (#1160).

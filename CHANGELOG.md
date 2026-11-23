@@ -10,6 +10,44 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **Affine constraint rows reach POUNCE as coefficients, not taped expressions
+  (#2293).** When the installed POUNCE's `build_nl_problem` takes `con_linear=`, the
+  tape evaluator's arena lowering hands each purely affine row (`x`, `-x`, `c*x`
+  leaves, optionally one trailing constant) to it as a sparse linear segment. The
+  row then has no `NlExpr` nodes, no expression tree and no AD tape. Bit-identical
+  by construction: constraint values, Jacobian and Hessian match the taped path
+  exactly on every in-repo corpus instance (`test_2293_linear_rows.py`). On the
+  issue's 229,376-row implicit-Euler reproducer, linear rows go from 2227 to 1201
+  B/row resident and from 2644 to 1766 B/row at the build peak (Linux, glibc).
+  Rows with a nonlinear part are unchanged. With an older POUNCE every row is taped
+  as before.
+
+### Fixed
+
+- **`y = x[k]; ... y[s]` no longer exhausts memory in a solve (#2293).** The
+  time-stepped indexing idiom built a nested `x[k][s]` node that the structure layers
+  (relaxation canonicalizer, multilinear split, linear extractors, OBBT) did not
+  recognize as a variable reference, so each one became an opaque relaxation node,
+  with no envelope and an interval-cache key holding a copy of the whole variable box.
+  On the issue's model at 14,336 rows a full `Model.solve()` passed 14 GB and was
+  killed; written `x[k, s]` the same model peaked at 310 MiB. Three changes:
+  - The `[]` operator builds an all-integer chain on a variable as the single node
+    `x[k, s]`, so every layer sees one spelling. Chains with a slice, mask, `None` or
+    `Ellipsis` are left as before.
+  - `resolve_scalar_slot` also resolves a genuine nested chain (one built with
+    `IndexExpression(...)` directly), and the tape's fast path now delegates to it.
+  - Interval-cache keys over the full box share one bytes object per distinct box,
+    instead of a copy per node. Keys compare exactly as before.
+
+  The issue's model as written now peaks at 259 MiB (N=512) and 973 MiB (N=2048,
+  57,344 rows). A model written with `x[k][s]` now solves identically to the same model
+  written `x[k, s]`. Before, it could take a different route: on a small kinetics
+  model the chained spelling was declined by the native spatial kernel and needed 5
+  nodes instead of 1. No in-repo corpus instance contains such a chain, so corpus
+  results are unchanged.
+
 ## [0.13.0] - 2026-11-22
 
 ### Added
