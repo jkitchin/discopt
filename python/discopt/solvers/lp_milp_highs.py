@@ -2477,6 +2477,81 @@ def _scale_logicals(sf: StdForm, f: np.ndarray) -> StdForm:
 _COEF_TIGHTEN_SAFETY = 8.0
 
 
+def fold_fixed_columns(sf: StdForm) -> tuple[Optional[StdForm], int]:
+    """``sf`` with every fixed structural column's entries moved into ``b``.
+
+    #2304: a column with ``xl_j == xu_j = v`` takes one value, so ``a_ij x_j`` is the
+    constant ``a_ij v`` and ``a x = b`` holds exactly when ``a' x = b - a_ij v`` does,
+    ``a'`` being ``a`` with that entry dropped. The column keeps its index, box and
+    cost (now with no entries), so a point of either form is a point of the other and
+    every feasible point, LP relaxation and bound is the same.
+
+    Why it matters: a binary pinned by a singleton row (``z == 1``, rounded into its
+    box by ``_round_single_integer_rows_sparse`` since f83addeba) keeps its big-M
+    coefficient, which :func:`coefficient_tightened` does not rewrite (it is not a
+    free binary) and which the #1295 guard (:func:`open_column_coefficient_ratio`)
+    then reads against the row's logical: ``1/M``, below :data:`UNSCALABLE_OPEN_RATIO`,
+    so one such row decertified the model. An entry on a fixed column gives HiGHS no
+    scaling freedom to get wrong; folding it removes it from the matrix HiGHS sees,
+    so the guard still reads every entry HiGHS is handed.
+
+    Exactness is checked, not assumed: an entry folds only when ``b_i - a_ij v`` is
+    exact in floating point (checked in rationals), and a column folds only when ALL
+    its entries do, so it is left with no entries rather than one, which would make
+    it look like a logical (:func:`_logical_columns`). Logical columns, columns with a
+    side at or beyond ``READBACK_LIMIT`` and integer columns at a non-integral value
+    are never folded. Returns ``(form, n_entries_folded)``, ``form`` ``None`` when
+    nothing folded.
+    """
+    if sf.A.nnz == 0:
+        return None, 0
+    logical = _logical_columns(sf)
+    is_int = np.zeros(sf.n, dtype=bool)
+    is_int[sf.int_idx] = True
+    fixed = (
+        (sf.xl == sf.xu)
+        & (np.abs(sf.xl) < READBACK_LIMIT)
+        & ~logical
+        & (np.diff(sf.A.indptr) > 0)
+        & ~(is_int & (sf.xl != np.round(sf.xl)))
+    )
+    if not fixed.any():
+        return None, 0
+    csc = sp.csc_matrix(sf.A, copy=True)
+    csc.sort_indices()
+    b = sf.b.astype(np.float64, copy=True)
+    b_exact: dict[int, Fraction] = {}
+    folded = np.zeros(sf.n, dtype=bool)
+    n_folded = 0
+    for j in np.flatnonzero(fixed):
+        j = int(j)
+        lo, hi = int(csc.indptr[j]), int(csc.indptr[j + 1])
+        v = Fraction(float(sf.xl[j]))
+        trial: dict[int, Fraction] = {}
+        for k in range(lo, hi):
+            i = int(csc.indices[k])
+            cur = trial.get(i, b_exact.get(i, Fraction(float(b[i]))))
+            nxt = cur - Fraction(float(csc.data[k])) * v
+            if Fraction(float(nxt)) != nxt:
+                break  # not representable: leave the whole column in place
+            trial[i] = nxt
+        else:
+            b_exact.update(trial)
+            folded[j] = True
+            n_folded += hi - lo
+    if not n_folded:
+        return None, 0
+    for i, val in b_exact.items():
+        b[i] = float(val)
+    keep = np.repeat(~folded, np.diff(csc.indptr))
+    csc.data[~keep] = 0.0
+    csc.eliminate_zeros()
+    return (
+        StdForm.from_arrays(sf.c, csc, b, sf.xl, sf.xu, sf.obj_const, sf.int_idx),
+        n_folded,
+    )
+
+
 def coefficient_tightened(
     sf: StdForm, *, implied_bounds: bool = False
 ) -> tuple[Optional[StdForm], int]:
@@ -2656,10 +2731,27 @@ def _coefficient_tightening_rescue(
     below its bound refutes it. Anything less returns the primary, improved at most by
     a better verified incumbent.
     """
-    sf_ct, n_rw = coefficient_tightened(sf, implied_bounds=_implied_bounds_enabled())
+    # #2304: fixed columns first, so a big-M on a binary pinned by a singleton row is
+    # neither left in the matrix HiGHS sees nor read by the #1295 guard on the re-solve.
+    sf_f, n_fold = fold_fixed_columns(sf)
+    sf_ct, n_rw = coefficient_tightened(
+        sf if sf_f is None else sf_f, implied_bounds=_implied_bounds_enabled()
+    )
+    if (
+        sf_ct is None
+        and sf_f is not None
+        and open_column_coefficient_ratio(sf)
+        < UNSCALABLE_OPEN_RATIO
+        <= open_column_coefficient_ratio(sf_f)
+    ):
+        # Nothing to tighten, but the fold alone clears the #1295 guard: re-solving
+        # is worth it only then (otherwise it is the primary's model again).
+        sf_ct = sf_f
     if sf_ct is None:
         return out
     out.stats["milp/coef_tightened_entries"] = float(n_rw)
+    if n_fold:
+        out.stats["milp/fixed_entries_folded"] = float(n_fold)
     kw2 = dict(kw)
     if kw["time_limit"] is not None:
         kw2["time_limit"] = float(kw["time_limit"]) - (time.monotonic() - t0)
