@@ -93,9 +93,6 @@ from discopt.solvers import (
 )
 from discopt.solvers import _gap as _gap_mod
 from discopt.solvers._pounce_report import report_in_model_sense as _report_in_model_sense
-from discopt.validation.feasibility import (
-    SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
-)
 from discopt.validation.feasibility import feasible_distance_cap as _feas_distance_cap
 from discopt.validation.feasibility import (
     jacobian_row_gradient_norms as _feas_row_gradient_norms,
@@ -5577,11 +5574,6 @@ def _extract_variable_info(model: Model):
 # callers and the unexplained 1e-4 gap closed with it rather than being restated.
 
 
-#: Absolute floor of the feasible-distance cap, aliased so the hot gate below can
-#: screen on it without an import per call.
-_FEAS_SMALL_ROW_ABS_FLOOR = _validation_small_row_abs_floor
-
-
 def _point_within_variable_box(evaluator, x, tol: float = 1e-6) -> bool:
     """Whether ``x`` lies inside the evaluator's own variable box.
 
@@ -5666,9 +5658,10 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     # #1254: the absolute test alone certified ``10**y1 + 10**y2 <= 10**z`` at a
     # point 0.87 away in ``y1`` — a third of that variable's box — from satisfying
     # the row, because every partial derivative there is ~2e-7 and the residual
-    # 2e-7 looked small on its own. Only a row violated by more than the cap's own
-    # floor can be rejected here, so an exactly-satisfied model costs nothing.
-    if max_viol <= _FEAS_SMALL_ROW_ABS_FLOOR:
+    # 2e-7 looked small on its own. An exactly-satisfied model costs nothing. A
+    # violated row always needs its gradient: the cap's floor shrinks with the
+    # row's sup-norm (#2312), so no positive violation is safe without it.
+    if max_viol <= 0.0:
         return True
     try:
         from discopt._relax.primal_heuristics import _scale_from_jacobian
@@ -5678,6 +5671,7 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
         # screen is O(nnz) rather than O(m*n) on a collocation model.
         jac = screen_jacobian(evaluator, x)
         grad = _feas_improving_row_norms(evaluator, jac, x, cons, cl, cu, n_check)
+        plain = np.asarray(_feas_row_gradient_norms(jac), dtype=np.float64)[:n_check]
         scale = np.asarray(_scale_from_jacobian(jac, x), dtype=np.float64)[:n_check]
     except Exception as exc:  # noqa: BLE001 - reported, never silently accepted
         # #1520: kept as a sound fallback, now visible. No gradient (a user
@@ -5687,9 +5681,9 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
             "feasibility distance cap: row gradients", exc, "applying the absolute test only"
         )
         return True
-    if grad.size != n_check or scale.size != n_check:
+    if grad.size != n_check or scale.size != n_check or plain.size != n_check:
         return True
-    return bool(np.all(viol <= _feas_distance_cap(grad, scale)))
+    return bool(np.all(viol <= _feas_distance_cap(grad, scale, plain)))
 
 
 def _feas_improving_row_norms(evaluator, jac, x, cons, cl, cu, n_check):
@@ -5877,6 +5871,7 @@ def _nonlinear_point_excess(
     box=None,
     tol=_NLPBB_EXIT_ABS_TOL,
     rtol=_NLPBB_EXIT_RTOL,
+    certify=False,
 ):
     """How far ``x`` sits outside nonlinear rows + a box, net of term-scaled noise.
 
@@ -5906,6 +5901,18 @@ def _nonlinear_point_excess(
     those rows are valid for integer-feasible points but deliberately tight, and
     they are not rows the user declared, so a gate must not judge a returned point
     by them.
+
+    A row whose term scale is not finite gets NO relative allowance (#2314): an
+    infinite Jacobian entry -- ``d/dx sqrt(x)`` at 0 -- made the scale ``inf * 0 =
+    nan`` (the excess came back ``nan``, which ``excess > tol`` accepts) or ``inf``
+    (``viol - rtol*inf = -inf``, forgiving the row whatever its violation). A
+    non-finite net residual counts as an infinite violation. That is right for a
+    SCREEN, which may only reject more. It is not a proof that a point is
+    infeasible, because the zeroed scale ignores the row's evaluation error, so a
+    caller that turns ``excess > tol`` into an infeasibility CERTIFICATE passes
+    ``certify=True``: then any compared row whose scale or net residual is not
+    finite, or an unevaluable Jacobian, raises instead (``FloatingPointError`` /
+    the Jacobian's own exception), and the caller must defer.
     """
     x = np.asarray(x, dtype=np.float64)
     excess = -np.inf
@@ -5971,8 +5978,13 @@ def _nonlinear_point_excess(
             # it rather than trust it, and fall back to the strict path if not.
             if jac.ndim != 2 or jac.shape[0] < n:
                 raise TypeError(f"expected a dense (m, n) Jacobian, got shape {jac.shape}")
-            scale = np.asarray(np.abs(jac[:n]) @ np.abs(x), dtype=np.float64).ravel()[:n]
+            # ``inf * 0`` (an infinite slope at a zero coordinate) is NaN and an
+            # overflowing product is inf; both are handled below, not warned on.
+            with np.errstate(invalid="ignore", over="ignore"):
+                scale = np.asarray(np.abs(jac[:n]) @ np.abs(x), dtype=np.float64).ravel()[:n]
         except Exception as exc:
+            if certify:
+                raise
             # An unevaluable Jacobian is not a licence to forgive: fall back to
             # the raw (stricter) violation rather than silently passing a point.
             # #1520: kept as a sound (stricter) fallback, now visible.
@@ -5980,7 +5992,21 @@ def _nonlinear_point_excess(
                 "#954 feasibility gate: constraint Jacobian", exc, "using raw residuals"
             )
             scale = np.zeros(n, dtype=np.float64)
-        net = viol - rtol * scale
+        # #2314: a non-finite scale earns no allowance, and a non-finite net
+        # residual is a violation -- never a NaN that compares False, never a
+        # ``-inf`` that forgives the row.
+        scale = np.array(scale, dtype=np.float64, copy=True)
+        unreliable = ~np.isfinite(scale)
+        scale[unreliable] = 0.0
+        with np.errstate(invalid="ignore", over="ignore"):
+            net = viol - rtol * scale
+        unreliable |= ~np.isfinite(net)
+        if certify and bool(unreliable.any()):
+            raise FloatingPointError(
+                f"constraint row {int(np.argmax(unreliable))}: term scale is not finite; "
+                "the excess is no proof of infeasibility"
+            )
+        net[~np.isfinite(net)] = np.inf
         excess = float(net.max())
         where = f"constraint row {int(net.argmax())}"
     if box_viol.size:
@@ -31892,11 +31918,15 @@ def _solve_node_nlp(
         _pt_ub = np.asarray(node_ub, dtype=np.float64)
         if _pt_lb.size > 0 and np.all(np.isfinite(_pt_lb)) and np.array_equal(_pt_lb, _pt_ub):
             try:
+                # ``certify=True`` (#2314): this turns the excess into an
+                # INFEASIBLE certificate, so a row whose scale cannot be trusted
+                # raises and the node NLP decides instead.
                 _pt_excess, _, _pt_cmp = _nonlinear_point_excess(
                     evaluator,
                     _pt_lb,
                     [cl for cl, _ in constraint_bounds],
                     [cu for _, cu in constraint_bounds],
+                    certify=True,
                 )
                 if _pt_cmp > 0 and _pt_excess > _NLPBB_EXIT_ABS_TOL:
                     return NLPResult(
@@ -35009,6 +35039,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         row_scale = np.asarray(abs(A_ub) @ absx, dtype=np.float64).ravel()
         thresh = _matrix_row_threshold(A_ub, row_scale, tol, rtol)
         bad = _rows_to_retest(viol, thresh, row_scale)
+        thresh = _exact_overflowed_thresholds(A_ub, x, thresh, row_scale, bad, tol, rtol)
         if bad.size and _any_row_truly_violated(A_ub, x, b_ub, bad, thresh, signed=True):
             return False
     if A_eq is not None and b_eq is not None and len(b_eq):
@@ -35017,6 +35048,7 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         row_scale = np.asarray(abs(A_eq) @ absx, dtype=np.float64).ravel()
         thresh = _matrix_row_threshold(A_eq, row_scale, tol, rtol)
         bad = _rows_to_retest(viol, thresh, row_scale)
+        thresh = _exact_overflowed_thresholds(A_eq, x, thresh, row_scale, bad, tol, rtol)
         if bad.size and _any_row_truly_violated(A_eq, x, b_eq, bad, thresh, signed=False):
             return False
     if bounds is not None:
@@ -35173,6 +35205,55 @@ def _matrix_row_threshold(A, row_scale, tol: float, rtol: float) -> np.ndarray:
         grad_inf = np.abs(np.asarray(A, dtype=np.float64)).max(axis=1)
     capped = np.minimum(tol + rtol * row_scale, _feas_distance_cap(grad_inf))
     return np.asarray(capped, dtype=np.float64)
+
+
+def _exact_overflowed_thresholds(A, x, thresh, row_scale, rows, tol: float, rtol: float):
+    """Restore the term-scaled allowance on rows whose float ``row_scale`` overflowed.
+
+    :func:`_matrix_row_threshold` takes ``min(tol + rtol·row_scale, cap)`` in floats,
+    so a row whose term magnitudes sum past ``f64`` max (every term finite) got
+    ``min(inf, cap) = cap`` -- the distance cap alone, a far LARGER allowance than
+    its own rule gives (#2315: terms ``[2**1023, 2**1023, 0]`` allowed ~9e303 where
+    the rule gives ~1.8e299). :func:`_rows_to_retest` already sends such a row to
+    the re-test; this recomputes its threshold first, from the EXACT term sum
+    (``Fraction``, as :func:`_row_truly_violated_exact` does for the products), as
+    ``min(tol + rtol·exact_scale, cap)``. The old value IS the cap for exactly
+    these rows, so the min is taken against it. Rows with a finite scale, and rows
+    not being re-tested, are returned unchanged; never loosens a threshold.
+    """
+    from fractions import Fraction
+
+    row_scale = np.asarray(row_scale, dtype=np.float64)
+    over = [int(i) for i in rows if not np.isfinite(row_scale[int(i)])]
+    if not over:
+        return thresh
+    thresh = np.array(thresh, dtype=np.float64, copy=True)
+    sparse = _sp_issparse(A)
+    if sparse:
+        A = A.tocsr()
+    else:
+        A = np.asarray(A, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    for i in over:
+        t_old = float(thresh[i])
+        if np.isnan(t_old):
+            continue
+        a_i = np.asarray(A[[i]].toarray(), dtype=np.float64).ravel() if sparse else A[i]
+        nz = np.nonzero(a_i)[0]
+        if not (np.all(np.isfinite(a_i[nz])) and np.all(np.isfinite(x[nz]))):
+            # No exact scale exists; the re-test decides such a row on its own.
+            continue
+        scale = sum(
+            (abs(Fraction(float(a_i[j]))) * abs(Fraction(float(x[j]))) for j in nz),
+            Fraction(0),
+        )
+        allowed = Fraction(float(tol)) + Fraction(float(rtol)) * scale
+        if t_old != np.inf and allowed >= Fraction(t_old):
+            continue
+        # Round-to-nearest, as the float threshold on an ordinary row is; a value
+        # beyond f64 range cannot be below a finite ``t_old`` and was skipped above.
+        thresh[i] = float(allowed)
+    return thresh
 
 
 def _any_row_truly_violated(A, x, b, rows, thresh, *, signed: bool) -> bool:

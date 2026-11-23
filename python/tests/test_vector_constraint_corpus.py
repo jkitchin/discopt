@@ -637,7 +637,7 @@ def test_row_scales_keeps_its_whole_batch_fallback():
             return np.array([[np.inf, 1.0], [2.0, 3.0]])
 
     got = _row_scales_and_gradients(_Ev(), np.array([0.0, 4.0]), np.array([0, 1]))
-    assert got == (None, None), (
+    assert got == (None, None, None), (
         "the batch must be declined whole, not zeroed per row and the rest kept"
     )
 

@@ -1342,14 +1342,14 @@ def _check_constraint_feasibility(
     if evaluator.n_constraints == 0:
         return True
     viol = row_violations(evaluator, x, cl, cu)
-    # The cheap absolute early-out survives only for rows the distance cap (#1254)
-    # cannot reach. That cap is never below ``SMALL_ROW_ABS_FLOOR``, so a row
-    # violated by no more than the floor is decided here with no Jacobian — which
-    # covers the exactly-satisfied rows that make up the common case. Anything
-    # above it needs the row's gradient before it can be judged: ``viol <= tol``
-    # alone is exactly the test that accepted a point 0.87 away, in a variable
-    # whose whole box is 3 wide, from satisfying its row.
-    if viol.size == 0 or bool(np.all(viol <= SMALL_ROW_ABS_FLOOR)):
+    # The cheap early-out survives only for rows the distance cap (#1254) cannot
+    # reach: exactly-satisfied rows, the common case, decided with no Jacobian.
+    # The cap's floor shrinks with the row's gradient (#2312), so it has no
+    # positive lower bound and any violated row needs the row's gradient before
+    # it can be judged: ``viol <= tol`` alone is exactly the test that accepted a
+    # point 0.87 away, in a variable whose whole box is 3 wide, from satisfying
+    # its row.
+    if viol.size == 0 or bool(np.all(viol <= 0.0)):
         return True
     # Re-test against the scaled tolerance — loosened on rows built from large
     # terms (cancellation noise), capped by the first-order distance to the row's
@@ -1360,6 +1360,7 @@ def _check_constraint_feasibility(
         jac = screen_jacobian(evaluator, x)
         scale = _scale_from_jacobian(jac, x)
         grad = _row_gradient_norms(evaluator, jac, x, cl, cu)
+        plain = jacobian_row_gradient_norms(jac)
     except Exception:
         # No Jacobian, so neither half of the scaled test can be formed. Fall back
         # to the plain absolute verdict, which is exactly what this function
@@ -1368,7 +1369,7 @@ def _check_constraint_feasibility(
         # False. Same answer, same direction, no Jacobian.
         return bool(np.all(viol <= tol))
     n = viol.size
-    return bool(np.all(viol <= combined_tolerance(scale[:n], tol, rtol, grad[:n])))
+    return bool(np.all(viol <= combined_tolerance(scale[:n], tol, rtol, grad[:n], plain[:n])))
 
 
 def row_violations(
@@ -1472,8 +1473,13 @@ def combined_tolerance(
     tol: float = 1e-6,
     rtol: float = 1e-9,
     grad_inf: Optional[np.ndarray] = None,
+    plain_inf: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """The per-row threshold of the combined feasibility test.
+
+    ``plain_inf`` is the row's plain gradient sup-norm over every column, which
+    holds the distance cap's absolute floor to the distance rule (#2312); omitted,
+    ``grad_inf`` stands in for it.
 
     ``tol + rtol*scale`` is the loosening half — it forgives cancellation noise
     proportional to a row's terms. ``grad_inf`` (``max_j |J_ij|``) adds the
@@ -1513,7 +1519,7 @@ def combined_tolerance(
     allowed = tol + rtol * scale
     if grad_inf is None:
         return allowed
-    return np.minimum(allowed, feasible_distance_cap(grad_inf, scale))
+    return np.minimum(allowed, feasible_distance_cap(grad_inf, scale, plain_inf))
 
 
 def scaled_violation_ratio(
@@ -1542,8 +1548,9 @@ def scaled_violation_ratio(
     jac = screen_jacobian(evaluator, x)
     scale = _scale_from_jacobian(jac, x)
     grad = _row_gradient_norms(evaluator, jac, x, cl, cu)
+    plain = jacobian_row_gradient_norms(jac)
     n = viol.size
-    return float(np.max(viol / combined_tolerance(scale[:n], tol, rtol, grad[:n])))
+    return float(np.max(viol / combined_tolerance(scale[:n], tol, rtol, grad[:n], plain[:n])))
 
 
 # --- The false-primal screen (#772 / #815 / #1061) ---------------------------

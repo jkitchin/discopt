@@ -59,9 +59,17 @@ def test_a_noise_level_shortfall_is_forgiven():
 
 @pytest.mark.unit
 def test_the_floor_is_added_to_the_allowance():
-    """``cap == floor + FEASIBLE_DISTANCE_TOL*grad``, elementwise."""
+    """``cap == floor + FEASIBLE_DISTANCE_TOL*grad``, elementwise.
+
+    Since #2312 the floor is itself held to the distance rule,
+    ``min(SMALL_ROW_ABS_FLOOR, FEASIBLE_DISTANCE_TOL*grad)`` (the plain norm
+    defaults to ``grad``), except on an exactly flat row, which keeps it whole.
+    """
     grad = np.array([0.0, 1e-9, 1e-8, 1.0, 1e6])
-    expected = SMALL_ROW_ABS_FLOOR + FEASIBLE_DISTANCE_TOL * grad
+    floor = np.where(
+        grad > 0, np.minimum(SMALL_ROW_ABS_FLOOR, FEASIBLE_DISTANCE_TOL * grad), SMALL_ROW_ABS_FLOOR
+    )
+    expected = floor + FEASIBLE_DISTANCE_TOL * grad
     assert np.allclose(feasible_distance_cap(grad), expected, rtol=0, atol=0)
 
 

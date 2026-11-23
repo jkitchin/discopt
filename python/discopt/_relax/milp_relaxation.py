@@ -317,22 +317,30 @@ def _rowless_lp_safe_bound(
     no rows, so the warm simplex -- the path that computes a Neumaier-Shcherbina
     bound -- does not apply, and the generic path returns its vertex objective with
     no certificate. Over a box the LP optimum is closed form, ``sum_j min(c_j lo_j,
-    c_j hi_j)``; each product, the sum and the offset are rounded one ulp down, so
-    the result never exceeds the exact optimum. ``None`` when a column with a
-    nonzero cost has no finite bound on its improving side (no finite bound exists).
+    c_j hi_j)``. The products, their sum and the offset are accumulated EXACTLY
+    (rationals) and rounded down once, so the result is the largest float not above
+    the exact optimum. Rounding every intermediate one ulp down instead (the
+    original form) stepped an exact 0 to a negative subnormal, which reached
+    ``SolveResult.bound`` as ``-1.374e-321`` on sonet24v2 (#2313; the #957 pattern).
+    ``None`` when a column with a nonzero cost has no finite bound on its improving
+    side (no finite bound exists), or when the cost/offset is not finite.
     """
-    terms = []
+    offset = float(offset)
+    if not math.isfinite(offset):
+        return None
+    total = Fraction(offset)
     for cj, (lo, hi) in zip(np.asarray(c, dtype=np.float64).ravel(), bounds):
         cj = float(cj)
         if cj == 0.0:
             continue
+        if not math.isfinite(cj):
+            return None
         side = float(lo) if cj > 0.0 else float(hi)
         if not _is_effectively_finite(side):
             return None
-        terms.append(math.nextafter(cj * side, -math.inf))
-    total = math.nextafter(math.fsum(terms), -math.inf) if terms else 0.0
-    out = math.nextafter(total + float(offset), -math.inf)
-    return out if math.isfinite(out) else None
+        total += Fraction(cj) * Fraction(side)
+    out = _fraction_to_float_down(total)
+    return out if out is not None and math.isfinite(out) else None
 
 
 def _lp_warm_deadline_enabled() -> bool:
