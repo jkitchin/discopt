@@ -403,7 +403,7 @@ def evaluator_box(evaluator):
     return lb, np.asarray(ub, dtype=np.float64).ravel(), mask
 
 
-def feasible_distance_cap(grad_norms, term_scale=None) -> np.ndarray:
+def feasible_distance_cap(grad_norms, term_scale=None, plain_norms=None) -> np.ndarray:
     """Cap on a row's absolute violation: ``FEASIBLE_DISTANCE_TOL * ||grad g_i||_inf``.
 
     Every feasibility gate in the solver compares a row's violation against a
@@ -458,14 +458,38 @@ def feasible_distance_cap(grad_norms, term_scale=None) -> np.ndarray:
     recorded rejection — #1254's point is 2.0e-7 against an allowance of 2.3e-11,
     #770's violations are 0.4-17.6 — since a 1e-12 addition cannot reach a
     violation nine orders above it.
+
+    The absolute floor is itself held to the distance rule (#2312):
+    ``min(SMALL_ROW_ABS_FLOOR, FEASIBLE_DISTANCE_TOL * plain_norms)``. A residual
+    of 1e-12 on a row whose LARGEST partial derivative is ``G`` puts the point
+    ``1e-12 / G`` from the row, more than the declared 1e-4 once ``G < 1e-8``.
+    Measured: #1254's model with ``y`` shifted six decades down (every partial
+    ~5e-13) was certified ``optimal`` at ``z = -20`` against the optimum
+    -12.699, the 2e-13 residual sitting under the bare 1e-12 floor; and on
+    ``x / y <= 0`` with ``y = 1e12`` the floor alone accepted ``x = 1``.
+    ``plain_norms`` is the row's plain sup-norm ``max_j |J_ij|`` over EVERY
+    column, not the improving-direction norm ``grad_norms``: a column pinned at
+    the bound that blocks it (#1392's synthes3 row) shrinks ``grad_norms`` but
+    leaves the arithmetic's noise unchanged, so it must keep its floor. Omitted,
+    it defaults to ``grad_norms`` (callers that pass the plain norm there). Where
+    the plain norm is exactly 0 or not finite there is no distance to hold the
+    floor to, and the absolute floor stays.
     """
     g = np.abs(np.asarray(grad_norms, dtype=np.float64))
+    p = g if plain_norms is None else np.abs(np.asarray(plain_norms, dtype=np.float64))
+    p = np.broadcast_to(p, g.shape)
     # Cancellation noise is not a distance: a row built from terms of magnitude
     # 1e5 carries ~1e-9*1e5 of pure floating-point residual no matter where the
     # point is, and a cap that cut into that would reject points for the
     # arithmetic's rounding rather than for their position.
     # ``test_polish_feasibility_gate_1199`` holds the boundary this protects.
-    floor = np.broadcast_to(np.float64(SMALL_ROW_ABS_FLOOR), g.shape)
+    with np.errstate(invalid="ignore", over="ignore"):
+        held = (p > 0.0) & np.isfinite(p)
+        floor = np.where(
+            held,
+            np.minimum(SMALL_ROW_ABS_FLOOR, FEASIBLE_DISTANCE_TOL * np.where(held, p, 0.0)),
+            SMALL_ROW_ABS_FLOOR,
+        )
     if term_scale is not None:
         floor = np.maximum(floor, CANCELLATION_RTOL * np.abs(np.asarray(term_scale, np.float64)))
     cap = floor + FEASIBLE_DISTANCE_TOL * g
@@ -763,7 +787,12 @@ def screen_jacobian(evaluator, x_flat: np.ndarray):
 
 
 def _row_scales_and_gradients(evaluator, x_flat: np.ndarray, rows: np.ndarray, box=None):
-    """``(max_j |J_ij| * |x_j|, max_j |J_ij|)`` for the given rows, or ``(None, None)``.
+    """``(max_j |J_ij| * |x_j|, gradient norm, max_j |J_ij|)`` for the given rows, or
+    ``(None, None, None)``.
+
+    The middle entry is the improving-move norm when ``box`` is given (#1284),
+    else the plain sup-norm; the last is always the plain sup-norm, which holds
+    :func:`feasible_distance_cap`'s floor to the distance rule (#2312).
 
     Both halves of the tolerance from ONE Jacobian evaluation: the term magnitude
     says how big the row is, the gradient sup-norm says how far the point is from
@@ -788,18 +817,19 @@ def _row_scales_and_gradients(evaluator, x_flat: np.ndarray, rows: np.ndarray, b
         J = screen_jacobian(evaluator, x_flat)
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         logger.debug("feasibility: Jacobian unavailable, using the stricter bound: %s", exc)
-        return None, None
+        return None, None, None
     if J.ndim != 2 or J.shape[0] <= int(rows.max()):
         logger.debug("feasibility: Jacobian shape %s cannot cover rows; stricter bound", J.shape)
-        return None, None
+        return None, None, None
     sub, all_finite = _jacobian_row_scales_checked(J[rows, :], x_flat)
     if not all_finite:
         logger.debug("feasibility: non-finite Jacobian entry; stricter bound")
-        return None, None
+        return None, None, None
+    plain = jacobian_row_gradient_norms(J[rows, :])
     if box is None:
-        return sub, jacobian_row_gradient_norms(J[rows, :])
+        return sub, plain, plain
     lb, ub, int_mask, direction = box
-    return sub, improving_gradient_norms(J[rows, :], x_flat, lb, ub, direction, int_mask)
+    return sub, improving_gradient_norms(J[rows, :], x_flat, lb, ub, direction, int_mask), plain
 
 
 def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult:
@@ -900,8 +930,8 @@ def _row_verdicts(
     failed = np.zeros(n_rows, dtype=bool)
 
     # Pass 1 selects the rows that could fail EITHER bound. The absolute bound is
-    # ``ABS_TOL * anchor``; the small-row cap (#1254) can be as low as
-    # ``SMALL_ROW_ABS_FLOOR``, so a row violated by more than that floor is a
+    # ``ABS_TOL * anchor``; the small-row cap (#1254) has no positive lower bound
+    # (its floor shrinks with the row's gradient, #2312), so any violated row is a
     # candidate too — without this term a row the cap rejects would short-circuit
     # to "feasible" here and the cap would be a no-op on the very rows it exists
     # for. The Jacobian is still computed only when some row is actually near or
@@ -910,7 +940,7 @@ def _row_verdicts(
     # which would evaluate its (non-finite) Jacobian.
     failed[undefined] = True
     viol[undefined] = np.inf
-    suspect = np.nonzero(~undefined & ((viol > ABS_TOL * anchor) | (viol > SMALL_ROW_ABS_FLOOR)))[0]
+    suspect = np.nonzero(~undefined & ((viol > ABS_TOL * anchor) | (viol > 0.0)))[0]
     if suspect.size == 0:
         return _RowVerdicts(failed, viol, allowed)
 
@@ -921,7 +951,7 @@ def _row_verdicts(
     box = None
     if lb.size == np.asarray(x_flat).size:
         box = (lb, ub, model_integer_mask(model), direction[suspect])
-    scales, grad_norms = _row_scales_and_gradients(evaluator, x_flat, suspect, box)
+    scales, grad_norms, plain_norms = _row_scales_and_gradients(evaluator, x_flat, suspect, box)
     if scales is None:
         # No Jacobian: no scale estimate, so no cap either (it would be a cap
         # built on nothing). The rows that fail the plain absolute bound are the
@@ -930,7 +960,7 @@ def _row_verdicts(
         return _RowVerdicts(failed, viol, allowed)
     allowed[suspect] = np.minimum(
         ABS_TOL * np.maximum(anchor[suspect], scales),
-        feasible_distance_cap(grad_norms, scales),
+        feasible_distance_cap(grad_norms, scales, plain_norms),
     )
     failed[suspect] = viol[suspect] > allowed[suspect]
     return _RowVerdicts(failed, viol, allowed, scaled=True)

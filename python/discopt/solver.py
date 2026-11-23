@@ -93,9 +93,6 @@ from discopt.solvers import (
 )
 from discopt.solvers import _gap as _gap_mod
 from discopt.solvers._pounce_report import report_in_model_sense as _report_in_model_sense
-from discopt.validation.feasibility import (
-    SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
-)
 from discopt.validation.feasibility import feasible_distance_cap as _feas_distance_cap
 from discopt.validation.feasibility import (
     jacobian_row_gradient_norms as _feas_row_gradient_norms,
@@ -5577,11 +5574,6 @@ def _extract_variable_info(model: Model):
 # callers and the unexplained 1e-4 gap closed with it rather than being restated.
 
 
-#: Absolute floor of the feasible-distance cap, aliased so the hot gate below can
-#: screen on it without an import per call.
-_FEAS_SMALL_ROW_ABS_FLOOR = _validation_small_row_abs_floor
-
-
 def _point_within_variable_box(evaluator, x, tol: float = 1e-6) -> bool:
     """Whether ``x`` lies inside the evaluator's own variable box.
 
@@ -5666,9 +5658,10 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     # #1254: the absolute test alone certified ``10**y1 + 10**y2 <= 10**z`` at a
     # point 0.87 away in ``y1`` — a third of that variable's box — from satisfying
     # the row, because every partial derivative there is ~2e-7 and the residual
-    # 2e-7 looked small on its own. Only a row violated by more than the cap's own
-    # floor can be rejected here, so an exactly-satisfied model costs nothing.
-    if max_viol <= _FEAS_SMALL_ROW_ABS_FLOOR:
+    # 2e-7 looked small on its own. An exactly-satisfied model costs nothing. A
+    # violated row always needs its gradient: the cap's floor shrinks with the
+    # row's sup-norm (#2312), so no positive violation is safe without it.
+    if max_viol <= 0.0:
         return True
     try:
         from discopt._relax.primal_heuristics import _scale_from_jacobian
@@ -5678,6 +5671,7 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
         # screen is O(nnz) rather than O(m*n) on a collocation model.
         jac = screen_jacobian(evaluator, x)
         grad = _feas_improving_row_norms(evaluator, jac, x, cons, cl, cu, n_check)
+        plain = np.asarray(_feas_row_gradient_norms(jac), dtype=np.float64)[:n_check]
         scale = np.asarray(_scale_from_jacobian(jac, x), dtype=np.float64)[:n_check]
     except Exception as exc:  # noqa: BLE001 - reported, never silently accepted
         # #1520: kept as a sound fallback, now visible. No gradient (a user
@@ -5687,9 +5681,9 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
             "feasibility distance cap: row gradients", exc, "applying the absolute test only"
         )
         return True
-    if grad.size != n_check or scale.size != n_check:
+    if grad.size != n_check or scale.size != n_check or plain.size != n_check:
         return True
-    return bool(np.all(viol <= _feas_distance_cap(grad, scale)))
+    return bool(np.all(viol <= _feas_distance_cap(grad, scale, plain)))
 
 
 def _feas_improving_row_norms(evaluator, jac, x, cons, cl, cu, n_check):
