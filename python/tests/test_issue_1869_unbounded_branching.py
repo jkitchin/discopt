@@ -49,9 +49,15 @@ def test_flag_off_drains_unresolved(name, monkeypatch):
     """OFF is the #467 fathom: uncertified, and labelled ``unresolved`` -- not
     ``exhausted``, which #1585 reserves for a complete search. #1990's RLT
     strip retry (``DISCOPT_RLT_STRIP_RETRY``) closes haverly's open column
-    without branching on it, so the dead end is reached with it off."""
+    without branching on it, so the dead end is reached with it off.
+    ``DISCOPT_DEFINED_VARS`` (default ON) is a third route that avoids it:
+    deprioritising haverly's affine-defined outputs keeps the search off the
+    unbounded column, and it certifies -400 in 35 nodes through a complete
+    search (``termination == "exhausted"``, bound -400.00000015 <= the oracle).
+    It is pinned off too, so this test still observes the #467 fathom."""
     monkeypatch.setenv(FLAG, "0")
     monkeypatch.setenv("DISCOPT_RLT_STRIP_RETRY", "0")
+    monkeypatch.setenv("DISCOPT_DEFINED_VARS", "0")
     r = _solve(name)
     assert not r.gap_certified
     assert r.termination == "unresolved", r.termination
