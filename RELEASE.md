@@ -10,10 +10,10 @@ For each release, fill in:
 - `vX.Y.Z` -- the target version
 - `vA.B.C` -- the previous released version
 
-The next planned release is **`v0.13.0`** (minor bump on top of `v0.12.0`: new
-public API -- `discopt.modeling.from_mps` / `from_lp` and the `discopt mcp` server --
-and a changed default, HiGHS as the pure LP/MILP/IIS engine under
-`DISCOPT_LP_ENGINE=auto` with `highspy` a core dependency again, #2233).
+The next planned release is **`v0.14.0`** (minor bump on top of `v0.13.0`: new
+public API -- `strategy="relu_icnn"` and `ml.bounds.lp_tighten_bounds` (#2323) -- changed
+defaults, `DISCOPT_DEFINED_VARS` (#2308) and LP-tightened `relu_bigm` constants (#2323),
+and a raised core-dependency floor, `pounce-solver>=0.19` (#2326)).
 
 ---
 
