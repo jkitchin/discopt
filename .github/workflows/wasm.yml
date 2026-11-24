@@ -12,6 +12,9 @@ on:
     paths:
       - "crates/discopt-wasm/**"
       - ".github/workflows/wasm.yml"
+      # `build-wheel.sh --check` reads the pounce-solver floor from here, so a
+      # floor bump has to run the staged-wheel check on its own PR (#2326).
+      - "pyproject.toml"
   workflow_dispatch:
 
 permissions:
