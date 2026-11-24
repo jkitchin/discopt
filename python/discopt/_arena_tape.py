@@ -356,21 +356,18 @@ def _arena_sum_of_squares(prog: _Program, root: int) -> bool:
     return True
 
 
-def lower(prog: _Program, roots: list[int], E: Any) -> list:
-    """Lower the arena to a ``cache`` of tape nodes, ``None`` where unsupported.
+def _mark_needed(prog: _Program, roots: Any) -> tuple[np.ndarray, dict[int, list[tuple[int, int]]]]:
+    """The backward pass of :func:`lower`: which nodes are materialised, and the chains.
 
-    Two passes. The first walks *backwards* from the roots marking which nodes
-    are actually reachable and, at each additive chain root, recording its
-    flattened leaves and marking those (not the chain's interior nodes) as
-    needed -- mirroring ``_nl_expr_compiler._children``, which descends straight
-    to a chain's leaves so the interiors are never lowered. Because a child's id
-    is always below its parent's, one backward sweep suffices.
-
-    The second pass walks *forwards* and materialises each needed node; every
-    operand it reads has a lower id and so is already in ``cache``.
+    Walks *backwards* from the roots marking which nodes are actually reachable
+    and, at each additive chain root, recording its flattened leaves and marking
+    those (not the chain's interior nodes) as needed -- mirroring
+    ``_nl_expr_compiler._children``, which descends straight to a chain's leaves
+    so the interiors are never lowered. Because a child's id is always below its
+    parent's, one backward sweep suffices.
     """
     n = prog.n
-    op, a, b, k = prog.op, prog.a, prog.b, prog.k
+    op, a, b = prog.op, prog.a, prog.b
 
     needed = np.zeros(n, dtype=bool)
     chains: dict[int, list[tuple[int, int]]] = {}
@@ -395,98 +392,119 @@ def lower(prog: _Program, roots: list[int], E: Any) -> list:
         if o == OP_SUMOVER:
             for t in prog.args(i):
                 needed[t] = True
+    return needed, chains
 
-    cache: list = [None] * n
-    for i in range(n):
-        if not needed[i]:
-            continue
-        o = int(op[i])
 
-        if o == OP_UNSUPPORTED:
-            continue
-        if o == OP_CONST:
-            cache[i] = E.const_(float(k[i]))
-            continue
-        if o == OP_VAR:
-            cache[i] = E.var(int(k[i]))
-            continue
+def _lower_node(
+    prog: _Program, i: int, chains: dict[int, list[tuple[int, int]]], cache: list, E: Any
+) -> None:
+    """The forward step of :func:`lower` for one needed node: set ``cache[i]``.
 
-        ch = chains.get(i)
-        if ch is not None:
-            # A separate flag rather than re-using `parts` as its own "dropped"
-            # sentinel: one unsupported leaf drops the whole chain, and a list
-            # that is sometimes `None` is both harder to read and untypeable.
-            parts: list[Any] = []
-            complete = True
-            for sign, leaf in ch:
-                p = cache[leaf]
-                if p is None:
-                    complete = False
-                    break
-                parts.append(p if sign > 0 else -p)
-            if complete:
-                cache[i] = E.sum(parts)
-            continue
+    Leaves ``cache[i]`` as ``None`` where the node is unsupported. Every operand
+    it reads has a lower id and must already be in ``cache``.
+    """
+    op, a, b, k = prog.op, prog.a, prog.b, prog.k
+    o = int(op[i])
 
-        if o == OP_SUMOVER:
-            terms = [cache[t] for t in prog.args(i)]
-            if any(t is None for t in terms):
-                continue
-            # Same degenerate-arity rules as `_nl_expr_compiler`: a sum over no
-            # terms is the constant 0, a sum over one term is that term.
-            if not terms:
-                cache[i] = E.const_(0.0)
-            elif len(terms) == 1:
-                cache[i] = terms[0]
+    if o == OP_UNSUPPORTED:
+        return
+    if o == OP_CONST:
+        cache[i] = E.const_(float(k[i]))
+        return
+    if o == OP_VAR:
+        cache[i] = E.var(int(k[i]))
+        return
+
+    ch = chains.get(i)
+    if ch is not None:
+        # A separate flag rather than re-using `parts` as its own "dropped"
+        # sentinel: one unsupported leaf drops the whole chain, and a list
+        # that is sometimes `None` is both harder to read and untypeable.
+        parts: list[Any] = []
+        complete = True
+        for sign, leaf in ch:
+            p = cache[leaf]
+            if p is None:
+                complete = False
+                break
+            parts.append(p if sign > 0 else -p)
+        if complete:
+            cache[i] = E.sum(parts)
+        return
+
+    if o == OP_SUMOVER:
+        terms = [cache[t] for t in prog.args(i)]
+        if any(t is None for t in terms):
+            return
+        # Same degenerate-arity rules as `_nl_expr_compiler`: a sum over no
+        # terms is the constant 0, a sum over one term is that term.
+        if not terms:
+            cache[i] = E.const_(0.0)
+        elif len(terms) == 1:
+            cache[i] = terms[0]
+        else:
+            cache[i] = E.sum(terms)
+        return
+
+    if o in (OP_NEG, OP_ABS):
+        arg = cache[a[i]]
+        if arg is None:
+            return
+        cache[i] = -arg if o == OP_NEG else abs(arg)
+        return
+
+    if o >= OP_FUNC_BASE:
+        fidx = o - OP_FUNC_BASE
+        arg = cache[a[i]]
+        if arg is None:
+            return
+        if fidx == _FUNC_LOG2:
+            # Exactly the form `_nl_expr_compiler` uses, because the two
+            # paths must build the same tape: `log(a) * (1/ln 2)`.
+            cache[i] = E.log(arg) * E.const_(1.0 / math.log(2.0))
+            return
+        if fidx == _FUNC_SQRT:
+            # Same edge-honest form as `_nl_expr_compiler._sqrt` (#1491), and
+            # the same norm exception for a sum of squares (#1933).
+            if _arena_sum_of_squares(prog, int(a[i])):
+                cache[i] = E.sqrt(arg)
             else:
-                cache[i] = E.sum(terms)
-            continue
+                cache[i] = _sqrt(E, arg)
+            return
+        method = _FUNC_METHOD.get(fidx)
+        if method is None:
+            return
+        cache[i] = getattr(arg, method)()
+        return
 
-        if o in (OP_NEG, OP_ABS):
-            arg = cache[a[i]]
-            if arg is None:
-                continue
-            cache[i] = -arg if o == OP_NEG else abs(arg)
-            continue
+    lhs, rhs = cache[a[i]], cache[b[i]]
+    if lhs is None or rhs is None:
+        return
+    if o == OP_ADD:
+        cache[i] = lhs + rhs
+    elif o == OP_SUB:
+        cache[i] = lhs - rhs
+    elif o == OP_MUL:
+        cache[i] = lhs * rhs
+    elif o == OP_DIV:
+        cache[i] = lhs / rhs
+    elif o == OP_POW:
+        cache[i] = _pow(E, lhs, rhs)
 
-        if o >= OP_FUNC_BASE:
-            fidx = o - OP_FUNC_BASE
-            arg = cache[a[i]]
-            if arg is None:
-                continue
-            if fidx == _FUNC_LOG2:
-                # Exactly the form `_nl_expr_compiler` uses, because the two
-                # paths must build the same tape: `log(a) * (1/ln 2)`.
-                cache[i] = E.log(arg) * E.const_(1.0 / math.log(2.0))
-                continue
-            if fidx == _FUNC_SQRT:
-                # Same edge-honest form as `_nl_expr_compiler._sqrt` (#1491), and
-                # the same norm exception for a sum of squares (#1933).
-                if _arena_sum_of_squares(prog, int(a[i])):
-                    cache[i] = E.sqrt(arg)
-                else:
-                    cache[i] = _sqrt(E, arg)
-                continue
-            method = _FUNC_METHOD.get(fidx)
-            if method is None:
-                continue
-            cache[i] = getattr(arg, method)()
-            continue
 
-        lhs, rhs = cache[a[i]], cache[b[i]]
-        if lhs is None or rhs is None:
-            continue
-        if o == OP_ADD:
-            cache[i] = lhs + rhs
-        elif o == OP_SUB:
-            cache[i] = lhs - rhs
-        elif o == OP_MUL:
-            cache[i] = lhs * rhs
-        elif o == OP_DIV:
-            cache[i] = lhs / rhs
-        elif o == OP_POW:
-            cache[i] = _pow(E, lhs, rhs)
+def lower(prog: _Program, roots: list[int], E: Any) -> list:
+    """Lower the arena to a ``cache`` of tape nodes, ``None`` where unsupported.
 
+    Two passes. The first (:func:`_mark_needed`) walks *backwards* from the
+    roots marking which nodes are reachable and recording each additive chain's
+    flattened leaves. The second walks *forwards* and materialises each needed
+    node (:func:`_lower_node`); every operand it reads has a lower id and so is
+    already in ``cache``.
+    """
+    needed, chains = _mark_needed(prog, roots)
+    cache: list = [None] * prog.n
+    for i in np.flatnonzero(needed).tolist():
+        _lower_node(prog, i, chains, cache, E)
     return cache
 
 
@@ -555,9 +573,14 @@ def try_build_arena_tape_split(model: Any, E: Any) -> Optional[tuple[Any, list, 
     return built[0], built[1], built[2]
 
 
-def _build_arena_tape(
-    model: Any, E: Any, *, split_linear: bool
-) -> Optional[tuple[Any, list, Optional[LinearCSR]]]:
+def _arena_inputs(
+    model: Any, *, split_linear: bool
+) -> Optional[tuple[_Program, int, list[int], dict[int, tuple[list[int], list[float], float]]]]:
+    """``(prog, objective id, constraint ids, linear rows)``, or ``None`` to fall back.
+
+    Everything :func:`_build_arena_tape` decides before it lowers a node; shared
+    with :func:`try_plan_chunked_arena_tape` so the two refuse the same models.
+    """
     if not arena_tape_enabled():
         return None
     # Builder rows would land ahead of the expression rows in the arena while the
@@ -625,15 +648,44 @@ def _build_arena_tape(
     prog = _Program(repr_.tape_program())
     if obj_id < 0 or obj_id >= prog.n:
         return None
+    if any(cid < 0 or cid >= prog.n for cid in con_ids):
+        return None
 
     linear: dict[int, tuple[list[int], list[float], float]] = {}
     if split_linear:
         for row, cid in enumerate(con_ids):
-            if cid < 0 or cid >= prog.n:
-                return None
             lin = _linear_row(prog, cid)
             if lin is not None:
                 linear[row] = lin
+    return prog, obj_id, con_ids, linear
+
+
+def _linear_csr(rows: range, linear: dict[int, tuple[list[int], list[float], float]]) -> LinearCSR:
+    """The CSR triple of *rows*' linear segments, local to those rows."""
+    lo = rows.start
+    indptr = np.zeros(len(rows) + 1, dtype=np.int64)
+    for row in rows:
+        lin = linear.get(row)
+        if lin is not None:
+            indptr[row - lo + 1] = len(lin[0])
+    np.cumsum(indptr, out=indptr)
+    indices = np.empty(int(indptr[-1]), dtype=np.int64)
+    data = np.empty(int(indptr[-1]), dtype=np.float64)
+    for row in rows:
+        lin = linear.get(row)
+        if lin is not None:
+            indices[indptr[row - lo] : indptr[row - lo + 1]] = lin[0]
+            data[indptr[row - lo] : indptr[row - lo + 1]] = lin[1]
+    return indptr, indices, data
+
+
+def _build_arena_tape(
+    model: Any, E: Any, *, split_linear: bool
+) -> Optional[tuple[Any, list, Optional[LinearCSR]]]:
+    inputs = _arena_inputs(model, split_linear=split_linear)
+    if inputs is None:
+        return None
+    prog, obj_id, con_ids, linear = inputs
 
     # A split row's leaves are not lowered unless something else reaches them,
     # so the `NlExpr` nodes they would have cost are never built (#2293).
@@ -650,16 +702,320 @@ def _build_arena_tape(
         return None
     if not split_linear:
         return obj, cons, None
-    indptr = np.zeros(len(con_ids) + 1, dtype=np.int64)
-    for row, (slots, _, _) in linear.items():
-        indptr[row + 1] = len(slots)
-    np.cumsum(indptr, out=indptr)
-    indices = np.empty(int(indptr[-1]), dtype=np.int64)
-    data = np.empty(int(indptr[-1]), dtype=np.float64)
-    for row, (slots, coefs, _) in linear.items():
-        indices[indptr[row] : indptr[row + 1]] = slots
-        data[indptr[row] : indptr[row + 1]] = coefs
-    return obj, cons, (indptr, indices, data)
+    return obj, cons, _linear_csr(range(len(con_ids)), linear)
+
+
+# ---------------------------------------------------------------------------
+# Chunked lowering for `pounce.NlProblemBuilder` (#2324)
+# ---------------------------------------------------------------------------
+
+#: Arena opcodes a POUNCE row can be built from and still be one the quadratic
+#: recognizer keeps as its own per-row tree (``polynomial_ops_only`` in
+#: ``pounce-py/src/nl_expr.rs``). A superset of what POUNCE keeps, which is the
+#: safe direction: see :func:`plan_chunks`.
+_POLY_OPS = frozenset(
+    {OP_CONST, OP_VAR, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_POW, OP_NEG, OP_SUMOVER}
+)
+
+#: Rows per chunk the planner aims for. A chunk is cut at the first admissible
+#: boundary at or after this many rows. pounce#1263 measured one 28-row step per
+#: chunk and 28 steps per chunk within 1% of each other, so the size is not
+#: sensitive; it bounds how much ``NlExpr`` is alive at once.
+CHUNK_ROWS = 1024
+
+
+def _operand_csr(
+    prog: _Program, needed: np.ndarray, chains: dict[int, list[tuple[int, int]]]
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(ptr, idx)``: each needed node's operands as :func:`_lower_node` reads them.
+
+    A chain root's operands are its flattened leaves; a sum's are its terms; a
+    unary or function node reads ``a``; a binary node reads ``a`` and ``b``; a
+    leaf or unsupported node reads nothing. Only what lowering reads is an edge:
+    an edge the tape does not have would be counted as a reference POUNCE never
+    sees (:func:`plan_chunks`). Repeats are kept. Built with numpy except for the
+    chains, which are already Python lists.
+    """
+    n = prog.n
+    op, a, b = prog.op, prog.a, prog.b
+    chain_ids = np.fromiter(chains.keys(), dtype=np.int64, count=len(chains))
+    is_chain = np.zeros(n, dtype=bool)
+    is_chain[chain_ids] = True
+    is_sum = needed & (op == OP_SUMOVER)
+    plain = needed & ~is_chain & ~is_sum & ~np.isin(op, (OP_CONST, OP_VAR, OP_UNSUPPORTED))
+    reads_a = plain & (a >= 0)
+    reads_b = plain & ~np.isin(op, (OP_NEG, OP_ABS)) & (op < OP_FUNC_BASE) & (b >= 0)
+    sum_len = np.diff(prog._args_ptr).astype(np.int64)
+
+    cnt = reads_a.astype(np.int64) + reads_b
+    cnt[is_sum] = sum_len[is_sum]
+    if len(chains):
+        cnt[chain_ids] = [len(ch) for ch in chains.values()]
+    ptr = np.zeros(n + 1, dtype=np.int64)
+    np.cumsum(cnt, out=ptr[1:])
+    idx = np.empty(int(ptr[-1]), dtype=np.int64)
+
+    ia = np.flatnonzero(reads_a)
+    idx[ptr[ia]] = a[ia]
+    ib = np.flatnonzero(reads_b)
+    idx[ptr[ib] + reads_a[ib]] = b[ib]
+    s = np.flatnonzero(is_sum)
+    lens = sum_len[s]
+    total = int(lens.sum())
+    if total:
+        within = np.arange(total, dtype=np.int64) - np.repeat(np.cumsum(lens) - lens, lens)
+        idx[np.repeat(ptr[s], lens) + within] = prog._args_flat[
+            np.repeat(prog._args_ptr[s], lens) + within
+        ]
+    for i, ch in chains.items():
+        idx[ptr[i] : ptr[i + 1]] = [leaf for _, leaf in ch]
+    return ptr, idx
+
+
+def plan_chunks(
+    prog: _Program,
+    obj_id: int,
+    con_ids: list[int],
+    linear: dict[int, Any],
+    target_rows: int = CHUNK_ROWS,
+    marked: Optional[tuple[np.ndarray, dict[int, list[tuple[int, int]]]]] = None,
+) -> Optional[tuple[list[range], np.ndarray, np.ndarray]]:
+    """Cut the rows into chunks that ``NlProblemBuilder`` builds exactly as one call does.
+
+    Returns ``(chunks, first_row, last_row)`` -- the chunks as contiguous row
+    ranges, and per arena node the first and last row reaching it (``len(con_ids)``
+    standing for the objective, ``-1`` for a node nothing reaches) -- or ``None``
+    when no cut into two or more is exact, and the caller builds with one
+    ``build_nl_problem``. The sweeps run in Rust
+    (``discopt_core::tape_plan::plan_chunks``); this function decides what they
+    sweep.
+
+    **Why a cut can change the problem.** POUNCE shares a subexpression (one
+    copied body, which its hybrid tape may promote into the shared-CSE prelude)
+    when it counts two references to it. ``build_nl_problem`` counts over every
+    row; the builder's ``Materializer`` counts per chunk and reuses a body an
+    earlier chunk shared. So a body one call shares is inlined by the builder
+    when its references straddle chunks and the first chunk that reaches it
+    reaches it only once -- and then POUNCE's Hessian moves in the last bits
+    (measured: 4.7e-15 relative on ``test_2324_chunked_build``'s deep fixture
+    cut one row a chunk, with values and Jacobian unchanged). A bound-neutral
+    change must not move the Hessian (CLAUDE.md §5), so such a cut is never
+    taken.
+
+    **The rule.** For every non-leaf node ``v`` that POUNCE could count twice
+    model-wide, the chunk holding the first row that reaches ``v`` must already
+    count two references to it. The counts bracket POUNCE's from the safe side:
+
+    * *model-wide* (upper): distinct parent nodes from any row or the objective,
+      plus one per row whose root ``v`` is. POUNCE counts per operand slot and
+      re-counts below a row's sum spine, but an extra count of that kind only
+      ever comes from a parent this already counts, or from a node above that
+      is itself counted twice and so is held to the rule.
+    * *in the first chunk* (lower): distinct parents reached from rows that
+      POUNCE certainly materialises through its shared maps -- rows reaching an
+      operation outside :data:`_POLY_OPS`. A row POUNCE's quadratic recognizer
+      keeps as its own tree is copied with a private map and counts nothing;
+      which polynomial rows it keeps is not decided here, so none of them is
+      counted. Root references are not counted either: POUNCE does not count a
+      row's root as a reference to it.
+
+    Var and constant nodes are cloned into each operand by ``NlExpr`` and never
+    shared, so they are exempt.
+
+    **The objective** is materialised by ``build`` after every chunk, while one
+    call counts it with the rows. A node it shares with the rows is therefore
+    held to the rule within the rows alone; if the rows cannot satisfy it, no
+    chunking is exact and ``None`` is returned.
+
+    **The cut.** For a node that violates the rule at row granularity, the rows
+    from its first reach to the row of its second counted parent must share a
+    chunk. Merging chunks only adds references to a chunk's count, so the union
+    of those intervals satisfies every node at once and so does any coarsening of
+    it; the chunks are then grown to ``target_rows`` at the admissible
+    boundaries.
+    """
+    from discopt._rust import tape_chunk_plan
+
+    if marked is None:
+        taped = [cid for row, cid in enumerate(con_ids) if row not in linear]
+        marked = _mark_needed(prog, [obj_id, *taped])
+    needed, chains = marked
+    ptr, idx = _operand_csr(prog, needed, chains)
+    poly = np.isin(prog.op, tuple(_POLY_OPS))
+    leaf = np.isin(prog.op, (OP_CONST, OP_VAR))
+    row_root = np.asarray(con_ids, dtype=np.int64)
+    if linear:
+        row_root[np.fromiter(linear.keys(), dtype=np.int64, count=len(linear))] = -1
+    starts, first_row, last_row = tape_chunk_plan(
+        ptr, idx, poly, leaf, row_root, int(obj_id), int(target_rows)
+    )
+    del ptr, idx, poly, leaf
+    if len(starts) < 3:
+        return None
+    st = starts.tolist()
+    return [range(st[c], st[c + 1]) for c in range(len(st) - 1)], first_row, last_row
+
+
+class ArenaDeclined(Exception):
+    """A chunked arena lowering met an unsupported node; build nothing from it."""
+
+
+class ArenaPrepared:
+    """What :func:`try_build_arena_tape_split` decides before lowering, kept for reuse.
+
+    :func:`prepare_arena_tape` computes it once; :meth:`plan` and
+    :meth:`lower_split` both start from it, so a model the planner does not cut
+    is lowered without repeating the arena walk, the linear-row scan or the
+    reachability sweep.
+    """
+
+    __slots__ = ("prog", "obj_id", "con_ids", "linear", "marked")
+
+    def __init__(
+        self,
+        prog: _Program,
+        obj_id: int,
+        con_ids: list[int],
+        linear: dict[int, tuple[list[int], list[float], float]],
+    ) -> None:
+        self.prog = prog
+        self.obj_id = obj_id
+        self.con_ids = con_ids
+        self.linear = linear
+        taped = [cid for row, cid in enumerate(con_ids) if row not in linear]
+        self.marked = _mark_needed(prog, [obj_id, *taped])
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.con_ids)
+
+    @property
+    def n_taped(self) -> int:
+        return len(self.con_ids) - len(self.linear)
+
+    def lower_split(self, E: Any) -> Optional[tuple[Any, list, LinearCSR]]:
+        """:func:`try_build_arena_tape_split`'s result, from the prepared state."""
+        needed, chains = self.marked
+        cache: list = [None] * self.prog.n
+        for i in np.flatnonzero(needed).tolist():
+            _lower_node(self.prog, i, chains, cache, E)
+        obj = cache[self.obj_id]
+        if obj is None:
+            return None
+        cons: list[Any] = []
+        for row, cid in enumerate(self.con_ids):
+            lin = self.linear.get(row)
+            cons.append(cache[cid] if lin is None else lin[2])
+        if any(c is None for c in cons):
+            return None
+        return obj, cons, _linear_csr(range(len(self.con_ids)), self.linear)
+
+    def plan(self, E: Any, target_rows: int = CHUNK_ROWS) -> Optional["ChunkedArenaTape"]:
+        """A :class:`ChunkedArenaTape`, or ``None`` where no exact cut exists."""
+        planned = plan_chunks(
+            self.prog, self.obj_id, self.con_ids, self.linear, target_rows, self.marked
+        )
+        if planned is None:
+            return None
+        chunks, first_row, last_row = planned
+        return ChunkedArenaTape(self, chunks, first_row, last_row, E)
+
+
+def prepare_arena_tape(model: Any) -> Optional[ArenaPrepared]:
+    """:class:`ArenaPrepared` for *model* with linear rows split, or ``None`` to fall back."""
+    inputs = _arena_inputs(model, split_linear=True)
+    return None if inputs is None else ArenaPrepared(*inputs)
+
+
+class ChunkedArenaTape:
+    """The arena lowering of :func:`try_build_arena_tape_split`, one chunk at a time.
+
+    :meth:`chunks` yields ``(rows, linear_csr)`` per planned chunk, lowering
+    only the nodes that chunk is the first to reach and dropping, once the
+    chunk has been yielded, every node no later chunk (or the objective)
+    reaches. A node a later chunk still needs -- a parameter's ``exp(p_j)`` --
+    stays in the cache, so the later chunk gets the same ``NlExpr`` object, as
+    one lowering would hand it. :meth:`objective` lowers what is left. The
+    rows, the objective and the CSR are exactly those
+    :func:`try_build_arena_tape_split` returns, cut at :attr:`plan`.
+
+    Raises :class:`ArenaDeclined` where the one-shot lowering would return
+    ``None``; the caller discards whatever it built from earlier chunks.
+    """
+
+    def __init__(
+        self,
+        prep: ArenaPrepared,
+        plan: list[range],
+        first_row: np.ndarray,
+        last_row: np.ndarray,
+        E: Any,
+    ) -> None:
+        self.prep = prep
+        self.plan = plan
+        self.n_rows = prep.n_rows
+        self._E = E
+        # Chunk of each node's first and last reach; the objective is chunk K.
+        starts = np.asarray([r.start for r in plan], dtype=np.int64)
+        reached = np.flatnonzero(first_row >= 0)
+        cf = np.searchsorted(starts, first_row[reached], side="right") - 1
+        cl = np.searchsorted(starts, last_row[reached], side="right") - 1
+        K = len(plan)
+        cf[first_row[reached] >= self.n_rows] = K
+        cl[last_row[reached] >= self.n_rows] = K
+        order = np.lexsort((reached, cf))
+        self._by_first = reached[order]
+        self._first_bounds = np.searchsorted(cf[order], np.arange(K + 2))
+        order = np.argsort(cl, kind="stable")
+        self._by_last = reached[order]
+        self._last_bounds = np.searchsorted(cl[order], np.arange(K + 2))
+        self._objective: Any = None
+        self._consumed = False
+        self._done = False
+
+    def chunks(self) -> Any:
+        if self._consumed:
+            raise RuntimeError("ChunkedArenaTape.chunks() may be consumed once")
+        self._consumed = True
+        prep, plan = self.prep, self.plan
+        prog, linear, con_ids = prep.prog, prep.linear, prep.con_ids
+        chains = prep.marked[1]
+        by_first, fb = self._by_first, self._first_bounds
+        by_last, lb = self._by_last, self._last_bounds
+        cache: list = [None] * prog.n
+        E = self._E
+        for c, rows in enumerate(plan):
+            for i in by_first[fb[c] : fb[c + 1]].tolist():
+                _lower_node(prog, i, chains, cache, E)
+            out: list[Any] = []
+            for row in rows:
+                lin = linear.get(row)
+                if lin is not None:
+                    out.append(lin[2])
+                    continue
+                node = cache[con_ids[row]]
+                if node is None:
+                    raise ArenaDeclined(f"row {row} reaches an unsupported arena node")
+                out.append(node)
+            yield out, _linear_csr(rows, linear)
+            del out
+            for i in by_last[lb[c] : lb[c + 1]].tolist():
+                cache[i] = None
+        K = len(plan)
+        for i in by_first[fb[K] : fb[K + 1]].tolist():
+            _lower_node(prog, i, chains, cache, E)
+        obj = cache[prep.obj_id]
+        if obj is None:
+            raise ArenaDeclined("the objective reaches an unsupported arena node")
+        self._objective = obj
+        self._done = True
+
+    def objective(self) -> Any:
+        """The objective's tape node, unnegated; valid once :meth:`chunks` is exhausted."""
+        if not self._done:
+            raise RuntimeError("ChunkedArenaTape.objective() before every chunk was consumed")
+        obj, self._objective = self._objective, None
+        return obj
 
 
 def try_build_expanded_tape(model: Any, E: Any) -> Optional[tuple[Any, list, list[int]]]:
