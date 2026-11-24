@@ -33,14 +33,28 @@ pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
 
 def _record_budgets(monkeypatch):
-    """Record ``(time_limit_s, seconds_left_at_call)`` per probe."""
-    state = {"deadline": None}
+    """Record ``(time_limit_s, t_before, t_call)`` per probe.
 
-    def left(tl):
-        rem = state["deadline"] - time.perf_counter() if state["deadline"] else float("nan")
-        return (tl, rem)
+    The sweep computes each probe's budget as ``deadline - perf_counter()`` at some
+    instant ``t_budget`` that this instrument cannot observe. It can observe two
+    instants that bracket it: ``t_call``, read here at the binding call, which comes
+    after the budget is computed, and ``t_before``, the previous probe's ``t_call``
+    (or ``state["t_start"]``, read before the sweep starts, for the first probe),
+    which comes before it. ``perf_counter`` is monotonic, so a budget equal to the
+    remaining time satisfies ``deadline - t_call <= tl <= deadline - t_before``
+    exactly. The earlier one-sided check ``tl <= (deadline - t_call) + 1e-3`` charged
+    the time between the sweep's clock read and this one to a 1 ms tolerance, and a
+    slow CI runner exceeded it by 3.1 ms (``59.99585 <= 59.99276 + 0.001``, #2327).
+    """
+    state: dict = {"deadline": None, "t_start": None, "t_last": None}
 
-    return record_binding_time_limits(monkeypatch, on_call=left), state
+    def bracket(tl):
+        t_call = time.perf_counter()
+        t_before = state["t_last"] if state["t_last"] is not None else state["t_start"]
+        state["t_last"] = t_call
+        return (tl, t_before, t_call)
+
+    return record_binding_time_limits(monkeypatch, on_call=bracket), state
 
 
 @pytest.mark.parametrize("name", list(PANEL))
@@ -50,14 +64,21 @@ def test_probe_lp_receives_remaining_deadline(monkeypatch, name):
     model = PANEL[name]()
     n_orig = sum(v.size for v in model._variables)
     rel = _build_relaxation(model)
-    state["deadline"] = time.perf_counter() + 60.0
-    run_obbt_on_relaxation(rel, n_orig=n_orig, time_limit_per_lp=5.0, deadline=state["deadline"])
+    deadline = time.perf_counter() + 60.0
+    state["deadline"] = deadline
+    state["t_start"] = time.perf_counter()
+    run_obbt_on_relaxation(rel, n_orig=n_orig, time_limit_per_lp=5.0, deadline=deadline)
 
     assert seen, "probe binding never called: the instrument measured nothing"
-    for tl, left in seen:
+    for tl, t_before, t_call in seen:
         # Before #2006 ``tl`` was None: the probe ran unbounded past the deadline.
         assert tl is not None and np.isfinite(tl)
-        assert 0.0 <= tl <= left + 1e-3
+        # The remaining time at an instant between the two clock reads; no tolerance.
+        assert 0.0 <= deadline - t_call <= tl <= deadline - t_before, (
+            tl,
+            deadline - t_before,
+            deadline - t_call,
+        )
     print(f"EXECUTED {len(seen)} probe-budget assertions")
 
 
