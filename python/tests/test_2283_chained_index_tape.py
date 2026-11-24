@@ -111,8 +111,9 @@ def _tape_evaluator(model, arena: bool, monkeypatch):
 
     used = []
 
-    # Both arena entry points: the evaluator takes the `_split` one when its
-    # POUNCE accepts `con_linear=` (#2293), the plain one otherwise.
+    # Both arena entry points: the evaluator lowers through `ArenaPrepared`
+    # (the `_split` lowering, prepared once, #2324) when its POUNCE accepts
+    # `con_linear=` (#2293), through the plain one otherwise.
     def spying(real):
         def spy(*a):
             out = real(*a)
@@ -122,7 +123,9 @@ def _tape_evaluator(model, arena: bool, monkeypatch):
         return spy
 
     monkeypatch.setattr(T, "try_build_arena_tape", spying(T.try_build_arena_tape))
-    monkeypatch.setattr(T, "try_build_arena_tape_split", spying(T.try_build_arena_tape_split))
+    from discopt._arena_tape import ArenaPrepared
+
+    monkeypatch.setattr(ArenaPrepared, "lower_split", spying(ArenaPrepared.lower_split))
     monkeypatch.setenv("DISCOPT_ARENA_TAPE", "1" if arena else "0")
     ev = T.TapeNLPEvaluator(model)
     monkeypatch.undo()

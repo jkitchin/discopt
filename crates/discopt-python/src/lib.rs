@@ -20,6 +20,7 @@ mod mps_bindings;
 mod nl_bindings;
 mod sat_bindings;
 mod spatial_bindings;
+mod tape_plan_bindings;
 
 /// Returns the discopt version.
 #[pyfunction]
@@ -39,6 +40,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<expr_bindings::PySubstitutionChain>()?;
     m.add_class::<expr_bindings::PyModelBuilder>()?;
     m.add_function(wrap_pyfunction!(expr_bindings::model_to_repr, m)?)?;
+    m.add_function(wrap_pyfunction!(tape_plan_bindings::tape_chunk_plan, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_file, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_string, m)?)?;
     m.add_function(wrap_pyfunction!(mps_bindings::read_mps_text, m)?)?;

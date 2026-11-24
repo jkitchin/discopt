@@ -20,6 +20,7 @@ pub mod parallel;
 pub mod presolve;
 pub mod profile;
 pub mod sat;
+pub mod tape_plan;
 pub mod term_classifier;
 pub mod work;
 

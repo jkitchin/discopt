@@ -59,10 +59,13 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 import numpy as np
 
 from discopt._arena_tape import (
+    CHUNK_ROWS,
+    ArenaDeclined,
+    ArenaPrepared,
     LinearCSR,
     arena_tape_enabled,
+    prepare_arena_tape,
     try_build_arena_tape,
-    try_build_arena_tape_split,
 )
 from discopt._nl_expr_compiler import (
     UnsupportedForTape,
@@ -155,6 +158,49 @@ def pounce_takes_con_linear() -> bool:
     import pounce
 
     return "con_linear" in (getattr(pounce.build_nl_problem, "__text_signature__", None) or "")
+
+
+def pounce_takes_keep_expressions() -> bool:
+    """Does this POUNCE's ``build_nl_problem`` take ``keep_expressions=`` (#2324)?
+
+    pounce#1262. ``keep_expressions=False`` drops the problem's own copy of
+    each row's expression tree once it is taped; only ``NlProblem.con_expr``
+    reads it, and nothing here does. Read off the signature, as
+    :func:`pounce_takes_con_linear` is.
+    """
+    import pounce
+
+    sig = getattr(pounce.build_nl_problem, "__text_signature__", None) or ""
+    return "keep_expressions" in sig
+
+
+def pounce_has_problem_builder() -> bool:
+    """Does this POUNCE have ``NlProblemBuilder`` (pounce#1263, #2324)?"""
+    import pounce
+
+    return hasattr(pounce, "NlProblemBuilder")
+
+
+_CHUNKED_ENV = "DISCOPT_TAPE_CHUNKED_BUILD"
+
+#: :meth:`TapeNLPEvaluator._build_chunked`'s "the arena declined partway" result.
+_DECLINED = object()
+#: :meth:`TapeNLPEvaluator._build_tape_nodes`'s "no arena preparation was made".
+_UNSET = object()
+
+
+def chunked_build_enabled() -> bool:
+    """``DISCOPT_TAPE_CHUNKED_BUILD`` (default on): build the shared problem in chunks.
+
+    A documented opt-out, not a stalled graduation. The chunked build is a
+    memory change with no numerical effect by construction --
+    :func:`discopt._arena_tape.plan_chunks` only takes a cut that POUNCE builds
+    exactly as one ``build_nl_problem`` call does, and
+    ``test_2324_chunked_build.py`` holds the two to the last bit -- so ``=0``
+    exists to A/B the memory, and as an escape hatch should a POUNCE ever
+    build a chunked problem differently from the one-call one.
+    """
+    return os.environ.get(_CHUNKED_ENV, "1").strip() != "0"
 
 
 _THREAD_SAFE_NLPROBLEM: Optional[bool] = None
@@ -348,11 +394,8 @@ class TapeNLPEvaluator:
         # Rows the arena lowering handed back as coefficients (#2293); `None`
         # when every row is taped.
         self._con_linear: Optional[LinearCSR] = None
-        obj, cons, sizes = self._build_tape_nodes(model)
-        if self._negate:
-            obj = -obj
-        self._constraint_flat_sizes = np.asarray(sizes, dtype=np.intp)
-        self._n_constraints = len(cons)
+        # Chunks the shared problem was built in (#2324); `None` for one call.
+        self._n_build_chunks: Optional[int] = None
 
         lb, ub = self.variable_bounds
         # float64 arrays, not lists of Python floats: `build_nl_problem`
@@ -361,6 +404,38 @@ class TapeNLPEvaluator:
         # 65 B/variable for the pair, plus another 16 B for the `_tape_*` copies).
         self._lo = np.array(lb, dtype=np.float64)
         self._hi = np.array(ub, dtype=np.float64)
+
+        shared_ok = _nlproblem_is_thread_safe()
+        # The arena's pre-lowering work (#2293's linear split needs it), done once
+        # whether the rows are then lowered in chunks or in one go.
+        prep: Any = _UNSET
+        if arena_tape_enabled() and pounce_takes_con_linear():
+            prep = prepare_arena_tape(model)
+            if shared_ok and prep is not None:
+                main = self._build_chunked(prep)
+                if main is _DECLINED:
+                    # The arena met an unsupported node partway through, so its
+                    # one-shot lowering would decline too: go straight to the walk.
+                    prep = None
+                elif main is not None:
+                    self._finish_build(None, None, main=main)
+                    return
+        obj, cons, sizes = self._build_tape_nodes(model, prep)
+        if self._negate:
+            obj = -obj
+        self._constraint_flat_sizes = np.asarray(sizes, dtype=np.intp)
+        self._n_constraints = len(cons)
+        self._finish_build(obj, cons, shared_ok=shared_ok)
+
+    def _finish_build(
+        self,
+        obj: Any,
+        cons: Optional[list[Any]],
+        *,
+        main: Any = None,
+        shared_ok: bool = True,
+    ) -> None:
+        """Everything :meth:`_build` does once the rows are lowered (or, *main*, built)."""
         # Optional: released (set to None) once the shared problem is built, #2283.
         self._obj_expr: Optional[Any] = obj
         self._con_exprs: Optional[list[Any]] = cons
@@ -377,7 +452,12 @@ class TapeNLPEvaluator:
         self._hole_dense = self._n_tape <= _HOLE_DENSE_MAX
         self._chain_local = threading.local()
         self._residual_exprs = self._build_residual_exprs()
-        self._shared_problem = self._new_problem() if _nlproblem_is_thread_safe() else None
+        self._shared_problem: Optional[tuple[Any, Any, Any]]
+        if main is not None:
+            # #2324: built a chunk at a time; there never were roots to release.
+            self._shared_problem = (main, *self._aux_problems())
+        else:
+            self._shared_problem = self._new_problem() if shared_ok else None
         if self._shared_problem is not None:
             # #2283: the shared NlProblem is the only consumer of these roots, and
             # it has its own tapes -- POUNCE does not keep the NlExpr DAG alive
@@ -411,7 +491,65 @@ class TapeNLPEvaluator:
         self._hess_struct: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._gn_base_map: Optional[np.ndarray] = None
 
-    def _build_tape_nodes(self, model: "Model") -> tuple[Any, list, list[int]]:
+    def _build_chunked(self, prep: ArenaPrepared) -> Any:
+        """The shared ``NlProblem`` built a chunk of rows at a time (#2324), or ``None``.
+
+        ``pounce.NlProblemBuilder`` copies each chunk into the problem as it is
+        added, so only one chunk of ``NlExpr`` is alive at a time instead of the
+        whole model's: pounce#1263 measured peak RSS 2.3 -> 1.3 KiB/row on
+        #2293's nonlinear rows, and the heap left stranded after the build
+        1.4 -> 0.5 KiB/row. The arena lowering keeps, between chunks, only the
+        nodes a later chunk (or the objective) still reaches.
+
+        It is taken only where it builds exactly what one ``build_nl_problem``
+        call builds (:func:`~discopt._arena_tape.plan_chunks`), so this is a
+        memory change and not a numerical one. ``None`` -- the caller builds
+        with one call -- for a model the arena does not lower, a model too small
+        to cut, a POUNCE without the builder, ``DISCOPT_TAPE_CHUNKED_BUILD=0``,
+        or a model with no exact cut. :data:`_DECLINED` when the arena met an
+        unsupported node partway through: the partial builder is dropped.
+
+        Only for the shared problem. The per-thread fallback builds one problem
+        per thread from the same roots, so it has to keep them all.
+
+        Not for a model with at most one chunk's worth of *taped* rows: chunking
+        saves memory only by freeing one chunk's ``NlExpr`` before the next is
+        lowered, and there is nothing to free between chunks of coefficient
+        rows. It costs there instead -- the builder holds each row's ``con_linear``
+        as a vector of its own until ``build``, measured at +130-150 B/row of heap
+        left stranded on #2293's all-linear rows (442-544 -> 577-697 B/row held).
+        """
+        if not (chunked_build_enabled() and pounce_has_problem_builder()):
+            return None
+        if prep.n_taped <= CHUNK_ROWS:
+            return None
+        plan = prep.plan(self._pounce.NlExpr, CHUNK_ROWS)
+        if plan is None:
+            return None
+        if plan.n_rows != len(self._source_constraints):
+            raise AssertionError(
+                f"arena tape produced {plan.n_rows} rows for "
+                f"{len(self._source_constraints)} constraints; row attribution "
+                f"(duals, row map, feasibility) would be wrong"
+            )
+        builder = self._pounce.NlProblemBuilder(self._n_variables, x_l=self._lo, x_u=self._hi)
+        try:
+            for rows, csr in plan.chunks():
+                builder.add_constraints(rows, con_linear=csr)
+                del rows
+        except ArenaDeclined as exc:
+            logger.debug("chunked arena tape declined: %s", exc)
+            return _DECLINED
+        obj = plan.objective()
+        if self._negate:
+            obj = -obj
+        main = builder.build(obj, keep_expressions=False)
+        self._constraint_flat_sizes = np.ones(plan.n_rows, dtype=np.intp)
+        self._n_constraints = plan.n_rows
+        self._n_build_chunks = len(plan.plan)
+        return main
+
+    def _build_tape_nodes(self, model: "Model", prep: Any = _UNSET) -> tuple[Any, list, list[int]]:
         """``(objective, constraint rows, rows-per-constraint)``, arena path first.
 
         The arena lowering covers scalar-bodied expression-path models, which is
@@ -427,19 +565,20 @@ class TapeNLPEvaluator:
         a future divergence between what it counts and what the evaluator does.
         """
         built = None
-        if arena_tape_enabled():
+        if prep is not _UNSET:
             # #2293: an affine row goes to POUNCE as coefficients rather than a
             # taped expression when this POUNCE can take them. Bit-identical
             # (`_arena_tape._linear_row`), so this is a memory change only:
             # measured on 229,376 three-term linear rows, ~600 B of problem
             # and ~600 B of transient `NlExpr` nodes per row become ~270 B.
-            if pounce_takes_con_linear():
-                split = try_build_arena_tape_split(model, self._pounce.NlExpr)
-                if split is not None:
-                    built = (split[0], split[1])
-                    self._con_linear = split[2]
-            else:
-                built = try_build_arena_tape(model, self._pounce.NlExpr)
+            # `prep` is `_build`'s `prepare_arena_tape` result (`None`: the arena
+            # declined), so the arena is walked once whatever happens next.
+            split = prep.lower_split(self._pounce.NlExpr) if prep is not None else None
+            if split is not None:
+                built = (split[0], split[1])
+                self._con_linear = split[2]
+        elif arena_tape_enabled():
+            built = try_build_arena_tape(model, self._pounce.NlExpr)
         if built is not None:
             # Named apart from the `cons` the Python walk below builds: that one
             # is annotated `list[Any]`, and re-using one name for both makes the
@@ -568,7 +707,12 @@ class TapeNLPEvaluator:
                 "TapeNLPEvaluator._new_problem called after the NlExpr roots were "
                 "released; only the per-thread fallback may build more than one problem"
             )
-        extra = {} if self._con_linear is None else {"con_linear": self._con_linear}
+        extra: dict[str, Any] = {}
+        if self._con_linear is not None:
+            extra["con_linear"] = self._con_linear
+        if pounce_takes_keep_expressions():
+            # #2324 item 3: nothing here reads `NlProblem.con_expr`.
+            extra["keep_expressions"] = False
         main = self._pounce.build_nl_problem(
             self._n_tape,
             self._obj_expr,
@@ -577,6 +721,10 @@ class TapeNLPEvaluator:
             x_u=self._tape_hi,
             **extra,
         )
+        return (main, *self._aux_problems())
+
+    def _aux_problems(self) -> tuple[Any, Any]:
+        """``(residual_or_None, hole_args_or_None)``: the small side tapes of a pair."""
         residual = None
         if self._residual_exprs is not None:
             # Objective is a literal 0: this tape exists only for its Jacobian
@@ -601,7 +749,7 @@ class TapeNLPEvaluator:
                 x_l=self._lo,
                 x_u=self._hi,
             )
-        return (main, residual, args)
+        return (residual, args)
 
     @property
     def _problem_pair(self) -> Any:
