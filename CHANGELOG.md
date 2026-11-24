@@ -12,6 +12,15 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`pounce-solver>=0.19` (core dependency and the `pounce` extra; was `>=0.18`).**
+  0.19.0 carries the pounce half of #2293. pounce#1254 adds `build_nl_problem(con_linear=)`,
+  used for affine rows. pounce#1262 adds `keep_expressions=False` and removes the dense
+  Hessian seeds. pounce#1263 adds `NlProblemBuilder`, used by the chunked build (#2324).
+  discopt still detects each feature before using it, but with this floor every install
+  has all three. Measured on #2293's reproducer at 229,376 rows (bytes per row resident
+  after the evaluator build, 0.18.0 -> 0.19.0): linear rows 2150 -> 1118, nonlinear
+  4149 -> 2011, kinetics-style shared rows 4015 -> 2410.
+
 - **Affine constraint rows reach POUNCE as coefficients, not taped expressions
   (#2293).** When the installed POUNCE's `build_nl_problem` takes `con_linear=`, the
   tape evaluator's arena lowering hands each purely affine row (`x`, `-x`, `c*x`

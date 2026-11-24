@@ -9,7 +9,7 @@ file before returning.
 
 What the report holds (measured, not assumed). The behavior with
 jkitchin/pounce#980 (the fix for pounce#979, POUNCE 672320d; in every release
-from 0.13.0, so in all of discopt's pin ``pounce-solver>=0.18``) is described
+from 0.13.0, so in all of discopt's pin ``pounce-solver>=0.19``) is described
 first:
 
 * ``statistics`` -- ``iteration_count``, the ``final_*`` residuals, evaluation
