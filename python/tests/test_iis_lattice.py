@@ -155,3 +155,77 @@ def test_engine_uses_lattice_where_parity_cannot():
     # No bound is needed: the lattice argument ignores them.
     assert res.bounds == []
     assert len(res.certificates) == len(res.constraints) + len(res.integrality)
+
+
+def test_non_integer_or_non_finite_data_gives_no_conclusion():
+    # 2x = 1 is lattice-infeasible; with any non-int datum: None, not False.
+    assert lattice_infeasible([({0: 2}, 1)], {0}) is True
+    assert lattice_infeasible([({0: 2.0}, 1)], {0}) is None
+    assert lattice_infeasible([({0: 2}, 1.0)], {0}) is None
+    assert lattice_infeasible([({0: 2}, 1), ({1: 1.5}, 1)], {0, 1}) is None
+    assert lattice_infeasible([({0: float("inf")}, 1)], {0}) is None
+    assert lattice_infeasible([({0: 2}, float("nan"))], {0}) is None
+    # integer_rows never hands such rows on: fractional / non-finite rows are skipped.
+    import scipy.sparse as sp
+    from discopt._iis_lattice import integer_rows
+
+    A = sp.csr_matrix(np.array([[2.0, 0.0], [1.5, 1.0], [1.0, 1.0], [1.0, 0.0]]))
+    lo = np.array([1.0, 1.0, 0.5, np.inf])
+    rows = integer_rows(A, lo, lo.copy())
+    assert list(rows) == [0]
+    coef, rhs = rows[0]
+    assert coef == {0: 2} and rhs == 1
+    assert all(type(v) is int for v in coef.values()) and type(rhs) is int
+
+
+def test_work_cap_gives_no_conclusion():
+    rows = [({0: 1, 1: 1}, 1), ({0: 1, 1: -1}, 0)]  # 2x = 1
+    assert lattice_infeasible(rows, {0, 1}) is True
+    assert lattice_infeasible(rows, {0, 1}, max_work=1) is None
+
+
+def test_capped_confirmation_falls_through_to_the_existing_route(monkeypatch):
+    """With the gate armed but every later lattice test cut off by the work cap,
+    probes and the presolve-off confirmation use the solver routes they used before
+    the gate, and the IIS is the same."""
+    pytest.importorskip("highspy")
+    from discopt import _iis_lattice
+    from discopt import _iis_milp as im
+
+    def odd_cycle():
+        m = dm.Model("cycle")
+        x = m.binary("x", shape=(5,))
+        for i in range(5):
+            m.subject_to(x[i] + x[(i + 1) % 5] == 1, name=f"cyc{i}")
+        m.minimize(0 * x[0])
+        return m
+
+    ref = milp_iis(odd_cycle())
+    assert ref.n_lattice >= 1
+
+    verdicts: list = []
+    real_test = _iis_lattice.lattice_infeasible
+    real_arm = im._Engine.arm_lattice
+
+    def arm_then_cap(self, *a, **k):
+        armed = real_arm(self, *a, **k)
+        # From here on (the candidate core, the probes, the confirmations):
+        # every test hits the cap, and each verdict is recorded.
+        monkeypatch.setattr(_iis_lattice, "MAX_WORK", 1)
+        monkeypatch.setattr(_iis_lattice, "lattice_infeasible", counted)
+        return armed
+
+    def counted(*a, **k):
+        v = real_test(*a, **k)
+        verdicts.append(v)
+        return v
+
+    monkeypatch.setattr(im._Engine, "arm_lattice", arm_then_cap)
+    m = odd_cycle()
+    res = milp_iis(m, total_time_limit=60.0)
+    # The cap fired on every test with work to do (an empty row set is answered
+    # False before any work), and no test proved anything.
+    assert verdicts.count(None) >= 1 and True not in verdicts, verdicts
+    assert res.n_lattice == 0 and res.parity_rows is None  # nothing decided by it
+    assert res.complete and res.proven_irreducible
+    assert (res.constraints, res.integrality) == (ref.constraints, ref.integrality)

@@ -10,9 +10,14 @@ proof of infeasibility for any subsystem that contains these rows and holds thes
 integralities, whatever its bounds -- and a "yes" says nothing about the bounded
 system.
 
-Everything is integer arithmetic on Python ints: only rows whose coefficients and
-right-hand side are integers enter (a row left out only weakens the test, never
-makes it unsound).
+It is a RELAXATION of the subsystem: variable bounds and inequality rows are
+ignored, so "lattice-infeasible" implies "infeasible", and nothing follows from
+"lattice-feasible". Everything is exact integer arithmetic on Python ints -- no
+floats after :func:`integer_rows` converts the data (``int`` of an integral finite
+float is exact). :func:`integer_rows` selects only rows whose coefficients and
+right-hand side are finite integers; leaving a row out only weakens the test,
+never makes it unsound. :func:`lattice_infeasible` itself returns ``None`` (no
+conclusion), never ``False``, on any row with non-integer or non-finite data.
 
 Generalizes the mod-2 test the IIS engine used before (a parity contradiction is the
 case ``y = comb / 2``), which also required every column of a row to be held
@@ -33,7 +38,7 @@ _INF = 1e20
 
 #: Work cap per test (row operations plus column operations). The test returns
 #: ``None`` (no conclusion) past it, so a large equality system cannot stall a probe.
-#: The smallset's hits need well under 10^5.
+#: The smallset's hits need well under 10^5. Read at call time (tests lower it).
 MAX_WORK = 2_000_000
 
 
@@ -45,6 +50,8 @@ def integer_rows(A, row_lo, row_hi) -> dict[int, tuple[dict[int, int], int]]:
     """``{row: ({col: coef}, rhs)}`` for every equality row with a finite rhs and
     integer coefficients and rhs: the rows the test may use. ``A`` is CSR."""
     out: dict[int, tuple[dict[int, int], int]] = {}
+    # Integral finite floats convert to Python ints exactly; nothing after this
+    # function sees a float.
     lo = np.asarray(row_lo, dtype=float)
     hi = np.asarray(row_hi, dtype=float)
     for r in np.flatnonzero((lo == hi) & (np.abs(lo) < _INF)):
@@ -53,7 +60,7 @@ def integer_rows(A, row_lo, row_hi) -> dict[int, tuple[dict[int, int], int]]:
             continue
         s, e = A.indptr[r], A.indptr[r + 1]
         vals = A.data[s:e]
-        if e == s or not bool(np.all(vals == np.round(vals))):
+        if e == s or not bool(np.all(np.isfinite(vals) & (vals == np.round(vals)))):
             continue
         out[int(r)] = ({int(j): int(v) for j, v in zip(A.indices[s:e], vals) if v}, int(b))
     return out
@@ -159,19 +166,28 @@ def lattice_infeasible(
     rows: list[tuple[dict[int, int], int]],
     held,
     stop_at: Optional[float] = None,
-    max_work: int = MAX_WORK,
+    max_work: Optional[int] = None,
 ) -> Optional[bool]:
-    """``True``: the equality rows ``rows`` (``({col: coef}, rhs)``, integer data)
-    have no solution with the columns in ``held`` integer and every other column
-    real, bounds ignored -- an exact proof. ``False``: they have one. ``None``: the
-    work cap or ``stop_at`` (``time.perf_counter()``) was reached first."""
+    """``True``: the equality rows ``rows`` (``({col: coef}, rhs)``) have no
+    solution with the columns in ``held`` integer and every other column real.
+    Variable bounds are ignored, so this is a relaxation and ``True`` is an exact
+    proof that any system containing these rows and holding these integralities is
+    infeasible. ``False``: the relaxation has a solution (the bounded system may
+    still be infeasible). ``None``: no conclusion -- a coefficient or rhs that is
+    not a Python ``int`` (non-integer or non-finite data), or the work cap
+    (``max_work``, default :data:`MAX_WORK`) or ``stop_at``
+    (``time.perf_counter()``) reached first."""
+    for r, b in rows:
+        if type(b) is not int or any(type(v) is not int for v in r.values()):
+            return None
     if not rows:
         return False
+    cap = MAX_WORK if max_work is None else max_work
     work = [0]
 
     def tick(n: int) -> None:
         work[0] += n
-        if work[0] > max_work or (
+        if work[0] > cap or (
             stop_at is not None and work[0] % 4096 < n and time.perf_counter() > stop_at
         ):
             raise _Budget
