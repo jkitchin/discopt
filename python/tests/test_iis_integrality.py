@@ -16,6 +16,7 @@ matrix rather than discopt's own extraction.
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from _highs_oracle import milp_verdict
 from discopt import _iis_backend as _bk
 from discopt.infeasibility import compute_iis
 
@@ -128,22 +129,16 @@ def _independent_check(
 
 
 def _subsystem_infeasible(A, rlo, rhi, lb, ub, kept_rows, kept_lb, kept_ub, kept_int):
+    """Both HiGHS presolve settings say infeasible and no verified point exists
+    (``_highs_oracle``, #2332: one presolve setting's verdict is not an oracle)."""
     inf = highspy.kHighsInf
     n = A.shape[1]
-    h = highspy.Highs()
-    h.silent()
     held = set(kept_int)
-    clb = [lb[j] if (j in held or j in kept_lb) else -inf for j in range(n)]
-    cub = [ub[j] if (j in held or j in kept_ub) else inf for j in range(n)]
-    h.addVars(n, np.array(clb), np.array(cub))
-    for r in kept_rows:
-        nz = np.flatnonzero(A[r])
-        h.addRow(rlo[r], rhi[r], len(nz), nz.astype(np.int32), A[r, nz])
-    if held:
-        idx = np.array(sorted(held), dtype=np.int32)
-        h.changeColsIntegrality(len(idx), idx, np.array([highspy.HighsVarType.kInteger] * len(idx)))
-    h.run()
-    return h.getModelStatus() == highspy.HighsModelStatus.kInfeasible
+    clb = np.array([lb[j] if (j in held or j in kept_lb) else -inf for j in range(n)])
+    cub = np.array([ub[j] if (j in held or j in kept_ub) else inf for j in range(n)])
+    rows = list(kept_rows)
+    verdict = milp_verdict(A[rows], rlo[rows], rhi[rows], clb, cub, sorted(held))
+    return verdict == "infeasible"
 
 
 @pytest.mark.smoke

@@ -114,10 +114,15 @@ _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS = 1 << 13
 #: 2026-11-18 (#2221) with the canary's ``presolve()`` probe on the hand-off, highspy
 #: 1.12.0, 1.13.0, 1.13.1, 1.14.0, 1.15.0 and 1.15.1 cycle, and 1.11.0 and 1.16.0 return.
 #: The fix is ERGO-Code/HiGHS PR 2962 (bisected on ``latest``), first released in 1.16.0,
-#: where sparsify on and off both reach ``Optimal`` 450623.7692 (2.2 s / 1.5 s). The bit is
-#: kept as a documented opt-out because ``highspy>=1.11`` still admits the cycling
-#: releases; it can go once the floor is >= 1.16 and the #1667 panel is re-measured.
-#: ``test_1671_highs_presolve_cycle_canary.py`` enforces both halves.
+#: where sparsify on and off both reach ``Optimal`` 450623.7692 (2.2 s / 1.5 s).
+#:
+#: Since #2332 the floor is ``highspy>=1.16``, so no supported release cycles and this
+#: bit no longer protects against anything measured. It is KEPT, not because it is
+#: needed, but because removing it changes what HiGHS's presolve does on the default
+#: pure-MILP route and on the ``milp_highs`` masters, where the #1667 change was measured
+#: to move lazy-master outcomes (performance-plan §76.6). What would remove it: the
+#: sparsify on/off panel on 1.16 that #2335 specifies, cert-clean and not harmful.
+#: ``test_1671_highs_presolve_cycle_canary.py`` pins this state until then.
 _PRESOLVE_RULE_SPARSIFY = 1 << 14
 #: Every ``presolve_rule_off`` bit the MILP route sets.
 MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS | _PRESOLVE_RULE_SPARSIFY
@@ -1699,6 +1704,41 @@ _USER_OPTIONS: contextvars.ContextVar[tuple[tuple[str, Any], ...]] = contextvars
     "discopt_highs_user_options", default=()
 )
 
+
+def _primary_presolve_off() -> bool:
+    """Did the caller switch HiGHS's presolve off for the primary MILP solve? (#2332)
+
+    ``solve(presolve=False)`` (#1751) and ``highs_options={"presolve": "off"}`` reach
+    every HiGHS instance of the route as a user option. The #1634 cross-check is only a
+    second opinion if it runs the OTHER configuration, so in that case the cross-solve
+    runs with presolve on (:func:`_cross_presolve_value`). Measured (#2332): HiGHS
+    1.11.0-1.15.1 return ``kInfeasible`` with presolve off on a feasible 5-column MILP
+    that presolve on solves (fixed in 1.16.0); two presolve-off solves would have
+    agreed with each other.
+    """
+    return any(k == "presolve" and v == "off" for k, v in _USER_OPTIONS.get())
+
+
+def _cross_presolve_value() -> str:
+    """HiGHS's ``presolve`` option for the #1634 cross-solve: the configuration the
+    primary did not run (``"off"``, or ``"choose"`` when the caller pinned it off)."""
+    return "choose" if _primary_presolve_off() else "off"
+
+
+def _cross_name() -> str:
+    """How messages name the #1634 cross-solve (:func:`_cross_presolve_value`)."""
+    return "presolve-on" if _primary_presolve_off() else "presolve-free"
+
+
+def _cross_check_exempt(sf: "StdForm") -> bool:
+    """#1655's exemption from the #1634 cross-check, which holds only when the primary
+    ran HiGHS's presolve: :func:`presolve_exact_class` shows that PRESOLVE's absolute
+    tolerances are exact on the model, and says nothing about a presolve-free tree.
+    With the primary's presolve off (#2332) its verdict is the only one there would be,
+    so the cross-check runs."""
+    return presolve_exact_class(sf) and not _primary_presolve_off()
+
+
 #: Set while :func:`solve_milp_std` (the HiGHS MILP route) runs; see :func:`_lp_engine`.
 _IN_HIGHS_MILP_ROUTE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "discopt_in_highs_milp_route", default=False
@@ -1740,7 +1780,8 @@ def user_options(pairs: tuple[tuple[str, Any], ...]) -> Iterator[None]:
 
     They are set after the route's base options (so ``output_flag=True`` turns the
     HiGHS log on) and before each solve's own options, so a route option -- e.g. the
-    #1634 cross-check's ``presolve="off"`` -- always wins over a user one.
+    #1634 cross-check's ``presolve`` -- always wins over a user one. (Under a user
+    ``presolve="off"`` that cross-check runs presolve ON, #2332.)
     """
     token = _USER_OPTIONS.set(tuple(pairs))
     try:
@@ -3181,7 +3222,7 @@ def _certified_milp(sf: StdForm, kw: dict[str, Any]) -> HighsOutcome:
     ``min(presolved, presolve-free)`` rule on every exit, so it no longer drops when a
     longer run happens to prove optimality without confirming it.
     """
-    if not _concurrent_cross_enabled() or presolve_exact_class(sf):
+    if not _concurrent_cross_enabled() or _cross_check_exempt(sf):
         out = _solve_milp_scaled(sf, **kw)
         if out.gap_certified and out.status in ("optimal", "infeasible"):
             return _cross_check_presolve(sf, out, kw)
@@ -3194,7 +3235,7 @@ def _certified_milp(sf: StdForm, kw: dict[str, Any]) -> HighsOutcome:
 
     def _run_cross() -> None:
         try:
-            box["out"] = ctx.run(_solve_milp_scaled, sf, presolve=False, **kw_c)
+            box["out"] = ctx.run(_solve_milp_scaled, sf, cross_check=True, **kw_c)
         except BaseException as err:  # re-raised in the caller's thread below
             box["err"] = err
 
@@ -3219,6 +3260,8 @@ def _certified_milp(sf: StdForm, kw: dict[str, Any]) -> HighsOutcome:
     cross: HighsOutcome = box["out"]
     out.stats["milp/presolve_cross_concurrent"] = 1.0
     out.stats["milp/presolve_cross_check_ran"] = 1.0
+    if _primary_presolve_off():
+        out.stats["milp/presolve_cross_presolve_on"] = 1.0  # #2332
     out.stats["milp/presolve_cross_check_time"] = float(cross.wall_time)
     if not certified:
         rem = None
@@ -3927,7 +3970,7 @@ def _cross_check_presolve(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) ->
     (:func:`_weaker_bound`); one that cannot run for want of budget is withdrawn (#1309).
     The budget already spent is the primary solve's ``wall_time``.
     """
-    if presolve_exact_class(sf):
+    if _cross_check_exempt(sf):
         # #1655: the hazard this check exists for cannot arise here (see
         # :func:`presolve_exact_class`), and on such a model -- a pure-binary
         # scheduling MILP HiGHS proves in 0.07 s -- the presolve-free solve ran for
@@ -3956,8 +3999,10 @@ def _cross_check_presolve(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) ->
     # primary's false kOptimal at it (433.40 certified against a true 363.40); cold, it
     # reached no verdict and the certificate was withdrawn.
     kw["initial_point"] = None
-    cross = _solve_milp_scaled(sf, presolve=False, **kw)
+    cross = _solve_milp_scaled(sf, cross_check=True, **kw)
     out.stats["milp/presolve_cross_check_ran"] = 1.0
+    if _primary_presolve_off():
+        out.stats["milp/presolve_cross_presolve_on"] = 1.0  # #2332
     out.stats["milp/presolve_cross_check_time"] = float(cross.wall_time)
     return _judge_presolve_cross(sf, out, cross, kw)
 
@@ -3983,9 +4028,10 @@ def _judge_presolve_cross(
         # #2187: the #1678 adoption uses this re-derived point, never the raw one.
         return _weaker_bound(sf, out, cross, dict(kw, _cross_rederived=rederived[:1]))
     logger.warning(
-        "HiGHS MILP route: the %s certificate is refuted by a presolve-free HiGHS solve "
+        "HiGHS MILP route: the %s certificate is refuted by a %s HiGHS solve "
         "(%s); reporting the verified point uncertified (#1634)",
         out.status,
+        _cross_name(),
         refuted,
     )
     x, obj = pt
@@ -4011,7 +4057,7 @@ def _judge_presolve_cross(
         bound=bound,
         gap_certified=False,
         message=(
-            f"HiGHS MILP {out.status} certificate refuted by a presolve-free solve: "
+            f"HiGHS MILP {out.status} certificate refuted by a {_cross_name()} solve: "
             f"{refuted} (#1634)"
         ),
         highs_status=out.highs_status,
@@ -4150,7 +4196,7 @@ def _weaker_bound(
         out.labels["milp/presolve_cross_status"] = cross.status
         return _withdraw(
             out,
-            f"the presolve-free cross-solve did not confirm it (status {cross.status}: "
+            f"the {_cross_name()} cross-solve did not confirm it (status {cross.status}: "
             f"{cross.message or 'no message'})",
             cross,
         )
@@ -4239,7 +4285,7 @@ def _tight_cross_bound(
             out.stats["milp/presolve_cross_tight_skipped"] = 1.0
             return False
     tight = _solve_milp_scaled(
-        sf, **dict(kw, presolve=False, feasibility_tolerance=CROSS_TIGHT_FEAS_TOL)
+        sf, **dict(kw, cross_check=True, feasibility_tolerance=CROSS_TIGHT_FEAS_TOL)
     )
     out.stats["milp/presolve_cross_tight_ran"] = 1.0
     out.stats["milp/presolve_cross_tight_time"] = float(tight.wall_time)
@@ -4293,6 +4339,7 @@ def _solve_milp_std(
     feasibility_tolerance: float = 1e-6,
     row_form: Optional[bool] = None,
     stop: Optional[_CrossStop] = None,
+    cross_check: bool = False,
 ) -> HighsOutcome:
     """Solve the MILP ``sf`` under the §3.2 contract.
 
@@ -4304,8 +4351,12 @@ def _solve_milp_std(
     ``row_form`` forces the #1733 logical folding on or off (``None``: the
     ``DISCOPT_MILP_ROW_FORM`` default with its HiGHS-version gate); only the
     :func:`_cross_form_infeasible_check` falsifier sets it.
-    ``presolve=False`` switches HiGHS's presolve off; it is the second solve of the
-    #1634 cross-check (:func:`_cross_check_presolve`), not a user option.
+    ``presolve=False`` switches HiGHS's presolve off (the #2187 presolve-free stage);
+    it is not a user option. ``cross_check=True`` marks a solve of the #1634 cross-check
+    (:func:`_cross_check_presolve`, the concurrent arm of :func:`_certified_milp`, the
+    #1640 tight re-run): it runs the configuration the primary did not -- presolve off,
+    or ON when the caller pinned the primary's presolve off (#2332,
+    :func:`_cross_presolve_value`) -- and overrides ``presolve``.
     ``feasibility_tolerance`` is HiGHS's ``mip_feasibility_tolerance``; only the #1640
     tightened cross-solve (:func:`_weaker_bound`) changes it.
 
@@ -4387,7 +4438,10 @@ def _solve_milp_std(
         # cost-tie test that bad coefficient ratios defeat; see the constant.
         ("presolve_rule_off", int(MILP_PRESOLVE_RULE_OFF)),
     ]
-    if not presolve:
+    if cross_check:
+        # #2332: the cross-solve's configuration is the one the primary did not run.
+        opts.append(("presolve", _cross_presolve_value()))
+    elif not presolve:
         opts.append(("presolve", "off"))
     if rem is not None:
         opts.append(("time_limit", float(rem)))
@@ -4475,6 +4529,7 @@ def _solve_milp_std(
             feasibility_tolerance=feasibility_tolerance,
             row_form=row_form,
             stop=stop,
+            cross_check=cross_check,
         )
         cold.stats["milp/seeded_optimal_without_bound"] = 1.0
         cold.wall_time = time.perf_counter() - t0

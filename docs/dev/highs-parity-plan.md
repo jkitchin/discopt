@@ -73,7 +73,7 @@ Execute §5's checklist strictly in order, one task per loop iteration (a task m
 | **R6** ⚠ verified-LP uses on the **MINLP** path | `solve_lp_std` is also the arbiter for POUNCE `primal_infeasible` labels (#1537, `_linear_node_verified_empty` `solver.py:34903`, guarded by `_highs_lp_verifier_available` `:34732` with a Rust-simplex fallback), the linear-node rescue `_linear_node_lp_rescue` (#1611 D-30, `solver.py:37710`), and the gated free-column node certificate (`DISCOPT_FREE_COLUMN_LP_CERT`, `mccormick_lp.py:446`, `:535`). | **yes** (#1537, #1611) | not in the brief |
 | R7 mentions only | `_relax/partition_selection.py:67` (docstring), `cli.py:76` (deps listing), `amp.py:2294` (docstring), `_tape_nlp_evaluator.py:87` (docstring). | — | text edits in P6 |
 
-Packaging/CI: `highspy>=1.11,!=1.12.0` is a **core** dependency (`pyproject.toml:44`); the
+Packaging/CI: `highspy>=1.16` (was `>=1.11,!=1.12.0` until #2332) is a **core** dependency (`pyproject.toml:44`); the
 `highs` extra is a no-op alias (`:73`). CI lanes: `HiGHS route (highspy …)`
 (`.github/workflows/ci.yml:721`) and the template for a no-dependency lane, `Python
 without JAX` (`:780`, with its corpus guard `python/tests/test_1873_jax_optional.py`).

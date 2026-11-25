@@ -62,7 +62,8 @@ def _tolerance_artifact(monkeypatch):
 
     def artifact(sf, *, presolve=True, **kw):
         out = real(sf, presolve=presolve, **kw)
-        if not presolve and out.bound is not None:
+        # The #1634 cross-solve (``cross_check=True`` since PR #2334's review).
+        if kw.get("cross_check") and out.bound is not None:
             tol = kw.get("feasibility_tolerance", 1e-6)
             out.bound = min(float(out.bound), _ARTIFACT_PER_TOL * tol)
             applied.append(out.bound)

@@ -48,12 +48,20 @@ def _lp():
 
 
 def _presolve_settings(monkeypatch, model, **kw):
+    """Solve ``model`` and return the ``presolve`` value of every HiGHS instance the
+    route built whose presolve it did NOT set itself (the user's ``presolve=False``
+    governs those). :func:`_route_set_presolve` holds the others."""
     seen = []
+    route_set.clear()
     real = lp_milp_highs._new_highs
 
     def spy(highspy, opts):
         h = real(highspy, opts)
-        seen.append(h.getOptionValue("presolve")[1])
+        val = h.getOptionValue("presolve")[1]
+        if any(k == "presolve" for k, _ in opts):
+            route_set.append(val)  # the #1634 cross-solve (and its re-runs)
+        else:
+            seen.append(val)
         return h
 
     monkeypatch.setattr(lp_milp_highs, "_new_highs", spy)
@@ -64,6 +72,10 @@ def _presolve_settings(monkeypatch, model, **kw):
     return r, seen
 
 
+#: Presolve values the route set itself in the last :func:`_presolve_settings` call.
+route_set: list[str] = []
+
+
 @pytest.mark.parametrize("build", [_knapsack, _lp])
 @pytest.mark.requires_highs
 def test_presolve_false_reaches_highs(monkeypatch, build):
@@ -72,6 +84,9 @@ def test_presolve_false_reaches_highs(monkeypatch, build):
     r, seen = _presolve_settings(monkeypatch, build(), presolve=False)
     assert r.status == "optimal"
     assert set(seen) == {"off"}
+    # #2332: the only presolve-on solve is the #1634 cross-check, which must run the
+    # configuration the primary did not (an LP has none).
+    assert set(route_set) == ({"choose"} if build is _knapsack else set())
 
 
 @pytest.mark.requires_highs
@@ -97,3 +112,4 @@ def test_agreeing_highs_option_is_accepted(monkeypatch):
         monkeypatch, _knapsack(), presolve=False, highs_options={"presolve": "off"}
     )
     assert set(seen) == {"off"}
+    assert set(route_set) == {"choose"}  # the #2332 cross-check

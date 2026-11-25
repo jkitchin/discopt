@@ -22,6 +22,7 @@ import pytest
 import scipy.sparse as sp
 
 highspy = pytest.importorskip("highspy")
+from _highs_oracle import milp_verdict  # noqa: E402
 from discopt import _iis_milp  # noqa: E402
 from discopt._iis_milp import _lift_implied_binaries, milp_iis  # noqa: E402
 
@@ -64,25 +65,17 @@ def _matrices(rows, n):
 
 
 def _feasible(rows, keep, n, lb, ub, is_int):
-    inf = highspy.kHighsInf
-    h = highspy.Highs()
-    h.silent()
-    h.addVars(n, lb, np.where(ub >= INF, inf, ub))
-    for r in keep:
-        cols, vals, lo, hi = rows[r]
-        h.addRow(
-            -inf if lo <= -INF else lo,
-            inf if hi >= INF else hi,
-            len(cols),
-            np.array(cols, dtype=np.int32),
-            np.array(vals),
-        )
-    idx = np.flatnonzero(is_int).astype(np.int32)
-    h.changeColsIntegrality(len(idx), idx, np.array([highspy.HighsVarType.kInteger] * len(idx)))
-    h.run()
-    st = h.getModelStatus()
-    assert st in (highspy.HighsModelStatus.kOptimal, highspy.HighsModelStatus.kInfeasible), st
-    return st == highspy.HighsModelStatus.kOptimal
+    """A verified point, or both HiGHS presolve settings saying infeasible
+    (``_highs_oracle``, #2332); anything else fails the test."""
+    keep = list(keep)
+    A = np.zeros((len(keep), n))
+    lo, hi = np.zeros(len(keep)), np.zeros(len(keep))
+    for k, r in enumerate(keep):
+        cols, vals, lo[k], hi[k] = rows[r]
+        A[k, cols] = vals
+    verdict = milp_verdict(A, lo, hi, lb, ub, is_int)
+    assert verdict is not None, (A, lo, hi, lb, ub, is_int)
+    return verdict == "feasible"
 
 
 @pytest.mark.smoke

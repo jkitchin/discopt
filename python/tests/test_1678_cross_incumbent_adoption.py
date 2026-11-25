@@ -59,7 +59,7 @@ def _forge(monkeypatch, *, cross_x_better: bool):
         out = real(sf, presolve=presolve, **kw)
         assert out.status == "optimal" and out.x is not None
         col = int(np.flatnonzero(sf.c == -7.0)[0])
-        if presolve:
+        if not kw.get("cross_check"):  # the #1634 cross-solve is marked since PR #2334
             calls.append("primary")
             x = out.x.copy()
             x[col] = PRIMARY_OBJ / -7.0

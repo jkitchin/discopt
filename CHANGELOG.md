@@ -32,6 +32,24 @@ The release procedure that produces these entries is documented in
   On MIPcc27's dijle at 600 s the answer goes from 2785 to 2401 elements (the reference
   is 2402); dives goes from 7152 to 7127 and dingo stays at 2197, all passing the
   competition checker. `DISCOPT_IIS_INT_TWO_PASS=0` restores the single pass.
+- **The highspy floor is now `highspy>=1.16` (was `>=1.11,!=1.12.0`; #2332).**
+  1.11.0-1.15.1 return `kInfeasible` with presolve off on feasible MILPs (#2332), and
+  1.12-1.15 also cycle in MIP presolve on the #1667 hand-off (#1671); 1.16.0 fixes both.
+  The route's #1667 sparsify-off bit stays as a documented workaround until the
+  re-measure in #2335. CI's HiGHS-version lane now runs 1.16.0 and the latest release.
+
+### Fixed
+
+- **`solve(presolve=False)` on the HiGHS MILP route no longer cross-checks a
+  presolve-off result with another presolve-off solve (#2332).** The #1634 cross-check
+  now runs the configuration the primary did not: presolve on when the caller pinned it
+  off. #1655's exemption of integer-data models from the cross-check (an argument about
+  HiGHS presolve) no longer applies to a presolve-off primary. HiGHS 1.11.0-1.15.1
+  return `kInfeasible` with presolve off on feasible MILPs that presolve on solves
+  (fixed in 1.16.0); on one such model the route used to lose the certificate under
+  `presolve=False` and now certifies the optimum. The IIS test helpers decide
+  infeasibility with a shared oracle that needs a verified point or both presolve
+  settings agreeing (`python/tests/_highs_oracle.py`).
 
 ### Fixed
 

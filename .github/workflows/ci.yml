@@ -759,8 +759,10 @@ jobs:
 
   python-highspy-versions:
     # highspy is the `discopt[highs]` extra (P6.3; an opt-in MILP backend, not the default)
-    # with the floor `highspy>=1.11` (1.9.0 has no getDualRay/getPrimalRay; 1.10.0
-    # breaks the lp_nlp_bb HiGHS master, which test_2021_highs_floor.py runs). Every
+    # with the floor `highspy>=1.16` (#2332: 1.11.0-1.15.1 return kInfeasible with
+    # presolve off on feasible MILPs; 1.12-1.15 also cycle in MIP presolve, #1671;
+    # 1.9.0 has no getDualRay/getPrimalRay; 1.10.0 breaks the lp_nlp_bb HiGHS master,
+    # which test_2021_highs_floor.py runs). Every
     # other lane installs the latest highspy, so nothing else would notice a route that
     # quietly needs a newer API. This lane runs the route's own tests against the floor
     # and the latest release, plus the cross-backend soundness files pinned to
@@ -774,12 +776,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The floor, the last pre-1.16 release, and the latest. ">=1.16.0" keeps "latest"
-        # from silently resolving below the first release whose behaviour changes were
-        # adopted (#2221). "==1.15.1" covers 1.12-1.15, which the pin still admits: the
-        # #1671 sparsify cycle window, the class-1 injections that are no-ops there, and
-        # the callback exceptions that leave ``run`` itself.
-        highspy: ["==1.11.0", "==1.15.1", ">=1.16.0"]
+        # The floor and the latest. ">=1.16.0" keeps "latest" from silently resolving
+        # below the floor; the two coincide until a release after 1.16.0 ships. The
+        # 1.11.0 and 1.15.1 arms went with the floor raise (#2332).
+        highspy: ["==1.16.0", ">=1.16.0"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -960,7 +960,7 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy openpyxl scikit-learn pyyaml sympy \
-            "highspy>=1.11,!=1.12.0" \
+            "highspy>=1.16" \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pyscipopt \
             pytest pytest-timeout pytest-xdist hypothesis

@@ -8,8 +8,9 @@ bug, and #1671 says to re-measure and either drop it or keep it as a documented
 opt-out once HiGHS fixes the bug. This test makes that step happen: it fails when the
 installed HiGHS stops cycling without being a release known to carry the fix, and on
 every version it checks that the route keeps sparsify off while the supported range still
-admits a cycling release. highspy 1.16.0 is the first release with the fix (#2221); the bit
-stays as a documented opt-out until the floor reaches 1.16.
+admits a cycling release. highspy 1.16.0 is the first release with the fix (#2221). The
+floor reached 1.16 in #2332; the bit stays as a documented workaround until the sparsify
+re-measure of #2335 decides it (the final assertion below pins that state).
 
 The cycle is a regression window. Measured 2026-11-18 (#2221) with this file's probe on
 each release, sparsify on: 1.11.0 returns; 1.12.0, 1.13.0, 1.13.1, 1.14.0, 1.15.0 and
@@ -69,9 +70,23 @@ HANDOFF = Path(__file__).parent / "data" / "highs_presolve_cycle_1671.mps.gz"
 KILL_AFTER = 10.0
 _PARALLEL = 1 << 13  # kPresolveRuleParallelRowsAndCols, off on the route since #1634
 _SPARSIFY = 1 << 14  # kPresolveRuleSparsify, the #1667 workaround
-#: The oldest highspy ``pyproject.toml`` accepts. It does not cycle itself, but the range
-#: it opens admits 1.12-1.15, which do.
-_SUPPORTED_FLOOR = "1.11"
+
+
+def _pyproject_floor() -> str:
+    """The highspy floor of ``pyproject.toml``'s core dependencies (``highspy>=X``)."""
+    import re
+    import tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    deps = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
+    (spec,) = [d for d in deps if d.replace(" ", "").startswith("highspy")]
+    m = re.match(r"highspy\s*>=\s*([0-9.]+)", spec)
+    assert m, spec
+    return m.group(1)
+
+
+#: The oldest highspy ``pyproject.toml`` accepts (#2332: 1.16, past every cycling release).
+_SUPPORTED_FLOOR = _pyproject_floor()
 #: Releases measured to cycle (module docstring): ``[first, fixed)``.
 _CYCLING_WINDOW = ((1, 12), (1, 16))
 
@@ -131,12 +146,11 @@ def test_highs_presolve_still_cycles_on_the_1667_handoff(handoff_mps):
     cycling = _presolve(handoff_mps, _PARALLEL)
     from discopt.solvers import lp_milp_highs
 
-    # The route keeps sparsify off on EVERY supported highspy: the supported range still
-    # admits the cycling releases, so dropping the bit would hang Model.solve there (#1667).
+    # The route keeps sparsify off until #2335's re-measure decides it. Dropping the bit
+    # is a measured change (that panel), not a side effect of another one.
     assert lp_milp_highs.MILP_PRESOLVE_RULE_OFF & _SPARSIFY, (
-        f"HiGHS {githash}: the MILP route no longer switches sparsify off, but the "
-        f"supported highspy range (>= {_SUPPORTED_FLOOR}) admits releases that cycle on "
-        "the #1667 hand-off"
+        f"HiGHS {githash}: the MILP route no longer switches sparsify off; that needs the "
+        "#2335 sparsify panel, and this canary re-scoped or deleted with its measurement"
     )
     if cycling is None:
         return
@@ -153,8 +167,12 @@ def test_highs_presolve_still_cycles_on_the_1667_handoff(handoff_mps):
         f"HiGHS {githash} ({release}) returned from presolve with sparsify ON "
         f"({cycling}), but every release from {lo} up to {hi} was measured to cycle"
     )
-    assert tuple(int(p) for p in _SUPPORTED_FLOOR.split(".")) < hi, (
-        f"the supported highspy floor is now {_SUPPORTED_FLOOR}, past every cycling release: "
-        "re-measure the #1667 sparsify panel and drop _PRESOLVE_RULE_SPARSIFY from "
-        "lp_milp_highs.MILP_PRESOLVE_RULE_OFF or keep it as a documented opt-out (#1671)"
+    # The floor is past every cycling release (#2332), so the bit is a documented
+    # workaround, not a cycle guard. Its docstring must say so and name the re-measure
+    # that would retire it -- otherwise it reads as a guard that is still needed.
+    assert tuple(int(p) for p in _SUPPORTED_FLOOR.split(".")) >= hi
+    doc = Path(lp_milp_highs.__file__).read_text()
+    assert "no supported release cycles" in doc and "#2335" in doc, (
+        "lp_milp_highs: the sparsify bit's comment must record that the floor is past the "
+        "cycling releases and point to the #2335 re-measure"
     )
