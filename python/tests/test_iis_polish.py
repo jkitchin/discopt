@@ -288,3 +288,47 @@ def test_filter_leaves_the_post_pass_its_reserve(monkeypatch):
     monkeypatch.setenv("DISCOPT_IIS_RELAX_INT", "0")
     milp_iis_arrays(arr, total_time_limit=40.0)
     assert seen == [pytest.approx(40.0 * (1 - E._POLISH_RESERVE_FRACTION)), 40.0]
+
+
+def test_post_pass_shares_saturate_with_the_budget(monkeypatch):
+    """#1153 role 2: the filter's reserve and the relaxation / add-one stops are
+    capped by constants, so a larger budget goes to the filter, not to a longer
+    count-bounded post-pass. Each cap equals its fraction of a 600 s budget, so it
+    cannot bind at <= 600 s."""
+    assert E._POLISH_RESERVE_CAP_S == pytest.approx(E._POLISH_RESERVE_FRACTION * 600.0)
+    assert E._RELAX_CAP_S == pytest.approx(E._RELAX_FRACTION * 600.0)
+    assert E._ADD_ONE_CAP_S == pytest.approx(E._ADD_ONE_FRACTION * 600.0)
+    seen = []
+    real = E._milp_iis_arrays
+
+    def spy(*a, **k):
+        seen.append(k["total_time_limit"])
+        return real(*a, **k)
+
+    monkeypatch.setattr(E, "_milp_iis_arrays", spy)
+    monkeypatch.delenv("DISCOPT_IIS_RELAX_INT", raising=False)
+    milp_iis_arrays(_full(), total_time_limit=6000.0)
+    assert seen == [pytest.approx(6000.0 - E._POLISH_RESERVE_CAP_S)]
+
+    stops = {}
+    real_relax, real_add = E._relax_integrality, E._add_one
+
+    def relax_spy(eng, cons, bounds, ints, keep, stop_at, *a, **k):
+        stops["relax"] = stop_at - time.perf_counter()
+        return real_relax(eng, cons, bounds, ints, keep, stop_at, *a, **k)
+
+    def add_spy(eng, cons, bounds, ints, stop_at, *a, **k):
+        stops["add_one"] = stop_at - time.perf_counter()
+        return real_add(eng, cons, bounds, ints, stop_at, *a, **k)
+
+    monkeypatch.setattr(E, "_relax_integrality", relax_spy)
+    monkeypatch.setattr(E, "_add_one", add_spy)
+    monkeypatch.delenv("DISCOPT_IIS_ADD_ONE", raising=False)
+    far = time.perf_counter() + 6000.0
+    arr = _arrays([[1, 1], [1, 1]], [3, -INF], [INF, 2], 2, [0, 0], [10, 10], [True, False])
+    kw = dict(cert_tol=1e-6, time_limit=6000.0, engine="highs", deadline=far)
+    _polish(arr, _anytime([0, 1], [], [0]), **kw)
+    _polish(_full(), _three_row_answer(), **kw)
+    assert set(stops) == {"relax", "add_one"}
+    assert 0.0 < stops["relax"] <= E._RELAX_CAP_S
+    assert 0.0 < stops["add_one"] <= E._ADD_ONE_CAP_S

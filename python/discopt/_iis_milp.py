@@ -825,7 +825,12 @@ _FORCED_INT_SPAN = 4
 #: budget, highspy 1.16): osun's move is found within its full 586-candidate
 #: sweep; otra's full sweep, 2132 candidates and 12,796 probes, took 145 s and
 #: found none, so the cap keeps such a sweep to ~45 s (11 ms a probe there).
+#: The share saturates at ``_ADD_ONE_CAP_S`` (#1153 role 2): the sweep's work is
+#: the probe count, so a bigger budget must not buy it a longer stop. The cap is
+#: ``_ADD_ONE_FRACTION`` of a 600 s budget, so it never binds at <= 600 s (the time
+#: left is at most the budget) and only stops the share growing beyond that.
 _ADD_ONE_FRACTION = 0.10
+_ADD_ONE_CAP_S = 60.0
 _ADD_ONE_MAX_PROBES = 4000
 
 
@@ -973,13 +978,22 @@ def _add_one(
 #: result, the clock only stops it), and the share of the time left the pass may
 #: use. Measured by Fable's prototype on dingo's 2197-element anytime answer:
 #: 66 solves in 17 s, 1867 elements; on dijle's, 6 solves in 1.8 s.
+#: The share saturates at ``_RELAX_CAP_S`` (#1153 role 2), ``_RELAX_FRACTION`` of
+#: a 600 s budget: it never binds at <= 600 s and stops growing beyond.
 _RELAX_MAX_ROUNDS = 64
 _RELAX_FRACTION = 0.25
+_RELAX_CAP_S = 150.0
 #: Share of ``total_time_limit`` the filter leaves for the post-pass
 #: (:func:`_polish`): an anytime answer arrives at the deadline otherwise, with no
 #: time to relax or certify it. 10% of mipcc's 600 s run is ~57 s; the prototype's
 #: post-pass (relaxation and every certificate) took ~36 s on dingo, ~12 s on dijle.
+#: The reserve saturates at ``_POLISH_RESERVE_CAP_S`` (#1153 role 2): the post-pass
+#: is bounded by counts (``_RELAX_MAX_ROUNDS``, ``_ADD_ONE_MAX_PROBES``, the forced
+#: margins), so a reserve that kept growing with the budget would only take
+#: filtering time it cannot use. The cap is the 10% of a 600 s budget, so it never
+#: binds at <= 600 s; beyond that every extra second goes to the filter.
 _POLISH_RESERVE_FRACTION = 0.10
+_POLISH_RESERVE_CAP_S = 60.0
 #: Below this a relaxed column's value counts as integral / inside its bound.
 _RELAX_TOL = 1e-9
 
@@ -1113,10 +1127,11 @@ def _polish(
 ) -> MilpIIS:
     """Post-pass on the answer: on an anytime (incomplete) answer the
     integrality relaxation (:func:`_relax_integrality`, at most
-    ``_RELAX_FRACTION`` of the time left; the filter stops
-    ``_POLISH_RESERVE_FRACTION`` of the budget early to leave it room); on a
-    complete one the add-one move (:func:`_add_one`; only with an overall
-    budget, capped at ``_ADD_ONE_FRACTION`` of the time left); then a
+    ``_RELAX_FRACTION`` of the time left, at most ``_RELAX_CAP_S``; the filter
+    stops ``_POLISH_RESERVE_FRACTION`` of the budget, at most
+    ``_POLISH_RESERVE_CAP_S``, early to leave it room); on a complete one the
+    add-one move (:func:`_add_one`; only with an overall budget, capped at
+    ``_ADD_ONE_FRACTION`` of the time left, at most ``_ADD_ONE_CAP_S``); then a
     forced-violation certificate for every kept element that still has none
     (:meth:`_Engine.forced_point`, margins :data:`_FORCED_MARGINS`).
 
@@ -1167,7 +1182,7 @@ def _polish(
     s_tol = min(cert_tol, _STRONG_OTHERS)
     if relax:
         assert deadline is not None
-        share = _RELAX_FRACTION * max(deadline - t0, 0.0)
+        share = min(_RELAX_FRACTION * max(deadline - t0, 0.0), _RELAX_CAP_S)
         keep = {
             k[1]
             for k in _check_certificates(pending, eng, cons, bounds, ints, s_tol, _STRONG_OWN)
@@ -1189,7 +1204,7 @@ def _polish(
             pass  # the relaxation or its confirmation ran out of time: the answer stands
     if add_one:
         assert deadline is not None
-        share = _ADD_ONE_FRACTION * max(deadline - t0, 0.0)
+        share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
         try:
             got, pend, decided, tried = _add_one(eng, cons, bounds, ints, t0 + share)
             if got is not None:
@@ -2062,14 +2077,16 @@ def milp_iis_arrays(
     if workers is not None and portfolio is None:
         raise ValueError("workers= needs portfolio=; a single order runs in-process")
     # The filter stops early enough to leave the post-pass its share
-    # (_POLISH_RESERVE_FRACTION); the post-pass runs against the whole budget.
+    # (_POLISH_RESERVE_FRACTION, saturating at _POLISH_RESERVE_CAP_S); the
+    # post-pass runs against the whole budget.
     filter_limit = total_time_limit
     if (
         total_time_limit is not None
         and include_bounds
         and os.environ.get("DISCOPT_IIS_RELAX_INT", "1") != "0"
     ):
-        filter_limit = (1.0 - _POLISH_RESERVE_FRACTION) * float(total_time_limit)
+        reserve = min(_POLISH_RESERVE_FRACTION * float(total_time_limit), _POLISH_RESERVE_CAP_S)
+        filter_limit = float(total_time_limit) - reserve
     if portfolio is not None:
         res = _portfolio_iis(
             arrays,
