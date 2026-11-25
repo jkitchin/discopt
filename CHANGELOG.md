@@ -10,6 +10,36 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-24
+
+### Added
+
+- **`strategy="relu_icnn"`: input-convex ReLU networks embedded as an LP, with no
+  binaries (#2323).** One epigraph row per layer (`z >= zhat`, `z` boxed in
+  `[max(lb,0), max(ub,0)]`), after Amos, Xu & Kolter 2017. The rows relax the network's
+  graph, so exactness is checked on every result rather than assumed: the outermost
+  `Model.solve` / `solve_model` repairs each network variable to its forward value,
+  re-verifies the whole model with `verify_point` and requires the objective to be
+  unchanged, and raises `ICNNExactnessError` otherwise (for example when the output is
+  maximised). An `unbounded` relaxation is refused, a network that is not input-convex
+  is refused at build time, and `serialize.dumps` and the `.nl` / LP / MPS / GAMS
+  writers refuse to write the bare relaxation for another solver.
+- **LP-tightened ReLU big-M constants, `DISCOPT_NN_LP_BIGM` (#2323).**
+  `ml.bounds.lp_tighten_bounds` minimises and maximises each pre-activation over the
+  triangle relaxation of the earlier layers (Tjeng, Xiao & Tedrake 2019; Grimstad &
+  Andersson 2019). Every bound is proved by the Neumaier–Shcherbina bound of its LP's
+  duals and intersected with the interval bound, so it is never looser, under a
+  deterministic work budget. On by default for `relu_bigm` after its §5 panel; off, as
+  a documented opt-in, for `relu_extended` and `relu_partition`, whose panels measured
+  harm. `=1` / `=0` force it on / off for every formulation.
+- **`milp/root_dual_violation_scaled` (#2300).** A diagnostic stat beside the root-dual
+  gate's per-column value, with each column's scale floored at
+  `‖c‖∞ + ‖A‖∞·‖y‖∞`, so round-off duals read as round-off. Reported only, never gated;
+  #2309's 4,420-MILP panel (#2310) kept the per-column gate.
+- **A structural guard over every native solve entry point (#2296).** A test asserts
+  that each `discopt._rust` `solve_*_py` call runs inside `charge("rust")` and that
+  every callback it receives is wrapped as interpreted.
+
 ### Changed
 
 - **`pounce-solver>=0.19` (core dependency and the `pounce` extra; was `>=0.18`).**
@@ -32,6 +62,37 @@ The release procedure that produces these entries is documented in
   B/row resident and from 2644 to 1766 B/row at the build peak (Linux, glibc).
   Rows with a nonlinear part are unchanged. With an older POUNCE every row is taped
   as before.
+
+- **`DISCOPT_DEFINED_VARS`, a new dependent-variable detector, graduated default ON
+  (#2308).** `full_space` neural embeddings searched far worse than the same network
+  written per neuron, with bit-identical root bounds. The old detector considered only
+  size-1 variables and read an affine row over `x[k]` as nonlinear.
+  `dependent_vars.find_defined_variables` keys array elements individually, treats
+  indexed references as affine leaves and gives each affine defining equality one output
+  by greedy minimum degree, under the scan work budget. `=0` restores the legacy
+  detector, unchanged.
+- **The shared POUNCE problem is built a chunk of rows at a time (#2324, #2325).**
+  `TapeNLPEvaluator` builds through `pounce.NlProblemBuilder`, dropping each lowered
+  chunk after it is handed over, and passes `keep_expressions=False`. Cuts are taken
+  only where they cannot change POUNCE's sharing, so the evaluator is bit-identical to
+  the one-call build on values, gradient, constraints, Jacobian, Hessian and both
+  structures. `DISCOPT_TAPE_CHUNKED_BUILD=0` is a documented opt-out.
+- **Less Python bookkeeping per constraint row on the tape evaluator path (#2294).**
+  Fingerprint id columns are packed `uintp` bytes, `evaluator_fingerprint` no longer
+  materialises a per-object `__dict__`, and bounds are float64 arrays: Python heap from
+  462 to 205 B/row on #2293's reproducer. A latent stale-id hit in `_structure_memo` is
+  closed by pinning the bodies it keys on.
+- **Native solve time is charged to the `rust` bucket (#2289, #2292).** Only one of the 15
+  native `solve_*_py` call sites was charged at the FFI boundary, so the rest landed
+  in `python_time`; all 15 now are, and callbacks into Python stay out of that bucket.
+  The phase1 `interop_overhead` criterion now reads 0.387 against its 0.05 target; it
+  is still an honest FAIL, and the target is kept (`docs/dev/performance-plan.md`).
+- **The convex route's `master=` label names the engine that ran (#2301, #2311).** An
+  explicit `milp_solver=` overrode the route's master without updating
+  `algorithm_route`. `lp_backend.resolve_milp_backend` now names the engine
+  `get_milp_solver` selects, through one shared selector.
+- **The bridge-scan truncation warning names remedies that exist (#2299, #2305):**
+  `model.mark_coupling(...)` and `detect_decomposition(model, dec_file=...)`.
 
 ### Fixed
 
@@ -56,6 +117,45 @@ The release procedure that produces these entries is documented in
   model the chained spelling was declined by the native spatial kernel and needed 5
   nodes instead of 1. No in-repo corpus instance contains such a chain, so corpus
   results are unchanged.
+
+- **Feasibility and bound soundness fixes (#2312–#2317, #2320).**
+  - #2312: `feasible_distance_cap`'s absolute floor scales with the row's Jacobian, and
+    `verify_point` and both `_check_constraint_feasibility` gates no longer accept a
+    positive residual below `SMALL_ROW_ABS_FLOOR` without the gradient test.
+  - #2313: `_rowless_lp_safe_bound` sums exactly and rounds down once;
+    `separable_poly_bound` uses directed rounding.
+  - #2314: a non-finite term scale or residual counts as a violation, and the fixed-box
+    shortcut that returns `infeasible` defers to the node NLP on an unreliable row.
+  - #2315: overflowed row scales are recomputed from the exact term sum before
+    re-testing.
+  - #2316: the LP spatial B&B's dive, feasibility-pump and post-cut-round LPs honour
+    the remaining time limit.
+  - #2317: a root-cut row with a non-finite value or Jacobian stays out of the LP.
+- **Lost #1654 certificate on a big-M row whose binary is fixed by a singleton row
+  (#2304, #2307).** New `fold_fixed_columns` moves a fixed column's entries into the
+  right-hand side, only when exact in rationals, before the coefficient-tightened
+  re-solve.
+- **The in-house OA master no longer dives to points already beaten (#2302, #2307).**
+  After a separator veto the lazy MILP driver asks for a separator-verified incumbent
+  (`MilpLazyHook::incumbent_candidate`), validated like a seed, so the tree prunes
+  against it. #2303 (NLP-BB root GMI) remains open.
+- **IIS: the SAT-candidate stage's time share starts when the stage starts (#2318,
+  #2319),** and a refinement cut by the clock returns the first core instead of a
+  partial one.
+- **`nonlinear_to_pwl` no longer silently skips array-valued constraints (#2308).**
+  Non-affine array rows are split per element and `sum(f(v))` into a sum of elements;
+  anything still unexpandable is reported in `skipped`.
+- **Browser page (#2295, #2297, #2298, #2306).** `from_nl` failed on every `.nl` with
+  linear rows under Pyodide (`VarBlock` passed int64 `repeats` to `np.repeat`, whose
+  `intp` is int32 on wasm32), and the deep-recursion runner raised
+  `can't start new thread` where Pyodide has no threads; it now runs inline. On the
+  74-file corpus under real Pyodide 0.28.3: 6 errors to 0, and fac2, launch, tspn05
+  and nvs12 regain their certificates.
+- **The browser page staged pounce-solver 0.14.0 against a `>=0.18` floor (#2291,
+  #2292).** `build-wheel.sh --check` now reads the floor from `[project]
+  dependencies`; the page now stages pounce-solver 0.19.0 (#2326).
+- **`test_root_round_is_never_declined_by_the_admission_check` no longer depends on
+  runner speed (#2290, #2292).**
 
 ## [0.13.0] - 2026-11-22
 
@@ -7231,7 +7331,8 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
-[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/jkitchin/discopt/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/jkitchin/discopt/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/jkitchin/discopt/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/jkitchin/discopt/compare/v0.11.0...v0.11.1
