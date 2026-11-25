@@ -469,6 +469,8 @@ def _run(
                 certificates_dropped=getattr(solution_json, "n_bad", 0),
                 order=res.order,
                 engine=engine,
+                forced=[res.n_forced, res.n_forced_certified],
+                add_one=[res.n_add_one_tried, res.n_add_one_moves],
                 wall=round(time.perf_counter() - t0, 2),
             )
         ),
