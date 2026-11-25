@@ -330,7 +330,8 @@ def compute_iis(
     portfolio_wait : {"fast", "all"}
         Only with ``portfolio``. ``"fast"`` (default): once one member
         completes, the others get a short window (the elapsed time, clamped to
-        10-30 s) to find a smaller set, then stop. ``"all"``: wait for every
+        10-30 s, and at least until half of ``total_time_limit`` has elapsed)
+        to find a smaller set, then stop. ``"all"``: wait for every
         member -- the smallest set, at up to the whole ``total_time_limit``.
         Measured on MIPcc27 at 600 s, ``"fast"`` returned 100-200 s earlier on
         the slow instances, with one set 4% larger (jjliu_clique 277 vs 266).

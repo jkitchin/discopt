@@ -96,10 +96,35 @@ _ROLL_MIN_S = 2.0
 #: neos859080 / mod008inf / hole10 / jjliu_clique with the same sizes, except
 #: jjliu_clique 277 vs 266 (its ICB member completed ~90 s after ICB-r).
 #: ``"all"`` is for the smallest set regardless of time.
-PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]]]] = {
-    "fast": (2.0, (10.0, 30.0)),
-    "all": (math.inf, None),
+#:
+#: The third entry is a *floor* (``grace_floor``, a fraction of the portfolio's
+#: budget): a completion before ``floor * budget`` does not cut the others off
+#: before that point (they still stop as soon as every member has finished). The
+#: clamped wait above was sized on 60-300 s sweeps; with a 600 s budget it
+#: discarded members that finish well inside the budget. Measured on MIPcc27's
+#: jjliu_clique at 600 s (6 threads, every member allowed to finish): ICB-r 279
+#: at 36 s, ICB / CIB 265 at 82 s, CIB-n 255 at 135 s, CIB-l 266 at 143 s; the
+#: fast wait shipped 279. The floor costs at most ``floor * budget`` of wall
+#: time, and only while some member is still running.
+#: The floor saturates at :data:`_GRACE_FLOOR_CAP_S` (#1153: a carve of the
+#: caller's budget must stop growing). The cap is what binds at the competition
+#: budget (``MIPCC_TIME_LIMIT`` 3600 s: 0.5 x the ~3130 s filter budget would be
+#: ~1560 s). It is sized from the latest useful completion measured: with every
+#: member allowed to finish (600 s, 6 threads), stein45inf's ICB beat the first
+#: finisher at 232 s (225 vs ICB-n's 229 at 188 s) and jjliu_clique's CIB-n at
+#: 135 s (255 vs 279 at 36 s); no other member beat those. 300 s covers both with
+#: ~30% headroom. Members still running past it (jjliu's ICB-n, incomplete at the
+#: deadline) are the ones a longer floor would only idle on.
+PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]], float]] = {
+    "fast": (2.0, (10.0, 30.0), 0.5),
+    "all": (math.inf, None, 0.0),
 }
+
+#: Ceiling, in seconds, of the fast wait's floor (see :data:`PORTFOLIO_WAITS`).
+_GRACE_FLOOR_CAP_S = 300.0
+
+#: Marker for this branch's measurements (CLAUDE.md §8). Remove before merging.
+_BRANCH_MARKER_REMAINING_GAPS = True
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -2356,7 +2381,9 @@ def milp_iis(
         raise ValueError(
             f"portfolio_wait must be one of {sorted(PORTFOLIO_WAITS)}, got {portfolio_wait!r}"
         )
-    grace, grace_window = PORTFOLIO_WAITS[portfolio_wait] if portfolio else (math.inf, None)
+    grace, grace_window, grace_floor = (
+        PORTFOLIO_WAITS[portfolio_wait] if portfolio else (math.inf, None, 0.0)
+    )
     return milp_iis_arrays(
         arrays,
         include_bounds=include_bounds,
@@ -2372,6 +2399,7 @@ def milp_iis(
         t_start=t_start,
         grace=grace,
         grace_window=grace_window,
+        grace_floor=grace_floor,
         iis_engine=iis_engine,
     )
 
@@ -2394,6 +2422,7 @@ def milp_iis_arrays(
     grace_window: Optional[tuple[float, float]] = None,
     iis_engine: Optional[str] = None,
     threads: Optional[int] = None,
+    grace_floor: float = 0.0,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
@@ -2408,8 +2437,8 @@ def milp_iis_arrays(
     Element ids in the result are the ``row_groups`` keys and column indices.
     ``t_start`` (``time.perf_counter()``) is when the budget began, so time the
     caller spent before the call counts against ``total_time_limit``.
-    ``grace`` / ``grace_window`` (portfolio only): see :func:`_portfolio_iis`;
-    the default waits for every member.
+    ``grace`` / ``grace_window`` / ``grace_floor`` (portfolio only): see
+    :func:`_portfolio_iis`; the default waits for every member.
     """
     iis_engine = _resolve_iis_engine(iis_engine)
     if t_start is None:
@@ -2452,10 +2481,11 @@ def milp_iis_arrays(
             grace=grace,
             grace_window=grace_window,
             threads=threads,
+            grace_floor=grace_floor,
         )
     else:
-        if grace != math.inf or grace_window is not None:
-            raise ValueError("grace= / grace_window= need portfolio=")
+        if grace != math.inf or grace_window is not None or grace_floor != 0.0:
+            raise ValueError("grace= / grace_window= / grace_floor= need portfolio=")
         if threads is not None:
             raise ValueError("threads= needs portfolio=; a single order runs in-process")
         res = _milp_iis_arrays(
@@ -3609,7 +3639,11 @@ def _milp_iis_arrays(
 #: complete; kedron 12 in 10 s vs 14.5 s. In the 60 s sweep it changed no
 #: completion (its exact confirmations need ~20 s each on otra), so it costs a
 #: core there and nothing else.
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l")
+#: ``CIB-n`` (rows first, no SAT core) joins with the wait floor: at 600 s on
+#: jjliu_clique it completes at 135 s with 255 against the next best 265 (ICB /
+#: CIB) and Gurobi's 265; measured earlier at 60 s it also gave domset-hexgrid
+#: 308 -> 171 and enlight4 19 -> 18.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l", "CIB-n")
 
 
 def _normalize_portfolio(portfolio: Any) -> Optional[tuple[str, ...]]:
@@ -3724,6 +3758,24 @@ def _grace_extra(
     return extra
 
 
+def _grace_cutoff(
+    t_done: float,
+    grace: float,
+    window: Optional[tuple[float, float]],
+    floor: float,
+    total_time_limit: Optional[float],
+) -> float:
+    """Elapsed time at which a portfolio stops its other members once one
+    completes at ``t_done``: ``t_done + _grace_extra(...)``, but never before
+    ``min(floor * total_time_limit, _GRACE_FLOOR_CAP_S)`` (see
+    :data:`PORTFOLIO_WAITS`)."""
+    end = t_done + _grace_extra(t_done, grace, window)
+    if total_time_limit is not None:
+        floor_s = min(floor * float(total_time_limit), _GRACE_FLOOR_CAP_S)
+        end = max(end, floor_s)
+    return end
+
+
 def _portfolio_iis(
     arrays: tuple,
     kwargs: dict,
@@ -3734,6 +3786,7 @@ def _portfolio_iis(
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
     threads: Optional[int] = None,
+    grace_floor: float = 0.0,
 ) -> MilpIIS:
     """Run one deletion filter per order in ``portfolio``, each in its own process,
     against one shared budget, and return the smallest complete result.
@@ -3762,6 +3815,11 @@ def _portfolio_iis(
     proportional wait cut off improvements on fast instances (bell3ainf: first
     at 4 s, Gurobi's size at 17 s) and idled for minutes on slow ones
     (neos859080: complete at ~285 s, waited to ~570 s).
+    ``grace_floor`` (a fraction in ``[0, 1)``; used only with ``total_time_limit``):
+    the cut-off is never earlier than ``grace_floor * total_time_limit`` (capped
+    at ``_GRACE_FLOOR_CAP_S``) after the start, so an early completion does not
+    stop members that finish well inside a large budget (see
+    :data:`PORTFOLIO_WAITS`). ``0`` disables it.
     """
     import os
     import pickle
@@ -3793,6 +3851,8 @@ def _portfolio_iis(
         lo_w, hi_w = (float(v) for v in grace_window)
         if not (0.0 <= lo_w <= hi_w) or not math.isfinite(grace):
             raise ValueError(f"grace_window needs 0 <= lo <= hi and a finite grace: {grace_window}")
+    if not 0.0 <= grace_floor < 1.0:
+        raise ValueError(f"grace_floor must be in [0, 1), got {grace_floor}")
 
     # perf_counter is per-process; members get an absolute wall-clock deadline.
     wall0 = time.time() - (time.perf_counter() - t_start)
@@ -3878,7 +3938,9 @@ def _portfolio_iis(
                     )
                     if payload.complete and math.isfinite(grace):
                         t_done = time.time() - wall0
-                        grace_end = wall0 + t_done + _grace_extra(t_done, grace, grace_window)
+                        grace_end = wall0 + _grace_cutoff(
+                            t_done, grace, grace_window, grace_floor, total_time_limit
+                        )
                         cutoff = grace_end if cutoff is None else min(cutoff, grace_end)
         finally:
             for i, (proc, t0, _, err) in running.items():

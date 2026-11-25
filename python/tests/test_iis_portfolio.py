@@ -293,6 +293,29 @@ def test_grace_extra_is_clamped_to_the_window():
     assert _grace_extra(285.0, 2.0, (10.0, 30.0)) == 30.0  # neos859080: was +285 s
 
 
+def test_fast_wait_has_a_budget_floor():
+    """MIPcc27 jjliu_clique at 600 s: ICB-r completed with 279 at 36 s and the
+    clamped wait stopped the rest at ~51 s, discarding CIB-n's 255 (done at
+    135 s) and ICB / CIB's 265 (82 s). The floor keeps members running until
+    half the budget has elapsed; it changes nothing once that is past."""
+    from discopt._iis_milp import PORTFOLIO_WAITS, _grace_cutoff
+
+    grace, window, floor = PORTFOLIO_WAITS["fast"]
+    assert floor == 0.5
+    assert _grace_cutoff(36.0, grace, window, floor, 540.0) == 270.0  # floor wins
+    assert _grace_cutoff(285.0, grace, window, floor, 540.0) == 315.0  # clamped wait
+    assert _grace_cutoff(4.0, grace, window, floor, None) == 14.0  # no budget: no floor
+    assert _grace_cutoff(36.0, grace, window, 0.0, 540.0) == 66.0  # floor off
+    # #1153: the floor saturates rather than growing with the budget.
+    assert _grace_cutoff(36.0, grace, window, floor, 3600.0) == 300.0
+
+
+def test_default_portfolio_includes_rows_first_without_core():
+    from discopt._iis_milp import DEFAULT_PORTFOLIO
+
+    assert "CIB-n" in DEFAULT_PORTFOLIO
+
+
 def test_grace_window_argument_validation():
     import math
 
@@ -315,6 +338,10 @@ def test_grace_window_argument_validation():
         milp_iis_arrays(arrays, portfolio=("ICB",), grace=2.0, grace_window=(5.0, 2.0))
     with pytest.raises(ValueError, match="need portfolio"):
         milp_iis_arrays(arrays, grace_window=(1.0, 2.0))
+    with pytest.raises(ValueError, match="need portfolio"):
+        milp_iis_arrays(arrays, grace_floor=0.5)
+    with pytest.raises(ValueError, match="grace_floor"):
+        milp_iis_arrays(arrays, portfolio=("ICB",), grace=2.0, grace_floor=1.0)
 
 
 def test_the_entry_program_uses_the_fast_wait(tmp_path, monkeypatch):
@@ -333,7 +360,7 @@ def test_the_entry_program_uses_the_fast_wait(tmp_path, monkeypatch):
     m.to_mps(str(path))
     monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
     assert mipcc.main([str(path), str(tmp_path / "s.json")]) == 0
-    assert (seen["grace"], seen["grace_window"]) == (2.0, (10.0, 30.0))
+    assert (seen["grace"], seen["grace_window"], seen["grace_floor"]) == (2.0, (10.0, 30.0), 0.5)
 
 
 @pytest.mark.parametrize(

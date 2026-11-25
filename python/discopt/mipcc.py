@@ -45,7 +45,8 @@ from discopt._optional_highs import run_checked, wrap_callback
 _T_LAUNCH = time.perf_counter()  # earliest point this process can see
 
 # Portfolio wait: the library default, "fast" (see _iis_milp.PORTFOLIO_WAITS:
-# the other members stop clamp(t, 10, 30) s after the first completes at t).
+# the other members stop clamp(t, 10, 30) s after the first completes at t, but
+# not before half the budget has elapsed).
 PORTFOLIO_WAIT = "fast"
 
 # Competition tolerance (SOLUTION_FORMAT.md, "Certificates"). Judging uses it.
@@ -437,6 +438,7 @@ def _run(
             t_start=time.perf_counter(),
             grace=PORTFOLIO_WAITS[PORTFOLIO_WAIT][0],
             grace_window=PORTFOLIO_WAITS[PORTFOLIO_WAIT][1],
+            grace_floor=PORTFOLIO_WAITS[PORTFOLIO_WAIT][2],
         )
     except TimeoutError as exc:
         # No subsystem was confirmed in the budget: the whole model (already
