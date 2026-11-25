@@ -18,6 +18,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 import scipy.sparse as sp
+from _highs_oracle import milp_verdict
 from discopt._iis_exact import exact_feasible
 from discopt._iis_milp import milp_iis
 
@@ -221,28 +222,11 @@ def test_mixed_sets_agree_with_highs_on_integer_data():
     for _ in range(150):
         n_int, n_cont = rng.randint(1, 3), rng.randint(1, 3)
         A, rlo, rhi, lb, ub, held = _random_set(rng, n_int, n_cont, rng.randint(1, 4))
-        n = lb.size
-        h = highspy.Highs()
-        h.silent()
-        h.addVars(n, lb, ub)
-        vt = highspy.HighsVarType
-        h.changeColsIntegrality(
-            n,
-            np.arange(n, dtype=np.int32),
-            np.array([vt.kInteger] * n_int + [vt.kContinuous] * n_cont),
-        )
-        inf = highspy.kHighsInf
-        for r in range(A.shape[0]):
-            s, e = A.indptr[r], A.indptr[r + 1]
-            h.addRow(
-                rlo[r] if np.isfinite(rlo[r]) else -inf,
-                rhi[r] if np.isfinite(rhi[r]) else inf,
-                e - s,
-                A.indices[s:e].astype(np.int32),
-                A.data[s:e],
-            )
-        h.run()
-        want = h.getModelStatus() == highspy.HighsModelStatus.kInfeasible
+        # #2332: a verified point, or both presolve settings agreeing -- never one
+        # HiGHS verdict on its own.
+        verdict = milp_verdict(A, rlo, rhi, lb, ub, range(n_int))
+        assert verdict is not None, (A.toarray(), rlo, rhi, lb, ub, n_int)
+        want = verdict == "infeasible"
         got = exact_feasible(A, rlo, rhi, lb, ub, held)
         assert got == want, (A.toarray(), rlo, rhi, lb, ub, n_int)
         checked += 1

@@ -14287,8 +14287,10 @@ def _highs_route_options(presolve: bool = True):
 
     #1751: ``solve(presolve=False)`` reaches HiGHS as ``presolve="off"`` -- on this
     route HiGHS's presolve is the only one that runs, so leaving it on made the
-    argument a silent no-op. An explicit ``highs_options["presolve"]`` that
-    contradicts it is refused rather than silently picking one.
+    argument a silent no-op. The MILP route's #1634 cross-check then runs presolve ON
+    (#2332): a second presolve-off solve would not be an independent check. An
+    explicit ``highs_options["presolve"]`` that contradicts it is refused rather than
+    silently picking one.
     """
     req = _HIGHS_OPTIONS_REQUEST.get()
     pairs: tuple[tuple[str, Any], ...] = ()

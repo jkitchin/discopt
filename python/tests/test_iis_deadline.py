@@ -13,6 +13,7 @@ import time
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from _highs_oracle import milp_verdict
 from discopt import _iis_backend as _bk
 from discopt.infeasibility import compute_iis
 
@@ -41,7 +42,8 @@ def _redundant_rows_model(n_red=60):
 
 
 def _independently_infeasible(model, iis):
-    """Solve the returned subsystem with a fresh HiGHS model built from the IIS."""
+    """Decide the returned subsystem independently: both HiGHS presolve settings must
+    say infeasible, and no verified point may exist (``_highs_oracle``, #2332)."""
     from discopt.decomposition._linear import extract_linear
 
     lin = extract_linear(model)
@@ -67,18 +69,10 @@ def _independently_infeasible(model, iis):
             clb[j] = lb[j]
         else:
             cub[j] = ub[j]
-    h = highspy.Highs()
-    h.silent()
-    h.setOptionValue("presolve", "off")
-    h.addVars(n, clb, cub)
-    A = lin.A.tocsr()
-    for r in rows:
-        s, e = A.indptr[r], A.indptr[r + 1]
-        lo = lin.b[r] if lin.sense[r] in (">=", "==") else -inf
-        hi = lin.b[r] if lin.sense[r] in ("<=", "==") else inf
-        h.addRow(lo, hi, e - s, A.indices[s:e].astype(np.int32), A.data[s:e])
-    h.run()
-    return h.getModelStatus() == highspy.HighsModelStatus.kInfeasible
+    A = lin.A.tocsr()[rows]
+    lo = np.array([lin.b[r] if lin.sense[r] in (">=", "==") else -inf for r in rows])
+    hi = np.array([lin.b[r] if lin.sense[r] in ("<=", "==") else inf for r in rows])
+    return milp_verdict(A, lo, hi, clb, cub, ()) == "infeasible"
 
 
 @pytest.mark.smoke

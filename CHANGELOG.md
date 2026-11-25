@@ -10,6 +10,19 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **`solve(presolve=False)` on the HiGHS MILP route no longer cross-checks a
+  presolve-off result with another presolve-off solve (#2332).** The #1634 cross-check
+  now runs the configuration the primary did not: presolve on when the caller pinned it
+  off. #1655's exemption of integer-data models from the cross-check (an argument about
+  HiGHS presolve) no longer applies to a presolve-off primary. HiGHS 1.11.0-1.15.1
+  return `kInfeasible` with presolve off on feasible MILPs that presolve on solves
+  (fixed in 1.16.0); on one such model the route used to lose the certificate under
+  `presolve=False` and now certifies the optimum. The IIS test helpers decide
+  infeasibility with a shared oracle that needs a verified point or both presolve
+  settings agreeing (`python/tests/_highs_oracle.py`).
+
 ## [0.14.0] - 2026-11-24
 
 ### Added

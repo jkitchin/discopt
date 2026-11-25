@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 highspy = pytest.importorskip("highspy")
+from _highs_oracle import milp_verdict  # noqa: E402
 from discopt._iis_milp import milp_iis  # noqa: E402
 
 
@@ -46,27 +47,20 @@ def _clause_model(rng, n, m, k=3):
 
 
 def _infeasible_with_highs(n, cls, rows, ints):
-    """Independent check: the kept clause rows with the kept integralities."""
+    """Independent check: the kept clause rows with the kept integralities, decided by
+    both HiGHS presolve settings or a verified point (``_highs_oracle``, #2332)."""
     inf = highspy.kHighsInf
-    h = highspy.Highs()
-    h.silent()
-    h.setOptionValue("presolve", "off")
     held = set(ints)
-    h.addVars(
-        n,
-        np.array([0.0 if j in held else -inf for j in range(n)]),
-        np.array([1.0 if j in held else inf for j in range(n)]),
-    )
-    for r in rows:
-        lits = cls[r]
-        cols = np.array([j for j, _ in lits], dtype=np.int32)
-        vals = np.array([-1.0 if neg else 1.0 for _, neg in lits])
-        h.addRow(1 - sum(neg for _, neg in lits), inf, len(cols), cols, vals)
-    if held:
-        idx = np.array(sorted(held), dtype=np.int32)
-        h.changeColsIntegrality(len(idx), idx, np.array([highspy.HighsVarType.kInteger] * len(idx)))
-    h.run()
-    return h.getModelStatus() == highspy.HighsModelStatus.kInfeasible
+    lb = np.array([0.0 if j in held else -inf for j in range(n)])
+    ub = np.array([1.0 if j in held else inf for j in range(n)])
+    rows = list(rows)
+    A = np.zeros((len(rows), n))
+    lo = np.zeros(len(rows))
+    for k, r in enumerate(rows):
+        for j, neg in cls[r]:
+            A[k, j] += -1.0 if neg else 1.0
+        lo[k] = 1 - sum(neg for _, neg in cls[r])
+    return milp_verdict(A, lo, np.full(len(rows), inf), lb, ub, sorted(held)) == "infeasible"
 
 
 def _is_unsat(n, cls):
