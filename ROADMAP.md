@@ -34,7 +34,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8
 >   back-compat alias. The NLP backends are `pounce` and `cyipopt`.
 > - **HiGHS is not the per-node LP engine** (T7). The MINLP default is the
 >   in-house Rust primal/dual simplex. HiGHS *is* a core dependency again
->   (`highspy>=1.11,!=1.12.0`): pure LP/MILP models are routed to it with
+>   (`highspy>=1.16`): pure LP/MILP models are routed to it with
 >   discopt-verified certificates (`milp_backend="native"` or
 >   `DISCOPT_LP_MILP_BACKEND=rust` opts out), and the convex-MINLP route uses a
 >   HiGHS master. Phase 8's "eliminate HiGHS" goal is superseded; see its header.

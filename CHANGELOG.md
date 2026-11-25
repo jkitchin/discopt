@@ -10,6 +10,14 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **The highspy floor is now `highspy>=1.16` (was `>=1.11,!=1.12.0`; #2332).**
+  1.11.0-1.15.1 return `kInfeasible` with presolve off on feasible MILPs (#2332), and
+  1.12-1.15 also cycle in MIP presolve on the #1667 hand-off (#1671); 1.16.0 fixes both.
+  The route's #1667 sparsify-off bit stays as a documented workaround until the
+  re-measure in #2335. CI's HiGHS-version lane now runs 1.16.0 and the latest release.
+
 ### Fixed
 
 - **`solve(presolve=False)` on the HiGHS MILP route no longer cross-checks a

@@ -114,10 +114,15 @@ _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS = 1 << 13
 #: 2026-11-18 (#2221) with the canary's ``presolve()`` probe on the hand-off, highspy
 #: 1.12.0, 1.13.0, 1.13.1, 1.14.0, 1.15.0 and 1.15.1 cycle, and 1.11.0 and 1.16.0 return.
 #: The fix is ERGO-Code/HiGHS PR 2962 (bisected on ``latest``), first released in 1.16.0,
-#: where sparsify on and off both reach ``Optimal`` 450623.7692 (2.2 s / 1.5 s). The bit is
-#: kept as a documented opt-out because ``highspy>=1.11`` still admits the cycling
-#: releases; it can go once the floor is >= 1.16 and the #1667 panel is re-measured.
-#: ``test_1671_highs_presolve_cycle_canary.py`` enforces both halves.
+#: where sparsify on and off both reach ``Optimal`` 450623.7692 (2.2 s / 1.5 s).
+#:
+#: Since #2332 the floor is ``highspy>=1.16``, so no supported release cycles and this
+#: bit no longer protects against anything measured. It is KEPT, not because it is
+#: needed, but because removing it changes what HiGHS's presolve does on the default
+#: pure-MILP route and on the ``milp_highs`` masters, where the #1667 change was measured
+#: to move lazy-master outcomes (performance-plan §76.6). What would remove it: the
+#: sparsify on/off panel on 1.16 that #2335 specifies, cert-clean and not harmful.
+#: ``test_1671_highs_presolve_cycle_canary.py`` pins this state until then.
 _PRESOLVE_RULE_SPARSIFY = 1 << 14
 #: Every ``presolve_rule_off`` bit the MILP route sets.
 MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS | _PRESOLVE_RULE_SPARSIFY
@@ -1732,6 +1737,7 @@ def _cross_check_exempt(sf: "StdForm") -> bool:
     With the primary's presolve off (#2332) its verdict is the only one there would be,
     so the cross-check runs."""
     return presolve_exact_class(sf) and not _primary_presolve_off()
+
 
 #: Set while :func:`solve_milp_std` (the HiGHS MILP route) runs; see :func:`_lp_engine`.
 _IN_HIGHS_MILP_ROUTE: contextvars.ContextVar[bool] = contextvars.ContextVar(

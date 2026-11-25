@@ -52,7 +52,7 @@ def missing_highs_error(feature: str) -> MissingHighsError:
     """The error :func:`require_highspy` raises, for callers that raise it lazily."""
     return MissingHighsError(
         f"{feature} needs HiGHS, which is not installed. Install it with `{INSTALL_HINT}` "
-        "(highspy>=1.11,!=1.12.0).",
+        "(highspy>=1.16).",
         name="highspy",
     )
 
