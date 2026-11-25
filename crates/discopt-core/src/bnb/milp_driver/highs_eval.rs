@@ -108,6 +108,10 @@ pub(super) struct HighsEval {
     /// lowers the upper limit). Off for a fixed external cutoff.
     pub tighten_cutoff: bool,
     pub stats: EvalStats,
+    /// `DISCOPT_MILP_CONFLICT`: keep the verified Farkas ray of an LP-infeasible
+    /// node (solve coordinates) in [`Self::ray`] for its dual proof.
+    pub keep_ray: bool,
+    pub ray: Option<Vec<f64>>,
 }
 
 impl HighsEval {
@@ -151,6 +155,8 @@ impl HighsEval {
             unresolved_floor: f64::INFINITY,
             tighten_cutoff: true,
             stats: EvalStats::default(),
+            keep_ray: false,
+            ray: None,
         })
     }
 
@@ -238,6 +244,9 @@ impl HighsEval {
         match nl.verdict {
             NodeLpVerdict::InfeasibleProved => {
                 self.stats.lp_infeasible += 1;
+                if self.keep_ray {
+                    self.ray = Some(nl.sol.dual.clone());
+                }
                 cutoff_observation(parent, pc);
                 Some(SearchResult::LpInfeasible)
             }
@@ -404,6 +413,7 @@ impl HighsEval {
             node.lower_bound = node.lower_bound.max(lift);
         }
         let mut first = true;
+        self.ray = None;
         loop {
             if !first && !inheuristic && node.lower_bound > optimality_limit {
                 return SearchResult::Open;
