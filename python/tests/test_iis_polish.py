@@ -332,3 +332,62 @@ def test_post_pass_shares_saturate_with_the_budget(monkeypatch):
     assert set(stops) == {"relax", "add_one"}
     assert 0.0 < stops["relax"] <= E._RELAX_CAP_S
     assert 0.0 < stops["add_one"] <= E._ADD_ONE_CAP_S
+
+
+def test_add_one_final_refilter_frees_an_integrality_its_box_alone_keeps_infeasible():
+    """x integer in [0, 1], y free. {R0: x + y >= 0.5, R1: y <= 0.2,
+    R2: x <= 0.8} with x held is an IIS of 4. Adding R3: x >= 1.5 drops all
+    three old rows ({R3} with x held, 2 elements). The final re-filter: freeing
+    x with its box is feasible at x = 1.5, outside [0, 1]; with the box kept it
+    is infeasible, so the integrality goes and only x <= 1 stays. Before the
+    fix the integrality was kept with no certificate: not irreducible."""
+    arr = _arrays(
+        [[1, 1], [0, 1], [1, 0], [1, 0]],
+        [0.5, -INF, -INF, 1.5],
+        [INF, 0.2, 0.8, INF],
+        2,
+        [0, -INF],
+        [1, INF],
+        [True, False],
+    )
+    eng = _engine(arr)
+    got, pend, decided, _ = E._add_one(eng, {0, 1, 2}, set(), {0}, time.perf_counter() + 60)
+    assert got == ({3}, {(0, "upper")}, set()) and decided
+    assert eng.confirm_infeasible(*got, stop_at=time.perf_counter() + 60) is True
+    res = MilpIIS(
+        constraints=sorted(got[0]),
+        bounds=sorted(got[1]),
+        integrality=sorted(got[2]),
+        certificates=E._check_certificates(pend, eng, *got, 1e-6),
+        complete=True,
+    )
+    assert _checked(arr, res) == _n_elements(res) == 2
+
+
+def test_post_pass_integrality_step_tries_the_integrality_alone():
+    """The step shared by re-hold and add-one's final re-filter: on {R0} with x
+    held, pass 1 (x free of its box) is feasible at x = 1.5, outside [0, 1];
+    pass 2 (box kept) is infeasible, so the integrality goes and its box joins
+    the bounds. On a second model (x binary, 0.2 <= x <= 0.8) the pass-1 point
+    lies in the box: it is the certificate, and the integrality stays."""
+    arr = _arrays(
+        [[1, 0], [1, 1], [0, 1]],
+        [1.5, -INF, 0],
+        [INF, 1.2, INF],
+        2,
+        [0, -INF],
+        [1, INF],
+        [True, False],
+    )
+    eng = _engine(arr)
+    b, i, pend = set(), {0}, {}
+    assert E._filter_integrality(eng.probe, eng, 0, {0}, b, i, pend)
+    assert i == set() and b == {(0, "lower"), (0, "upper")} and pend == {}
+    # x in {0, 1} with 0.2 <= x <= 0.8 (rows R0, R1 of a second model): the
+    # joint point is in the box, a certificate as it is; the integrality stays.
+    arr2 = _arrays([[1], [1]], [0.2, -INF], [INF, 0.8], 1, [0], [1], [True])
+    eng2 = _engine(arr2)
+    b, i, pend = set(), {0}, {}
+    assert E._filter_integrality(eng2.probe, eng2, 0, {0, 1}, b, i, pend)
+    assert i == {0} and b == set() and set(pend) == {("integrality", 0)}
+    assert 0.2 - 1e-9 <= pend[("integrality", 0)][0] <= 0.8 + 1e-9

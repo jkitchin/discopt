@@ -842,6 +842,46 @@ def _element_keys(cons, bounds, ints) -> list[tuple]:
     )
 
 
+def _filter_integrality(
+    probe, eng: _Engine, j: int, cons: set, bounds: set, ints: set, pending: dict
+) -> bool:
+    """One deletion-filter step on held integrality ``j`` of a post pass, in
+    place on ``bounds``/``ints``; returns False when a probe was undecided.
+
+    Pass 1 relaxes the integrality jointly with its column's box (a held
+    column's bounds are not elements). If that stays infeasible the integrality
+    goes; a feasible point inside the box is its certificate. A point outside the
+    box certifies nothing (a relaxed integrality keeps its box), so pass 2, as
+    in the integrality phase, relaxes the integrality alone with the box kept:
+    if that stays infeasible the integrality is not needed, it goes and its
+    finite bounds become elements (left to the caller's bound stage). Without
+    pass 2 such an integrality was kept with no certificate and the answer was
+    not irreducible: measured on MIPcc27 stein45inf through a re-hold pass built
+    on this same step (zz02 at -1 outside [0, 1], checker minimal=False, 215 of
+    216 certified). :func:`_add_one`'s final re-filter had the same step.
+    """
+    v, x = probe(cons, bounds, ints - {j})
+    if v is True:
+        ints.discard(j)
+        return True
+    if v is None:
+        return False
+    lo_j, hi_j = float(eng.col_lb[j]), float(eng.col_ub[j])
+    if x is not None and lo_j <= x[j] <= hi_j:
+        pending[("integrality", j)] = x
+        return True
+    box = {(j, s) for s, f in (("lower", lo_j > -_INF), ("upper", hi_j < _INF)) if f}
+    v, x = probe(cons, bounds | box, ints - {j})
+    if v is True:
+        ints.discard(j)
+        bounds |= box
+    elif v is None:
+        return False
+    elif x is not None:
+        pending[("integrality", j)] = x
+    return True
+
+
 def _add_one(
     eng: _Engine,
     cons: set[int],
@@ -857,8 +897,9 @@ def _add_one(
     goes on from the new set. Integralities and bounds stay fixed during the
     scan (more of them only makes a deletion harder, so a constraint the scan
     keeps stays needed once some are dropped) and are re-filtered once at the
-    end: each integrality jointly with its column's box, as the integrality
-    phase does, then each bound.
+    end: each integrality as the integrality phase does it
+    (:func:`_filter_integrality`: jointly with its column's box, then alone with
+    the box kept), then each bound.
 
     Returns ``(new_set or None, pending, decided, tried)``: ``new_set`` only
     when a move was adopted; ``pending`` the probe points of the final
@@ -944,13 +985,8 @@ def _add_one(
     new_c, new_b, new_i = set(best), set(bounds), set(ints)
     pending: dict[tuple, np.ndarray] = {}
     for j in sorted(new_i):
-        v, x = eng.probe(new_c, new_b, new_i - {j})
-        if v is True:
-            new_i.discard(j)
-        elif v is None:
+        if not _filter_integrality(eng.probe, eng, j, new_c, new_b, new_i, pending):
             decided = False
-        elif x is not None:
-            pending[("integrality", j)] = x
     for jb in sorted(new_b):
         v, x = eng.probe(new_c, new_b - {jb}, new_i)
         if v is True:
