@@ -1618,6 +1618,9 @@ def _milp_iis_arrays(
     # The structural sweep (``_structural_sweep``): solve-free deletion between
     # phases and on the answer. ``DISCOPT_IIS_SWEEP=0`` is the opt-out for A/B.
     use_sweep = os.environ.get("DISCOPT_IIS_SWEEP", "1") != "0"
+    # Two-pass integrality phase (joint relaxation first, integrality-only
+    # second). ``DISCOPT_IIS_INT_TWO_PASS=0`` restores the single pass.
+    two_pass = os.environ.get("DISCOPT_IIS_INT_TWO_PASS", "1") != "0"
     n_swept = 0
     n_sweep_reverted = 0
     A_csr = A.tocsr() if use_sweep else None
@@ -1796,7 +1799,7 @@ def _milp_iis_arrays(
                 pending[key(batch[0])] = x
             i += 1
 
-    def batch_filter_columns(cols: list) -> None:
+    def batch_filter_columns(cols: list, joint_only: bool = False, first: int = 1) -> list:
         """The integrality phase with each column's finite bounds removed
         together with its integrality ("relax the column").
 
@@ -1810,8 +1813,14 @@ def _milp_iis_arrays(
         for a single column, the integrality alone is tried (the previous
         step), so nothing the old phase dropped is kept; its bounds then stay
         for the bound phase. Same adaptive batching as :func:`batch_filter`.
+
+        With ``joint_only`` that single-column integrality-only probe is not
+        made: the column is returned (in order) for a later pass, so every
+        probe of this pass can only shrink the counted size. ``first`` is the
+        size of the opening batch.
         """
         nonlocal proven
+        deferred: list = []
 
         def relax(j) -> list:
             ints_active.discard(j)
@@ -1820,7 +1829,7 @@ def _milp_iis_arrays(
                 bounds.discard(jb)
             return gone
 
-        i, size = 0, 1
+        i, size = 0, max(1, min(first, cap))
         while i < len(cols):
             batch = cols[i : i + size]
             removed = {j: relax(j) for j in batch}
@@ -1843,8 +1852,13 @@ def _milp_iis_arrays(
                 size = max(1, len(batch) // 2)
                 continue
             # One column: its bounds may be what is needed -- try the
-            # integrality alone, as the previous phase did.
+            # integrality alone, as the previous phase did (or, in the joint
+            # pass, leave that to the next pass).
             j = batch[0]
+            if joint_only and res is not None:
+                deferred.append(j)
+                i += 1
+                continue
             if removed[j]:
                 ints_active.discard(j)
                 try:
@@ -1863,6 +1877,7 @@ def _milp_iis_arrays(
                 assert x is not None
                 pending[("integrality", j)] = x
             i += 1
+        return deferred
 
     def phase_integrality() -> None:
         # Guieu & Chinneck: if the LP relaxation is infeasible, all integrality
@@ -1872,6 +1887,22 @@ def _milp_iis_arrays(
         res, _ = eng.probe(cons, bounds, set())
         if res is True:
             ints_active.clear()
+        elif include_bounds and two_pass:
+            # Pass 1 relaxes columns jointly (integrality and both bounds), so
+            # each success shrinks the counted size and the rolling checkpoint
+            # follows it. It opens with every general-integer column (domain
+            # wider than {lb, lb + 1}) in one probe: on MIPcc27's dijle one
+            # joint relaxation of the 384 remaining ones took the subsystem
+            # from 2785 to 2401 (0.9 s), while one-at-a-time from binaries
+            # never reached them. Pass 2 tries integrality alone on what pass
+            # 1 refused, batched; its bounds then go to the bound phase.
+            cols = sorted(ints_active)
+            gen = [j for j in cols if not (col_ub[j] - col_lb[j] <= 1)]
+            rest = [j for j in cols if col_ub[j] - col_lb[j] <= 1]
+            deferred = batch_filter_columns(
+                _ord(gen) + _ord(rest), joint_only=True, first=max(1, len(gen))
+            )
+            batch_filter(deferred, ints_active, lambda j: ("integrality", j))
         elif include_bounds:
             batch_filter_columns(_ord(sorted(ints_active)))
         else:
