@@ -471,6 +471,7 @@ def _run(
                 engine=engine,
                 forced=[res.n_forced, res.n_forced_certified],
                 add_one=[res.n_add_one_tried, res.n_add_one_moves],
+                relaxed=res.n_relaxed,
                 wall=round(time.perf_counter() - t0, 2),
             )
         ),

@@ -162,6 +162,7 @@ class MilpIIS:
     n_forced_certified: int = 0
     n_add_one_tried: int = 0
     n_add_one_moves: int = 0
+    n_relaxed: int = 0  # integralities the anytime relaxation (_relax_integrality) traded away
     # Portfolio runs only: one entry per member, in portfolio order, with keys
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
     # and a timed-out member's own TimeoutError message.
@@ -966,6 +967,141 @@ def _add_one(
     return (new_c, new_b, new_i), pending, decided, tried
 
 
+#: Integrality relaxation of an anytime answer (:func:`_relax_integrality`):
+#: counterexample rounds per stage (each round restores at least one element, so
+#: the cap only bounds a stage that would restore one at a time; it fixes the
+#: result, the clock only stops it), and the share of the time left the pass may
+#: use. Measured by Fable's prototype on dingo's 2197-element anytime answer:
+#: 66 solves in 17 s, 1867 elements; on dijle's, 6 solves in 1.8 s.
+_RELAX_MAX_ROUNDS = 64
+_RELAX_FRACTION = 0.25
+#: Share of ``total_time_limit`` the filter leaves for the post-pass
+#: (:func:`_polish`): an anytime answer arrives at the deadline otherwise, with no
+#: time to relax or certify it. 10% of mipcc's 600 s run is ~57 s; the prototype's
+#: post-pass (relaxation and every certificate) took ~36 s on dingo, ~12 s on dijle.
+_POLISH_RESERVE_FRACTION = 0.10
+#: Below this a relaxed column's value counts as integral / inside its bound.
+_RELAX_TOL = 1e-9
+
+
+def _relax_integrality(
+    eng: _Engine,
+    cons: set[int],
+    bounds: set,
+    ints: set[int],
+    keep: set[int],
+    stop_at: float,
+    max_rounds: int = _RELAX_MAX_ROUNDS,
+) -> Optional[tuple[set[int], set, set[int]]]:
+    """Trade held integralities of an answer for fewer or certifiable elements,
+    by counterexample-guided refinement: relax a whole block at once; a feasible
+    point names the columns it needs back (those it puts off-integer, or past a
+    dropped bound), which are restored, and the block is re-solved until the set
+    is infeasible again.
+
+    1. General integers (box wider than one unit, or unbounded): relaxed with
+       their bounds (one element less each).
+    2. Binaries: relaxed keeping both bounds, then the upper bounds are dropped,
+       then the lower bounds of the columns that kept their upper one. A column
+       left with both bounds is held integer again (one element, not two), so
+       the size never grows; a column with one bound costs what its integrality
+       did, but a bound has a certificate where, under the checker's rule (a
+       relaxed integrality keeps its box), the integrality may have none.
+
+    ``keep``: integralities not to relax (those already holding a certificate).
+    Every restore only tightens the set, so an infeasible set stays infeasible;
+    probes run under the engine's policy, so the caller confirms the result
+    (:meth:`_Engine.confirm_infeasible`). Returns the new set, or None when it
+    is not smaller-or-equal and different. Each stage is bounded by
+    ``max_rounds`` solves (deterministic); reaching ``stop_at`` raises
+    :class:`_OutOfTime` and the caller discards the pass. Not run on a complete
+    answer: there every integrality was already deletion-tested.
+    """
+    c0, b0, i0 = set(cons), set(bounds), set(ints)
+    lb, ub = eng.col_lb, eng.col_ub
+
+    def probe(b: set, i: set) -> tuple[Optional[bool], Optional[np.ndarray]]:
+        if time.perf_counter() >= stop_at:
+            raise _OutOfTime
+        return eng.probe(c0, b, i)
+
+    def frac(x: np.ndarray, j: int) -> bool:
+        return abs(float(x[j]) - round(float(x[j]))) > _RELAX_TOL
+
+    b, i = set(b0), set(i0)
+    # Stage 1: general integers with their bounds.
+    gen = {j for j in i - keep if not (lb[j] > -_INF and ub[j] < _INF and ub[j] - lb[j] <= 1)}
+    relaxed = set(gen)
+    for _ in range(max_rounds):
+        if not relaxed:
+            break
+        v, x = probe(b, i - relaxed)
+        if v is True:
+            i -= relaxed
+            break
+        if v is None or x is None:
+            relaxed = set()
+            break
+        back = {
+            j
+            for j in relaxed
+            if frac(x, j) or x[j] < lb[j] - _RELAX_TOL or x[j] > ub[j] + _RELAX_TOL
+        }
+        if not back:
+            relaxed = set()
+            break
+        relaxed -= back
+    # Stage 2: binaries, keeping their box first.
+    binr = {j for j in i - keep if lb[j] > -_INF and ub[j] < _INF and ub[j] - lb[j] <= 1}
+    box = {(j, s) for j in binr for s in ("lower", "upper")}
+
+    def refine(cand: set, test) -> set:
+        """The subset of ``cand`` that ``test(subset)`` accepts, by restoring
+        the counterexample's columns; empty when undecided or stuck."""
+        cur = set(cand)
+        for _ in range(max_rounds):
+            if not cur:
+                return cur
+            v, x, back = test(cur)
+            if v is True:
+                return cur
+            if v is None or not back:
+                return set()
+            cur -= back
+        return set()
+
+    def t_int(cur):
+        v, x = probe(b | {(j, s) for j in cur for s in ("lower", "upper")}, i - cur)
+        return v, x, (set() if x is None else {j for j in cur if frac(x, j)})
+
+    rel = refine(binr, t_int)
+    if rel:
+        bb = (b - box) | {(j, s) for j in rel for s in ("lower", "upper")}
+        ii = i - rel
+
+        def t_up(cur):
+            v, x = probe(bb - {(j, "upper") for j in cur}, ii)
+            return v, x, (set() if x is None else {j for j in cur if x[j] > ub[j] + _RELAX_TOL})
+
+        no_up = refine(rel, t_up)
+        bb -= {(j, "upper") for j in no_up}
+
+        def t_lo(cur):
+            v, x = probe(bb - {(j, "lower") for j in cur}, ii)
+            return v, x, (set() if x is None else {j for j in cur if x[j] < lb[j] - _RELAX_TOL})
+
+        no_lo = refine(rel - no_up, t_lo)
+        bb -= {(j, "lower") for j in no_lo}
+        # Both bounds left: hold the integrality again (tighter, one element).
+        both = {j for j in rel if (j, "lower") in bb and (j, "upper") in bb}
+        bb -= {(j, s) for j in both for s in ("lower", "upper")}
+        b, i = bb, ii | both
+    size = len(b) + len(i)
+    if (b, i) == (b0, i0) or size > len(b0) + len(i0):
+        return None
+    return c0, b, i
+
+
 def _polish(
     arrays: tuple,
     res: MilpIIS,
@@ -975,24 +1111,35 @@ def _polish(
     engine: str,
     deadline: Optional[float],
 ) -> MilpIIS:
-    """Post-pass on the answer: the add-one move (:func:`_add_one`; only on a
-    complete answer and with an overall budget, capped at ``_ADD_ONE_FRACTION``
-    of the time left), then a forced-violation certificate for every kept
-    element that still has none (:meth:`_Engine.forced_point`, margins
-    :data:`_FORCED_MARGINS`).
+    """Post-pass on the answer: on an anytime (incomplete) answer the
+    integrality relaxation (:func:`_relax_integrality`, at most
+    ``_RELAX_FRACTION`` of the time left; the filter stops
+    ``_POLISH_RESERVE_FRACTION`` of the budget early to leave it room); on a
+    complete one the add-one move (:func:`_add_one`; only with an overall
+    budget, capped at ``_ADD_ONE_FRACTION`` of the time left); then a
+    forced-violation certificate for every kept element that still has none
+    (:meth:`_Engine.forced_point`, margins :data:`_FORCED_MARGINS`).
 
     Soundness: a set the add-one move changed replaces the answer only when
     :meth:`_Engine.confirm_infeasible` confirms it under both presolve
     configurations, as for every answer; otherwise the answer stands unchanged.
+    The same holds for a set the relaxation changed.
     A certificate is kept only when :func:`_check_certificates` accepts it by
     arithmetic on the final set. Needs ``res.bounds`` to be every bound the set
     applies, i.e. ``include_bounds=True``. ``DISCOPT_IIS_ADD_ONE=0`` /
-    ``DISCOPT_IIS_CERT_REPAIR=0`` are opt-outs for A/B measurement."""
+    ``DISCOPT_IIS_CERT_REPAIR=0`` / ``DISCOPT_IIS_RELAX_INT=0`` are opt-outs for
+    A/B measurement."""
     add_one = (
         os.environ.get("DISCOPT_IIS_ADD_ONE", "1") != "0" and res.complete and deadline is not None
     )
+    relax = (
+        os.environ.get("DISCOPT_IIS_RELAX_INT", "1") != "0"
+        and not res.complete
+        and deadline is not None
+        and bool(res.integrality)
+    )
     repair = os.environ.get("DISCOPT_IIS_CERT_REPAIR", "1") != "0"
-    if not add_one and not repair:
+    if not add_one and not relax and not repair:
         return res
     t0 = time.perf_counter()
     if deadline is not None and deadline - t0 < 4 * _MIN_SOLVE_S:
@@ -1016,7 +1163,30 @@ def _polish(
     cons, bounds, ints = set(res.constraints), set(res.bounds), set(res.integrality)
     pending: dict[tuple, np.ndarray] = dict(res.certificates)
     proven = res.proven_irreducible
-    tried = moves = 0
+    tried = moves = n_relaxed = 0
+    s_tol = min(cert_tol, _STRONG_OTHERS)
+    if relax:
+        assert deadline is not None
+        share = _RELAX_FRACTION * max(deadline - t0, 0.0)
+        keep = {
+            k[1]
+            for k in _check_certificates(pending, eng, cons, bounds, ints, s_tol, _STRONG_OWN)
+            if k[0] == "integrality"
+        }
+        try:
+            got = _relax_integrality(eng, cons, bounds, ints, keep, t0 + share)
+            if got is not None:
+                t_c = time.perf_counter()
+                verdict = eng.confirm_infeasible(
+                    *got,
+                    stop_at=min(deadline, t_c + share),
+                    presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
+                )
+                if verdict is True:
+                    n_relaxed = len(ints - got[2])
+                    cons, bounds, ints = got
+        except _OutOfTime:
+            pass  # the relaxation or its confirmation ran out of time: the answer stands
     if add_one:
         assert deadline is not None
         share = _ADD_ONE_FRACTION * max(deadline - t0, 0.0)
@@ -1039,7 +1209,6 @@ def _polish(
     certs = _check_certificates(pending, eng, cons, bounds, ints, cert_tol)
     n_forced = n_forced_ok = 0
     if repair:
-        s_tol = min(cert_tol, _STRONG_OTHERS)
         strong = _check_certificates(certs, eng, cons, bounds, ints, s_tol, _STRONG_OWN)
         try:
             for key in _element_keys(cons, bounds, ints):
@@ -1075,6 +1244,7 @@ def _polish(
         n_forced_certified=n_forced_ok,
         n_add_one_tried=tried,
         n_add_one_moves=moves,
+        n_relaxed=n_relaxed,
     )
 
 
@@ -1891,6 +2061,15 @@ def milp_iis_arrays(
         raise ValueError(f"iis_engine={iis_engine!r}: expected one of {ENGINES}")
     if workers is not None and portfolio is None:
         raise ValueError("workers= needs portfolio=; a single order runs in-process")
+    # The filter stops early enough to leave the post-pass its share
+    # (_POLISH_RESERVE_FRACTION); the post-pass runs against the whole budget.
+    filter_limit = total_time_limit
+    if (
+        total_time_limit is not None
+        and include_bounds
+        and os.environ.get("DISCOPT_IIS_RELAX_INT", "1") != "0"
+    ):
+        filter_limit = (1.0 - _POLISH_RESERVE_FRACTION) * float(total_time_limit)
     if portfolio is not None:
         res = _portfolio_iis(
             arrays,
@@ -1898,7 +2077,7 @@ def milp_iis_arrays(
             portfolio,
             workers,
             t_start,
-            total_time_limit,
+            filter_limit,
             grace=grace,
             grace_window=grace_window,
         )
@@ -1906,7 +2085,7 @@ def milp_iis_arrays(
         if grace != math.inf or grace_window is not None:
             raise ValueError("grace= / grace_window= need portfolio=")
         res = _milp_iis_arrays(
-            arrays, **kwargs, order=order, total_time_limit=total_time_limit, t_start=t_start
+            arrays, **kwargs, order=order, total_time_limit=filter_limit, t_start=t_start
         )
     if not include_bounds:
         return res  # the post-pass needs every applied bound listed (see _polish)

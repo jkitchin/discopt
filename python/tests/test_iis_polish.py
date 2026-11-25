@@ -204,3 +204,87 @@ def test_add_one_sweep_cut_by_the_clock_is_discarded_and_the_probe_cap_is_determ
     )
     assert sorted(out.constraints) == [0, 1, 2] and out.n_add_one_moves == 0
     assert _checked(arr, out) == 3
+
+
+def _anytime(cons, bounds, ints):
+    """An answer as the filter returns it when the clock stopped it."""
+    return MilpIIS(constraints=cons, bounds=bounds, integrality=ints, complete=False)
+
+
+def _post(arr, res):
+    return _polish(
+        arr, res, cert_tol=1e-6, time_limit=10.0, engine="highs", deadline=time.perf_counter() + 60
+    )
+
+
+def test_relax_drops_a_general_integer_from_an_anytime_answer(monkeypatch):
+    """x + y >= 3, x + y <= 2 is infeasible without x's integrality: the block
+    relaxation drops it (with its box, so one element less)."""
+    monkeypatch.delenv("DISCOPT_IIS_RELAX_INT", raising=False)
+    arr = _arrays([[1, 1], [1, 1]], [3, -INF], [INF, 2], 2, [0, 0], [10, 10], [True, False])
+    out = _post(arr, _anytime([0, 1], [], [0]))
+    assert out.integrality == [] and out.bounds == [] and sorted(out.constraints) == [0, 1]
+    assert out.n_relaxed == 1 and not out.complete
+    assert _checked(arr, out) == 2
+
+
+def test_relax_trades_an_uncertifiable_binary_integrality_for_one_bound(monkeypatch):
+    """x binary, x >= 1.5: x's integrality has no certificate under the checker's
+    rule (relaxed, x keeps its box [0, 1]). The swap keeps only x <= 1, which
+    has one, so every element of the same-size answer is certified."""
+    monkeypatch.delenv("DISCOPT_IIS_RELAX_INT", raising=False)
+    arr = _arrays([[1]], [1.5], [INF], 1, [0], [1], [True])
+    monkeypatch.setenv("DISCOPT_IIS_RELAX_INT", "0")
+    before = _post(arr, _anytime([0], [], [0]))
+    assert before.integrality == [0] and _checked(arr, before) == 1
+    monkeypatch.setenv("DISCOPT_IIS_RELAX_INT", "1")
+    out = _post(arr, _anytime([0], [], [0]))
+    assert out.integrality == [] and out.bounds == [(0, "upper")] and out.constraints == [0]
+    assert _n_elements(out) == _n_elements(before) and out.n_relaxed == 1
+    assert _checked(arr, out) == 2
+
+
+def test_relax_restores_a_needed_integrality_and_leaves_complete_answers_alone(monkeypatch):
+    """2x = 1 with x binary: the relaxed point x = 0.5 names x, which is held
+    again, so the answer is unchanged. A complete answer is never relaxed."""
+    monkeypatch.delenv("DISCOPT_IIS_RELAX_INT", raising=False)
+    arr = _arrays([[2]], [1], [1], 1, [0], [1], [True])
+    out = _post(arr, _anytime([0], [], [0]))
+    assert out.integrality == [0] and out.bounds == [] and out.n_relaxed == 0
+    arr2 = _arrays([[1, 1], [1, 1]], [3, -INF], [INF, 2], 2, [0, 0], [10, 10], [True, False])
+    done = MilpIIS(constraints=[0, 1], bounds=[], integrality=[0], complete=True)
+    assert _post(arr2, done).integrality == [0]
+
+
+def test_relaxed_set_is_kept_only_when_confirmed(monkeypatch):
+    monkeypatch.delenv("DISCOPT_IIS_RELAX_INT", raising=False)
+    monkeypatch.setattr(E._Engine, "confirm_infeasible", lambda self, *a, **k: None)
+    arr = _arrays([[1, 1], [1, 1]], [3, -INF], [INF, 2], 2, [0, 0], [10, 10], [True, False])
+    out = _post(arr, _anytime([0, 1], [], [0]))
+    assert out.integrality == [0] and out.n_relaxed == 0
+
+
+def test_relaxation_cut_by_the_clock_is_discarded():
+    arr = _arrays([[1, 1], [1, 1]], [3, -INF], [INF, 2], 2, [0, 0], [10, 10], [True, False])
+    eng = _engine(arr)
+    with pytest.raises(E._OutOfTime):
+        E._relax_integrality(eng, {0, 1}, set(), {0}, set(), time.perf_counter() - 1.0)
+
+
+def test_filter_leaves_the_post_pass_its_reserve(monkeypatch):
+    """With a budget, the filter gets (1 - _POLISH_RESERVE_FRACTION) of it and the
+    post-pass the whole; the opt-out gives the filter the whole budget again."""
+    seen = []
+    real = E._milp_iis_arrays
+
+    def spy(*a, **k):
+        seen.append(k["total_time_limit"])
+        return real(*a, **k)
+
+    monkeypatch.setattr(E, "_milp_iis_arrays", spy)
+    arr = _full()
+    monkeypatch.delenv("DISCOPT_IIS_RELAX_INT", raising=False)
+    milp_iis_arrays(arr, total_time_limit=40.0)
+    monkeypatch.setenv("DISCOPT_IIS_RELAX_INT", "0")
+    milp_iis_arrays(arr, total_time_limit=40.0)
+    assert seen == [pytest.approx(40.0 * (1 - E._POLISH_RESERVE_FRACTION)), 40.0]
