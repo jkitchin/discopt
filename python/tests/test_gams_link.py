@@ -723,21 +723,20 @@ def test_smoke_gms_file_parses(entry):
 )
 def test_smoke_gms_optimum_via_from_gams(entry):
     model = dm.from_gams(str(_GAMS_DATA / entry["file"]))
-    # Keep the solver budget well under pytest's --timeout=120: nonconvex
-    # instances (e.g. Rosenbrock) never close their global gap, so they run to
-    # the full time_limit. The correct incumbent is found in the first seconds;
-    # the remaining time is pure gap-closing effort, so a short budget is enough
-    # to validate the optimum without tripping the harness timeout.
+    # Every entry certifies its global optimum. Measured on a dev machine at
+    # 49c7418ea (time_limit=60): lp_prodmix, mip_knapsack, nlp_circle, minlp_exp and
+    # lp_transport in <= 0.12 s with 0-1 nodes; nlp_rosenbrock (nonconvex) in
+    # 0.6-0.8 s and 2117 nodes, the same node count on every run.
     #
-    # "A short budget" was 30s, which for nlp_rosenbrock meant 30s of exactly
-    # the gap-closing effort this comment calls pointless — it was the single
-    # most expensive case in this file. Every other entry certifies in well
-    # under a second, so 5s only ever binds on the instances the comment is
-    # about, and on those the incumbent is already final.
-    result = model.solve(time_limit=5)
-    # Nonconvex instances may return "feasible" (the solver declines to certify a
-    # global gap); either way the reported optimum must match the known value.
-    assert result.status in ("optimal", "feasible")
+    # The time limit is therefore a backstop, not the quality bar (CLAUDE.md,
+    # "Tests"). It used to be 5 s, under a comment saying Rosenbrock never closes
+    # its gap. Rosenbrock does close it, but on a loaded CI coverage shard the 5 s
+    # limit stopped it at 1967 of its 2117 nodes, and the test failed on
+    # ``status == "time_limit"`` with the right objective (#2329, coverage shard
+    # 3/4). Coverage alone does not explain it: under --cov locally the case takes
+    # 0.75 s. 60 s is ~75x the measured time and still under --timeout=120.
+    result = model.solve(time_limit=60)
+    assert result.status == "optimal", (result.status, result.gap, result.node_count)
     assert result.objective == pytest.approx(entry["objective"], abs=max(entry["tol"], 1e-4))
 
 
