@@ -591,3 +591,35 @@ def test_rehold_reuses_the_answers_certificates(monkeypatch):
     assert out[False][1] < out[True][1]
     keys = {("constraint", 0), ("constraint", 1), ("integrality", 1)}
     assert out[False][2] == out[True][2] == keys
+
+
+def test_rehold_frees_an_integrality_its_box_alone_keeps_infeasible():
+    """MIPcc27 stein45inf (gate, branch a97e46b): re-hold kept integrality zz02
+    because relaxing it jointly with its box was feasible (zz02 = -1), while
+    relaxing it alone, box kept, is infeasible: the checker reported the answer
+    not minimal (215 of 216 certified). Here x is integer in [0, 1], y free;
+    R0: x >= 1.5, R1: x + y <= 1.2, R2: y >= 0. Holding x makes R0 alone
+    infeasible; freeing x with its box gives x = 1.5, outside it, so the
+    integrality is tried alone: it goes, its box becomes elements, and the
+    bound stage keeps only x <= 1."""
+    arr = _arrays(
+        [[1, 0], [1, 1], [0, 1]],
+        [1.5, -INF, 0],
+        [INF, 1.2, INF],
+        2,
+        [0, -INF],
+        [1, INF],
+        [True, False],
+    )
+    eng = _engine(arr)
+    got, pend, decided = E._rehold(eng, {0, 1, 2}, set(), set(), time.perf_counter() + 60)
+    assert got == ({0}, {(0, "upper")}, set()) and decided
+    assert eng.confirm_infeasible(*got, stop_at=time.perf_counter() + 60) is True
+    res = MilpIIS(
+        constraints=sorted(got[0]),
+        bounds=sorted(got[1]),
+        integrality=sorted(got[2]),
+        certificates=E._check_certificates(pend, eng, *got, 1e-6),
+        complete=True,
+    )
+    assert _checked(arr, res) == _n_elements(res) == 2

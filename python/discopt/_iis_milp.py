@@ -1315,13 +1315,8 @@ def _rehold(
     for j in sorted(new_i):
         if ("integrality", j) in skip:
             continue
-        v, x = probe(new_c, new_b, new_i - {j})
-        if v is True:
-            new_i.discard(j)
-        elif v is None:
+        if not _filter_integrality(probe, eng, j, new_c, new_b, new_i, pending):
             decided = False
-        elif x is not None:
-            pending[("integrality", j)] = x
     skip = certified(new_c, new_b, new_i)
     for jb in sorted(new_b):
         if ("bound", jb[0], jb[1]) in skip:
