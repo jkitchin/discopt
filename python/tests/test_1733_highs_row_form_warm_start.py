@@ -101,16 +101,6 @@ def test_oracle_is_the_pinned_optimum():
 def test_issue_repro_certifies_the_true_optimum(warm):
     m, ws = _model()
     r = m.solve(initial_solution=ws) if warm else m.solve()
-    if r.solver_stats["highs/version"] < L.ROW_FORM_MIN_HIGHS:
-        # HiGHS 1.10/1.11 keep the slack form (see ROW_FORM_MIN_HIGHS); there the
-        # contract is no false certificate, not a certificate. Measured: 1.10 certifies
-        # 363.3962; 1.11 labels the model infeasible, which the cross-form check
-        # refutes, so the optimum is reported uncertified.
-        assert r.bound is None or r.bound <= OPT + 1e-6 * OPT, (r.status, r.bound)
-        if r.status == "optimal":
-            assert abs(r.objective - OPT) <= 1e-6 * OPT
-        assert r.solver_stats.get("milp/row_form_skipped_old_highs") == 1.0
-        return
     assert r.status == "optimal", (r.status, r.objective, r.bound, r.algorithm_route)
     assert abs(r.objective - OPT) <= 1e-6 * OPT
     assert r.bound <= OPT + 1e-6 * OPT
@@ -230,18 +220,6 @@ def test_sentinel_side_opens_the_row_end(coef):
         assert lo[0] == -np.inf and hi[0] == 3.0
     else:
         assert lo[0] == 3.0 and hi[0] == np.inf
-
-
-def test_old_highs_keeps_the_slack_form(monkeypatch):
-    """HiGHS 1.10/1.11 return a false kInfeasible on the #1229 row form (fixed in
-    1.12), so older versions are handed the slack form."""
-    monkeypatch.setattr(L, "_version_number", lambda h: 11100.0)
-    m, _ = _model()
-    r = m.solve()
-    st = r.solver_stats
-    assert st.get("milp/row_form_skipped_old_highs") == 1.0
-    assert "milp/logicals_as_row_bounds" not in st
-    assert r.bound is None or r.bound <= OPT + 1e-6 * OPT
 
 
 def test_infeasible_label_is_refuted_by_the_other_form(monkeypatch):
