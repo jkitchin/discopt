@@ -41,6 +41,23 @@ def _redundant_rows_model(n_red=60):
     return m
 
 
+def _two_sided_rows_model(n_red=30):
+    """Like ``_redundant_rows_model`` but the noise rows are pairs
+    ``-3 <= x_k - x_{k+1} <= 3``: not redundant over the boxes, and no column is
+    monotone, so the first structural sweep removes nothing and the filter
+    drops the rows (later sweeps then drop the bounds of the columns it
+    orphans)."""
+    m = dm.Model("pairs")
+    x = m.continuous("x", shape=(n_red + 2,), lb=0, ub=10)
+    m.subject_to(x[0] >= 5, name="big")
+    for k in range(1, n_red + 1):
+        m.subject_to(x[k] - x[k + 1] <= 3, name=f"up{k}")
+        m.subject_to(x[k] - x[k + 1] >= -3, name=f"dn{k}")
+    m.subject_to(x[0] <= 2, name="small")
+    m.minimize(0 * x[0])
+    return m
+
+
 def _independently_infeasible(model, iis):
     """Decide the returned subsystem independently: both HiGHS presolve settings must
     say infeasible, and no verified point may exist (``_highs_oracle``, #2332)."""
@@ -76,8 +93,13 @@ def _independently_infeasible(model, iis):
 
 
 @pytest.mark.smoke
+@pytest.mark.parametrize("sweep", ["0", "1"])
 @pytest.mark.parametrize("confirm", ["each", "final"])
-def test_budget_returns_a_confirmed_anytime_subsystem(monkeypatch, confirm):
+def test_budget_returns_a_confirmed_anytime_subsystem(monkeypatch, confirm, sweep):
+    # The structural sweep deletes ``_redundant_rows_model``'s rows with no
+    # probe, so the sweep-off arm uses it and the sweep-on arm uses a model the
+    # sweep cannot reduce: both exercise the budgeted filter.
+    monkeypatch.setenv("DISCOPT_IIS_SWEEP", sweep)
     from discopt import _iis_milp
 
     real_run = highspy.Highs.run
@@ -93,7 +115,8 @@ def test_budget_returns_a_confirmed_anytime_subsystem(monkeypatch, confirm):
     monkeypatch.setattr(
         _iis_milp, "milp_iis", lambda m, **kw: real_milp_iis(m, confirm=confirm, **kw)
     )
-    m = _redundant_rows_model()
+    m = _redundant_rows_model() if sweep == "0" else _two_sided_rows_model()
+    n_rows = len(m._constraints)
     # ~0.15 s per solve: room for the base probe, a checkpoint confirmation,
     # some filtering and the final two-solve confirmation -- but not the ~20+
     # solves the full filter needs.
@@ -105,7 +128,7 @@ def test_budget_returns_a_confirmed_anytime_subsystem(monkeypatch, confirm):
     assert elapsed < budget + 2.0, elapsed  # CI-safe slack; overshoot is ~0.3 s locally
     names = {c.name for c in iis.constraints}
     assert {"big", "small"} <= names  # the conflict is never dropped
-    assert len(names) < 62  # and the filter did make progress
+    assert len(names) < n_rows  # and the filter did make progress
     assert _independently_infeasible(m, iis)
 
 

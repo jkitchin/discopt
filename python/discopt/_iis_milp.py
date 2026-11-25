@@ -148,6 +148,10 @@ class MilpIIS:
     n_reduced_confirmed: int = 0  # confirmations decided via the exact reduction
     n_exact_confirmed: int = 0
     n_exact_refuted: int = 0
+    n_swept: int = 0  # elements the structural sweep dropped with no solve
+    # Sweeps undone because they would have dropped an element holding a
+    # certificate (a contradiction that only tolerances can produce).
+    n_sweep_reverted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
     # Portfolio runs only: one entry per member, in portfolio order, with keys
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
@@ -950,6 +954,251 @@ def _lift_implied_binaries(A, row_lo, row_hi, col_lb, col_ub, is_int):
     return out
 
 
+#: Relative margin of the structural sweep's activity tests on rows with
+#: non-integral data (integral data is compared exactly, in Python ``int``).
+_SWEEP_REL = 1e-9
+
+#: The sweep checks the clock every this many rows or columns.
+_SWEEP_CLOCK_EVERY = 256
+
+
+def _structural_sweep(
+    A_csr,
+    A_csc,
+    row_lo,
+    row_hi,
+    row_groups,
+    col_lb,
+    col_ub,
+    cons,
+    bounds,
+    ints_active,
+    include_bounds=True,
+    stop_at=None,
+) -> tuple[int, int, int]:
+    """Drop elements of an infeasible subsystem with no solve; returns
+    ``(constraints, bounds, integralities)`` removed. Mutates the three sets.
+
+    ``stop_at`` (a ``time.perf_counter()`` value) ends the sweep early. Every
+    removal made up to then is valid on its own, so an early stop is sound.
+
+    Each step below removes constraints from the CURRENT subsystem ``S`` only
+    when ``S`` minus them is still infeasible, by an exact argument about ``S``
+    itself, and steps are applied one after another, each judged on the system
+    the previous one left (judging several rows redundant *jointly* is unsound:
+    each may be implied only by the others). The rules, applied to a fixpoint:
+
+    * **Redundant row.** Every row of a group holds for every point of the
+      current column boxes (a column's box: its declared bounds when it is held
+      integer, else the bounds still in ``bounds``). Dropping it leaves the
+      feasible set unchanged. Only boxes are used, never other rows.
+    * **Monotone column** (pure-literal elimination). A column ``j`` and a
+      direction ``d`` such that every current row containing ``j`` is one-sided
+      and loosens as ``x_j`` moves along ``d``; let ``v`` be ``j``'s current
+      bound in that direction. If ``v`` is infinite, or every such row holds at
+      ``x_j = v`` for every point of the other columns' boxes (``v`` integral
+      when ``j`` is held), then a point satisfying ``S`` minus those rows
+      extends to ``S`` by moving ``x_j`` to ``v`` (or far enough), so ``S``
+      minus them is infeasible. Groups are dropped only when all their rows are
+      among those rows.
+    * **Orphan column.** No current row contains ``j``. Its integrality and
+      bounds go together, provided its box is nonempty and, if held, contains
+      an integer: then any point of the rest extends by a value of ``x_j`` from
+      the box. (Relaxing the integrality alone would turn its bounds into
+      counted elements.)
+
+    Removing constraints never invalidates a certificate of a kept element (a
+    point feasible for ``S`` minus that element stays feasible for a subset
+    of it). In exact arithmetic a sweep never drops an element whose
+    certificate shows it is needed, since that would contradict the argument
+    above; the engine checks this and reverts a sweep that does
+    (``MilpIIS.n_sweep_reverted``). Measured on MIPcc27's dijle, whose
+    3961-element answer kept 1176 orphan elements.
+
+    Integral data is compared in Python ``int`` arithmetic: a float sum of
+    integral terms is exact only below 2**53, and above it rounding can push
+    an activity across the row side (``2**53 + 3`` rounds to ``2**53 + 4``),
+    which would drop a needed row. Other data uses a relative margin.
+
+    Cost: the redundant-row test depends only on column boxes, and a sweep
+    changes a box only for a column no kept row touches, so one pass over the
+    rows suffices. Columns go through a worklist: a column is re-examined only
+    when a row containing it was dropped.
+    """
+    n = col_lb.size
+    held = np.zeros(n, dtype=bool)
+    held[list(ints_active)] = True
+    has_lo = np.zeros(n, dtype=bool)
+    has_hi = np.zeros(n, dtype=bool)
+    for j, side in bounds:
+        (has_lo if side == "lower" else has_hi)[j] = True
+    finite_lo = col_lb > -_INF
+    finite_hi = col_ub < _INF
+    blo = np.where((held | has_lo) & finite_lo, col_lb, -math.inf)
+    bhi = np.where((held | has_hi) & finite_hi, col_ub, math.inf)
+
+    group_of: dict[int, int] = {}
+    for ci in cons:
+        for r in np.asarray(row_groups[ci]).ravel():
+            group_of[int(r)] = ci
+
+    def integral(x) -> bool:
+        return math.isfinite(x) and float(x).is_integer()
+
+    def holds(r: int, j: int = -1, v: float = 0.0) -> bool:
+        """Row ``r`` holds on every point of the boxes (``x_j = v`` if given)."""
+        s, e = A_csr.indptr[r], A_csr.indptr[r + 1]
+        # Python floats: ``int >= np.float64`` converts the int to float64 and
+        # rounds; ``int >= float`` compares exactly.
+        L, H = float(row_lo[r]), float(row_hi[r])
+        check_lo, check_hi = L > -_INF, H < _INF
+        lo_act = hi_act = mag = 0.0
+        ilo = ihi = 0  # exact activities while every term is integral
+        exact = True
+        for k, a in zip(A_csr.indices[s:e], A_csr.data[s:e]):
+            if a == 0.0:
+                continue
+            lb, ub = (v, v) if k == j else (blo[k], bhi[k])
+            # Bound giving the least / greatest term a * x_k.
+            bl, bh = (lb, ub) if a > 0 else (ub, lb)
+            if check_lo and not math.isfinite(bl):
+                return False  # the minimum activity is -inf
+            if check_hi and not math.isfinite(bh):
+                return False  # the maximum activity is +inf
+            if exact and integral(a):
+                ia = int(a)
+                if check_lo:
+                    exact = integral(bl)
+                    if exact:
+                        ilo += ia * int(bl)
+                if exact and check_hi:
+                    exact = integral(bh)
+                    if exact:
+                        ihi += ia * int(bh)
+            else:
+                exact = False
+            if check_lo:
+                lo_act += a * bl
+                mag += abs(a * bl)
+            if check_hi:
+                hi_act += a * bh
+                mag += abs(a * bh)
+        if exact:
+            # int vs float comparisons are exact in Python.
+            return (not check_lo or ilo >= L) and (not check_hi or ihi <= H)
+        if check_lo and not lo_act >= L + _SWEEP_REL * (1.0 + mag + abs(L)):
+            return False
+        if check_hi and not hi_act <= H - _SWEEP_REL * (1.0 + mag + abs(H)):
+            return False
+        return True
+
+    def drop_group(ci: int) -> None:
+        cons.discard(ci)
+        for r in np.asarray(row_groups[ci]).ravel():
+            group_of.pop(int(r), None)
+
+    n_c = n_b = n_i = 0
+    ticks = 0
+
+    def out_of_time() -> bool:
+        nonlocal ticks
+        ticks += 1
+        return (
+            stop_at is not None
+            and ticks % _SWEEP_CLOCK_EVERY == 0
+            and time.perf_counter() >= stop_at
+        )
+
+    if stop_at is not None and time.perf_counter() >= stop_at:
+        return n_c, n_b, n_i
+    # Redundant rows, judged on the boxes alone. One pass: no justification
+    # uses another row, and no box of a column in a kept row changes later.
+    for ci in sorted(cons):
+        if out_of_time():
+            return n_c, n_b, n_i
+        grp = np.asarray(row_groups[ci]).ravel()
+        if grp.size and all(holds(int(r)) for r in grp):
+            drop_group(ci)
+            n_c += 1
+    # Monotone and orphan columns, one column at a time, through a worklist:
+    # a column's verdict changes only when a kept row containing it is dropped.
+    queue = deque(range(n))
+    queued = np.ones(n, dtype=bool)
+
+    def requeue(ci: int) -> None:
+        for r in np.asarray(row_groups[ci]).ravel():
+            s, e = A_csr.indptr[r], A_csr.indptr[r + 1]
+            for k in A_csr.indices[s:e]:
+                if not queued[k]:
+                    queued[k] = True
+                    queue.append(int(k))
+
+    while queue:
+        if out_of_time():
+            return n_c, n_b, n_i
+        j = queue.popleft()
+        queued[j] = False
+        s, e = A_csc.indptr[j], A_csc.indptr[j + 1]
+        rows = [
+            (int(r), a)
+            for r, a in zip(A_csc.indices[s:e], A_csc.data[s:e])
+            if a != 0.0 and int(r) in group_of
+        ]
+        lo_j, hi_j = blo[j], bhi[j]
+        if lo_j > hi_j:
+            continue  # an empty box is itself the contradiction
+        if not rows:
+            if not (held[j] or (include_bounds and (has_lo[j] or has_hi[j]))):
+                continue  # nothing of this column is an element
+            if held[j] and math.isfinite(lo_j) and math.ceil(lo_j) > hi_j:
+                continue  # no integer in the box
+            was_held = bool(held[j])
+            if was_held:
+                held[j] = False
+                ints_active.discard(j)
+                n_i += 1
+            if include_bounds:
+                for side, flag in (("lower", has_lo), ("upper", has_hi)):
+                    if (j, side) in bounds:
+                        bounds.discard((j, side))
+                        n_b += not was_held  # a held column's box was no element
+                    flag[j] = False
+            blo[j] = col_lb[j] if has_lo[j] and finite_lo[j] else -math.inf
+            bhi[j] = col_ub[j] if has_hi[j] and finite_hi[j] else math.inf
+            continue
+        for d in (-1, 1):
+            ok = True
+            for r, a in rows:
+                lo_f, hi_f = row_lo[r] > -_INF, row_hi[r] < _INF
+                if lo_f == hi_f:
+                    ok = False  # two-sided (or free) row
+                    break
+                # A >= row loosens as a*x_j grows; a <= row as it shrinks.
+                if (a * d > 0) != lo_f:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            v = lo_j if d < 0 else hi_j
+            if math.isfinite(v):
+                if held[j] and not integral(v):
+                    continue
+                if not all(holds(r, j, v) for r, _ in rows):
+                    continue
+            groups = {group_of[r] for r, _ in rows}
+            mine = {r for r, _ in rows}
+            if not all(
+                set(int(x) for x in np.asarray(row_groups[ci]).ravel()) <= mine for ci in groups
+            ):
+                continue
+            for ci in groups:
+                drop_group(ci)
+                n_c += 1
+                requeue(ci)
+            break
+    return n_c, n_b, n_i
+
+
 def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at):
     """A small unsatisfiable set of constraints of a pure-binary model.
 
@@ -1366,6 +1615,55 @@ def _milp_iis_arrays(
     bounds = set(finite_bounds)
     proven = True
     pending: dict[tuple, np.ndarray] = {}
+    # The structural sweep (``_structural_sweep``): solve-free deletion between
+    # phases and on the answer. ``DISCOPT_IIS_SWEEP=0`` is the opt-out for A/B.
+    use_sweep = os.environ.get("DISCOPT_IIS_SWEEP", "1") != "0"
+    # Two-pass integrality phase (joint relaxation first, integrality-only
+    # second). ``DISCOPT_IIS_INT_TWO_PASS=0`` restores the single pass.
+    two_pass = os.environ.get("DISCOPT_IIS_INT_TWO_PASS", "1") != "0"
+    n_swept = 0
+    n_sweep_reverted = 0
+    A_csr = A.tocsr() if use_sweep else None
+    A_csc = A.tocsc() if use_sweep else None
+
+    def sweep(stop_at: Optional[float] = None) -> None:
+        """Sweep the current sets in place. A sweep that would drop an element
+        holding a certificate is undone whole: the certificate and the sweep's
+        exact argument contradict each other, which only tolerances can cause,
+        and the pre-sweep set is the one the filter established."""
+        nonlocal n_swept, n_sweep_reverted
+        if not use_sweep:
+            return
+        before = (set(cons), set(bounds), set(ints_active))
+        removed = _structural_sweep(
+            A_csr,
+            A_csc,
+            row_lo,
+            row_hi,
+            row_groups,
+            col_lb,
+            col_ub,
+            cons,
+            bounds,
+            ints_active,
+            include_bounds=include_bounds,
+            stop_at=deadline if stop_at is None else stop_at,
+        )
+        if not sum(removed):
+            return
+        dropped: set[tuple] = {("constraint", c) for c in before[0] - cons}
+        dropped |= {("bound", j, side) for j, side in before[1] - bounds}
+        dropped |= {("integrality", j) for j in before[2] - ints_active}
+        if any(k in pending for k in dropped):
+            cons.clear()
+            cons.update(before[0])
+            bounds.clear()
+            bounds.update(before[1])
+            ints_active.clear()
+            ints_active.update(before[2])
+            n_sweep_reverted += 1
+            return
+        n_swept += sum(removed)
 
     sat_rows: Optional[int] = None
     sat_conflicts = 0
@@ -1501,7 +1799,7 @@ def _milp_iis_arrays(
                 pending[key(batch[0])] = x
             i += 1
 
-    def batch_filter_columns(cols: list) -> None:
+    def batch_filter_columns(cols: list, joint_only: bool = False, first: int = 1) -> list:
         """The integrality phase with each column's finite bounds removed
         together with its integrality ("relax the column").
 
@@ -1515,8 +1813,14 @@ def _milp_iis_arrays(
         for a single column, the integrality alone is tried (the previous
         step), so nothing the old phase dropped is kept; its bounds then stay
         for the bound phase. Same adaptive batching as :func:`batch_filter`.
+
+        With ``joint_only`` that single-column integrality-only probe is not
+        made: the column is returned (in order) for a later pass, so every
+        probe of this pass can only shrink the counted size. ``first`` is the
+        size of the opening batch.
         """
         nonlocal proven
+        deferred: list = []
 
         def relax(j) -> list:
             ints_active.discard(j)
@@ -1525,7 +1829,7 @@ def _milp_iis_arrays(
                 bounds.discard(jb)
             return gone
 
-        i, size = 0, 1
+        i, size = 0, max(1, min(first, cap))
         while i < len(cols):
             batch = cols[i : i + size]
             removed = {j: relax(j) for j in batch}
@@ -1548,8 +1852,13 @@ def _milp_iis_arrays(
                 size = max(1, len(batch) // 2)
                 continue
             # One column: its bounds may be what is needed -- try the
-            # integrality alone, as the previous phase did.
+            # integrality alone, as the previous phase did (or, in the joint
+            # pass, leave that to the next pass).
             j = batch[0]
+            if joint_only and res is not None:
+                deferred.append(j)
+                i += 1
+                continue
             if removed[j]:
                 ints_active.discard(j)
                 try:
@@ -1568,6 +1877,7 @@ def _milp_iis_arrays(
                 assert x is not None
                 pending[("integrality", j)] = x
             i += 1
+        return deferred
 
     def phase_integrality() -> None:
         # Guieu & Chinneck: if the LP relaxation is infeasible, all integrality
@@ -1577,6 +1887,22 @@ def _milp_iis_arrays(
         res, _ = eng.probe(cons, bounds, set())
         if res is True:
             ints_active.clear()
+        elif include_bounds and two_pass:
+            # Pass 1 relaxes columns jointly (integrality and both bounds), so
+            # each success shrinks the counted size and the rolling checkpoint
+            # follows it. It opens with every general-integer column (domain
+            # wider than {lb, lb + 1}) in one probe: on MIPcc27's dijle one
+            # joint relaxation of the 384 remaining ones took the subsystem
+            # from 2785 to 2401 (0.9 s), while one-at-a-time from binaries
+            # never reached them. Pass 2 tries integrality alone on what pass
+            # 1 refused, batched; its bounds then go to the bound phase.
+            cols = sorted(ints_active)
+            gen = [j for j in cols if not (col_ub[j] - col_lb[j] <= 1)]
+            rest = [j for j in cols if col_ub[j] - col_lb[j] <= 1]
+            deferred = batch_filter_columns(
+                _ord(gen) + _ord(rest), joint_only=True, first=max(1, len(gen))
+            )
+            batch_filter(deferred, ints_active, lambda j: ("integrality", j))
         elif include_bounds:
             batch_filter_columns(_ord(sorted(ints_active)))
         else:
@@ -1836,8 +2162,10 @@ def _milp_iis_arrays(
         if include_bounds and phase_order.index("B") < phase_order.index("I"):
             # B runs before I: bounds of columns I releases are filtered at the end.
             phases.append(phase_bounds)
+        sweep()
         for k, phase in enumerate(phases):
             phase()
+            sweep()
             if confirm == "final" and k < len(phases) - 1:
                 if checkpoint is not None and reported_size(
                     cons, bounds, ints_active
@@ -1933,6 +2261,16 @@ def _milp_iis_arrays(
             complete = False
             proven = False
 
+    # The answer itself, confirmed or the fallback checkpoint: a run stopped in
+    # the integrality phase leaves columns no kept row touches (dijle: 1176
+    # elements). Dropping them needs no solve and keeps every certificate.
+    # The deadline has usually fired by now, so this sweep runs with no clock:
+    # its work is finite and fixed by the data (one pass over the rows; a column
+    # is re-queued only when one of its rows is dropped, so at most n + nnz column
+    # visits), and it decides nothing by machine speed (#912). Measured on the
+    # 50 MIPcc27 smallset models: a whole-model sweep takes at most 0.09 s
+    # (neos-3135947-otra, 139k nonzeros).
+    sweep(stop_at=math.inf)
     # Bounds the final subsystem APPLIES (beyond held-integer boxes). With
     # include_bounds=False that is every finite bound, but none is an element.
     applied_bounds = sorted((j, s) for j, s in bounds if j not in ints_active)
@@ -1965,6 +2303,8 @@ def _milp_iis_arrays(
         n_reduced_confirmed=eng.n_reduced_confirmed,
         n_exact_confirmed=eng.n_exact_confirmed,
         n_exact_refuted=eng.n_exact_refuted,
+        n_swept=n_swept,
+        n_sweep_reverted=n_sweep_reverted,
     )
 
 
