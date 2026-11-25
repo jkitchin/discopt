@@ -3235,7 +3235,7 @@ def _certified_milp(sf: StdForm, kw: dict[str, Any]) -> HighsOutcome:
 
     def _run_cross() -> None:
         try:
-            box["out"] = ctx.run(_solve_milp_scaled, sf, presolve=False, **kw_c)
+            box["out"] = ctx.run(_solve_milp_scaled, sf, cross_check=True, **kw_c)
         except BaseException as err:  # re-raised in the caller's thread below
             box["err"] = err
 
@@ -3999,7 +3999,7 @@ def _cross_check_presolve(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) ->
     # primary's false kOptimal at it (433.40 certified against a true 363.40); cold, it
     # reached no verdict and the certificate was withdrawn.
     kw["initial_point"] = None
-    cross = _solve_milp_scaled(sf, presolve=False, **kw)
+    cross = _solve_milp_scaled(sf, cross_check=True, **kw)
     out.stats["milp/presolve_cross_check_ran"] = 1.0
     if _primary_presolve_off():
         out.stats["milp/presolve_cross_presolve_on"] = 1.0  # #2332
@@ -4285,7 +4285,7 @@ def _tight_cross_bound(
             out.stats["milp/presolve_cross_tight_skipped"] = 1.0
             return False
     tight = _solve_milp_scaled(
-        sf, **dict(kw, presolve=False, feasibility_tolerance=CROSS_TIGHT_FEAS_TOL)
+        sf, **dict(kw, cross_check=True, feasibility_tolerance=CROSS_TIGHT_FEAS_TOL)
     )
     out.stats["milp/presolve_cross_tight_ran"] = 1.0
     out.stats["milp/presolve_cross_tight_time"] = float(tight.wall_time)
@@ -4339,6 +4339,7 @@ def _solve_milp_std(
     feasibility_tolerance: float = 1e-6,
     row_form: Optional[bool] = None,
     stop: Optional[_CrossStop] = None,
+    cross_check: bool = False,
 ) -> HighsOutcome:
     """Solve the MILP ``sf`` under the §3.2 contract.
 
@@ -4350,10 +4351,12 @@ def _solve_milp_std(
     ``row_form`` forces the #1733 logical folding on or off (``None``: the
     ``DISCOPT_MILP_ROW_FORM`` default with its HiGHS-version gate); only the
     :func:`_cross_form_infeasible_check` falsifier sets it.
-    ``presolve=False`` marks the second solve of the #1634 cross-check
-    (:func:`_cross_check_presolve`), not a user option: it switches HiGHS's presolve
-    off, or ON when the caller pinned the primary's presolve off (#2332,
-    :func:`_cross_presolve_value`), so the two solves are never the same configuration.
+    ``presolve=False`` switches HiGHS's presolve off (the #2187 presolve-free stage);
+    it is not a user option. ``cross_check=True`` marks a solve of the #1634 cross-check
+    (:func:`_cross_check_presolve`, the concurrent arm of :func:`_certified_milp`, the
+    #1640 tight re-run): it runs the configuration the primary did not -- presolve off,
+    or ON when the caller pinned the primary's presolve off (#2332,
+    :func:`_cross_presolve_value`) -- and overrides ``presolve``.
     ``feasibility_tolerance`` is HiGHS's ``mip_feasibility_tolerance``; only the #1640
     tightened cross-solve (:func:`_weaker_bound`) changes it.
 
@@ -4435,9 +4438,11 @@ def _solve_milp_std(
         # cost-tie test that bad coefficient ratios defeat; see the constant.
         ("presolve_rule_off", int(MILP_PRESOLVE_RULE_OFF)),
     ]
-    if not presolve:
+    if cross_check:
         # #2332: the cross-solve's configuration is the one the primary did not run.
         opts.append(("presolve", _cross_presolve_value()))
+    elif not presolve:
+        opts.append(("presolve", "off"))
     if rem is not None:
         opts.append(("time_limit", float(rem)))
     h = _new_highs(highspy, opts)
@@ -4524,6 +4529,7 @@ def _solve_milp_std(
             feasibility_tolerance=feasibility_tolerance,
             row_form=row_form,
             stop=stop,
+            cross_check=cross_check,
         )
         cold.stats["milp/seeded_optimal_without_bound"] = 1.0
         cold.wall_time = time.perf_counter() - t0

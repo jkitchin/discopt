@@ -140,34 +140,6 @@ def test_witness_certifies_true_optimum(name):
     assert r.bound <= truth + 1e-9 * (1.0 + abs(truth))
 
 
-@pytest.mark.parametrize("name", sorted(WITNESSES))
-def test_mechanism_is_the_parallel_column_rule(name):
-    """Replay the route's own standard form in HiGHS with the route's options: the
-    witness is false with rule 13 on and true with it off. If a HiGHS release stops
-    reproducing the false value with the rule on, this documents it (skip) rather than
-    fail -- the off-arm assertion is the one that guards the route."""
-    c, A, b, ub, truth = WITNESSES[name]  # noqa: N806
-    _, _, sf = _highs_std_form(_model(c, A, b, ub))
-    base = [
-        ("mip_rel_gap", 1e-4),
-        ("mip_abs_gap", 1e-6),
-        ("mip_feasibility_tolerance", 1e-6),
-        ("primal_feasibility_tolerance", 1e-7),
-    ]
-    bounds = {}
-    for off in (0, MILP_PRESOLVE_RULE_OFF):
-        h = lp_milp_highs._new_highs(highspy, base + [("presolve_rule_off", int(off))])
-        _, why = lp_milp_highs._pass_model(h, highspy, sf, integer=True, offset=sf.obj_const)
-        assert not why
-        h.run()
-        bounds[off] = float(h.getInfo().mip_dual_bound)
-    tol = 1e-9 * (1.0 + abs(truth))
-    assert bounds[MILP_PRESOLVE_RULE_OFF] <= truth + tol
-    if bounds[0] <= truth + tol:
-        pytest.skip(f"HiGHS {highspy.Highs().version()} no longer prunes {name} with rule 13 on")
-    assert bounds[0] > truth + tol
-
-
 @pytest.mark.parametrize("objscale", [1.0, 1e-3])
 def test_generator_panel_has_no_false_certificate(objscale):
     """The issue's generator over 300 seeds per cost scale, truth by enumeration.
@@ -214,7 +186,7 @@ def test_cross_check_alone_refutes_the_witness(name, monkeypatch):
     monkeypatch.setattr(lp_milp_highs, "MILP_PRESOLVE_RULE_OFF", 0)
     c, A, b, ub, truth = WITNESSES[name]  # noqa: N806
     # #2221: highspy 1.16 no longer prunes these witnesses with rule 13 on (see
-    # ``test_mechanism_is_the_parallel_column_rule``), so the primary solve is now right
+    # :data:`FALSE_PRIMARY_115`), so the primary solve is now right
     # and the cross-check had nothing to refute. The fault is injected at the seam: the
     # certified primary handed to the judge is replaced by what highspy 1.15.1 returned.
     injected = _inject_false_primary(monkeypatch, name)
@@ -229,6 +201,13 @@ def test_cross_check_alone_refutes_the_witness(name, monkeypatch):
 #: The structural point the presolve-on primary certified ``optimal`` (with
 #: ``bound == objective``) on each witness, rule 13 on, ``DISCOPT_MILP_ROW_FORM=0``.
 #: Measured on highspy 1.15.1 (#2221); 1.16.0 certifies the enumerated optimum instead.
+#:
+#: The mechanism replay that used to stand beside this (the route's own standard form in
+#: HiGHS with the route's options: ``mip_dual_bound`` above the enumerated optimum with
+#: rule 13 on, at or below it with :data:`MILP_PRESOLVE_RULE_OFF`) reproduced on
+#: highspy 1.11.0-1.15.1 and skipped on 1.16.0, where all three witnesses come out right
+#: with the rule on. With the floor at ``highspy>=1.16`` (#2332) it could only skip, so
+#: it was deleted (PR #2334 review); this injection keeps the refutation path covered.
 FALSE_PRIMARY_115 = {
     "seed151_cost1e-3": [0.0, 4.0, 2.0, 0.0, 0.0],  # -0.0035926 vs -0.0058531
     "seed181_cost1e-3": [0.0, 0.0, 3.0, 0.0, 1.0],  # 0.0208207 vs 0.0080148

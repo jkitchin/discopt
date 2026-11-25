@@ -68,7 +68,7 @@ def _one_node_cross(monkeypatch):
     calls = []
 
     def capped(sf, *, presolve=True, **kw):
-        if not presolve:
+        if kw.get("cross_check"):  # the #1634 cross-solve (marked since PR #2334)
             kw = dict(kw, max_nodes=1)
             calls.append(1)
         return real(sf, presolve=presolve, **kw)

@@ -189,3 +189,76 @@ def test_integer_data_class_is_cross_checked_when_the_primary_ran_presolve_off(m
     assert out.stats.get("milp/presolve_cross_check_ran") == 1.0
     assert out.stats.get("milp/presolve_cross_presolve_on") == 1.0
     assert "off" in seen and "choose" in seen, seen
+
+
+# ------------------------------- presolve=False still means "off" outside the check
+
+
+def _refuted_own_integers() -> H.HighsOutcome:
+    """A primary refuted over its own integers: what sends :func:`H._tight_resolve_refuted`
+    to the #2187 presolve-free stage when its tight re-solve is refuted the same way."""
+    return H.HighsOutcome(
+        "feasible",
+        x=np.array([0.0, 10.0]),
+        objective=-20.0,
+        bound=-30.0,
+        wall_time=0.5,
+        refuted_by="own-integers",
+    )
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("presolve_off", [False, True])
+def test_2187_presolve_free_stage_runs_presolve_off_under_a_user_presolve_off(
+    monkeypatch, presolve_off
+):
+    """PR #2334 review: the #2187 stage asks for a presolve-FREE solve, because presolve
+    was blamed for the refutation. Before the ``cross_check`` keyword, ``presolve=False``
+    meant "the configuration the primary did not run", so under a user
+    ``presolve="off"`` this stage ran presolve ON and was still labelled presolve-free."""
+    monkeypatch.delenv("DISCOPT_MILP_REFUTED_PRESOLVE_FREE", raising=False)
+    sf = H.StdForm.from_arrays(
+        c=np.array([-1.0, -2.0]),
+        A=np.array([[1.0, 1.0]]),
+        b=np.array([10.0]),
+        xl=np.array([0.0, 0.0]),
+        xu=np.array([1e20, 1e20]),
+        int_idx=np.array([0, 1]),
+    )
+    tight = _refuted_own_integers()
+    tight.wall_time = 0.25
+    monkeypatch.setattr(H, "_certified_milp", lambda sf, kw: tight)  # refuted again
+    seen = _spy_milp_presolve(monkeypatch)
+    kw = {
+        "time_limit": 30.0,
+        "gap_tolerance": 1e-4,
+        "abs_gap_tolerance": None,
+        "max_nodes": 100,
+        "n_struct": None,
+    }
+    pairs = (("presolve", "off"),) if presolve_off else ()
+    with H.user_options(pairs):
+        res = H._tight_resolve_refuted(sf, _refuted_own_integers(), kw)
+    # Adopted here: the stage's stats move under ``before_tight_resolve/``.
+    assert any(k.endswith("refuted_presolve_free_ran") for k in res.stats), res.stats
+    assert "presolve-free" in res.labels.get("milp/bound_provenance", ""), res.labels
+    # ... and the label is now true: every HiGHS MILP solve of the stage ran presolve off.
+    assert seen and set(seen) == {"off"}, seen
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("presolve_off", [False, True])
+def test_presolve_false_is_off_and_cross_check_is_the_other_configuration(
+    monkeypatch, presolve_off
+):
+    """The keyword contract of the solve itself, on the issue-adjacent sweep model."""
+    seen = _spy_milp_presolve(monkeypatch)
+    kw = {"time_limit": 10.0, "gap_tolerance": 1e-4, "max_nodes": 10**6, "n_struct": 6}
+    pairs = (("presolve", "off"),) if presolve_off else ()
+    sf = _std_form(SWEEP_29614)
+    with H.user_options(pairs):
+        H._solve_milp_scaled(sf, presolve=False, **kw)
+        n_free = len(seen)
+        H._solve_milp_scaled(sf, cross_check=True, **kw)
+    assert n_free >= 1 and set(seen[:n_free]) == {"off"}, seen
+    assert set(seen[n_free:]) == ({"choose"} if presolve_off else {"off"}), seen
