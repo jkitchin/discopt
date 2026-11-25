@@ -512,6 +512,48 @@ def test_s406_perm4_extended_publishes_the_value_of_its_point():
     assert "milp/presolve_cross_incumbent_adopted" not in r.solver_stats
 
 
+def test_rederivation_is_not_capped_at_the_equality_yardstick(monkeypatch):
+    """#2335: HiGHS's objective flattered by MORE than the 1e-6 equality yardstick is
+    still replaced by the LP over its own integers when the gap closes with that
+    difference charged twice. Before, only differences within the yardstick were, and
+    the flattered objective was published as ``optimal`` (measured on the s406 perm4
+    net above with sparsify on: 1.61e-6). Here the fixed-integer LP is made to report
+    its point 5e-6 worse than HiGHS's objective, independent of which point HiGHS finds.
+    """
+    sf = StdForm.from_arrays(
+        c=np.array([-1.0, -1.0, 0.0]),
+        A=np.array([[1.0, 1.0, 1.0]]),
+        b=np.array([10.0]),
+        xl=np.zeros(3),
+        xu=np.array([1e20, 1e20, 1e20]),
+        int_idx=np.array([0, 1]),
+    )
+    flattered = 5e-6
+    real_fx = lp_milp_highs._fixed_integer_lp
+    real_verify = lp_milp_highs._verified_mip_point
+    fx_points: list = []
+
+    def fx(sf_, x, time_limit):
+        out = real_fx(sf_, x, time_limit)
+        fx_points.append(out.x)
+        return out
+
+    def verify(sf_, x):
+        got = real_verify(sf_, x)
+        if got is not None and any(x is p for p in fx_points):
+            return got[0], got[1] + flattered
+        return got
+
+    monkeypatch.setattr(lp_milp_highs, "_fixed_integer_lp", fx)
+    monkeypatch.setattr(lp_milp_highs, "_verified_mip_point", verify)
+    out = lp_milp_highs.solve_milp_std(sf, time_limit=30.0, gap_tolerance=1e-4, max_nodes=1000)
+    assert fx_points, "the fixed-integer LP check never ran, so this asserts nothing"
+    assert out.status == "optimal" and out.gap_certified, out.message
+    assert out.stats["milp/incumbent_rederived"] == pytest.approx(flattered, rel=1e-9)
+    assert out.objective == pytest.approx(-10.0 + flattered, abs=1e-12)
+    assert out.bound is not None and out.bound <= -10.0 + 1e-9 and out.bound <= out.objective
+
+
 def _two_point_sf() -> StdForm:
     # min -x - 2y  s.t.  x + y + s = 10, x, y integer >= 0: optimum -20 at (0, 10).
     return StdForm.from_arrays(

@@ -4799,17 +4799,29 @@ def _solve_milp_std(
                 # distance from HiGHS's objective is what its feasibility tolerance bought
                 # (read by :func:`_tighten_feasibility_artefact`).
                 stats["milp/fixed_int_objective"] = float(pt[1])
-                # #1733: when HiGHS's objective beats the LP over its own integers by no more
-                # than the equality yardstick, the difference is row tolerance HiGHS spent
-                # on the objective, not a better point; publish the LP's point. Only where
-                # #1612 would leave the pair alone (the gap still closes with that
-                # difference charged twice), so its tight re-solve is untouched. Measured
-                # on test_piecewise's incremental graph (HiGHS random_seed 16): y published
-                # 1.0e-6 above f(x) on the row form; the LP point is exact.
+                # #1733: when HiGHS's objective beats the LP over its own integers, the
+                # difference is row tolerance HiGHS spent on the objective, not a better
+                # point: the LP optimum is the best any feasible point with these integers
+                # attains. Publish the LP's point. Only where #1612 would leave the pair
+                # alone (the gap still closes with that difference charged twice), so its
+                # tight re-solve is untouched. Measured on test_piecewise's incremental
+                # graph (HiGHS random_seed 16): y published 1.0e-6 above f(x) on the row
+                # form; the LP point is exact.
+                #
+                # #2335: no cap on the size of that difference. It used to apply only
+                # within the equality yardstick (CERT_ABS + CERT_REL*|v|), and a larger
+                # one, still closing the gap, published HiGHS's flattered objective as
+                # ``optimal``. Measured on test_2187's s406 perm4 net under relu_extended
+                # with sparsify on (highspy 1.16.0): HiGHS's objective -38.1894295 sat
+                # 1.61e-6 below the LP over its integers, -38.1894279, which is the
+                # network's exact value at the published inputs. The row tolerance is
+                # amplified through the network's weights, so its size is not bounded
+                # by the yardstick. Swapping in the LP point never touches the bound and
+                # only publishes a verified, exactly evaluated point.
                 delta = float(pt[1]) - float(out.objective) if out.objective is not None else 0.0
                 gap_kw = {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance}
                 if (
-                    0.0 < delta <= CERT_ABS + CERT_REL * abs(float(pt[1]))
+                    0.0 < delta
                     and out.bound is not None
                     and _gap_closed(float(pt[1]) + delta, float(out.bound), gap_kw)
                 ):
