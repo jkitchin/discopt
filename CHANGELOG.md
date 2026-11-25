@@ -10,6 +10,18 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **Solve-free structural sweep in the MILP IIS engine.** Between filter phases and on
+  the final answer, `compute_iis` drops the integrality and bounds of columns no kept row
+  touches, rows that hold over the column boxes, and rows a monotone (pure-literal)
+  column can always satisfy. Every step is an exact argument on the current subsystem,
+  so the answer stays infeasible and its certificates stay valid. On the MIPcc27
+  instances dijle and dingo, with 600 s per instance, the answers shrink from 3961 to
+  2785 and from 3768 to 2197 elements, both passing the competition checker.
+  `MilpIIS.n_swept` counts the dropped elements; `DISCOPT_IIS_SWEEP=0` turns the sweep
+  off.
+
 ## [0.14.0] - 2026-11-24
 
 ### Added
