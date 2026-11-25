@@ -24,7 +24,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 22,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -125,7 +125,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 17,
+   "n_solves": 16,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -227,7 +227,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 15,
+   "n_solves": 14,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -256,7 +256,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 16,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -427,7 +427,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 15,
+   "n_solves": 13,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -505,7 +505,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 10,
+   "n_solves": 6,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -672,7 +672,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 11,
+   "n_solves": 10,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -926,7 +926,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 10,
+   "n_solves": 8,
    "proven_irreducible": true,
    "complete": true,
    "n": 3,
@@ -949,7 +949,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 23,
+   "n_solves": 6,
    "proven_irreducible": true,
    "complete": true,
    "n": 42,
@@ -977,7 +977,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 7,
+   "n_solves": 5,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -1148,7 +1148,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 18,
+   "n_solves": 15,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1181,7 +1181,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 20,
+   "n_solves": 13,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1244,7 +1244,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 11,
+   "n_solves": 12,
    "proven_irreducible": true,
    "complete": true,
    "n": 3,
@@ -1274,7 +1274,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 25,
+   "n_solves": 6,
    "proven_irreducible": true,
    "complete": true,
    "n": 62,
@@ -1533,7 +1533,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 17,
+   "n_solves": 13,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1575,7 +1575,7 @@
      []
     ]
    ],
-   "n_solves": 21,
+   "n_solves": 20,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1608,7 +1608,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 10,
+   "n_solves": 8,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1647,7 +1647,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 18,
+   "n_solves": 19,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1670,7 +1670,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 8,
+   "n_solves": 6,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -1698,7 +1698,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 6,
+   "n_solves": 5,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
