@@ -148,6 +148,7 @@ class MilpIIS:
     n_reduced_confirmed: int = 0  # confirmations decided via the exact reduction
     n_exact_confirmed: int = 0
     n_exact_refuted: int = 0
+    n_swept: int = 0  # elements the structural sweep dropped with no solve
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
     # Portfolio runs only: one entry per member, in portfolio order, with keys
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
@@ -950,6 +951,191 @@ def _lift_implied_binaries(A, row_lo, row_hi, col_lb, col_ub, is_int):
     return out
 
 
+#: Relative margin of the structural sweep's activity tests on rows with
+#: non-integral data (integral data is compared exactly).
+_SWEEP_REL = 1e-9
+
+
+def _structural_sweep(
+    A_csr,
+    A_csc,
+    row_lo,
+    row_hi,
+    row_groups,
+    col_lb,
+    col_ub,
+    cons,
+    bounds,
+    ints_active,
+    include_bounds=True,
+) -> tuple[int, int, int]:
+    """Drop elements of an infeasible subsystem with no solve; returns
+    ``(constraints, bounds, integralities)`` removed. Mutates the three sets.
+
+    Each step below removes constraints from the CURRENT subsystem ``S`` only
+    when ``S`` minus them is still infeasible, by an exact argument about ``S``
+    itself, and steps are applied one after another, each judged on the system
+    the previous one left (judging several rows redundant *jointly* is unsound:
+    each may be implied only by the others). The rules, applied to a fixpoint:
+
+    * **Redundant row.** Every row of a group holds for every point of the
+      current column boxes (a column's box: its declared bounds when it is held
+      integer, else the bounds still in ``bounds``). Dropping it leaves the
+      feasible set unchanged. Only boxes are used, never other rows.
+    * **Monotone column** (pure-literal elimination). A column ``j`` and a
+      direction ``d`` such that every current row containing ``j`` is one-sided
+      and loosens as ``x_j`` moves along ``d``; let ``v`` be ``j``'s current
+      bound in that direction. If ``v`` is infinite, or every such row holds at
+      ``x_j = v`` for every point of the other columns' boxes (``v`` integral
+      when ``j`` is held), then a point satisfying ``S`` minus those rows
+      extends to ``S`` by moving ``x_j`` to ``v`` (or far enough), so ``S``
+      minus them is infeasible. Groups are dropped only when all their rows are
+      among those rows.
+    * **Orphan column.** No current row contains ``j``. Its integrality and
+      bounds go together, provided its box is nonempty and, if held, contains
+      an integer: then any point of the rest extends by a value of ``x_j`` from
+      the box. (Relaxing the integrality alone would turn its bounds into
+      counted elements.)
+
+    Removing constraints never invalidates a certificate of a kept element (a
+    point feasible for ``S`` minus that element stays feasible for a subset
+    of it), and a sweep never drops an element whose certificate shows it is
+    needed: that would contradict the argument above. Measured on MIPcc27's
+    dijle, whose 3961-element answer kept 1176 orphan elements.
+    """
+    n = col_lb.size
+    held = np.zeros(n, dtype=bool)
+    held[list(ints_active)] = True
+    has_lo = np.zeros(n, dtype=bool)
+    has_hi = np.zeros(n, dtype=bool)
+    for j, side in bounds:
+        (has_lo if side == "lower" else has_hi)[j] = True
+    finite_lo = col_lb > -_INF
+    finite_hi = col_ub < _INF
+    blo = np.where((held | has_lo) & finite_lo, col_lb, -math.inf)
+    bhi = np.where((held | has_hi) & finite_hi, col_ub, math.inf)
+
+    group_of: dict[int, int] = {}
+    for ci in cons:
+        for r in np.asarray(row_groups[ci]).ravel():
+            group_of[int(r)] = ci
+
+    def integral(x) -> bool:
+        return math.isfinite(x) and float(x).is_integer()
+
+    def holds(r: int, j: int = -1, v: float = 0.0) -> bool:
+        """Row ``r`` holds on every point of the boxes (``x_j = v`` if given)."""
+        s, e = A_csr.indptr[r], A_csr.indptr[r + 1]
+        lo_act = hi_act = mag = 0.0
+        exact = True
+        for k, a in zip(A_csr.indices[s:e], A_csr.data[s:e]):
+            if a == 0.0:
+                continue
+            lb, ub = (v, v) if k == j else (blo[k], bhi[k])
+            tl, th = (a * lb, a * ub) if a > 0 else (a * ub, a * lb)
+            lo_act += tl
+            hi_act += th
+            for t in (tl, th):
+                if math.isfinite(t):
+                    mag += abs(t)
+            exact = (
+                exact
+                and integral(a)
+                and (lb == -math.inf or integral(lb))
+                and (ub == math.inf or integral(ub))
+            )
+        L, H = row_lo[r], row_hi[r]
+        if L > -_INF:
+            tol = 0.0 if exact and integral(L) else _SWEEP_REL * (1.0 + mag + abs(L))
+            if not lo_act >= L + tol:
+                return False
+        if H < _INF:
+            tol = 0.0 if exact and integral(H) else _SWEEP_REL * (1.0 + mag + abs(H))
+            if not hi_act <= H - tol:
+                return False
+        return True
+
+    def drop_group(ci: int) -> None:
+        cons.discard(ci)
+        for r in np.asarray(row_groups[ci]).ravel():
+            group_of.pop(int(r), None)
+
+    n_c = n_b = n_i = 0
+    changed = True
+    while changed:
+        changed = False
+        # Redundant rows, judged on the boxes alone (all at once is sound: no
+        # justification uses another row, and no box changes in this pass).
+        for ci in sorted(cons):
+            grp = np.asarray(row_groups[ci]).ravel()
+            if grp.size and all(holds(int(r)) for r in grp):
+                drop_group(ci)
+                n_c += 1
+                changed = True
+        # Monotone and orphan columns, one column at a time.
+        for j in range(n):
+            s, e = A_csc.indptr[j], A_csc.indptr[j + 1]
+            rows = [
+                (int(r), a)
+                for r, a in zip(A_csc.indices[s:e], A_csc.data[s:e])
+                if a != 0.0 and int(r) in group_of
+            ]
+            lo_j, hi_j = blo[j], bhi[j]
+            if lo_j > hi_j:
+                continue  # an empty box is itself the contradiction
+            if not rows:
+                if not (held[j] or (include_bounds and (has_lo[j] or has_hi[j]))):
+                    continue  # nothing of this column is an element
+                if held[j] and math.isfinite(lo_j) and math.ceil(lo_j) > hi_j:
+                    continue  # no integer in the box
+                was_held = bool(held[j])
+                if was_held:
+                    held[j] = False
+                    ints_active.discard(j)
+                    n_i += 1
+                if include_bounds:
+                    for side, flag in (("lower", has_lo), ("upper", has_hi)):
+                        if (j, side) in bounds:
+                            bounds.discard((j, side))
+                            n_b += not was_held  # a held column's box was no element
+                        flag[j] = False
+                blo[j] = col_lb[j] if has_lo[j] and finite_lo[j] else -math.inf
+                bhi[j] = col_ub[j] if has_hi[j] and finite_hi[j] else math.inf
+                changed = True
+                continue
+            for d in (-1, 1):
+                ok = True
+                for r, a in rows:
+                    lo_f, hi_f = row_lo[r] > -_INF, row_hi[r] < _INF
+                    if lo_f == hi_f:
+                        ok = False  # two-sided (or free) row
+                        break
+                    # A >= row loosens as a*x_j grows; a <= row as it shrinks.
+                    if (a * d > 0) != lo_f:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                v = lo_j if d < 0 else hi_j
+                if math.isfinite(v):
+                    if held[j] and not integral(v):
+                        continue
+                    if not all(holds(r, j, v) for r, _ in rows):
+                        continue
+                groups = {group_of[r] for r, _ in rows}
+                mine = {r for r, _ in rows}
+                if not all(
+                    set(int(x) for x in np.asarray(row_groups[ci]).ravel()) <= mine for ci in groups
+                ):
+                    continue
+                for ci in groups:
+                    drop_group(ci)
+                    n_c += 1
+                changed = True
+                break
+    return n_c, n_b, n_i
+
+
 def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at):
     """A small unsatisfiable set of constraints of a pure-binary model.
 
@@ -1366,6 +1552,31 @@ def _milp_iis_arrays(
     bounds = set(finite_bounds)
     proven = True
     pending: dict[tuple, np.ndarray] = {}
+    # The structural sweep (``_structural_sweep``): solve-free deletion between
+    # phases and on the answer. ``DISCOPT_IIS_SWEEP=0`` is the opt-out for A/B.
+    use_sweep = os.environ.get("DISCOPT_IIS_SWEEP", "1") != "0"
+    n_swept = 0
+    A_csr = A.tocsr() if use_sweep else None
+    A_csc = A.tocsc() if use_sweep else None
+
+    def sweep() -> None:
+        nonlocal n_swept
+        if not use_sweep:
+            return
+        removed = _structural_sweep(
+            A_csr,
+            A_csc,
+            row_lo,
+            row_hi,
+            row_groups,
+            col_lb,
+            col_ub,
+            cons,
+            bounds,
+            ints_active,
+            include_bounds=include_bounds,
+        )
+        n_swept += sum(removed)
 
     sat_rows: Optional[int] = None
     sat_conflicts = 0
@@ -1836,8 +2047,10 @@ def _milp_iis_arrays(
         if include_bounds and phase_order.index("B") < phase_order.index("I"):
             # B runs before I: bounds of columns I releases are filtered at the end.
             phases.append(phase_bounds)
+        sweep()
         for k, phase in enumerate(phases):
             phase()
+            sweep()
             if confirm == "final" and k < len(phases) - 1:
                 if checkpoint is not None and reported_size(
                     cons, bounds, ints_active
@@ -1933,6 +2146,22 @@ def _milp_iis_arrays(
             complete = False
             proven = False
 
+    # The answer itself, confirmed or the fallback checkpoint: a run stopped in
+    # the integrality phase leaves columns no kept row touches (dijle: 1176
+    # elements). Dropping them needs no solve and keeps every certificate.
+    sweep()
+    if use_sweep:
+        # A swept element never holds a certificate in exact arithmetic (the
+        # certificate would make the sweep's argument false); within tolerances
+        # one could, and a certificate is reported only for a kept element.
+        def kept(key: tuple) -> bool:
+            if key[0] == "constraint":
+                return key[1] in cons
+            if key[0] == "integrality":
+                return key[1] in ints_active
+            return (key[1], key[2]) in bounds
+
+        pending = {k: x for k, x in pending.items() if kept(k)}
     # Bounds the final subsystem APPLIES (beyond held-integer boxes). With
     # include_bounds=False that is every finite bound, but none is an element.
     applied_bounds = sorted((j, s) for j, s in bounds if j not in ints_active)
@@ -1965,6 +2194,7 @@ def _milp_iis_arrays(
         n_reduced_confirmed=eng.n_reduced_confirmed,
         n_exact_confirmed=eng.n_exact_confirmed,
         n_exact_refuted=eng.n_exact_refuted,
+        n_swept=n_swept,
     )
 
 

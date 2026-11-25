@@ -94,6 +94,9 @@ def _infeasible(model, res):
 
 
 def test_budget_out_mid_phase_returns_a_rolling_checkpoint(monkeypatch):
+    # The structural sweep would delete these redundant rows with no probe;
+    # this test is about the filter, so it runs without the sweep.
+    monkeypatch.setenv("DISCOPT_IIS_SWEEP", "0")
     m = _model()
     base = 1 + 27 + 3  # every row + every integrality (bounds are boxes of held ints)
     # Enough presolve-on solves for the integrality filter to drop the first
@@ -117,6 +120,9 @@ def test_no_budget_no_rolling_checkpoints():
 def test_a_refuting_rolling_confirmation_redoes_the_run(monkeypatch):
     """If the presolve-free route finds an exact-integer point for a set the
     filter holds as proven, an earlier verdict was wrong: per-probe rerun."""
+    # The structural sweep would delete these redundant rows with no probe;
+    # this test is about the filter, so it runs without the sweep.
+    monkeypatch.setenv("DISCOPT_IIS_SWEEP", "0")
     real_conf = _iis_milp._Engine.confirm_infeasible
     state = {"n": 0}
 

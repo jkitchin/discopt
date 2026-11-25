@@ -84,6 +84,9 @@ def _independently_infeasible(model, iis):
 @pytest.mark.smoke
 @pytest.mark.parametrize("confirm", ["each", "final"])
 def test_budget_returns_a_confirmed_anytime_subsystem(monkeypatch, confirm):
+    # The structural sweep would delete these redundant rows with no probe;
+    # this test is about the filter, so it runs without the sweep.
+    monkeypatch.setenv("DISCOPT_IIS_SWEEP", "0")
     from discopt import _iis_milp
 
     real_run = highspy.Highs.run

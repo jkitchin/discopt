@@ -300,7 +300,10 @@ def test_batch_and_single_filters_both_give_certified_iis(max_batch, confirm):
 
 
 @pytest.mark.smoke
-def test_batching_cuts_solves_when_most_rows_are_redundant():
+def test_batching_cuts_solves_when_most_rows_are_redundant(monkeypatch):
+    # The structural sweep would delete these redundant rows with no probe;
+    # this test is about the filter, so it runs without the sweep.
+    monkeypatch.setenv("DISCOPT_IIS_SWEEP", "0")
     from discopt._iis_milp import milp_iis
 
     def build():
