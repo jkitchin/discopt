@@ -69,6 +69,20 @@ pub fn sym_lex_enabled() -> bool {
     }
 }
 
+/// `DISCOPT_MILP_ORBITOPE`: propagate the column-lex order of full integer orbitopes
+/// built from verified automorphisms (see [`crate::lp::highs_cutgen::orbitope`]).
+/// Default OFF (bound-changing, §5 panel owed). Panics on an unrecognized value.
+pub fn orbitope_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_ORBITOPE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_MILP_ORBITOPE={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
 /// One lexicographic-leader row `sum coef_j x_j >= 0` over structural columns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexRow {
@@ -399,6 +413,100 @@ fn assert_common_order(sym: &Symmetry) {
     }
 }
 
+/// Full integer orbitopes from the verified generators: chains `C_0, ..., C_{k-1}` of
+/// disjoint structural column sets in which a verified involution `g_j` swaps `C_j` and
+/// `C_{j+1}` elementwise and moves no other structural column. Every entry is a bounded
+/// integer, the indices increase along each row, and every column is ascending in the
+/// one row order: the conditions [`crate::lp::highs_cutgen::orbitope`] rests on.
+pub fn orbitopes(f: &Form<'_>, sym: &Symmetry) -> Vec<crate::lp::highs_cutgen::orbitope::Orbitope> {
+    use crate::lp::highs_cutgen::orbitope::Orbitope;
+    let ns = f.ns;
+    let ok_col = |j: usize| f.is_int[j] && f.l[j] > -INF && f.u[j] < INF;
+    // Eligible generators: involutions whose moved structurals are bounded integers.
+    let gens: Vec<&Vec<usize>> = sym
+        .generators
+        .iter()
+        .filter(|g| {
+            (0..f.n).all(|j| g[g[j]] == j)
+                && (0..ns).any(|j| g[j] != j)
+                && (0..ns).all(|j| g[j] == j || (g[j] < ns && ok_col(j)))
+        })
+        .collect();
+    let moved = |g: &Vec<usize>| (0..ns).filter(|&j| g[j] != j).count();
+    let valid = |cols: &[Vec<usize>]| {
+        let p = cols[0].len();
+        cols.iter()
+            .all(|c| c.len() == p && c.windows(2).all(|w| w[0] < w[1]))
+            && (0..p).all(|r| cols.windows(2).all(|w| w[0][r] < w[1][r]))
+    };
+    let mut taken = vec![false; ns];
+    let mut used = vec![false; gens.len()];
+    let mut out = Vec::new();
+    for i in 0..gens.len() {
+        if used[i] {
+            continue;
+        }
+        used[i] = true;
+        let g = gens[i];
+        if (0..ns).any(|j| g[j] != j && taken[j]) {
+            continue;
+        }
+        let a: Vec<usize> = (0..ns).filter(|&j| g[j] > j).collect();
+        let mut cols = vec![a.clone(), a.iter().map(|&j| g[j]).collect::<Vec<_>>()];
+        if !valid(&cols) {
+            continue;
+        }
+        let mut mine = taken.clone();
+        for c in &cols {
+            for &j in c {
+                mine[j] = true;
+            }
+        }
+        loop {
+            let mut grew = false;
+            for t in 0..gens.len() {
+                if used[t] {
+                    continue;
+                }
+                let h = gens[t];
+                for front in [false, true] {
+                    let end = if front {
+                        &cols[0]
+                    } else {
+                        &cols[cols.len() - 1]
+                    };
+                    if moved(h) != 2 * end.len() || end.iter().any(|&j| h[j] == j || mine[h[j]]) {
+                        continue;
+                    }
+                    let new: Vec<usize> = end.iter().map(|&j| h[j]).collect();
+                    let mut cand = cols.clone();
+                    if front {
+                        cand.insert(0, new.clone());
+                    } else {
+                        cand.push(new.clone());
+                    }
+                    if !valid(&cand) {
+                        continue;
+                    }
+                    cols = cand;
+                    for &j in &new {
+                        mine[j] = true;
+                    }
+                    used[t] = true;
+                    grew = true;
+                    break;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        taken = mine;
+        out.push(Orbitope { cols });
+    }
+    out
+}
+
 /// The working form with `rows` appended as `sum coef x - s = 0`, `s in [0, INF)`
 /// (a new slack column per row, after the existing columns). Returns
 /// `(csc, m, n, c, l, u, b)`.
@@ -464,14 +572,8 @@ pub fn augment(
 mod tests {
     use super::*;
 
-    /// `k` interchangeable blocks of `d` general integers in `[0, r-1]`, one shared
-    /// row `sum x >= 1` (with surplus) and per-block rows `x_b1 + x_b2 <= cap`.
-    fn blocks(
-        k: usize,
-        d: usize,
-        r: f64,
-        cap: f64,
-    ) -> (
+    /// A test model: `(csc, m, n, c, l, u, b, is_int)`.
+    type Model = (
         SparseCols,
         usize,
         usize,
@@ -480,14 +582,16 @@ mod tests {
         Vec<f64>,
         Vec<f64>,
         Vec<bool>,
-    ) {
+    );
+
+    /// `k` interchangeable blocks of `d` general integers in `[0, r-1]`, one shared
+    /// row `sum x >= 1` (with surplus) and per-block rows `x_b1 + x_b2 <= cap`.
+    fn blocks(k: usize, d: usize, r: f64, cap: f64) -> Model {
         let ns = k * d;
         let m = 1 + k;
         let n = ns + m;
         let mut dense = vec![0.0; m * n];
-        for j in 0..ns {
-            dense[j] = 1.0;
-        }
+        dense[..ns].iter_mut().for_each(|v| *v = 1.0);
         dense[ns] = -1.0;
         for bk in 0..k {
             let i = 1 + bk;
@@ -511,19 +615,7 @@ mod tests {
         (csc, m, n, c, l, u, b, is_int)
     }
 
-    fn form<'a>(
-        t: &'a (
-            SparseCols,
-            usize,
-            usize,
-            Vec<f64>,
-            Vec<f64>,
-            Vec<f64>,
-            Vec<f64>,
-            Vec<bool>,
-        ),
-        ns: usize,
-    ) -> Form<'a> {
+    fn form<'a>(t: &'a Model, ns: usize) -> Form<'a> {
         Form {
             csc: &t.0,
             m: t.1,
@@ -622,6 +714,97 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 100, "probe fired on {checked} points");
+    }
+
+    /// Joint soundness of the lex rows and the orbitope chains (feasible-point
+    /// sampling): every orbit of feasible points keeps its lex-max under BOTH, every
+    /// orbitope's adjacent swap is a verified generator, and orbitopes were found.
+    #[test]
+    fn orbitopes_and_rows_keep_every_orbit_lex_max() {
+        let mut probes = 0usize;
+        let mut found = 0usize;
+        for &(k, d, r) in &[(3usize, 2usize, 3.0f64), (4, 2, 2.0), (2, 3, 3.0)] {
+            let t = blocks(k, d, r, 3.0);
+            let ns = k * d;
+            let f = form(&t, ns);
+            let s = detect(&f, 1000, None);
+            let g = Graph::new(&f);
+            let orbs = orbitopes(&f, &s);
+            found += orbs.len();
+            for o in &orbs {
+                for w in o.cols.windows(2) {
+                    // The swap of the two columns is (on structurals) a verified generator.
+                    assert!(s.generators.iter().any(|p| {
+                        g.verify(p)
+                            && (0..ns).all(|j| {
+                                let want = match (
+                                    w[0].iter().position(|&a| a == j),
+                                    w[1].iter().position(|&b| b == j),
+                                ) {
+                                    (Some(r), _) => w[1][r],
+                                    (_, Some(r)) => w[0][r],
+                                    _ => j,
+                                };
+                                p[j] == want
+                            })
+                    }));
+                }
+            }
+            let chains = |x: &[f64]| {
+                orbs.iter().all(|o| {
+                    o.cols.windows(2).all(|w| {
+                        for (&a, &b) in w[0].iter().zip(&w[1]) {
+                            if x[a] != x[b] {
+                                return x[a] > x[b];
+                            }
+                        }
+                        true
+                    })
+                })
+            };
+            let keep = |x: &[f64]| {
+                s.rows
+                    .iter()
+                    .all(|row| row.coefs.iter().map(|&(j, v)| v * x[j]).sum::<f64>() >= 0.0)
+                    && chains(x)
+            };
+            let feasible = |x: &[f64]| {
+                x.iter().sum::<f64>() >= 1.0 && (0..k).all(|bk| x[bk * d] + x[bk * d + 1] <= 3.0)
+            };
+            let total = (r as usize).pow(ns as u32);
+            for mut code in 0..total {
+                let mut x = vec![0.0; ns];
+                for v in x.iter_mut() {
+                    *v = (code % r as usize) as f64;
+                    code /= r as usize;
+                }
+                if !feasible(&x) {
+                    continue;
+                }
+                let mut seen = vec![x.clone()];
+                let mut q = 0;
+                while q < seen.len() {
+                    let y = seen[q].clone();
+                    for p in &s.generators {
+                        let z: Vec<f64> = (0..ns).map(|j| y[p[j]]).collect();
+                        if !seen.contains(&z) {
+                            seen.push(z);
+                        }
+                    }
+                    q += 1;
+                }
+                let lexmax = seen
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
+                assert!(keep(lexmax), "lex-max {lexmax:?} of an orbit is cut");
+                probes += 1;
+            }
+        }
+        assert!(
+            probes > 300 && found >= 3,
+            "probes {probes}, orbitopes {found}"
+        );
     }
 
     #[test]

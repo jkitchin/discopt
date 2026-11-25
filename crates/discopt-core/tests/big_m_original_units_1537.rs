@@ -32,6 +32,7 @@ fn options() -> MilpOptions {
         rel_gap_max_abs: false,
         bound_hook: None,
         bound_hook_every: 1,
+        orbitopes: None,
         extend_no_incumbent_s: None,
         gap_tol: 1e-9,
         abs_gap_tol: None,

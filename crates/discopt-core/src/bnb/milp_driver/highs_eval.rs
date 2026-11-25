@@ -127,6 +127,9 @@ impl HighsEval {
             ctx.l_w,
             ctx.u_w,
             ctx.is_int_full,
+            ctx.c_w,
+            // Only the search on the model they were detected on (never a sub-MIP's).
+            ctx.opts.orbitopes.as_ref().filter(|_| !super::in_sub_mip()),
         )?;
         Some(HighsEval {
             dom,

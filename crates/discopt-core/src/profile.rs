@@ -891,6 +891,11 @@ counters!(
     MilpSymLexGenerators,
     MilpSymLexTried,
     MilpSymLexRows,
+    // `DISCOPT_MILP_ORBITOPE`: verified full integer orbitopes, their columns, and
+    // the bound changes their column-lex propagation made.
+    MilpOrbitopes,
+    MilpOrbitopeColumns,
+    MilpOrbitopeFixings,
     // #2224 (`DISCOPT_MILP_PREINC_SCORE`): branchings the HiGHS-design search took
     // with the raised pre-incumbent cutoff/inference score weight.
     PreIncScoreBranchings,
