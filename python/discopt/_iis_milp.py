@@ -876,6 +876,80 @@ def _parity_core(A, row_lo, row_hi, is_int, row_groups) -> Optional[tuple[set, s
     return cons, touched
 
 
+def _integral(x) -> bool:
+    return bool(np.all(np.asarray(x) == np.round(x)))
+
+
+def _lift_implied_binaries(A, row_lo, row_hi, col_lb, col_ub, is_int):
+    """Continuous columns that may be taken binary without changing feasibility.
+
+    Returns the set of continuous columns ``c`` for which the model stays
+    feasible-equivalent when ``c`` is restricted to ``{0, 1}``, judged per row so
+    that the equivalence holds for *every subset* of the rows (the property the
+    CDCL core stage needs: a core of the lifted model must be infeasible as a
+    subsystem of the original one). A column qualifies when ``col_lb == 0``,
+    ``col_ub >= 1`` and every row it appears in is single-sided and, written as
+    ``sum a_k x_k >= L``, is one of:
+
+    - *upper row*: ``a_c == -1``, ``L`` integral, and every other column of the
+      row integer with an integral coefficient. It reads ``c <= (integer
+      expression)``, so rounding ``c`` up keeps it.
+    - *covering row*: ``a_c > 0`` with ``a_c >= L``, and every other term
+      nonnegative over its box (``a_k > 0`` with ``lb_k >= 0``, or ``a_k < 0``
+      with ``ub_k <= 0``). Raising ``c`` only helps it, and ``c = 1`` alone
+      satisfies it, so capping ``c`` at 1 keeps it too.
+
+    Proof: given a feasible point, hold the integer columns and map each lifted
+    ``c`` to ``min(ceil(c), 1)``. An upper row bounds ``c`` by an integer at least
+    ``c``, so by at least ``ceil(c)`` and (being decreased by the cap) by the new
+    value. A covering row loses activity only where some ``c > 1`` is capped, and
+    then ``a_c * 1 + (nonnegative rest) >= L``. Only lifted columns move, each
+    within ``[0, 1]`` so their own covering-row terms stay nonnegative; an upper
+    row holds one lifted column at most (its other columns are integer). Measured
+    on MIPcc27 neos-1461051 (80 continuous columns, all qualifying): the CDCL
+    stage then gives a 308-row core where it declined before.
+    """
+    n = col_lb.size
+    cont = np.flatnonzero(~is_int)
+    if cont.size == 0:
+        return set()
+    At = A.tocsc()
+    out: set[int] = set()
+    for c in cont:
+        c = int(c)
+        if col_lb[c] != 0.0 or col_ub[c] < 1.0:
+            continue
+        ok = At.indptr[c + 1] > At.indptr[c]
+        for p in range(At.indptr[c], At.indptr[c + 1]):
+            r = int(At.indices[p])
+            lo, hi = row_lo[r], row_hi[r]
+            if (lo > -_INF) == (hi < _INF):  # two-sided (or free) row
+                ok = False
+                break
+            sgn = 1.0 if lo > -_INF else -1.0
+            L = lo if lo > -_INF else -hi
+            s0, e0 = A.indptr[r], A.indptr[r + 1]
+            cols = A.indices[s0:e0]
+            vals = sgn * A.data[s0:e0]
+            others = cols != c
+            a_c = float(vals[~others][0])
+            oc, ov = cols[others], vals[others]
+            if a_c == -1.0:
+                ok = _integral(L) and bool(np.all(is_int[oc])) and _integral(ov)
+            elif a_c > 0.0:
+                ok = a_c >= L and bool(
+                    np.all(((ov > 0) & (col_lb[oc] >= 0)) | ((ov < 0) & (col_ub[oc] <= 0)))
+                )
+            else:
+                ok = False
+            if not ok:
+                break
+        if ok:
+            out.add(c)
+    assert all(0 <= c < n for c in out)
+    return out
+
+
 def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at):
     """A small unsatisfiable set of constraints of a pure-binary model.
 
@@ -1330,8 +1404,20 @@ def _milp_iis_arrays(
         sat_stop = time.perf_counter() + sat_budget
         if deadline is not None:
             sat_stop = min(sat_stop, deadline)
+        # Continuous columns that are binary in effect (see
+        # _lift_implied_binaries) are handed to the CDCL stage as binaries. Only
+        # the proposal sees them so: the base probe below proves the candidate
+        # on the ORIGINAL types, and the filter runs on them.
+        lifted = _lift_implied_binaries(A, row_lo, row_hi, col_lb, col_ub, is_int)
+        sat_is_int, sat_ub = is_int, col_ub
+        if lifted:
+            idx = np.fromiter(lifted, dtype=np.int64)
+            sat_is_int = is_int.copy()
+            sat_is_int[idx] = True
+            sat_ub = col_ub.copy()
+            sat_ub[idx] = 1.0
         cand, sat_conflicts = _binary_core(
-            A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, sat_stop
+            A, row_lo, row_hi, col_lb, sat_ub, sat_is_int, row_groups, sat_stop
         )
         if cand is not None and len(cand) < len(cons):
             cons = set(cand)
