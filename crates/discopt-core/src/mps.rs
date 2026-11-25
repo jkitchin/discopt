@@ -34,7 +34,8 @@
 //! * numbers are C `atof` after the first `D` (else `d`) becomes `E`: the longest
 //!   valid prefix, hex floats, `inf` and `nan` included, garbage is 0 (2088-2112);
 //! * `assessLp`: costs and bounds at or past 1e20 become infinite; a NaN bound, an
-//!   infinite-from-the-wrong-side bound or a matrix entry with |a| >= 1e15 is an
+//!   infinite-from-the-wrong-side bound or a matrix entry with |a| >= 1e15 (the
+//!   `large_matrix_value` option, see [`read_mps_str_with`]) is an
 //!   error; matrix entries with |a| <= 1e-9 (and NaN) are dropped.
 //!
 //! The legacy fixed-format reader HiGHS falls back to (`HMPSIO.cpp`) is NOT
@@ -342,12 +343,17 @@ struct Parser {
     /// The argument of the last QSECTION / QCMATRIX header (HiGHS's
     /// `section_args`, set inside `checkFirstWord`).
     section_arg: String,
+    /// The header of the unsupported section met (for the error message).
+    unsupported: String,
 }
 
 /// [`check_first_word`], recording a QSECTION / QCMATRIX header's argument as
 /// HiGHS's `checkFirstWord` does.
 fn cfw<'a>(p: &mut Parser, line: &'a str) -> (Key, &'a str, &'a str) {
     let r = check_first_word(line);
+    if matches!(r.0, Key::Unsupported) {
+        p.unsupported = r.1.to_string();
+    }
     if matches!(r.0, Key::Qsection | Key::Qcmatrix | Key::Csection) {
         p.section_arg = tokens(r.2)
             .first()
@@ -383,8 +389,21 @@ impl Parser {
     }
 }
 
-/// Read an MPS model from its text (decompress `.gz` before calling).
+/// HiGHS's default `large_matrix_value`: `assessLp` refuses a model with a matrix
+/// entry of at least this magnitude.
+pub const DEFAULT_LARGE_MATRIX_VALUE: f64 = 1e15;
+
+/// Read an MPS model from its text (decompress `.gz` before calling), refusing a
+/// matrix entry with `|a| >= 1e15` as HiGHS does by default.
 pub fn read_mps_str(text: &str) -> Result<MpsModel, MpsError> {
+    read_mps_str_with(text, DEFAULT_LARGE_MATRIX_VALUE)
+}
+
+/// [`read_mps_str`] with HiGHS's `large_matrix_value` option set: a matrix entry
+/// with `|a| >= large_matrix_value` is an error. `f64::INFINITY` accepts every
+/// finite entry, as a HiGHS run with `large_matrix_value=inf` does (the MIPcc27
+/// checker reads models that way).
+pub fn read_mps_str_with(text: &str, large_matrix_value: f64) -> Result<MpsModel, MpsError> {
     let mut p = Parser::default();
     let mut lines = text.split('\n');
     let next_data = |lines: &mut std::str::Split<'_, char>| -> Option<String> {
@@ -406,7 +425,9 @@ pub fn read_mps_str(text: &str) -> Result<MpsModel, MpsError> {
     loop {
         match key {
             Key::End => break,
-            Key::Unsupported => return err("unsupported section"),
+            Key::Unsupported => {
+                return err(&format!("unsupported section {}", p.unsupported));
+            }
             Key::Csection => return err("cones (CSECTION) not supported"),
             Key::None | Key::Name | Key::Max | Key::Min => {
                 let Some(line) = next_data(&mut lines) else {
@@ -832,10 +853,10 @@ pub fn read_mps_str(text: &str) -> Result<MpsModel, MpsError> {
             }
         }
     }
-    finish(p)
+    finish(p, large_matrix_value)
 }
 
-fn finish(mut p: Parser) -> Result<MpsModel, MpsError> {
+fn finish(mut p: Parser, large_matrix_value: f64) -> Result<MpsModel, MpsError> {
     for j in 0..p.col_names.len() {
         if p.col_binary[j] {
             p.col_lower[j] = 0.0;
@@ -882,7 +903,7 @@ fn finish(mut p: Parser) -> Result<MpsModel, MpsError> {
     a_start.push(0);
     for col in &p.col_entries {
         for &(i, v) in col {
-            if v.abs() >= 1e15 {
+            if v.abs() >= large_matrix_value {
                 return Err(MpsError::Parse(format!("matrix entry {v} too large")));
             }
             if v.is_nan() || v.abs() <= 1e-9 {
@@ -946,6 +967,18 @@ mod tests {
         }
         assert!(mps_value("nan").is_nan());
         assert_eq!(checked, cases.len());
+    }
+
+    /// `large_matrix_value`: 3.6e15 is refused at HiGHS's default 1e15 and read
+    /// unchanged with the cap lifted (MIPLIB `control30-5-10-4` has such entries).
+    #[test]
+    fn large_matrix_value_cap_is_an_option() {
+        let text = "NAME t\nROWS\n N obj\n L c\nCOLUMNS\n x obj 1 c 3606374111163430\n\
+                    RHS\n r c 4\nENDATA\n";
+        assert!(matches!(read_mps_str(text), Err(MpsError::Parse(_))));
+        let m = read_mps_str_with(text, f64::INFINITY).unwrap();
+        assert_eq!(m.a_value, vec![3606374111163430.0]);
+        assert!(read_mps_str_with(text, 1e16).is_ok());
     }
 
     /// The INTORG default and objective offset, end to end.

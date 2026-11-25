@@ -96,7 +96,16 @@ class HighsBackend:
         lp.integrality_ = [
             highspy.HighsVarType.kInteger if b else highspy.HighsVarType.kContinuous for b in is_int
         ]
-        h.passModel(lp)
+        # The MIPcc27 checker reads models with ``large_matrix_value=inf``; at
+        # HiGHS's default (1e15) ``passModel`` refuses a model with a larger entry
+        # (MIPLIB control30-5-10-4 has 1100, up to 6e23). The refusal used to go
+        # unchecked: the backend kept an empty model and every probe's non-proof
+        # status was reported as "could not prove the model infeasible within the
+        # time limit" in under a second. Lift the cap and refuse loudly otherwise.
+        h.setOptionValue("large_matrix_value", float("inf"))
+        status = h.passModel(lp)
+        if status == highspy.HighsStatus.kError:
+            raise RuntimeError("HiGHS refused the IIS model (passModel returned kError)")
         self.h = h
         self.n, self.m = n, m
         self._stop = math.inf

@@ -16,8 +16,12 @@ import numpy as np
 import scipy.sparse as sp
 
 
-def read_mps(path: str) -> dict:
+def read_mps(path: str, large_matrix_value: float = 1e15) -> dict:
     """The model in ``path`` (``.mps`` or ``.mps.gz``) as arrays.
+
+    ``large_matrix_value`` is HiGHS's option of that name: a matrix entry with
+    ``|a| >= large_matrix_value`` raises ``ValueError``, as HiGHS's ``readModel``
+    refuses it at its default 1e15; ``float("inf")`` reads every finite entry.
 
     Keys: ``n``, ``m``, ``A`` (CSC, columns in file order, entries in file order
     within a column), ``c``, ``offset``, ``maximize``, ``col_lb``, ``col_ub``,
@@ -31,7 +35,7 @@ def read_mps(path: str) -> dict:
     opener = gzip.open if path.endswith(".gz") else open
     with opener(path, "rb") as f:
         text = f.read().decode("utf-8", errors="surrogateescape")
-    d = read_mps_text(text)
+    d = read_mps_text(text, large_matrix_value=float(large_matrix_value))
     n, m = int(d["num_col"]), int(d["num_row"])
     A = sp.csc_matrix((d["a_value"], d["a_index"], d["a_start"]), shape=(m, n))
     integ = np.asarray(d["integrality"], dtype=np.int64)
