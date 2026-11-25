@@ -80,7 +80,7 @@
 "python/tests/test_1662_perspective_oa_spatial.py::test_witness_certifies_on_the_spatial_path": 22.57,
 "python/tests/test_1662_perspective_oa_spatial.py::test_witness_differential_against_big_m": 61.7,
 "python/tests/test_1667_highs_sparsify_presolve_cycle.py::test_unit_commitment_returns_within_its_time_limit": 46.73,
-"python/tests/test_1671_highs_presolve_cycle_canary.py::test_highs_presolve_still_cycles_on_the_1667_handoff": 10.26,
+"python/tests/test_1671_highs_presolve_cycle_canary.py::test_route_presolve_returns_on_the_1667_handoff": 10.26,
 "python/tests/test_1678_convex_lift_vertex_enclosure.py::test_root_bound_reaches_the_hull_relaxation": 40.42,
 "python/tests/test_1678_default_box_certificate.py::test_no_certificate_on_the_default_box[_max_nlp]": 6.85,
 "python/tests/test_1678_default_box_certificate.py::test_no_certificate_on_the_default_box[_nlp_1678]": 7.6,
