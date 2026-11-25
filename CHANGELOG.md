@@ -33,6 +33,19 @@ The release procedure that produces these entries is documented in
   is 2402); dives goes from 7152 to 7127 and dingo stays at 2197, all passing the
   competition checker. `DISCOPT_IIS_INT_TWO_PASS=0` restores the single pass.
 
+### Fixed
+
+- **MIPcc entry: models with matrix entries of 1e15 or more.** The competition checker
+  reads models with HiGHS's `large_matrix_value` set to infinity; the entry refused them
+  at the reader (MIPLIB `control30-5-10-4`, 1100 entries up to 6e23). Past the reader,
+  the HiGHS IIS backend ignored the status of `passModel`, so a model HiGHS refused left
+  an empty model behind and the engine reported "could not prove the model infeasible
+  within the time limit" in under a second. The reader takes `large_matrix_value`
+  (default 1e15, as HiGHS), the entry passes infinity, the backend and the
+  checker-settings re-solve lift the cap as the checker does, and a refused model or row
+  now raises. An unsupported MPS section's error names it (`unsupported section
+  INDICATORS`).
+
 ## [0.14.0] - 2026-11-24
 
 ### Added

@@ -341,3 +341,49 @@ def test_entry_falls_back_to_rust_without_highspy(monkeypatch):
     assert _resolve_iis_engine(None) == "highs"
     monkeypatch.setitem(sys.modules, "highspy", None)
     assert _resolve_iis_engine(None) == "rust"
+
+
+_BIG_ENTRY = (
+    "NAME big\nROWS\n N obj\n G c1\n G c2\nCOLUMNS\n x obj 1 c1 3606374111163430\n"
+    " y c2 1\nRHS\n r c1 1e16 c2 2\nBOUNDS\n UP b x 1\n UP b y 10\nENDATA\n"
+)
+
+
+@pytest.mark.requires_highs
+def test_a_matrix_entry_past_1e15_is_read_and_explained(tmp_path, monkeypatch):
+    """MIPLIB control30-5-10-4 has entries up to 6e23. The checker reads them
+    (``large_matrix_value=inf``); the entry used to refuse the file at the reader,
+    and past the reader HiGHS's ``passModel`` refused the model unchecked, so the
+    engine reported "could not prove the model infeasible" in under a second.
+    Here ``3.6e15 x >= 1e16`` with ``x <= 1`` is the IIS; ``y >= 2`` is not."""
+    inst = tmp_path / "big.mps"
+    inst.write_text(_BIG_ENTRY)
+    out = tmp_path / "sol.json"
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
+    monkeypatch.setenv("MIPCC_THREADS", "2")
+    monkeypatch.setenv("DISCOPT_IIS_ENGINE", "highs")
+    assert mipcc.main([str(inst), str(out)]) == 0
+    doc = json.loads(out.read_text())
+    assert doc["rows"]["c1"]["action"] == "keep"
+    assert doc["rows"]["c2"] == {"action": "relax"}
+    assert doc["columns"]["x"]["upper_bound"]["action"] == "keep"
+
+
+@pytest.mark.requires_highs
+def test_highs_backend_refuses_loudly_when_highs_rejects_the_model(monkeypatch):
+    """A ``passModel`` error must raise, not leave an empty model behind whose
+    every probe reads as "undecided" (the control30 failure)."""
+    import highspy
+    import scipy.sparse as sp
+    from discopt import _iis_backend
+
+    monkeypatch.setattr(highspy.Highs, "passModel", lambda self, lp: highspy.HighsStatus.kError)
+    with pytest.raises(RuntimeError, match="refused the IIS model"):
+        _iis_backend.HighsBackend(
+            sp.csr_matrix(np.array([[1.0]])),
+            np.array([3.0]),
+            np.array([1e20]),
+            np.array([0.0]),
+            np.array([1.0]),
+            np.array([False]),
+        )

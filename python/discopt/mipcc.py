@@ -74,10 +74,15 @@ def budget(limit: float) -> tuple[float, float]:
 
 def read_mps(path: str) -> dict:
     """The model's arrays and names, via discopt's own MPS reader (``discopt._mps``,
-    an exact reproduction of HiGHS's ``readModel`` -> ``getLp``; highs-parity P6)."""
+    an exact reproduction of HiGHS's ``readModel`` -> ``getLp``; highs-parity P6).
+
+    The matrix-entry cap is lifted (``large_matrix_value=inf``) because the
+    competition checker sets that option before ``readModel``: a model it scores
+    with entries of 1e15 or more (MIPLIB ``control30-5-10-4``) must not be refused
+    here, which would leave the whole model as the answer."""
     from discopt._mps import read_mps as _read
 
-    d = _read(path)
+    d = _read(path, large_matrix_value=float("inf"))
     n, m = d["n"], d["m"]
     A = d["A"].tocsr()
     A.sum_duplicates()
@@ -315,6 +320,9 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
     h.setOptionValue("mip_feasibility_tolerance", CHECK_TOL)
     h.setOptionValue("primal_feasibility_tolerance", CHECK_TOL)
     h.setOptionValue("time_limit", float(time_limit))
+    # As the checker does before ``readModel``: a matrix entry of 1e15 or more is
+    # read, not refused (control30-5-10-4).
+    h.setOptionValue("large_matrix_value", float("inf"))
     # Wall-clock guard: HiGHS was measured overrunning its time_limit 7-10x on
     # presolve-free solves; stop it at the limit (plus a little) whatever it does.
     stop = time.perf_counter() + float(time_limit) + 1.0
@@ -339,13 +347,17 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
     for r in np.flatnonzero(rows):
         s, e = A.indptr[r], A.indptr[r + 1]
         lo, hi = data["row_lo"][r], data["row_hi"][r]
-        h.addRow(
+        added = h.addRow(
             lo if lo > -_INF else -inf,
             hi if hi < _INF else inf,
             e - s,
             A.indices[s:e].astype(np.int32),
             A.data[s:e],
         )
+        if added == highspy.HighsStatus.kError:
+            # A dropped row would loosen the subsystem and could reject a sound
+            # answer; refuse instead (main() keeps the answer already on disk).
+            raise RuntimeError(f"HiGHS refused kept row {r} on the checker-settings solve")
     run = run_checked(h)
     if run not in (highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning):
         raise RuntimeError(f"HiGHS failed on the checker-settings solve: {run}")

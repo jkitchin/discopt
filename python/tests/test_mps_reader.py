@@ -193,3 +193,37 @@ def test_mipcc_reads_without_highspy():
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert p.returncode == 0, p.stderr[-3000:]
     assert "READ (531, 30)" in p.stdout, p.stdout
+
+
+_BIG_ENTRY = (
+    "NAME big\nROWS\n N obj\n G c1\n G c2\nCOLUMNS\n x obj 1 c1 3606374111163430\n"
+    " y c2 1\nRHS\n r c1 1e16 c2 2\nBOUNDS\n UP b x 1\n UP b y 10\nENDATA\n"
+)
+
+
+def test_large_matrix_value_is_an_option(tmp_path):
+    """HiGHS refuses a matrix entry of 1e15 or more at its default
+    ``large_matrix_value``; the MIPcc27 checker lifts it to infinity before
+    ``readModel``. The reader refuses by default and reads with the cap lifted
+    (MIPLIB control30-5-10-4 has 1100 such entries)."""
+    f = tmp_path / "big.mps"
+    f.write_text(_BIG_ENTRY)
+    with pytest.raises(ValueError, match="too large"):
+        read_mps(str(f))
+    d = read_mps(str(f), large_matrix_value=float("inf"))
+    assert d["A"].toarray().tolist() == [[3606374111163430.0, 0.0], [0.0, 1.0]]
+    with pytest.raises(ValueError, match="too large"):
+        read_mps(str(f), large_matrix_value=1e15)
+
+
+def test_unsupported_section_is_named(tmp_path):
+    """An INDICATORS section (MIPLIB oocsp-racks030f7cci) is refused as HiGHS
+    refuses it, and the message names the section. The MIPcc27 checker also
+    refuses such a file (``UnsupportedInstanceError``), so it is never scored."""
+    f = tmp_path / "ind.mps"
+    f.write_text(
+        "NAME ind\nROWS\n N obj\n L c\nCOLUMNS\n x obj 1 c 1\nRHS\n r c 4\n"
+        "INDICATORS\n IF c x 1\nENDATA\n"
+    )
+    with pytest.raises(ValueError, match="unsupported section INDICATORS"):
+        read_mps(str(f))

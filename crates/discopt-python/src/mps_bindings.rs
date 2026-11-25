@@ -1,6 +1,6 @@
 //! PyO3 binding for the in-house MPS reader (`discopt_core::mps`, highs-parity P6).
 
-use discopt_core::mps::{read_mps_str, MpsError};
+use discopt_core::mps::{read_mps_str_with, MpsError, DEFAULT_LARGE_MATRIX_VALUE};
 use numpy::PyArray1;
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
@@ -13,12 +13,20 @@ use pyo3::types::PyDict;
 /// `integrality` (empty when all continuous), `col_names`, `row_names` (empty when
 /// names repeat) and `has_hessian`.
 ///
+/// `large_matrix_value` is HiGHS's option of that name (default 1e15): a matrix
+/// entry at least that large is refused; `inf` accepts every finite entry.
+///
 /// Raises `ValueError` where HiGHS's reader fails, and `NotImplementedError` for a
 /// fixed-format file (HiGHS's legacy fixed reader is not emulated).
 #[pyfunction]
-pub fn read_mps_text<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
+#[pyo3(signature = (text, large_matrix_value = DEFAULT_LARGE_MATRIX_VALUE))]
+pub fn read_mps_text<'py>(
+    py: Python<'py>,
+    text: &str,
+    large_matrix_value: f64,
+) -> PyResult<Bound<'py, PyDict>> {
     let m = py
-        .allow_threads(|| read_mps_str(text))
+        .allow_threads(|| read_mps_str_with(text, large_matrix_value))
         .map_err(|e| match e {
             MpsError::Parse(_) => PyValueError::new_err(e.to_string()),
             MpsError::FixedFormat(_) => PyNotImplementedError::new_err(e.to_string()),
