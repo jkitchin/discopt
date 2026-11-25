@@ -94,14 +94,14 @@ def test_non_clause_model_is_computed_exactly_as_without_the_candidate():
     m = dm.Model("p")
     x = m.integer("x", lb=0, ub=5)
     y = m.integer("y", lb=0, ub=5)
-    # 3x = 1: integer-infeasible, but not by parity (2x = 1 would be a mod-2
-    # certificate, which the parity candidate legitimately takes).
-    m.subject_to(3 * x == 1, name="half")
+    # Infeasible by its bounds alone. (3x = 1 would be a lattice certificate,
+    # which the lattice candidate rightly takes.)
+    m.subject_to(2 * x + 2 * y >= 21, name="half")
     m.subject_to(y <= 3, name="red_herring")
     m.minimize(0 * x)
     a = milp_iis(m)
     b = milp_iis(m, sat_candidate=False)
-    assert a.sat_rows is None
+    assert a.sat_rows is None and a.parity_rows is None and a.n_lattice == 0
     assert (a.constraints, a.bounds, a.integrality, a.n_solves) == (
         b.constraints,
         b.bounds,
@@ -180,9 +180,10 @@ def test_candidate_stage_respects_the_time_budget():
 def test_candidate_stage_share_starts_when_the_stage_starts(monkeypatch):
     """#2318: the stage's share (``_SAT_STAGE_FRACTION`` of ``total_time_limit``) was
     counted from the start of ``milp_iis``, so model extraction, first-call imports
-    and ``_parity_core`` were charged to it. When they outlasted the share the stage
-    started past its own deadline, did no work and reported ``sat_conflicts == 0``
-    (CI, PR #2311's Rust-engine lane). Slow the step just before the stage past the
+    and the step before it (then ``_parity_core``, now arming the lattice test) were
+    charged to it. When they outlasted the share the stage started past its own
+    deadline, did no work and reported ``sat_conflicts == 0`` (CI, PR #2311's
+    Rust-engine lane). Slow the step just before the stage past the
     whole share: the stage must still run, and the overall budget must still hold."""
     import time
 
@@ -190,15 +191,15 @@ def test_candidate_stage_share_starts_when_the_stage_starts(monkeypatch):
 
     budget = 3.0
     share = im._SAT_STAGE_FRACTION * budget
-    real_parity_core = im._parity_core
+    real_arm = im._Engine.arm_lattice
     slept = []
 
-    def slow_parity_core(*args, **kwargs):
+    def slow_arm(self, *args, **kwargs):
         time.sleep(share + 0.2)
         slept.append(True)
-        return real_parity_core(*args, **kwargs)
+        return real_arm(self, *args, **kwargs)
 
-    monkeypatch.setattr(im, "_parity_core", slow_parity_core)
+    monkeypatch.setattr(im._Engine, "arm_lattice", slow_arm)
     t0 = time.perf_counter()
     res = milp_iis(_pigeonhole_model(10, 9), time_limit=10, total_time_limit=budget)
     elapsed = time.perf_counter() - t0
