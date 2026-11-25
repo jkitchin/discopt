@@ -1238,6 +1238,7 @@ def _rehold(
     ints: set[int],
     stop_at: float,
     max_probes: int = _REHOLD_MAX_PROBES,
+    known: Optional[dict] = None,
 ) -> tuple[Optional[tuple[set[int], set, set[int]]], dict, bool]:
     """Re-hold move on a complete answer: hold every integrality of a column the
     answer's constraints touch, re-run the constraint deletion filter, then the
@@ -1264,7 +1265,13 @@ def _rehold(
     re-held or the pass needs more than ``max_probes`` probes. Reaching
     ``stop_at`` raises :class:`_OutOfTime`, so the caller discards the pass.
     Probes run under the engine's policy, so the caller must confirm the new
-    set (:meth:`_Engine.confirm_infeasible`)."""
+    set (:meth:`_Engine.confirm_infeasible`).
+
+    ``known`` (the answer's certificates) skips probes: an element whose point
+    is a strong certificate (:func:`_check_certificates`) on the set a stage
+    starts from is necessary, and stays so while that stage only removes
+    elements, so it is kept without a solve. Checked once per stage, by
+    arithmetic. Measured on stein45inf's ICB-n answer: 39 of 258 probes."""
     A = eng.A
     supp: set[int] = set()
     for c in cons:
@@ -1284,7 +1291,19 @@ def _rehold(
             raise _OutOfTime
         return eng.probe(c2, b2, i2)
 
+    known = known or {}
+    s_tol = min(_STRONG_OTHERS, 1e-6)
+
+    def certified(c2: set[int], b2: set, i2: set[int]) -> dict:
+        # The known points that certify their element on the set a stage starts from.
+        got = _check_certificates(known, eng, c2, b2, i2, s_tol, _STRONG_OWN)
+        pending.update(got)
+        return got
+
+    skip = certified(new_c, new_b, new_i)
     for q in sorted(cons):
+        if ("constraint", q) in skip:
+            continue
         v, x = probe(new_c - {q}, new_b, new_i)
         if v is True:
             new_c.discard(q)
@@ -1292,7 +1311,10 @@ def _rehold(
             decided = False
         elif x is not None:
             pending[("constraint", q)] = x
+    skip = certified(new_c, new_b, new_i)
     for j in sorted(new_i):
+        if ("integrality", j) in skip:
+            continue
         v, x = probe(new_c, new_b, new_i - {j})
         if v is True:
             new_i.discard(j)
@@ -1300,7 +1322,10 @@ def _rehold(
             decided = False
         elif x is not None:
             pending[("integrality", j)] = x
+    skip = certified(new_c, new_b, new_i)
     for jb in sorted(new_b):
+        if ("bound", jb[0], jb[1]) in skip:
+            continue
         v, x = probe(new_c, new_b - {jb}, new_i)
         if v is True:
             new_b.discard(jb)
@@ -1620,7 +1645,7 @@ def _polish(
         share = min(_REHOLD_FRACTION * max(deadline - t0, 0.0), _REHOLD_CAP_S)
         t_r = time.perf_counter()
         try:
-            got, pend, decided = _rehold(eng, cons, bounds, ints, t_r + share)
+            got, pend, decided = _rehold(eng, cons, bounds, ints, t_r + share, known=pending)
             if got is not None:
                 t_c = time.perf_counter()
                 verdict = eng.confirm_infeasible(

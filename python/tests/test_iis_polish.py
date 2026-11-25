@@ -572,3 +572,22 @@ def test_rehold_share_saturates(monkeypatch):
     out = _polish(arr, res, deadline=time.perf_counter() + 6000.0, **kw)
     assert 0.0 < stops["rehold"] <= E._REHOLD_CAP_S
     assert out.n_rehold == 1
+
+
+def test_rehold_reuses_the_answers_certificates(monkeypatch):
+    """A known point that certifies its element on the re-held set skips that
+    element's probe; the result is unchanged."""
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    res = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    A, lo, hi, groups, lb, ub, is_int = arr
+    out = {}
+    for known in (None, res.certificates):
+        eng = E._Engine(A, lo, hi, lb, ub, is_int, groups, 10.0, False, engine="highs")
+        c, b, i = set(res.constraints), set(res.bounds), set(res.integrality)
+        got, pend, decided = E._rehold(eng, c, b, i, time.perf_counter() + 60, known=known)
+        out[known is None] = (got, eng.n_solves, set(pend))
+    assert out[True][0] == out[False][0] == ({0, 1}, set(), {1})
+    assert out[False][1] < out[True][1]
+    keys = {("constraint", 0), ("constraint", 1), ("integrality", 1)}
+    assert out[False][2] == out[True][2] == keys
