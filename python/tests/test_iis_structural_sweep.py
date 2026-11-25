@@ -267,3 +267,95 @@ def test_engine_sweeps_and_the_opt_out_restores_the_filter(monkeypatch):
     assert off.n_swept == 0 and on.n_swept > 0
     assert on.n_solves < off.n_solves, (on.n_solves, off.n_solves)
     assert len(on.certificates) == len(on.constraints) + len(on.bounds) + len(on.integrality)
+    assert on.n_sweep_reverted == 0
+
+
+@pytest.mark.smoke
+def test_integral_data_beyond_2_53_is_compared_exactly():
+    # x0 + x1 >= 2**53 + 4 with x0 <= 2**53, x1 <= 3: the row is violated
+    # everywhere (max activity 2**53 + 3), so it is the whole conflict. A float
+    # sum rounds 2**53 + 3 to 2**53 + 4 and would call it redundant.
+    big = float(2**53)
+    (nc, _, _), cons, _, _ = _one([[1, 1]], [big + 4], [INF], [big, 3], [big, 3], [0, 1])
+    assert nc == 0 and cons == {0}
+    # With side 2**53 + 2 (exactly representable; 2**53 + 3 is not) the row
+    # holds over the boxes and is dropped.
+    (nc, _, _), cons, _, _ = _one([[1, 1]], [big + 2], [INF], [big, 3], [big, 3], [0, 1])
+    assert nc == 1 and cons == set()
+
+
+@pytest.mark.smoke
+def test_sweep_stops_at_its_deadline():
+    A_rows = [[1, 0, 0], [1, 0, 0], [0, 1, -1]]
+    A = sp.csr_matrix(np.array(A_rows, dtype=float))
+    args = (
+        np.array([5, -INF, -INF], float),
+        np.array([INF, 2, 0], float),
+        {r: np.array([r]) for r in range(3)},
+        np.array([-INF, 0, 0], float),
+        np.array([INF] * 3, float),
+    )
+    cons, bounds, ints = {0, 1, 2}, {(1, "lower"), (2, "lower")}, set()
+    out = _structural_sweep(A, A.tocsc(), *args, cons, bounds, ints, stop_at=0.0)
+    assert out == (0, 0, 0) and cons == {0, 1, 2}
+    out = _structural_sweep(A, A.tocsc(), *args, cons, bounds, ints, stop_at=None)
+    assert out[0] == 1 and cons == {0, 1}
+
+
+@pytest.mark.smoke
+def test_a_cascade_against_column_order_reaches_the_fixpoint():
+    # x0 >= 5, x0 <= 2 conflict; a chain x_{k+1} - x_k <= 0 (k = 1..N-1), and a
+    # two-sided row 0 <= x1 <= 10 that keeps x1 from ever being monotone. Only
+    # the chain's LAST column is monotone at first; each removal frees the
+    # column before it, so the cascade runs against column order.
+    N = 40
+    rows = [[0.0] * (N + 1) for _ in range(N + 2)]
+    rows[0][0] = rows[1][0] = 1
+    lo, hi = [5, -INF], [INF, 2]
+    for k in range(1, N):
+        rows[k + 1][k + 1], rows[k + 1][k] = 1, -1
+        lo.append(-INF)
+        hi.append(0)
+    rows[N + 1][1] = 1
+    lo.append(0)
+    hi.append(10)
+    (nc, _, _), cons, _, _ = _one(rows, lo, hi, [-INF] * (N + 1), [INF] * (N + 1), [])
+    assert cons == {0, 1, N + 1} and nc == N - 1
+
+
+def _cert_kept(res):
+    for key in res.certificates:
+        if key[0] == "constraint":
+            assert key[1] in res.constraints, key
+        elif key[0] == "integrality":
+            assert key[1] in res.integrality, key
+        else:
+            assert (key[1], key[2]) in res.bounds, key
+
+
+@pytest.mark.smoke
+def test_a_sweep_that_drops_a_certified_element_is_reverted(monkeypatch):
+    """A sweep that (through a tolerance artifact) would drop an element whose
+    certificate shows it is needed is undone whole and counted, never applied
+    silently. Simulated by a sweep that, from its second call on, also drops
+    the conflict row ``big`` (certified by the row phase, which runs first)."""
+    from discopt import _iis_milp
+
+    real = _iis_milp._structural_sweep
+    calls = {"n": 0}
+
+    def bad_sweep(A_csr, A_csc, row_lo, row_hi, row_groups, col_lb, col_ub, cons, *a, **k):
+        nc, nb, ni = real(A_csr, A_csc, row_lo, row_hi, row_groups, col_lb, col_ub, cons, *a, **k)
+        calls["n"] += 1
+        if calls["n"] >= 2 and 0 in cons:
+            cons.discard(0)
+            nc += 1
+        return nc, nb, ni
+
+    monkeypatch.setattr(_iis_milp, "_structural_sweep", bad_sweep)
+    res = milp_iis(_redundant_rows_model(), order="CIB")
+    assert calls["n"] >= 2
+    assert res.n_sweep_reverted >= 1
+    assert res.constraints == [0, 39] and res.proven_irreducible
+    assert ("constraint", 0) in res.certificates
+    _cert_kept(res)

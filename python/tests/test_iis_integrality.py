@@ -300,10 +300,12 @@ def test_batch_and_single_filters_both_give_certified_iis(max_batch, confirm):
 
 
 @pytest.mark.smoke
-def test_batching_cuts_solves_when_most_rows_are_redundant(monkeypatch):
-    # The structural sweep would delete these redundant rows with no probe;
-    # this test is about the filter, so it runs without the sweep.
-    monkeypatch.setenv("DISCOPT_IIS_SWEEP", "0")
+@pytest.mark.parametrize("sweep", ["0", "1"])
+def test_batching_cuts_solves_when_most_rows_are_redundant(monkeypatch, sweep):
+    # The structural sweep deletes ``x_k + x_{k+1} <= 15`` (redundant over the
+    # boxes) with no probe, so the sweep-on arm uses two-sided rows
+    # ``-3 <= x_k - x_{k+1} <= 3`` it cannot remove: both arms test batching.
+    monkeypatch.setenv("DISCOPT_IIS_SWEEP", sweep)
     from discopt._iis_milp import milp_iis
 
     def build():
@@ -311,14 +313,20 @@ def test_batching_cuts_solves_when_most_rows_are_redundant(monkeypatch):
         x = m.continuous("x", shape=(60,), lb=0, ub=10)
         m.subject_to(x[0] >= 5, name="big")
         for k in range(1, 59):
-            m.subject_to(x[k] + x[k + 1] <= 15, name=f"rh{k}")
+            if sweep == "0":
+                m.subject_to(x[k] + x[k + 1] <= 15, name=f"rh{k}")
+            else:
+                m.subject_to(x[k] - x[k + 1] <= 3, name=f"up{k}")
+                m.subject_to(x[k] - x[k + 1] >= -3, name=f"dn{k}")
         m.subject_to(x[0] <= 2, name="small")
         m.minimize(0 * x[0])
         return m
 
+    last = len(build()._constraints) - 1
     one = milp_iis(build(), max_batch=1)
     many = milp_iis(build())
-    assert one.constraints == many.constraints == [0, 59]
+    assert one.constraints == many.constraints == [0, last]
+    assert many.n_sweep_reverted == 0
     assert many.n_solves < one.n_solves / 3, (many.n_solves, one.n_solves)
 
 

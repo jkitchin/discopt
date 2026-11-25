@@ -35,6 +35,27 @@ def _model(n_noise=27):
     return m
 
 
+def _pair_model(n_noise=27):
+    """``_model`` with noise rows ``x_a + x_b <= 1.5`` instead of ``x_k <= 1``.
+    They are not redundant over the binary boxes and no column is monotone
+    (each is in the two-sided ``half``), so the structural sweep removes
+    nothing and the filter does the work with the sweep on."""
+    m = dm.Model("roll_pairs")
+    x = m.binary("x", shape=(3,))
+    m.subject_to(x[0] + x[1] + x[2] == 1.5, name="half")
+    for k in range(n_noise):
+        m.subject_to(x[k % 3] + x[(k + 1) % 3] <= 1.5, name=f"pair{k}")
+    m.minimize(0 * x[0])
+    return m
+
+
+def _filter_model(monkeypatch, sweep):
+    # The structural sweep deletes ``_model``'s redundant rows with no probe,
+    # so the sweep-on arm uses ``_pair_model``: both arms exercise the filter.
+    monkeypatch.setenv("DISCOPT_IIS_SWEEP", sweep)
+    return _model() if sweep == "0" else _pair_model()
+
+
 def _cut_after(monkeypatch, n_choose):
     """Presolve-on solves after the first ``n_choose`` raise out-of-time."""
     real = _iis_milp._Engine._solve
@@ -93,11 +114,9 @@ def _infeasible(model, res):
     return all(verdicts)
 
 
-def test_budget_out_mid_phase_returns_a_rolling_checkpoint(monkeypatch):
-    # The structural sweep would delete these redundant rows with no probe;
-    # this test is about the filter, so it runs without the sweep.
-    monkeypatch.setenv("DISCOPT_IIS_SWEEP", "0")
-    m = _model()
+@pytest.mark.parametrize("sweep", ["0", "1"])
+def test_budget_out_mid_phase_returns_a_rolling_checkpoint(monkeypatch, sweep):
+    m = _filter_model(monkeypatch, sweep)
     base = 1 + 27 + 3  # every row + every integrality (bounds are boxes of held ints)
     # Enough presolve-on solves for the integrality filter to drop the first
     # batches of y's, then the budget "runs out" mid-phase.
@@ -107,6 +126,7 @@ def test_budget_out_mid_phase_returns_a_rolling_checkpoint(monkeypatch):
     assert res.n_rolling >= 1
     size = len(res.constraints) + len(res.bounds) + len(res.integrality)
     assert size <= 0.9 * base  # smaller than the base set checkpoint 0 holds
+    assert res.n_sweep_reverted == 0
     monkeypatch.undo()
     assert _infeasible(m, res)
 
@@ -117,12 +137,11 @@ def test_no_budget_no_rolling_checkpoints():
     assert res.constraints == [0] and sorted(res.integrality) == [0, 1, 2]
 
 
-def test_a_refuting_rolling_confirmation_redoes_the_run(monkeypatch):
+@pytest.mark.parametrize("sweep", ["0", "1"])
+def test_a_refuting_rolling_confirmation_redoes_the_run(monkeypatch, sweep):
     """If the presolve-free route finds an exact-integer point for a set the
     filter holds as proven, an earlier verdict was wrong: per-probe rerun."""
-    # The structural sweep would delete these redundant rows with no probe;
-    # this test is about the filter, so it runs without the sweep.
-    monkeypatch.setenv("DISCOPT_IIS_SWEEP", "0")
+    m = _filter_model(monkeypatch, sweep)
     real_conf = _iis_milp._Engine.confirm_infeasible
     state = {"n": 0}
 
@@ -134,7 +153,7 @@ def test_a_refuting_rolling_confirmation_redoes_the_run(monkeypatch):
         return real_conf(self, *a, **k)
 
     monkeypatch.setattr(_iis_milp._Engine, "confirm_infeasible", confirm)
-    res = milp_iis(_model(), total_time_limit=60.0, sat_candidate=False, order="CIB")
+    res = milp_iis(m, total_time_limit=60.0, sat_candidate=False, order="CIB")
     assert state["n"] >= 2
     assert res.fallback and res.complete
 
@@ -180,3 +199,30 @@ def test_a_phase_end_confirmation_out_of_its_own_budget_does_not_end_the_filter(
     assert budgeted["n"] >= 2  # the phase-end confirmation was reached and ran out
     assert res.complete
     assert res.constraints == [0] and sorted(res.integrality) == [0, 1, 2]
+
+
+def test_a_budgeted_sweep_on_run_keeps_certificates_with_their_elements(monkeypatch):
+    """With the sweep on and the budget running out mid-run, the answer (a
+    checkpoint the sweep has acted on) is infeasible, has every certificate
+    on a kept element, and the sweep did remove something: the orphan ``y``
+    columns' integralities and bounds."""
+    monkeypatch.setenv("DISCOPT_IIS_SWEEP", "1")
+    m = _pair_model()
+    m.integer("y", shape=(12,), lb=0, ub=3)  # in no row
+    calls = _cut_after(monkeypatch, 6)
+    res = milp_iis(m, total_time_limit=60.0, sat_candidate=False, order="CIB")
+    assert calls["choose"] > 6 and not res.complete
+    assert res.n_swept > 0 and res.n_sweep_reverted == 0
+    n = 0
+    for key in res.certificates:
+        if key[0] == "constraint":
+            assert key[1] in res.constraints, key
+        elif key[0] == "integrality":
+            assert key[1] in res.integrality, key
+        else:
+            assert (key[1], key[2]) in res.bounds, key
+        n += 1
+    assert n >= 1
+    assert not any(j >= 3 for j in res.integrality)  # no orphan y survives
+    monkeypatch.undo()
+    assert _infeasible(m, res)
