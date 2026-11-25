@@ -147,22 +147,24 @@ def _allowlist_script():
 def test_allowlist_is_built_from_ci_duration_logs(tmp_path):
     """The list is built from CI job logs. Those carry a timestamp prefix, mix in
     setup lines that must not count, and GitHub masks any substring equal to a
-    secret: the first CI run printed ``test_hi***`` for the 1671 canary."""
+    secret: the first CI run printed ``test_hi***`` for the 1671 canary (then named
+    ``test_highs_presolve_still_cycles_on_the_1667_handoff``; renamed in #2335, so the
+    fixture masks the current name the same way)."""
     mod = _allowlist_script()
     canary = "python/tests/test_1671_highs_presolve_cycle_canary.py"
     log = tmp_path / "shard.log"
     log.write_text(
         "2026-10-22T15:54:37.4Z 12.50s call     python/tests/test_a.py::test_x[1-2]\n"
         "2026-10-22T15:54:37.4Z 19.64s setup    python/tests/test_a.py::test_y\n"
-        f"2026-10-22T15:54:37.4Z 10.20s call     {canary}::test_hi***\n"
+        f"2026-10-22T15:54:37.4Z 10.20s call     {canary}::test_ro***\n"
     )
     assert mod.read_durations_log(log) == {
         "python/tests/test_a.py::test_x[1-2]": 12.5,
-        f"{canary}::test_highs_presolve_still_cycles_on_the_1667_handoff": 10.2,
+        f"{canary}::test_route_presolve_returns_on_the_1667_handoff": 10.2,
     }
     # A mask that hid a parameter id, or a prefix with no unique match, is refused
     # rather than guessed: a wrong key would silently not match its test.
-    for masked in (f"{canary}::test_hi***[x]", f"{canary}::test_nothing_like_this***"):
+    for masked in (f"{canary}::test_ro***[x]", f"{canary}::test_nothing_like_this***"):
         with pytest.raises(SystemExit, match="cannot be recovered"):
             mod.unmask(masked)
 
