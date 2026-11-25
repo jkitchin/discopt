@@ -958,14 +958,6 @@ def _lift_implied_binaries(A, row_lo, row_hi, col_lb, col_ub, is_int):
 #: non-integral data (integral data is compared exactly, in Python ``int``).
 _SWEEP_REL = 1e-9
 
-#: How long the sweep on the final answer may run once the overall deadline has
-#: passed. That sweep is the one that removes what an interrupted phase left
-#: behind (dijle: 1176 orphan elements after a run stopped in the integrality
-#: phase), and it runs after the deadline has fired by construction. Measured
-#: on the 50 MIPcc27 smallset models: a whole-model sweep takes at most 0.09 s
-#: (neos-3135947-otra, 139k nonzeros). Stopping early is sound.
-_SWEEP_FINAL_GRACE = 1.0
-
 #: The sweep checks the clock every this many rows or columns.
 _SWEEP_CLOCK_EVERY = 256
 
@@ -2241,13 +2233,13 @@ def _milp_iis_arrays(
     # The answer itself, confirmed or the fallback checkpoint: a run stopped in
     # the integrality phase leaves columns no kept row touches (dijle: 1176
     # elements). Dropping them needs no solve and keeps every certificate.
-    # The deadline has usually fired by now, so this sweep gets its own short
-    # window (``_SWEEP_FINAL_GRACE``) rather than none.
-    sweep(
-        stop_at=None
-        if deadline is None
-        else max(deadline, time.perf_counter() + _SWEEP_FINAL_GRACE)
-    )
+    # The deadline has usually fired by now, so this sweep runs with no clock:
+    # its work is finite and fixed by the data (one pass over the rows; a column
+    # is re-queued only when one of its rows is dropped, so at most n + nnz column
+    # visits), and it decides nothing by machine speed (#912). Measured on the
+    # 50 MIPcc27 smallset models: a whole-model sweep takes at most 0.09 s
+    # (neos-3135947-otra, 139k nonzeros).
+    sweep(stop_at=math.inf)
     # Bounds the final subsystem APPLIES (beyond held-integer boxes). With
     # include_bounds=False that is every finite bound, but none is an element.
     applied_bounds = sorted((j, s) for j, s in bounds if j not in ints_active)
