@@ -493,6 +493,7 @@ def _run(
                 relaxed=res.n_relaxed,
                 closed=[res.n_exchanged, res.n_close_dropped],
                 proven=res.proven_irreducible,
+                rehold=res.n_rehold,
                 wall=round(time.perf_counter() - t0, 2),
             )
         ),

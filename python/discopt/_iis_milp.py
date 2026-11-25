@@ -203,6 +203,7 @@ class MilpIIS:
     n_exchanged: int = 0
     n_close_dropped: int = 0
     n_relaxed: int = 0  # integralities the anytime relaxation (_relax_integrality) traded away
+    n_rehold: int = 0  # elements the re-hold move (_rehold) removed from a complete answer
     # Portfolio runs only: one entry per member, in portfolio order, with keys
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
     # and a timed-out member's own TimeoutError message.
@@ -1217,6 +1218,101 @@ def _add_one(
     return (new_c, new_b, new_i), pending, decided, tried
 
 
+#: Re-hold move (:func:`_rehold`): its extent is a probe count (deterministic),
+#: and its share of the time left is only a stop -- a pass cut short by it is
+#: discarded. Measured on MIPcc27 stein45inf (complete 225 = 209 rows + 16
+#: integralities, Gurobi 213 = 189 + 24): re-holding every integrality and
+#: re-filtering gave 212 = 190 + 22 in 254 probes, 82 s (0.32 s a probe, host
+#: load ~50). The share saturates at ``_REHOLD_CAP_S`` (#1153 role 2): 300 s is
+#: ~3.5x that pass, and a set too large to filter inside it is skipped by the
+#: probe count before any solve.
+_REHOLD_FRACTION = 0.5
+_REHOLD_CAP_S = 300.0
+_REHOLD_MAX_PROBES = 2000
+
+
+def _rehold(
+    eng: _Engine,
+    cons: set[int],
+    bounds: set,
+    ints: set[int],
+    stop_at: float,
+    max_probes: int = _REHOLD_MAX_PROBES,
+) -> tuple[Optional[tuple[set[int], set, set[int]]], dict, bool]:
+    """Re-hold move on a complete answer: hold every integrality of a column the
+    answer's constraints touch, re-run the constraint deletion filter, then the
+    integrality filter (each integrality jointly with its column's box, as the
+    integrality phase does), then the bounds.
+
+    Why it can shrink a minimal set: an integrality-first filter frees
+    integralities while every constraint is present, and each one it frees can
+    make several constraints necessary. Holding them again lets the constraint
+    filter drop those, and the integralities are then freed only where the
+    smaller row set allows it. The size counts each element once, so trading k
+    integralities for more than k constraints is a smaller IIS.
+
+    Irreducibility of the result: a constraint kept by the first stage was
+    needed with *more* integralities held, so it stays needed once some are
+    freed (the system only relaxes); the integrality and bound stages run on
+    the final constraints.
+
+    Returns ``(new_set or None, pending, decided)``: ``new_set`` only when it is
+    strictly smaller; ``pending`` the probe points of the kept elements
+    (candidate certificates, valid for the final set because it only relaxes
+    the system they were found in); ``decided`` whether every probe behind the
+    new set was decided. Skipped (``None``) when no integrality would be
+    re-held or the pass needs more than ``max_probes`` probes. Reaching
+    ``stop_at`` raises :class:`_OutOfTime`, so the caller discards the pass.
+    Probes run under the engine's policy, so the caller must confirm the new
+    set (:meth:`_Engine.confirm_infeasible`)."""
+    A = eng.A
+    supp: set[int] = set()
+    for c in cons:
+        for r in np.asarray(eng.row_groups[c]).ravel():
+            supp.update(A.indices[A.indptr[r] : A.indptr[r + 1]].tolist())
+    extra = {int(j) for j in supp if eng.is_int[j] and j not in ints}
+    if not extra or len(cons) + len(ints) + len(extra) + len(bounds) > max_probes:
+        return None, {}, True
+    new_i = set(ints) | extra
+    new_b = {b for b in bounds if b[0] not in new_i}
+    new_c = set(cons)
+    pending: dict[tuple, np.ndarray] = {}
+    decided = True
+
+    def probe(c2: set[int], b2: set, i2: set[int]) -> tuple[Optional[bool], Optional[np.ndarray]]:
+        if time.perf_counter() >= stop_at:
+            raise _OutOfTime
+        return eng.probe(c2, b2, i2)
+
+    for q in sorted(cons):
+        v, x = probe(new_c - {q}, new_b, new_i)
+        if v is True:
+            new_c.discard(q)
+        elif v is None:
+            decided = False
+        elif x is not None:
+            pending[("constraint", q)] = x
+    for j in sorted(new_i):
+        v, x = probe(new_c, new_b, new_i - {j})
+        if v is True:
+            new_i.discard(j)
+        elif v is None:
+            decided = False
+        elif x is not None:
+            pending[("integrality", j)] = x
+    for jb in sorted(new_b):
+        v, x = probe(new_c, new_b - {jb}, new_i)
+        if v is True:
+            new_b.discard(jb)
+        elif v is None:
+            decided = False
+        elif x is not None:
+            pending[("bound", jb[0], jb[1])] = x
+    if len(new_c) + len(new_b) + len(new_i) >= len(cons) + len(bounds) + len(ints):
+        return None, {}, True
+    return (new_c, new_b, new_i), pending, decided
+
+
 #: Integrality relaxation of an anytime answer (:func:`_relax_integrality`):
 #: counterexample rounds per stage (each round restores at least one element, so
 #: the cap only bounds a stage that would restore one at a time; it fixes the
@@ -1438,22 +1534,28 @@ def _polish(
     ``_RELAX_FRACTION`` of the time left, at most ``_RELAX_CAP_S``; the filter
     stops ``_POLISH_RESERVE_FRACTION`` of the budget, at most
     ``_POLISH_RESERVE_CAP_S``, early to leave it room); on a complete one the
-    add-one move (:func:`_add_one`; only with an overall budget, capped at
-    ``_ADD_ONE_FRACTION`` of the time left, at most ``_ADD_ONE_CAP_S``); then a
+    re-hold move (:func:`_rehold`; only with an overall budget, capped at
+    ``_REHOLD_FRACTION`` of the time left, at most ``_REHOLD_CAP_S``) and then
+    the add-one move (:func:`_add_one`; likewise, capped at
+    ``_ADD_ONE_FRACTION`` of the time then left, at most ``_ADD_ONE_CAP_S``); then a
     forced-violation certificate for every kept element that still has none
     (:meth:`_Engine.forced_point`, margins :data:`_FORCED_MARGINS`).
 
-    Soundness: a set the add-one move changed replaces the answer only when
+    Soundness: a set the re-hold or add-one move changed replaces the answer only when
     :meth:`_Engine.confirm_infeasible` confirms it under both presolve
     configurations, as for every answer; otherwise the answer stands unchanged.
     The same holds for a set the relaxation changed.
     A certificate is kept only when :func:`_check_certificates` accepts it by
     arithmetic on the final set. Needs ``res.bounds`` to be every bound the set
-    applies, i.e. ``include_bounds=True``. ``DISCOPT_IIS_ADD_ONE=0`` /
+    applies, i.e. ``include_bounds=True``. ``DISCOPT_IIS_REHOLD=0`` /
+    ``DISCOPT_IIS_ADD_ONE=0`` /
     ``DISCOPT_IIS_CERT_REPAIR=0`` / ``DISCOPT_IIS_RELAX_INT=0`` are opt-outs for
     A/B measurement."""
     add_one = (
         os.environ.get("DISCOPT_IIS_ADD_ONE", "1") != "0" and res.complete and deadline is not None
+    )
+    rehold = (
+        os.environ.get("DISCOPT_IIS_REHOLD", "1") != "0" and res.complete and deadline is not None
     )
     relax = (
         os.environ.get("DISCOPT_IIS_RELAX_INT", "1") != "0"
@@ -1462,7 +1564,7 @@ def _polish(
         and bool(res.integrality)
     )
     repair = os.environ.get("DISCOPT_IIS_CERT_REPAIR", "1") != "0"
-    if not add_one and not relax and not repair and not _close_enabled():
+    if not add_one and not relax and not repair and not rehold and not _close_enabled():
         return res
     t0 = time.perf_counter()
     if deadline is not None and deadline - t0 < 4 * _MIN_SOLVE_S:
@@ -1489,7 +1591,7 @@ def _polish(
     cons, bounds, ints = set(res.constraints), set(res.bounds), set(res.integrality)
     pending: dict[tuple, np.ndarray] = dict(res.certificates)
     proven = res.proven_irreducible
-    tried = moves = n_relaxed = 0
+    tried = moves = n_relaxed = n_rehold = 0
     s_tol = min(cert_tol, _STRONG_OTHERS)
     if relax:
         assert deadline is not None
@@ -1513,8 +1615,29 @@ def _polish(
                     cons, bounds, ints = got
         except _OutOfTime:
             pass  # the relaxation or its confirmation ran out of time: the answer stands
+    if rehold:
+        assert deadline is not None
+        share = min(_REHOLD_FRACTION * max(deadline - t0, 0.0), _REHOLD_CAP_S)
+        t_r = time.perf_counter()
+        try:
+            got, pend, decided = _rehold(eng, cons, bounds, ints, t_r + share)
+            if got is not None:
+                t_c = time.perf_counter()
+                verdict = eng.confirm_infeasible(
+                    *got,
+                    stop_at=min(deadline, t_c + share),
+                    presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
+                )
+                if verdict is True:
+                    n_rehold = len(cons) + len(bounds) + len(ints) - sum(len(g) for g in got)
+                    cons, bounds, ints = got
+                    pending.update(pend)
+                    proven = proven and decided
+        except _OutOfTime:
+            pass  # the pass or its confirmation ran out of time: the answer stands
     if add_one:
         assert deadline is not None
+        t0 = time.perf_counter()
         share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
         try:
             got, pend, decided, tried = _add_one(eng, cons, bounds, ints, t0 + share)
@@ -1635,6 +1758,7 @@ def _polish(
         n_relaxed=n_relaxed,
         n_exchanged=n_exchanged,
         n_close_dropped=n_close_dropped,
+        n_rehold=n_rehold,
     )
 
 

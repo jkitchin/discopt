@@ -486,3 +486,89 @@ def test_closing_pass_leaves_a_certified_answer_alone(monkeypatch):
     res = milp_iis_arrays(arr, total_time_limit=30.0)
     assert res.integrality == [0] and res.n_exchanged == 0 and res.n_close_dropped == 0
     assert _checked(arr, res) == _n_elements(res)
+
+
+# Re-hold move (_rehold). x, y binary, z free continuous:
+#   R0: x + y = 1, R1: x - y = 0  -- infeasible only with an integrality (2y = 1);
+#   R2: x - z >= 0, R3: z >= 0.6  -- with R0, R1 infeasible even continuously.
+# An integrality-first filter without the SAT core (ICB-n) frees both
+# integralities, since the rows stay infeasible, and then needs all four rows
+# (size 4). Holding the integralities again lets R2 and R3 go: {R0, R1, one int}.
+_RH_ROWS = [[1, 1, 0], [1, -1, 0], [1, 0, -1], [0, 0, 1]]
+_RH_LO = [1, 0, 0, 0.6]
+_RH_HI = [1, 0, INF, INF]
+
+
+def _rehold_model():
+    return _arrays(_RH_ROWS, _RH_LO, _RH_HI, 3, [0, 0, -INF], [1, 1, INF], [True, True, False])
+
+
+def test_rehold_trades_rows_for_an_integrality(monkeypatch):
+    """MIPcc27 stein45inf: the integrality-first answer kept 209 rows + 16
+    integralities (225); re-holding gave 190 + 22 (212, Gurobi 213)."""
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    off = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    assert off.complete and sorted(off.constraints) == [0, 1, 2, 3] and off.integrality == []
+    monkeypatch.delenv("DISCOPT_IIS_REHOLD")
+    on = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    assert on.complete and sorted(on.constraints) == [0, 1]
+    assert len(on.integrality) == 1 and on.bounds == []
+    assert on.n_rehold == 1
+    assert _checked(arr, on) == _n_elements(on) == 3
+
+
+def test_rehold_is_kept_only_when_confirmed(monkeypatch):
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    res = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    monkeypatch.delenv("DISCOPT_IIS_REHOLD")
+    monkeypatch.setenv("DISCOPT_IIS_ADD_ONE", "0")
+    calls = []
+
+    def refuse(self, *a, **k):
+        calls.append(a)
+        return None
+
+    monkeypatch.setattr(E._Engine, "confirm_infeasible", refuse)
+    out = _polish(
+        arr, res, cert_tol=1e-6, time_limit=10.0, engine="highs", deadline=time.perf_counter() + 60
+    )
+    assert len(calls) == 1
+    assert sorted(out.constraints) == [0, 1, 2, 3] and out.n_rehold == 0
+
+
+def test_rehold_probe_cap_and_clock_discard_the_pass(monkeypatch):
+    """The probe cap skips the pass before any solve (deterministic); reaching
+    the stop raises _OutOfTime, which _polish turns into 'the answer stands'."""
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    res = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    A, lo, hi, groups, lb, ub, is_int = arr
+    eng = E._Engine(A, lo, hi, lb, ub, is_int, groups, 10.0, False, engine="highs")
+    c, b, i = set(res.constraints), set(res.bounds), set(res.integrality)
+    n0 = eng.n_solves
+    got, pend, decided = E._rehold(eng, c, b, i, time.perf_counter() + 60, max_probes=5)
+    assert got is None and pend == {} and eng.n_solves == n0
+    with pytest.raises(E._OutOfTime):
+        E._rehold(eng, c, b, i, time.perf_counter() - 1.0)
+
+
+def test_rehold_share_saturates(monkeypatch):
+    """#1153 role 2: the re-hold stop is capped by a constant."""
+    stops = {}
+    real = E._rehold
+
+    def spy(eng, cons, bounds, ints, stop_at, *a, **k):
+        stops["rehold"] = stop_at - time.perf_counter()
+        return real(eng, cons, bounds, ints, stop_at, *a, **k)
+
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    res = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    monkeypatch.delenv("DISCOPT_IIS_REHOLD")
+    monkeypatch.setattr(E, "_rehold", spy)
+    kw = dict(cert_tol=1e-6, time_limit=6000.0, engine="highs")
+    out = _polish(arr, res, deadline=time.perf_counter() + 6000.0, **kw)
+    assert 0.0 < stops["rehold"] <= E._REHOLD_CAP_S
+    assert out.n_rehold == 1
