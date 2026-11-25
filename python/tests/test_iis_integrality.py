@@ -540,3 +540,63 @@ def test_integral_point_within_tolerance_is_its_own_witness():
     assert w is not None and w[0] == 1.0
     assert eng.n_solves == solves, "a repair LP ran for a point that needed none"
     assert eng.n_artifacts == 0
+
+
+def _general_integers_after_binaries_model(k=12):
+    """``x0 + x1 + x2 + sum(g) == 1.5`` over binaries ``x`` and general integers
+    ``g`` in [0, 10], with every ``g_k`` pinned by ``g_k == 0``. The ``x``
+    integralities are needed; each ``g``'s integrality and bounds are not (its
+    pin row fixes it). The ``x`` columns come first in index order, as dijle's
+    binaries do."""
+    m = dm.Model("gen_after_bin")
+    x = m.binary("x", shape=(3,))
+    g = m.integer("g", shape=(k,), lb=0, ub=10)
+    m.subject_to(x[0] + x[1] + x[2] + dm.sum(g) == 1.5, name="half")
+    for i in range(k):
+        m.subject_to(g[i] == 0, name=f"pin{i}")
+    m.minimize(0 * x[0])
+    return m
+
+
+@pytest.mark.parametrize("two_pass", ["0", "1"])
+def test_unbudgeted_two_pass_gives_the_same_iis(monkeypatch, two_pass):
+    """Run to completion, both integrality passes give the one IIS: the rows,
+    the binaries' integralities, and no general-integer element."""
+    from discopt._iis_milp import milp_iis
+
+    monkeypatch.setenv("DISCOPT_IIS_INT_TWO_PASS", two_pass)
+    res = milp_iis(_general_integers_after_binaries_model(), sat_candidate=False, order="ICB")
+    assert res.complete
+    assert sorted(res.integrality) == [0, 1, 2]
+    assert len(res.constraints) == 13 and res.bounds == []
+
+
+def test_two_pass_relaxes_general_integers_before_a_budget_runs_out(monkeypatch):
+    """The dijle mechanism (2785 -> 2401 at 600 s). One column at a time from
+    index order spends the budget refusing binaries (two probes each: joint,
+    then integrality alone) and never reaches the general integers; the
+    two-pass phase relaxes all of them in its opening probe, so the anytime
+    answer is smaller. Fails with ``DISCOPT_IIS_INT_TWO_PASS=0``."""
+    from discopt._iis_milp import _Engine, _OutOfTime, milp_iis
+
+    def run(two_pass):
+        monkeypatch.setenv("DISCOPT_IIS_INT_TWO_PASS", two_pass)
+        real = _Engine._solve
+        calls = {"choose": 0}
+
+        def solve(self, presolve, stop_at=None):
+            if presolve == "choose":
+                calls["choose"] += 1
+                if calls["choose"] > 5:
+                    raise _OutOfTime
+            return real(self, presolve, stop_at)
+
+        monkeypatch.setattr(_Engine, "_solve", solve)
+        m = _general_integers_after_binaries_model()
+        res = milp_iis(m, total_time_limit=60.0, sat_candidate=False, order="ICB")
+        monkeypatch.setattr(_Engine, "_solve", real)
+        assert calls["choose"] > 5 and not res.complete
+        return len(res.constraints) + len(res.bounds) + len(res.integrality)
+
+    on, off = run("1"), run("0")
+    assert on <= 16 < off, (on, off)  # 13 rows + 3 binaries, vs. every g held

@@ -170,7 +170,7 @@
      []
     ]
    ],
-   "n_solves": 25,
+   "n_solves": 27,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -751,7 +751,7 @@
      []
     ]
    ],
-   "n_solves": 18,
+   "n_solves": 19,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -812,7 +812,7 @@
      []
     ]
    ],
-   "n_solves": 17,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1041,7 +1041,7 @@
      []
     ]
    ],
-   "n_solves": 22,
+   "n_solves": 23,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1575,7 +1575,7 @@
      []
     ]
    ],
-   "n_solves": 20,
+   "n_solves": 23,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,

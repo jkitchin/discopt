@@ -22,6 +22,17 @@ The release procedure that produces these entries is documented in
   `MilpIIS.n_swept` counts the dropped elements; `DISCOPT_IIS_SWEEP=0` turns the sweep
   off.
 
+### Changed
+
+- **Two-pass integrality phase in the MILP IIS engine.** With bounds as elements, the
+  integrality filter first relaxes columns jointly (integrality plus both bounds),
+  starting with every general-integer column in one probe, and only then tries
+  integrality alone, batched, on the columns that refused. Every probe in the first pass
+  can only shrink the counted size, so an answer cut off by the time limit is smaller.
+  On MIPcc27's dijle at 600 s the answer goes from 2785 to 2401 elements (the reference
+  is 2402); dives goes from 7152 to 7127 and dingo stays at 2197, all passing the
+  competition checker. `DISCOPT_IIS_INT_TWO_PASS=0` restores the single pass.
+
 ## [0.14.0] - 2026-11-24
 
 ### Added
