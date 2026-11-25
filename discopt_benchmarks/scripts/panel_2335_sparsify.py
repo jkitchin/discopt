@@ -5,11 +5,12 @@ MILP_PRESOLVE_RULE_OFF``, which holds bit 13 (#1634, unsound parallel-column
 reduction) and bit 14 (sparsify, #1667: the 1.12-1.15 presolve cycle). This panel
 measures bit 14 alone:
 
-* ``off``: the shipped value (bit 14 set, sparsify off);
-* ``on``: the same value with bit 14 cleared (bit 13 stays set).
+* ``off``: bit 13 and bit 14 (sparsify off; the route's value before #2335);
+* ``on``: bit 13 only (sparsify on; the route's value since #2335).
 
-The arm is applied inside each worker subprocess by patching the constant in
-``lp_milp_highs`` and ``milp_highs`` (``milp_highs`` imports the name), and the
+The arm is applied inside each worker subprocess by patching
+``lp_milp_highs.MILP_PRESOLVE_RULE_OFF`` and ``milp_highs.MASTER_PRESOLVE_RULE_OFF``
+to rule 13 plus (``off``) or minus (``on``) bit 14, and the
 worker records every ``presolve_rule_off`` value HiGHS was actually handed, by
 wrapping ``highspy.Highs.setOptionValue``. The parent refuses a row whose recorded
 values do not match its arm, and the run exits non-zero when it compared nothing
@@ -61,17 +62,17 @@ GAP = 1e-4
 # ----------------------------------------------------------------------------- worker
 def _apply_arm(arm: str) -> int:
     import highspy
-    from discopt.solvers import lp_milp_highs as L
-    from discopt.solvers import milp_highs as MH
+    from discopt.solvers import lp_milp_highs as lmh
+    from discopt.solvers import milp_highs as mh
 
-    assert L.MILP_PRESOLVE_RULE_OFF & BIT14, "shipped value lost bit 14; panel is stale"
-    val = int(L.MILP_PRESOLVE_RULE_OFF)
-    if arm == "on":
-        val &= ~BIT14
-    elif arm != "off":
+    # Both arms are set explicitly from rule 13 (#1634), so the panel measures the same
+    # two configurations whatever the shipped defaults are (the route dropped bit 14 in
+    # #2335; the masters keep it in MASTER_PRESOLVE_RULE_OFF).
+    if arm not in ("on", "off"):
         raise ValueError(arm)
-    L.MILP_PRESOLVE_RULE_OFF = val
-    MH.MILP_PRESOLVE_RULE_OFF = val
+    val = (1 << 13) | (BIT14 if arm == "off" else 0)
+    lmh.MILP_PRESOLVE_RULE_OFF = val
+    mh.MASTER_PRESOLVE_RULE_OFF = val
 
     seen: list[int] = []
     orig = highspy.Highs.setOptionValue
@@ -88,13 +89,13 @@ def _apply_arm(arm: str) -> int:
 
 def _uc_model():
     sys.path.insert(0, str(REPO / "python" / "tests"))
-    import test_1667_highs_sparsify_presolve_cycle as T
+    import test_1667_highs_sparsify_presolve_cycle as t1667
 
     # Cut UC_SCRIPT at its FILE print: keep the model build, drop the solve.
-    src = T.UC_SCRIPT.split('print("FILE"')[0]
+    src = t1667.UC_SCRIPT.split('print("FILE"')[0]
     ns: dict = {}
     exec(src, ns)  # noqa: S102 - the repository's own test model
-    return ns["m"], T.UC_OPT
+    return ns["m"], t1667.UC_OPT
 
 
 def worker(kind: str, spec: str, arm: str, tl: float) -> dict:
@@ -103,9 +104,9 @@ def worker(kind: str, spec: str, arm: str, tl: float) -> dict:
 
     assert str(REPO / "python") in discopt.__file__, discopt.__file__
     if kind in ("check", "miplib"):
-        import lp_milp_panel as P
+        import lp_milp_panel
 
-        res = P.worker(spec, "H", tl, GAP, 10**9)
+        res = lp_milp_panel.worker(spec, "H", tl, GAP, 10**9)
     elif kind == "uc":
         m, _ = _uc_model()
         t0 = time.perf_counter()
@@ -146,7 +147,8 @@ def _items(a) -> list[dict]:
     if "uc" in suites:
         out.append({"suite": "uc", "name": "uc_1667", "spec": "-", "oracle": 450623.7692106868,
                     "maximize": False, "oracle_status": "Optimal"})  # fmt: skip
-    for suite, man in (("check", "data/lp_milp/manifest.json"), ("miplib", "data/miplib/panel.json")):
+    manifests = (("check", "data/lp_milp/manifest.json"), ("miplib", "data/miplib/panel.json"))
+    for suite, man in manifests:
         if suite not in suites:
             continue
         d = json.loads((REPO / "discopt_benchmarks" / man).read_text())
@@ -182,13 +184,13 @@ def _items(a) -> list[dict]:
 
 
 def _incorrect(it: dict, res: dict) -> list[str]:
-    import lp_milp_panel as P
+    import lp_milp_panel as lmp
 
     if it["suite"] in ("check", "miplib") and it.get("panel") == "INF":
-        return P._incorrect_inf(res, it["oracle_status"])
+        return lmp._incorrect_inf(res, it["oracle_status"])
     if it["oracle"] is None:
         return []
-    why = P._incorrect(res, it["oracle"], it["maximize"], GAP)
+    why = lmp._incorrect(res, it["oracle"], it["maximize"], GAP)
     return why
 
 
@@ -250,7 +252,8 @@ def cmd_run(a) -> int:
                         f"[{rep}] {it['suite']:6s} {it['name']:24s} {arm:3s} "
                         f"{res.get('status', res.get('error'))!s:12s} "
                         f"obj={res.get('objective')} nodes={res.get('nodes')} "
-                        f"wall={res.get('wall', 0) or 0:.2f} writes={res.get('n_highs_rule_writes')} "
+                        f"wall={res.get('wall', 0) or 0:.2f} "
+                        f"writes={res.get('n_highs_rule_writes')} "
                         f"load={load:.1f} {'INCORRECT ' + str(why) if why else ''}",
                         flush=True,
                     )
@@ -294,11 +297,16 @@ def cmd_summary(a) -> int:
                 med[arm + "_cert"] = c
                 med[arm + "_n"] = len(rs)
             for arm, other in (("off", "on"), ("on", "off")):
-                if med[arm + "_cert"] == med[arm + "_n"] and med[other + "_cert"] < med[other + "_n"]:
+                full = med[arm + "_cert"] == med[arm + "_n"]
+                if full and med[other + "_cert"] < med[other + "_n"]:
                     lost[other].append(n)
             # certified objectives must agree across arms
-            co = [r["objective"] for arm in ("off", "on") for r in arms[arm]
-                  if "error" not in r and r["gap_certified"] and r["objective"] is not None]  # fmt: skip
+            co = [
+                r["objective"]
+                for arm in ("off", "on")
+                for r in arms[arm]
+                if "error" not in r and r["gap_certified"] and r["objective"] is not None
+            ]
             if co and max(co) - min(co) > 1e-4 * (1 + abs(max(co))) + 1e-6:
                 print(f"  CROSS-ARM MISMATCH {suite} {n}: {co}")
                 inc["on"] += 1
@@ -323,8 +331,10 @@ def cmd_summary(a) -> int:
                 if len(w) > 1:
                     sds.append(statistics.stdev(w))
         if sds:
-            print(f"  within-arm wall sd: median {statistics.median(sds):.3f} s, "
-                  f"max {max(sds):.3f} s over {len(sds)} (instance, arm) cells")
+            print(
+                f"  within-arm wall sd: median {statistics.median(sds):.3f} s, "
+                f"max {max(sds):.3f} s over {len(sds)} (instance, arm) cells"
+            )
     print(f"\ncompared={compared}")
     return 0 if compared else 1
 

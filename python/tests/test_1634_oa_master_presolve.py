@@ -141,8 +141,10 @@ def test_rule_13_off_alone_fixes_the_witness(monkeypatch):
 def test_rule_13_bit_is_the_parallel_rows_and_cols_rule():
     from discopt.solvers.lp_milp_highs import MILP_PRESOLVE_RULE_OFF
 
-    assert MH.MILP_PRESOLVE_RULE_OFF is MILP_PRESOLVE_RULE_OFF
+    # The masters set the route's bits plus sparsify (#2335), so rule 13 is off on both.
+    assert MH.MASTER_PRESOLVE_RULE_OFF & MILP_PRESOLVE_RULE_OFF == MILP_PRESOLVE_RULE_OFF
     assert MILP_PRESOLVE_RULE_OFF & (1 << 13)
+    assert MH.MASTER_PRESOLVE_RULE_OFF & (1 << 13)
 
 
 def test_cross_check_catches_what_rule_13_does_not():

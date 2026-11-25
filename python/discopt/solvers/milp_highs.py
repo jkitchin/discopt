@@ -49,18 +49,26 @@ import numpy as np
 import scipy.sparse as sp
 
 from discopt.solvers import MILPResult, SolveStatus
-from discopt.solvers.lp_milp_highs import MILP_PRESOLVE_RULE_OFF
+from discopt.solvers.lp_milp_highs import _PRESOLVE_RULE_SPARSIFY, MILP_PRESOLVE_RULE_OFF
 from discopt.solvers.milp_simplex import _INF, BoundList, _marshal_col_bounds, _open_default_box
 
 logger = logging.getLogger(__name__)
 
-# #1634: every master solve here switches off the same HiGHS presolve rule the
+# #1634: every master solve here switches off the HiGHS presolve rule the
 # pure-MILP route does (:data:`~discopt.solvers.lp_milp_highs.MILP_PRESOLVE_RULE_OFF`,
 # rule 13, ParallelRowsAndCols). Measured on the #1634 generator written with explicit
 # slacks (``A x + s = b``) plus a convex quadratic, so it takes the convex-MINLP route
 # with OA on this master: 35/1200 false certificates on main (seed 181 at cost scale
 # 1e-3 certified 0.02082 against an enumerated 0.00801). The same masters through this
 # backend directly: 35/1200 false bounds with HiGHS defaults, 1/1200 with rule 13 off.
+#: The ``presolve_rule_off`` value every master solve here sets: the pure-MILP route's
+#: rule 13 (#1634) plus sparsify (rule 14). The route dropped sparsify in #2335; the
+#: masters keep it as a documented choice, not a cycle guard (highspy >= 1.16 does not
+#: cycle). Why, and what would change it, is the #2335 record at
+#: :data:`~discopt.solvers.lp_milp_highs._PRESOLVE_RULE_SPARSIFY`: on the lazy master
+#: over tls2, portfol_roundlot and syn/rsyn, sparsify on did not beat off (certified
+#: 64/108 vs 65/108 runs, better incumbent 3 vs 7 on the uncertified rows).
+MASTER_PRESOLVE_RULE_OFF = MILP_PRESOLVE_RULE_OFF | _PRESOLVE_RULE_SPARSIFY
 #: Row/bound slack the #1634 cross-check grants a point before it counts as verified,
 #: relative to ``max(1, |rhs|, |a| @ |x|)``. A verified point is only ever used to
 #: LOWER a bound, so a loose value errs toward a weaker bound, never a false one.
@@ -688,7 +696,7 @@ def _solve_milp_once(
         ("mip_rel_gap", float(gap_tolerance)),
         # #1634: HiGHS's parallel-column presolve fixes integers on an absolute
         # cost-tie test that bad coefficient ratios defeat; see the constant.
-        ("presolve_rule_off", int(MILP_PRESOLVE_RULE_OFF)),
+        ("presolve_rule_off", int(MASTER_PRESOLVE_RULE_OFF)),
     ]
     if not presolve:
         opts.append(("presolve", "off"))
@@ -812,7 +820,7 @@ def _cross_check_presolve(
     An OA / GDP master's ``bound`` becomes the global lower bound, so a master solve
     that prunes its own optimum is a FALSE certificate on a convex MINLP. HiGHS's MIP
     presolve and tree decide on ABSOLUTE tolerances that a badly scaled master
-    defeats. Rule 13 is off (:data:`~discopt.solvers.lp_milp_highs.MILP_PRESOLVE_RULE_OFF`),
+    defeats. Rule 13 is off (:data:`~discopt.solvers.milp_highs.MASTER_PRESOLVE_RULE_OFF`),
     but measured on the
     #1634 slack panel through this backend that still leaves 1/1200 false bounds with
     presolve on, and 6/1200 with presolve off entirely; the two configurations never
@@ -979,7 +987,7 @@ def _cross_check_lazy_master(
         *(extra_options or {}).items(),
         ("output_flag", False),
         ("presolve", "off"),
-        ("presolve_rule_off", int(MILP_PRESOLVE_RULE_OFF)),
+        ("presolve_rule_off", int(MASTER_PRESOLVE_RULE_OFF)),
     ]
     if infeasible:
         opts.append(("mip_rel_gap", float(rel_gap)))
@@ -1613,7 +1621,7 @@ def solve_milp_with_lazy_cuts(
     for key, val in [
         ("output_flag", False),
         ("mip_rel_gap", float(gap_tolerance)),
-        ("presolve_rule_off", int(MILP_PRESOLVE_RULE_OFF)),  # #1634
+        ("presolve_rule_off", int(MASTER_PRESOLVE_RULE_OFF)),  # #1634
         # #2021: caller options (e.g. the sub-MIP switch of
         # ``oa._HIGHS_MASTER_NO_SUBMIP_OPTIONS``); the same object ``h`` is reused
         # by every restart, so they hold for every rebuilt tree.

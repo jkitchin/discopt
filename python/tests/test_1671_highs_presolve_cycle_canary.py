@@ -1,16 +1,17 @@
-"""#1671: tripwire for the HiGHS presolve cycle behind the #1667 workaround.
+"""#1671: tripwire for the HiGHS presolve cycle on the #1667 unit-commitment hand-off.
 
-The HiGHS MILP route switches off presolve rule 14 (sparsify) because HiGHS 1.15.1's
-MIP presolve cycles forever on the #1667 unit-commitment hand-off -- in
-``HPresolve::fastPresolveLoop`` -> ``rowPresolve``, a loop that polls neither
-``time_limit`` nor the interrupt callbacks. That bit is a workaround for an upstream
-bug, and #1671 says to re-measure and either drop it or keep it as a documented
-opt-out once HiGHS fixes the bug. This test makes that step happen: it fails when the
-installed HiGHS stops cycling without being a release known to carry the fix, and on
-every version it checks that the route keeps sparsify off while the supported range still
-admits a cycling release. highspy 1.16.0 is the first release with the fix (#2221). The
-floor reached 1.16 in #2332; the bit stays as a documented workaround until the sparsify
-re-measure of #2335 decides it (the final assertion below pins that state).
+HiGHS 1.12-1.15's MIP presolve cycles forever on the #1667 unit-commitment hand-off --
+in ``HPresolve::fastPresolveLoop`` -> ``rowPresolve``, a loop that polls neither
+``time_limit`` nor the interrupt callbacks. From #1667 the MILP route switched presolve
+rule 14 (sparsify) off to avoid it. highspy 1.16.0 is the first release with the
+upstream fix (#2221), the floor reached 1.16 in #2332, and #2335 re-measured sparsify
+on vs off on 1.16 and turned it back ON for the route (the ``milp_highs`` masters keep
+it off as a documented choice; record at ``lp_milp_highs._PRESOLVE_RULE_SPARSIFY``).
+
+So this canary now guards the other direction: the route hands HiGHS sparsify on, so
+the installed HiGHS must return from presolve on the hand-off with the route's own
+``presolve_rule_off``. It fails if a supported release brings the cycle back, which
+would hang ``Model.solve`` past its time limit on this class.
 
 The cycle is a regression window. Measured 2026-11-18 (#2221) with this file's probe on
 each release, sparsify on: 1.11.0 returns; 1.12.0, 1.13.0, 1.13.1, 1.14.0, 1.15.0 and
@@ -131,9 +132,10 @@ def _presolve(path: str, rule_off: int) -> list[str] | None:
     return line[0].split()[1:]
 
 
-def test_highs_presolve_still_cycles_on_the_1667_handoff(handoff_mps):
-    """Sparsify stays off while any supported highspy cycles; only releases outside the
-    measured 1.12-1.15 window may return."""
+def test_route_presolve_returns_on_the_1667_handoff(handoff_mps):
+    """The route's presolve configuration (sparsify on since #2335) must not cycle on the
+    installed HiGHS. The sparsify-off arm is the positive control: it returned on every
+    release measured, so it proves the probe ran and read the model."""
     control = _presolve(handoff_mps, _PARALLEL | _SPARSIFY)
     assert control is not None, (
         f"presolve with sparsify OFF did not return within {KILL_AFTER} s; the control "
@@ -143,36 +145,21 @@ def test_highs_presolve_still_cycles_on_the_1667_handoff(handoff_mps):
     assert (rows, cols, n_int) == ("2904", "4344", "240"), control
     assert status == "HighsStatus.kOk", control
 
-    cycling = _presolve(handoff_mps, _PARALLEL)
     from discopt.solvers import lp_milp_highs
 
-    # The route keeps sparsify off until #2335's re-measure decides it. Dropping the bit
-    # is a measured change (that panel), not a side effect of another one.
-    assert lp_milp_highs.MILP_PRESOLVE_RULE_OFF & _SPARSIFY, (
-        f"HiGHS {githash}: the MILP route no longer switches sparsify off; that needs the "
-        "#2335 sparsify panel, and this canary re-scoped or deleted with its measurement"
-    )
-    if cycling is None:
-        return
-    # #2221: highspy 1.16.0 (f3f113d) ships ERGO-Code/HiGHS PR 2962 and no longer cycles.
-    # Measured 2026-11-18, full run() on this file: sparsify on reaches Optimal 450623.7692
-    # in 2.2 s, sparsify off the same optimum in 1.5 s. 1.11.0 predates the regression. A
-    # release inside the measured window returning means this probe stopped testing.
+    route = int(lp_milp_highs.MILP_PRESOLVE_RULE_OFF)
+    assert not route & _SPARSIFY, "#2335: the route runs sparsify; this probe tests that"
+    assert route & _PARALLEL  # #1634's rule 13 stays off
+    returned = _presolve(handoff_mps, route)
     import highspy
 
     release = highspy.Highs().version()
-    minor = tuple(int(p) for p in release.split(".")[:2])
+    assert returned is not None, (
+        f"HiGHS {githash} ({release}) cycles in presolve on the #1667 hand-off with the "
+        f"route's presolve_rule_off={route} (sparsify on). The route would hang past its "
+        "time limit on this class: switch sparsify off on the route again (#1667) and "
+        "report the release upstream (#1671)"
+    )
+    # The floor is past every release measured to cycle (#2332).
     lo, hi = _CYCLING_WINDOW
-    assert not (lo <= minor < hi), (
-        f"HiGHS {githash} ({release}) returned from presolve with sparsify ON "
-        f"({cycling}), but every release from {lo} up to {hi} was measured to cycle"
-    )
-    # The floor is past every cycling release (#2332), so the bit is a documented
-    # workaround, not a cycle guard. Its docstring must say so and name the re-measure
-    # that would retire it -- otherwise it reads as a guard that is still needed.
     assert tuple(int(p) for p in _SUPPORTED_FLOOR.split(".")) >= hi
-    doc = Path(lp_milp_highs.__file__).read_text()
-    assert "no supported release cycles" in doc and "#2335" in doc, (
-        "lp_milp_highs: the sparsify bit's comment must record that the floor is past the "
-        "cycling releases and point to the #2335 re-measure"
-    )

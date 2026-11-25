@@ -97,8 +97,9 @@ _MAX_NODES_CAP = 2**31 - 1
 #: which the same absolute test misfires. The reduction is unsound on badly scaled columns
 #: and the route has no way to re-derive a bound HiGHS's presolve took away, so it is off.
 _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS = 1 << 13
-#: HiGHS ``presolve_rule_off`` bit for ``kPresolveRuleSparsify`` (rule 14). The MILP route
-#: switches it off (#1667) because it is the trigger of a presolve cycle that never returns.
+#: HiGHS ``presolve_rule_off`` bit for ``kPresolveRuleSparsify`` (rule 14). From #1667 to
+#: #2335 the MILP route switched it off, because it triggered a presolve cycle that never
+#: returned. Since #2335 only the ``milp_highs`` masters set it (below).
 #:
 #: On the #1667 unit-commitment hand-off (2904 rows, 4344 columns of this route's slack
 #: form), ``h.run()`` stays in ``HPresolve::fastPresolveLoop`` -> ``rowPresolve`` forever.
@@ -116,16 +117,32 @@ _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS = 1 << 13
 #: The fix is ERGO-Code/HiGHS PR 2962 (bisected on ``latest``), first released in 1.16.0,
 #: where sparsify on and off both reach ``Optimal`` 450623.7692 (2.2 s / 1.5 s).
 #:
-#: Since #2332 the floor is ``highspy>=1.16``, so no supported release cycles and this
-#: bit no longer protects against anything measured. It is KEPT, not because it is
-#: needed, but because removing it changes what HiGHS's presolve does on the default
-#: pure-MILP route and on the ``milp_highs`` masters, where the #1667 change was measured
-#: to move lazy-master outcomes (performance-plan §76.6). What would remove it: the
-#: sparsify on/off panel on 1.16 that #2335 specifies, cert-clean and not harmful.
-#: ``test_1671_highs_presolve_cycle_canary.py`` pins this state until then.
+#: #2335 re-measured it on highspy 1.16.0 (sparsify on vs off, interleaved, fresh
+#: subprocess per solve, 0 incorrect on either arm; figures are on / off) and split the
+#: decision by route:
+#:
+#: * **Pure-MILP route: dropped.** :data:`MILP_PRESOLVE_RULE_OFF` no longer holds this
+#:   bit, so the route runs HiGHS's default presolve apart from rule 13. Neutral on every
+#:   measure: the #1667 hand-off certifies 450623.7692 both ways (8.4 / 8.9 s median of 3);
+#:   the 66 LP/MILP check instances 65/65 certified, 22.9 / 22.8 s, identical node counts;
+#:   MIPLIB-38 35/35 certified, 171.3 / 171.3 s, node counts moved on 5 instances (2 in
+#:   each direction). Within-arm wall sd median 0.10 s.
+#: * **``milp_highs`` masters: kept** (``milp_highs.MASTER_PRESOLVE_RULE_OFF``), as a
+#:   documented choice, not a cycle guard. On tls2, portfol_roundlot and the 52 syn/rsyn
+#:   big-M instances with ``DISCOPT_CONVEX_ROUTE_OA_MASTER=highs`` (30 s, 2 reps), total
+#:   wall was equal (886 / 887 s) but sparsify off certified 65/108 runs against 64/108
+#:   (``syn30m04m`` at the budget edge) and on the 22 uncertified instances gave the better
+#:   incumbent 7 times to 3 and the tighter bound 9 times to 6. Not significant (sign test
+#:   p ~ 0.34), but it does not favour turning sparsify on, and §76.6 recorded this rule
+#:   moving lazy-master outcomes. What would change it: a master panel where sparsify on
+#:   is at or ahead on those rows. The masters are opt-in, so no default path is affected.
+#:
+#: ``test_1671_highs_presolve_cycle_canary.py`` now guards the other direction: the
+#: route runs sparsify, so the installed HiGHS must not cycle on the hand-off.
 _PRESOLVE_RULE_SPARSIFY = 1 << 14
-#: Every ``presolve_rule_off`` bit the MILP route sets.
-MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS | _PRESOLVE_RULE_SPARSIFY
+#: Every ``presolve_rule_off`` bit the pure-MILP route sets (#1634's rule 13; sparsify
+#: was dropped by #2335, see above).
+MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS
 #: The only terminal statuses a limit can produce.
 _LIMIT_STATUSES = ("kTimeLimit", "kIterationLimit", "kSolutionLimit", "kInterrupt")
 
@@ -1457,15 +1474,6 @@ def _row_form_enabled() -> bool:
     slack-column route reachable for A/B measurement.
     """
     return os.environ.get("DISCOPT_MILP_ROW_FORM", "1") != "0"
-
-
-#: #1733: oldest HiGHS (``_version_number``) the row form is used with. HiGHS 1.10.0 and
-#: 1.11.0 return ``kInfeasible`` (presolve on and off) on the row form of the #1229
-#: instance, which is feasible -- the slack form solves it. The minimal trigger is eight
-#: folded rows, among them a parallel pair and rows over a fixed integer column. 1.12.0,
-#: 1.13.0, 1.14.0 and 1.15.1 solve the same row form to its optimum. Older versions keep
-#: the slack form.
-ROW_FORM_MIN_HIGHS = 11200.0
 
 
 @dataclass(frozen=True)
@@ -4462,13 +4470,12 @@ def _solve_milp_std(
         stats["milp/tiny_entries_absorbed"] = float(n_tiny)
     # #1733: HiGHS sees the logical columns as row bounds; see _eliminate_logicals.
     rf: Optional[_RowForm] = None
+    # #2335: the 1.12 version gate (HiGHS 1.10/1.11 false-kInfeasible the #1229 row form)
+    # is gone; the highspy floor is 1.16 (#2332).
     if row_form is True or (row_form is None and _row_form_enabled()):
-        if row_form is None and stats["highs/version"] < ROW_FORM_MIN_HIGHS:
-            stats["milp/row_form_skipped_old_highs"] = 1.0
-        else:
-            sf_pass, row_lo, row_hi, rf = _eliminate_logicals(sf_pass, row_lo, row_hi, n_struct)
-            if rf is not None:
-                stats["milp/logicals_as_row_bounds"] = float(rf.cols.size)
+        sf_pass, row_lo, row_hi, rf = _eliminate_logicals(sf_pass, row_lo, row_hi, n_struct)
+        if rf is not None:
+            stats["milp/logicals_as_row_bounds"] = float(rf.cols.size)
     pass_st, pass_why = _pass_model(
         h,
         highspy,

@@ -6,8 +6,11 @@ route it was still inside ``h.run()`` after 300 s. The route hands HiGHS its sla
 standard form ``a x + s = b``, and HiGHS's MIP presolve cycles on it in
 ``fastPresolveLoop`` -> ``rowPresolve`` (stack sample), a loop that polls neither
 ``time_limit`` nor the interrupt callbacks. Switching off sparsify, the aggregator
-or doubleton equations each broke the cycle; the route now switches off sparsify
-(:data:`lp_milp_highs.MILP_PRESOLVE_RULE_OFF`). Upstream bug: #1671.
+or doubleton equations each broke the cycle; the route switched off sparsify
+(:data:`lp_milp_highs.MILP_PRESOLVE_RULE_OFF`). Upstream bug: #1671, fixed in highspy
+1.16.0, the floor since #2332. #2335 measured sparsify on vs off on 1.16 and turned it
+back on for the route, so this hand-off now runs with sparsify ON: the test below is
+the end-to-end check that the route returns on it.
 """
 
 from __future__ import annotations
@@ -34,10 +37,12 @@ def _highs_milp_route(monkeypatch):
 UC_OPT = 450623.7692106868
 
 
-def test_sparsify_is_off_on_every_milp_route():
-    assert L.MILP_PRESOLVE_RULE_OFF & (1 << 14)  # kPresolveRuleSparsify (#1667)
+def test_sparsify_is_on_for_the_route_and_off_for_the_masters():
+    """#2335: on highspy >= 1.16 the route runs sparsify (panel neutral); the
+    ``milp_highs`` masters keep it off as a documented choice."""
+    assert not L.MILP_PRESOLVE_RULE_OFF & (1 << 14)  # kPresolveRuleSparsify on the route
     assert L.MILP_PRESOLVE_RULE_OFF & (1 << 13)  # parallel rows/cols stays off (#1634)
-    assert MH.MILP_PRESOLVE_RULE_OFF == L.MILP_PRESOLVE_RULE_OFF  # OA / GDP masters too
+    assert MH.MASTER_PRESOLVE_RULE_OFF == L.MILP_PRESOLVE_RULE_OFF | (1 << 14)
 
 
 UC_SCRIPT = textwrap.dedent(
