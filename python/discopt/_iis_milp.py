@@ -139,7 +139,10 @@ class MilpIIS:
     n_artifacts: int = 0  # ... whose point did not survive rounding (verdict -> undecided)
     sat_rows: Optional[int] = None  # constraints in the SAT-core candidate (None: not used)
     sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
-    parity_rows: Optional[int] = None  # constraints in the mod-2 candidate (None: not used)
+    # Constraints in the lattice candidate (:func:`_lattice_candidate`; None: not
+    # used). The name is from the mod-2 candidate it generalizes.
+    parity_rows: Optional[int] = None
+    n_lattice: int = 0  # probes proven infeasible by the exact lattice test, no solve
     n_exact: int = 0  # confirmations decided exactly when presolve-off could not
     ladder_size: Optional[int] = None  # elements left by the oracle ladder (None: not run)
     ladder_calls: int = 0  # oracle calls the ladder made
@@ -217,6 +220,11 @@ class _Engine:
         self.n_reduced_confirmed = 0  # ... that proved the set infeasible
         self.n_exact_refuted = 0  # ... that found it feasible
         self.n_artifacts = 0
+        # The exact lattice test (:mod:`discopt._iis_lattice`): constraint id ->
+        # its integer equality rows, set by :meth:`arm_lattice` only when the
+        # whole model is lattice-infeasible (None: disarmed, no cost per probe).
+        self._lat: Optional[dict[int, list]] = None
+        self.n_lattice = 0
         # Held-integer columns and their declared box in the current configuration.
         self._held = np.zeros(0, dtype=np.int64)
         self._cfg: tuple[np.ndarray, ...] = ()
@@ -225,6 +233,41 @@ class _Engine:
         self.backend = make_backend(engine, A, row_lo, row_hi, col_lb, col_ub, is_int)
         self.engine = engine
         self._inf = self.backend.inf
+
+    def arm_lattice(self, stop_at: Optional[float] = None) -> bool:
+        """Arm the lattice test when the whole model is lattice-infeasible.
+
+        The test is monotone -- dropping a row, or relaxing an integrality, never
+        turns a lattice-feasible system infeasible -- so when the full model passes
+        it, every subsystem the filter will probe passes too, and the per-probe
+        test could never fire: it is left disarmed. On MIPcc27's smallset it arms
+        on enlight4, enlight11 and neos-807454 only."""
+        from discopt._iis_lattice import integer_rows, lattice_infeasible
+
+        rows = integer_rows(self.A, self.row_lo, self.row_hi)
+        lat: dict[int, list] = {}
+        for ci, rs in self.row_groups.items():
+            got = [rows[int(r)] for r in np.asarray(rs).ravel() if int(r) in rows]
+            if got:
+                lat[ci] = got
+        allrows = [t for ci in sorted(lat) for t in lat[ci]]
+        held = set(int(j) for j in np.flatnonzero(self.is_int))
+        if lattice_infeasible(allrows, held, stop_at) is True:
+            self._lat = lat
+        return self._lat is not None
+
+    def _lattice_proves(self, active_cons, active_int) -> bool:
+        """The set's integer equality rows are infeasible over the integers it
+        holds, whatever its bounds: an exact proof (:mod:`discopt._iis_lattice`)."""
+        if self._lat is None:
+            return False
+        from discopt._iis_lattice import lattice_infeasible
+
+        lat = self._lat
+        rows = [t for ci in sorted(active_cons) if ci in lat for t in lat[ci]]
+        if not rows:
+            return False
+        return lattice_infeasible(rows, active_int, self.deadline) is True
 
     def _configure(
         self,
@@ -380,6 +423,13 @@ class _Engine:
         Without it a presolve-on ``Infeasible`` is acted on directly and the
         caller MUST confirm the final subsystem with :meth:`confirm_infeasible`.
         """
+        if self._lattice_proves(active_cons, active_int):
+            # Exact, so it needs no presolve-free cross-check either; and it
+            # decides in milliseconds sets HiGHS spent the probe limit on (relaxed
+            # columns left unbounded by the filter: enlight11).
+            self.n_lattice += 1
+            self._record_proven(active_cons, active_bounds, active_int)
+            return True, None
         self._configure(active_cons, active_bounds, active_int)
         ms = self._solve("choose")
         if ms == _bk.OPTIMAL:
@@ -469,10 +519,10 @@ class _Engine:
         all_infeasible = True
         for p in presolve:
             if p == "off":
-                rlo, rhi, _, _ = self._cfg
-                if self._parity_infeasible(rlo, rhi):
-                    # A mod-2 certificate: an exact proof in milliseconds, where
-                    # a presolve-free solve needed 47 s on enlight11's set.
+                if self._lattice_proves(active_cons, active_int):
+                    # An integer Farkas certificate: an exact proof in
+                    # milliseconds, where a presolve-free solve needed 47 s on
+                    # enlight11's set.
                     self.n_exact += 1
                     self.n_exact_confirmed += 1
                     continue
@@ -546,31 +596,6 @@ class _Engine:
         rlo, rhi, lb, ub = self._cfg
         self.n_exact += 1
         return exact_feasible(self.A, rlo, rhi, lb, ub, self._held, stop_at=stop)
-
-    def _parity_infeasible(self, rlo, rhi) -> bool:
-        """The configured set's equality rows over held integer columns (integer
-        data) contain a mod-2 contradiction: an exact proof of infeasibility, in
-        integer arithmetic, whatever the bounds (:func:`_gf2_certificates`)."""
-        held = np.zeros(self.col_lb.size, dtype=bool)
-        held[self._held] = True
-        A = self.A
-        bits: list[tuple[int, int]] = []
-        for r in np.flatnonzero(np.isfinite(rlo) & (rlo == rhi)):
-            b = rlo[r]
-            if b != round(b):
-                continue
-            s0, e0 = A.indptr[r], A.indptr[r + 1]
-            cols, vals = A.indices[s0:e0], A.data[s0:e0]
-            if cols.size == 0 or not bool(np.all(held[cols])):
-                continue
-            if not bool(np.all(vals == np.round(vals))):
-                continue
-            mask = 0
-            for j, a in zip(cols, vals):
-                if int(round(a)) % 2:
-                    mask |= 1 << int(j)
-            bits.append((mask, int(round(b)) % 2))
-        return bool(bits) and bool(_gf2_certificates(bits))
 
 
 def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
@@ -794,90 +819,43 @@ def _encode_geq(
     return nv
 
 
-def _gf2_certificates(rows: list[tuple[int, int]]) -> list[int]:
-    """Row subsets (bitmasks over ``rows``) whose sum is ``0 = 1`` mod 2.
+def _lattice_candidate(A, row_lo, row_hi, is_int, row_groups, stop_at):
+    """A small constraint set that is infeasible by the lattice test alone
+    (:func:`discopt._iis_lattice.lattice_core`), or None.
 
-    ``rows[i] = (lhs_mask, rhs_bit)``: the odd-coefficient columns and the rhs
-    parity of an integer equality row. Gaussian elimination over GF(2), tracking
-    which input rows each reduced row combines."""
-    piv: dict[int, tuple[int, int, int]] = {}
-    out = []
-    for i, (lhs, rhs) in enumerate(rows):
-        comb = 1 << i
-        while lhs:
-            top = lhs.bit_length() - 1
-            if top not in piv:
-                piv[top] = (lhs, rhs, comb)
-                break
-            pl, pr, pc = piv[top]
-            lhs ^= pl
-            rhs ^= pr
-            comb ^= pc
-        else:
-            if rhs:
-                out.append(comb)
-    return out
+    Returns ``(constraints, held integer columns, columns the rows touch)``: a
+    proposal -- the caller holds those integralities, keeps the bounds of the
+    touched columns, drops every other element, and has the base probe prove it
+    infeasible before using it. Only constraints with a single row enter.
 
-
-def _parity_core(A, row_lo, row_hi, is_int, row_groups) -> Optional[tuple[set, set]]:
-    """A small constraint set that is infeasible by a mod-2 argument alone.
-
-    Eligible: equality constraints whose rows have integer coefficients and rhs
-    over integer columns only. A subset of them summing to ``even.x = odd`` mod
-    2 has no integer solution, whatever the bounds. The smallest such subset
-    found is shrunk to a minimal one (no proper subset is a certificate) and
-    returned as ``(constraints, columns they touch)``: a proposal -- the caller
-    holds the integrality of those columns, drops every other element, and has
-    HiGHS prove it infeasible before using it.
-
-    On MIPcc27's smallset certificates exist for enlight4 (8 rows), enlight11 (48)
-    and neos-807454 (9; Gurobi's IIS there is those 9 rows and 56 integralities);
-    the elimination takes milliseconds.
+    On MIPcc27's smallset it exists for enlight4 (8 rows + 10 integralities),
+    enlight11 (48 + 48) and neos-807454 (9 + 32; Gurobi's IIS there is those 9
+    rows and 56 integralities), at 0.01-3 s; the mod-2 core it replaced gave 8,
+    48 and 9 rows with every touched column held.
     """
-    elig: list[int] = []  # constraint indices
-    rowbits: list[tuple[int, int]] = []
-    for ci in sorted(row_groups):
-        rs = row_groups[ci]
-        if len(rs) != 1:
-            continue
-        r = int(rs[0])
-        if row_lo[r] != row_hi[r] or row_lo[r] != round(row_lo[r]) or abs(row_lo[r]) >= _INF:
-            continue
-        s0, e0 = A.indptr[r], A.indptr[r + 1]
-        cols, vals = A.indices[s0:e0], A.data[s0:e0]
-        if cols.size == 0 or not bool(np.all(is_int[cols])):
-            continue
-        if not bool(np.all(vals == np.round(vals))):
-            continue
-        mask = 0
-        for j, a in zip(cols, vals):
-            if int(round(a)) % 2:
-                mask |= 1 << int(j)
-        elig.append(ci)
-        rowbits.append((mask, int(round(row_lo[r])) % 2))
-    certs = _gf2_certificates(rowbits)
-    if not certs:
+    from discopt._iis_lattice import integer_rows, lattice_core
+
+    rows = integer_rows(A, row_lo, row_hi)
+    by_con = {
+        ci: rows[int(rs[0])] for ci, rs in row_groups.items() if len(rs) == 1 and int(rs[0]) in rows
+    }
+    if not by_con:
         return None
-    best = min(certs, key=lambda c: bin(c).count("1"))
-    support = [i for i in range(len(rowbits)) if best >> i & 1]
-    # Deletion to a minimal certificate: drop a row whenever the rest still
-    # contains one (then restrict to that one).
-    k = 0
-    while k < len(support):
-        rest = support[:k] + support[k + 1 :]
-        sub = _gf2_certificates([rowbits[i] for i in rest])
-        if sub:
-            c = min(sub, key=lambda c: bin(c).count("1"))
-            support = [rest[t] for t in range(len(rest)) if c >> t & 1]
-            k = 0
-            continue
-        k += 1
-    cons = {elig[i] for i in support}
+    held = set(int(j) for j in np.flatnonzero(is_int))
+    core = lattice_core(by_con, held, orders=_LATTICE_ORDERS, stop_at=stop_at)
+    if core is None:
+        return None
+    cons, ints = core
     touched: set[int] = set()
     for ci in cons:
-        r = int(row_groups[ci][0])
-        touched.update(int(j) for j in A.indices[A.indptr[r] : A.indptr[r + 1]])
-    return cons, touched
+        touched.update(by_con[ci][0])
+    return cons, ints, touched
+
+
+#: Deletion orders :func:`_lattice_candidate` tries (deterministic seeds; the
+#: smallest core is kept). Each is a few hundred lattice tests. On the smallset
+#: the best cores (18 / 96 / 41) first appear at orders 3 / 4 / 1 of 0-15.
+_LATTICE_ORDERS = 16
 
 
 def _integral(x) -> bool:
@@ -1397,8 +1375,8 @@ def milp_iis(
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
 
     ``sat_candidate``: start from a small candidate subsystem instead of the
-    full model -- a mod-2 certificate over integer equality rows
-    (:func:`_parity_core`) when one exists, else, on a pure-binary model with
+    full model -- a minimal lattice (integer Farkas) certificate over integer
+    equality rows (:func:`_lattice_candidate`) when one exists, else, on a pure-binary model with
     integral coefficients, an unsatisfiable constraint set found by discopt's
     CDCL solver (:func:`_binary_core`). Either is only a proposal: it is used if
     HiGHS proves it infeasible (the base probe), otherwise the full model is
@@ -1669,19 +1647,18 @@ def _milp_iis_arrays(
     sat_conflicts = 0
     parity_rows: Optional[int] = None
     full_state = (set(cons), set(bounds), set(ints_active))
-    if sat_candidate:
-        pc = _parity_core(A, row_lo, row_hi, is_int, row_groups)
+    if eng.arm_lattice(deadline) and sat_candidate:
+        pc = _lattice_candidate(A, row_lo, row_hi, is_int, row_groups, deadline)
         if pc is not None:
-            # The certificate needs only its rows and the integrality of the
-            # columns they touch. The bounds of those columns are kept as well
-            # (elements once a column's integrality is relaxed, filtered like any
-            # other): dropping them left relaxed columns unbounded, and their
-            # probe points then failed the 1e-6 certificate check (neos-807454:
-            # 9 of 65 members certified instead of 65) and led to a larger IIS
-            # (enlight4: 19 instead of 18).
+            # The certificate needs only its rows and the integralities the
+            # core holds. The bounds of the columns the rows touch are kept as
+            # well (elements, filtered like any other): dropping them up front
+            # left relaxed columns unbounded, and their probe points then failed
+            # the 1e-6 certificate check (neos-807454: 9 of 65 members certified
+            # instead of 65).
             cons = set(pc[0])
             ints_active &= pc[1]
-            bounds = {jb for jb in bounds if jb[0] in pc[1]}
+            bounds = {jb for jb in bounds if jb[0] in pc[2]}
             parity_rows = len(cons)
     if sat_candidate and parity_rows is None:
         # The clause-core stage gets a share of an overall budget that SATURATES
@@ -1695,7 +1672,7 @@ def _milp_iis_arrays(
         # The share starts when the stage does, as every later stage's does
         # (``min(deadline, now + budget)``), and the overall deadline still caps
         # it. It used to start at ``t_start``, which charged model extraction,
-        # first-call imports and ``_parity_core`` to it: where those outlasted
+        # first-call imports and the lattice candidate to it: where those outlasted
         # the share, the stage began past its own deadline and did no work at
         # all, so whether the candidate ran depended on machine speed (#2318,
         # CI on PR #2311; #912 role 2).
@@ -2302,6 +2279,7 @@ def _milp_iis_arrays(
         n_rolling=n_rolling,
         n_reduced_confirmed=eng.n_reduced_confirmed,
         n_exact_confirmed=eng.n_exact_confirmed,
+        n_lattice=eng.n_lattice,
         n_exact_refuted=eng.n_exact_refuted,
         n_swept=n_swept,
         n_sweep_reverted=n_sweep_reverted,
