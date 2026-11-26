@@ -12842,7 +12842,19 @@ def _ipx_lift_report_source_objective(
     if result.objective is not None and obj == float(result.objective):
         return result
     result.objective = obj
+    # The search capped its bound at the value it converged on (here the lifted
+    # expansion); once the objective is re-valued the cap belongs at the new value,
+    # exactly as ``Model._reconcile_objective_with_model`` re-caps it. Without this
+    # the stale cap stayed: on #2262's convex IQP (NLP-BB on the lift) the bound
+    # sat at the expansion value -1.18e-6 on CI while the proved bound was
+    # -3.8e-10, so re-reading the objective to 0.0 withdrew a sound certificate.
     bound = getattr(result, "bound", None)
+    recapped = _recap_bound_at_objective(
+        bound, obj, getattr(result, "_proved_bound", None), is_maximize
+    )
+    if recapped is not None and recapped != bound:
+        result._set_bound(recapped, valid=result.bound_valid, source=result.bound_source)
+        bound = recapped
     result.gap = _relative_gap_from_objective_bound(obj, bound)
     if result.status == "optimal" and bound is not None:
         abs_tol = entry_args.get("abs_gap_tolerance")

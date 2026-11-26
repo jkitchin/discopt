@@ -3892,7 +3892,12 @@ impl<'a> ConflictSet<'a> {
         increase_conflict_score: bool,
     ) -> i64 {
         self.resolve_queue.clear();
-        let branch_pos = self.localdom.branch_pos.clone();
+        // Read in place, never cloned: this runs once per depth per conflict, and
+        // the stack is as deep as the search. A per-call clone made a conflict
+        // O(depth^2): measured on an OA master of portfol_roundlot (depth ~1500,
+        // ~800k calls), 70% of the solve was the clone's memmove, 12.2 s vs 0.9 s
+        // with conflict analysis off. HiGHS reads `localdom.branchPos_` in place.
+        let branch_pos = &self.localdom.branch_pos;
         let start_pos = if depth_level == 0 {
             0
         } else {
