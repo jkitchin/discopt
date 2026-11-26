@@ -162,41 +162,40 @@ class BlockMaster:
 
         isbin = is_int & (self.col_lb == 0) & (self.col_ub == 1)
         ip, ix, dat = A.indptr, A.indices, A.data
-        rowcols = [ix[ip[r] : ip[r + 1]] for r in range(m)]
-        rowvals = [dat[ip[r] : ip[r + 1]] for r in range(m)]
-        self.rowcols, self.rowvals = rowcols, rowvals
-        link = [
-            r
-            for r in range(m)
-            if rowcols[r].size >= 2
-            and bool(np.all(isbin[rowcols[r]]))
-            and bool(np.all(rowvals[r] > 0))
-            and row_hi[r] >= _INF
-            and 0 < row_lo[r] < _INF
-        ]
+        # The structure is detected in array operations over the nonzeros: as a
+        # per-row Python loop it cost 4.0 s on a 1e6-row model before refusing
+        # it (``Unsupported``), in every portfolio member. Same lists, same order.
+        rlo = np.asarray(row_lo, dtype=np.float64)
+        rhi = np.asarray(row_hi, dtype=np.float64)
+        nnz_r = np.diff(ip)
+        row_of = np.repeat(np.arange(m, dtype=np.int64), nnz_r)
+        n_bad = np.bincount(row_of, weights=(~isbin[ix]) | (dat <= 0), minlength=m)
+        is_link = (nnz_r >= 2) & (n_bad == 0) & (rhi >= _INF) & (rlo > 0) & (rlo < _INF)
+        link = np.flatnonzero(is_link).tolist()
         if not link:
             raise Unsupported("no linking row")
-        is_link = np.zeros(m, dtype=bool)
-        is_link[link] = True
-        brow = [r for r in range(m) if not is_link[r] and rowcols[r].size]
+        is_brow = ~is_link & (nnz_r > 0)
+        brow = np.flatnonzero(is_brow).tolist()
         if not brow:
             raise Unsupported("no block row")
         in_link = np.zeros(n, dtype=bool)
-        for r in link:
-            in_link[rowcols[r]] = True
-        cnt = np.zeros(n, dtype=np.int64)
-        for r in brow:
-            cnt[rowcols[r]] += 1
-        # One satellite per block row: a linking column that lies in this block row only.
-        satrow: dict[int, int] = {}
-        for r in brow:
-            for j in rowcols[r]:
-                if cnt[j] == 1 and in_link[j]:
-                    satrow[int(j)] = r
-                    break
+        in_link[ix[is_link[row_of]]] = True
+        # Block rows per column, a repeated (row, column) entry counted once.
+        first = np.ones(ix.size, dtype=bool)
+        first[1:] = (row_of[1:] != row_of[:-1]) | (ix[1:] != ix[:-1])
+        cnt = np.bincount(ix[is_brow[row_of] & first], minlength=n).astype(np.int64)
+        # One satellite per block row: a linking column that lies in this block
+        # row only -- the row's first such entry, rows in increasing order.
+        e_sat = np.flatnonzero(is_brow[row_of] & (cnt[ix] == 1) & in_link[ix])
+        r_sat = row_of[e_sat]
+        lead = np.ones(e_sat.size, dtype=bool)
+        lead[1:] = r_sat[1:] != r_sat[:-1]
+        satrow: dict[int, int] = dict(zip(ix[e_sat[lead]].tolist(), r_sat[lead].tolist()))
         self.satrow = satrow
         in_brow = cnt > 0
-        core = [int(j) for j in np.flatnonzero(in_brow) if int(j) not in satrow]
+        is_sat = np.zeros(n, dtype=bool)
+        is_sat[list(satrow)] = True
+        core = np.flatnonzero(in_brow & ~is_sat).tolist()
         if not core:
             raise Unsupported("no core column")
         core_a = np.asarray(core, dtype=np.int64)
@@ -213,6 +212,9 @@ class BlockMaster:
             and _is_integral(self.col_ub[used])
         ):
             raise Unsupported("non-integer data")
+        rowcols = [ix[ip[r] : ip[r + 1]] for r in range(m)]
+        rowvals = [dat[ip[r] : ip[r + 1]] for r in range(m)]
+        self.rowcols, self.rowvals = rowcols, rowvals
 
         par = {j: j for j in core}
 

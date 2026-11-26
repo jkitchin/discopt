@@ -41,6 +41,14 @@ _INF = 1e20
 #: The smallset's hits need well under 10^5. Read at call time (tests lower it).
 MAX_WORK = 2_000_000
 
+#: Cap on :func:`_int_solvable`'s dense column table (``k * ncols`` cells, ``k``
+#: the left-null dimension). Building the table and scanning it are not arithmetic
+#: and are not charged to :data:`MAX_WORK`; past this size the test returns
+#: ``None`` before allocating. Measured on MIPcc27's smallset the largest table is
+#: 4.6e5 cells (neos-807454); on a synthetic 1e6-row LP it was ~1e5 x 1e5, built
+#: unclocked to 24 GB past every deadline. Read at call time (tests lower it).
+MAX_TABLE = 20_000_000
+
 
 class _Budget(Exception):
     pass
@@ -117,19 +125,31 @@ def _left_null(rows_c: list[dict[int, int]], tick) -> list[dict[int, int]]:
     return null
 
 
-def _int_solvable(M: list[dict[int, int]], rhs: list[int], ncols: int, tick) -> bool:
+def _int_solvable(
+    M: list[dict[int, int]], rhs: list[int], ncols: int, tick, clock=lambda: None
+) -> bool:
     """Does ``M z = rhs`` have an integer solution? Column operations (unimodular)
     bring ``M`` to lower-triangular form row by row; the system is solvable iff
     each pivot divides its residual and every row without a pivot has a zero
-    residual."""
+    residual. ``clock()`` raises :class:`_Budget` past the caller's deadline; it is
+    called in the table build and scans, which ``tick`` (arithmetic) does not see.
+    Raises :class:`_Budget` before allocating a table over :data:`MAX_TABLE`."""
     k = len(M)
-    cols: list[list[int]] = [[0] * k for _ in range(ncols)]
+    if k * ncols > MAX_TABLE:
+        raise _Budget
+    cols: list[list[int]] = []
+    for j in range(ncols):
+        if not j & 1023:
+            clock()
+        cols.append([0] * k)
     for i, r in enumerate(M):
         for j, v in r.items():
             cols[j][i] = v
     res = list(rhs)
     p = 0
     for i in range(k):
+        if not i & 63:
+            clock()
         act = [j for j in range(p, ncols) if cols[j][i] != 0]
         while len(act) > 1:
             act.sort(key=lambda j: abs(cols[j][i]))
@@ -192,6 +212,10 @@ def lattice_infeasible(
         ):
             raise _Budget
 
+    def clock() -> None:
+        if stop_at is not None and time.perf_counter() > stop_at:
+            raise _Budget
+
     try:
         rows_c = [{j: v for j, v in r.items() if j not in held} for r, _ in rows]
         null = _left_null(rows_c, tick)
@@ -214,7 +238,7 @@ def lattice_infeasible(
                         acc[t] = acc.get(t, 0) + w * v
             M.append({t: v for t, v in acc.items() if v})
             c.append(b)
-        return not _int_solvable(M, c, len(icols), tick)
+        return not _int_solvable(M, c, len(icols), tick, clock)
     except _Budget:
         return None
 
