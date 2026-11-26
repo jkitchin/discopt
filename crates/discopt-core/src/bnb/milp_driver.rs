@@ -2161,6 +2161,8 @@ fn node_local_gmi_bound(
                     y: &lp.y,
                     basic_vars: &lp.basis.basic_vars,
                     deadline: ctx.deadline,
+                    open_nodes: None,
+                    col_dual: None,
                 },
                 &crate::lp::highs_cutgen::bridge::NodeSepa {
                     node_l: &lp.l[..ctx.ns],
@@ -6920,6 +6922,8 @@ fn solve_milp_node_search(
     }
 
     let mut lp_iters = 0usize;
+    // Root LP solves behind `lp_iters` at the search's start (`avgrootlpiters`).
+    let mut root_solves = 0usize;
     // Pivots spent by improving dives (`DISCOPT_MILP_IMPROVE_DIVE`), budgeted against
     // `lp_iters` by `improve_dive_batch_eligible`.
     let mut improve_dive_iters = 0usize;
@@ -7371,6 +7375,7 @@ fn solve_milp_node_search(
                     }
                 };
                 lp_iters += root.iters;
+                root_solves += 1;
                 if root.status != LpStatus::Optimal {
                     break;
                 }
@@ -7649,6 +7654,8 @@ fn solve_milp_node_search(
                         y: &root.dual,
                         basic_vars: &root.basis.basic_vars,
                         deadline,
+                        open_nodes: None,
+                        col_dual: None,
                     });
                     crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, rc.generated as u64);
                     let remaining = opts.root_cuts - total_cuts;
@@ -8334,7 +8341,14 @@ fn solve_milp_node_search(
     // variable bounds (shared, read only) and the model's density limits.
     let highs_node_vb: Option<crate::lp::highs_cutgen::vbound::VarBoundStore> =
         match highs_sep.as_mut() {
-            Some(hs) if crate::lp::highs_cutgen::bridge::node_sepa_enabled() => hs.take_vbounds(),
+            // Under `DISCOPT_HIGHS_SEARCH_SEPA` the search's node separation runs on
+            // the subsystem itself, which keeps its variable bounds.
+            Some(hs)
+                if crate::lp::highs_cutgen::bridge::node_sepa_enabled()
+                    && !highs_env::search_sepa_enabled() =>
+            {
+                hs.take_vbounds()
+            }
             _ => None,
         };
     let highs_node: Option<HighsNodeCtx<'_>> = (highs_sep.is_some()
@@ -8941,6 +8955,8 @@ fn solve_milp_node_search(
                     nodes_before: tm.stats().total_nodes,
                     submip: in_sub_mip(),
                     iters_before: lp_iters as i64,
+                    root_solves,
+                    node_iter_limit: highs_env::node_iter_limit_enabled(),
                 };
                 // The best verified point so far: the tree's, or the root
                 // evaluation's heuristic candidate.
@@ -9068,8 +9084,8 @@ fn solve_milp_node_search(
                 let cliques = if highs_env::clique_domain_enabled() {
                     highs_sep
                         .as_ref()
-                        .and_then(|h| h.clique_table())
-                        .map(|t| (t, r0.solution[..ns.min(r0.solution.len())].to_vec()))
+                        .and_then(|h| h.clique_table().map(|t| (t, h.root_probed())))
+                        .map(|(t, rp)| (t, r0.solution[..ns.min(r0.solution.len())].to_vec(), rp))
                 } else {
                     None
                 };
@@ -9083,6 +9099,9 @@ fn solve_milp_node_search(
                     seed_pool,
                     milp_depth == 0,
                     cliques,
+                    highs_sep
+                        .as_mut()
+                        .filter(|_| highs_env::search_sepa_enabled()),
                 );
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};
@@ -9131,6 +9150,7 @@ fn solve_milp_node_search(
                 search_incomplete,
                 lp_iters,
                 root_cut_rows,
+                milp_depth == 0,
             );
         }
         // --- sequential reduce: apply tree mutations in batch order ---
@@ -10118,22 +10138,8 @@ fn solve_milp_node_search(
         stats.total_nodes >= opts.max_nodes || frontier_capped || work_capped,
     );
 
-    // Diagnostic instrument (`DISCOPT_MILP_DUMP_INCUMBENT=<file>`): the top-level
-    // solve's final incumbent in this function's column space (the root LP's
-    // structural columns), one value per line. It is the reference point for
-    // `DISCOPT_HIGHS_SEPA_CHECK_POINT`, which judges root cuts on the same LP.
-    // A process can make several top-level engine calls (an LP-only one included),
-    // so each call with integer columns and an incumbent writes `<path>.<k>`.
-    if milp_depth == 0 && has_inc && !opts.integer_cols.is_empty() {
-        if let Ok(path) = std::env::var("DISCOPT_MILP_DUMP_INCUMBENT") {
-            static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let k = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let take = ns.min(x.len());
-            let text: Vec<String> = x[..take].iter().map(|v| format!("{v:?}")).collect();
-            let path = format!("{path}.{k}");
-            std::fs::write(&path, text.join("\n"))
-                .unwrap_or_else(|e| panic!("incumbent dump {path}: {e}"));
-        }
+    if milp_depth == 0 && has_inc {
+        dump_incumbent(&x, ns, opts);
     }
     let mut res = MilpResult {
         status,
@@ -10176,6 +10182,28 @@ fn solve_milp_node_search(
     res
 }
 
+/// Diagnostic instrument (`DISCOPT_MILP_DUMP_INCUMBENT=<file>`): the top-level
+/// solve's final incumbent in the driver's column space (the root LP's structural
+/// columns), one value per line. It is the reference point for
+/// `DISCOPT_HIGHS_SEPA_CHECK_POINT`, which judges root cuts on the same LP. A process
+/// can make several top-level engine calls (an LP-only one included), so each call
+/// with integer columns and an incumbent writes `<path>.<k>`. Both result paths call
+/// it (the batched search's tail and [`highs_search_result`]); off when unset.
+fn dump_incumbent(x: &[f64], ns: usize, opts: &MilpOptions) {
+    if opts.integer_cols.is_empty() {
+        return;
+    }
+    if let Ok(path) = std::env::var("DISCOPT_MILP_DUMP_INCUMBENT") {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let take = ns.min(x.len());
+        let text: Vec<String> = x[..take].iter().map(|v| format!("{v:?}")).collect();
+        let path = format!("{path}.{k}");
+        std::fs::write(&path, text.join("\n"))
+            .unwrap_or_else(|e| panic!("incumbent dump {path}: {e}"));
+    }
+}
+
 /// The driver's result from a finished HiGHS-design search (`DISCOPT_HIGHS_MIP_SEARCH`):
 /// the same status decision, objective recomputation (#1296) and misvaluation guard
 /// (#2136) as the batched search's tail.
@@ -10190,6 +10218,7 @@ fn highs_search_result(
     search_incomplete: bool,
     lp_iters: usize,
     root_cut_rows: usize,
+    top_level: bool,
 ) -> MilpResult {
     let has_inc = o.best.is_some();
     let (x, tree_v) = match &o.best {
@@ -10257,6 +10286,9 @@ fn highs_search_result(
         bound_hook_calls: o.bound_hook_calls,
         bound_hook_raised: o.bound_hook_raised,
     };
+    if top_level && has_inc {
+        dump_incumbent(&res.x, ns, opts);
+    }
     if has_inc && incumbent_misvalued(res.obj, tree_v) {
         crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
         withdraw_certificate(&mut res);
@@ -15689,6 +15721,188 @@ mod tests {
         );
     }
 
+    /// `DISCOPT_HIGHS_NODE_ITER_LIMIT`: every node evaluation of the search solves
+    /// under HiGHS's node iteration limit (`processNodes`' `setIterationLimit`, HiGHS
+    /// 1.16), and without the flag under the driver's own `max_iter`. Before the fix
+    /// the search had no node limit: on neos17 (2,000 nodes, with
+    /// `DISCOPT_HIGHS_SEARCH_SEPA`) warm primal solves ran up to the 100,000-pivot
+    /// default, 1,244,493 phase-1 pivots in all against 35,192 without separation.
+    #[test]
+    fn highs_search_node_lps_run_under_the_node_iteration_limit() {
+        use super::highs_branch::e2e::{E2eResult, E2E};
+        let mut seed = 17u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut checked_on, mut checked_off) = (0usize, 0usize);
+        for _ in 0..20 {
+            let ns = rnd(10, 16) as usize;
+            let m = rnd(6, 10) as usize;
+            let l = vec![0.0; ns];
+            let u: Vec<f64> = (0..ns).map(|_| rnd(1, 8) as f64).collect();
+            let c: Vec<f64> = (0..ns).map(|_| -(rnd(1, 9) as f64) - 0.5).collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            for i in 0..m {
+                for col in cols.iter_mut() {
+                    if rnd(0, 2) != 0 {
+                        col.push((i, rnd(1, 7) as f64));
+                    }
+                }
+                b.push(rnd(5, 30) as f64 + 0.5);
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let o = opts(ns, (0..ns).collect());
+            let base = o.simplex.max_iter;
+            assert!(
+                base > 10_000,
+                "the driver's max_iter {base} must exceed the floor"
+            );
+            for on in [false, true] {
+                let csc = SparseCols::from_csc(cp.clone(), rix.clone(), rvx.clone());
+                E2E.with(|e| {
+                    *e.borrow_mut() = Some(E2eResult {
+                        cfg_iter_limit: on,
+                        ..Default::default()
+                    })
+                });
+                let _ =
+                    solve_milp_node_search(csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, None, None, None);
+                let h = E2E.with(|e| e.borrow_mut().take().unwrap());
+                let seen = h.node_max_iter.clone();
+                if !h.ran {
+                    continue;
+                }
+                // Tiny LPs: every term of the limit is below its 10,000 floor.
+                let want = if on { 10_000 } else { base };
+                for &mi in &seen {
+                    assert_eq!(mi, want, "node LP max_iter with the limit {on}");
+                }
+                if on {
+                    checked_on += seen.len();
+                } else {
+                    checked_off += seen.len();
+                }
+            }
+        }
+        assert!(
+            checked_on > 0 && checked_off > 0,
+            "no node evaluation checked: on {checked_on}, off {checked_off}"
+        );
+    }
+
+    #[test]
+    fn highs_node_iteration_limit_formula() {
+        use highs_env::node_iteration_limit as lim;
+        // `max(10000, 10 * max(avgiter, avgrootlpiters), 3 * firstrootlpiters / 2)`.
+        assert_eq!(lim(0.0, 0.0, 0), 10_000);
+        assert_eq!(lim(2_000.0, 100.0, 0), 20_000);
+        assert_eq!(lim(100.0, 2_000.0, 0), 20_000);
+        assert_eq!(lim(10.0, 10.0, 20_001), 30_001);
+        // `HighsInt iterlimit = 10 * max(...)` truncates.
+        assert_eq!(lim(1_234.56, 0.0, 0), 12_345);
+    }
+
+    /// The search starts its separators fresh, as HiGHS's does: `HighsMipWorker`
+    /// separates the tree's nodes with its own `HighsSeparation`, so tableau
+    /// `numCalls`/`numTries` restart at 0 and the path separator's generator at
+    /// `random_seed`, while the root's rounds ran on `evaluateRootNode`'s local one.
+    /// Before the fix the search (`DISCOPT_HIGHS_SEARCH_SEPA`) kept the root's
+    /// counts; on bell5 (presolve off) HiGHS's dump shows the reset at its first
+    /// search round (tableau numTries 439 -> 0), and replaying the dump without it
+    /// diverged every later path-separator draw.
+    #[test]
+    fn highs_search_starts_with_fresh_separators() {
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+        use super::highs_branch::e2e::{E2eResult, E2E};
+        let fresh =
+            crate::lp::highs_cutgen::bridge::RootSeparation::new(1, 1, 1, false).separator_state();
+        let mut seed = 31u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let mut checked = 0usize;
+        for _ in 0..40 {
+            let ns = rnd(10, 16) as usize;
+            let m = rnd(6, 10) as usize;
+            let l = vec![0.0; ns];
+            let u: Vec<f64> = (0..ns).map(|_| rnd(1, 8) as f64).collect();
+            let c: Vec<f64> = (0..ns).map(|_| -(rnd(1, 9) as f64) - 0.5).collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            for i in 0..m {
+                for col in cols.iter_mut() {
+                    if rnd(0, 2) != 0 {
+                        col.push((i, rnd(1, 7) as f64));
+                    }
+                }
+                b.push(rnd(5, 30) as f64 + 0.5);
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let o = opts(ns, (0..ns).collect());
+            E2E.with(|e| {
+                *e.borrow_mut() = Some(E2eResult {
+                    cfg_hsep: true,
+                    ..Default::default()
+                })
+            });
+            let _ = solve_milp_node_search(csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, None, None, None);
+            let h = E2E.with(|e| e.borrow_mut().take().unwrap());
+            if !h.ran {
+                continue;
+            }
+            assert_eq!(
+                h.hsep_state,
+                Some(fresh),
+                "the search kept the root's separator state"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 5,
+            "probe fired too little: {checked} searches checked"
+        );
+    }
+
     /// The HiGHS-design search's dual bound counts the queue's suboptimal nodes.
     ///
     /// A node whose bound is above the optimality limit (the incumbent less the gap
@@ -20554,6 +20768,8 @@ mod sepa_cutoff_box_tests {
             y: &t.sol.dual,
             basic_vars: &t.sol.basis.basic_vars,
             deadline: None,
+            open_nodes: None,
+            col_dual: None,
         }
     }
 
@@ -20714,6 +20930,8 @@ mod sepa_clique_tests {
             y: &sol.dual,
             basic_vars: &sol.basis.basic_vars,
             deadline: None,
+            open_nodes: None,
+            col_dual: None,
         });
         // Every binary point satisfying the rows: 0 and the unit vectors.
         let keep: [[f64; NS]; 4] = [
@@ -20743,6 +20961,171 @@ mod sepa_clique_tests {
         }
         assert!(clique, "no clique cut among {:?}", rc.cuts);
         assert!(checks >= 4, "only {checks} checks");
+    }
+}
+
+/// `DISCOPT_HIGHS_SEPA_ROOT_PROBE`: root probing's cuts (global bounds from presolve
+/// probing, implied-bound cuts of the LP's fractional binaries) keep every feasible
+/// point of random small programs, found by enumeration, and probing never calls a
+/// feasible program infeasible.
+#[cfg(test)]
+mod root_probe_tests {
+    use super::*;
+    use crate::lp::highs_cutgen::bridge::{RootSeparation, StdFormRound};
+
+    const M: usize = 4;
+    const NS: usize = 6;
+    const N: usize = NS + M;
+    /// Columns 0..4 binary, 4 integer in [0, 3], 5 continuous in [0, 2].
+    const NBIN: usize = 4;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % ((hi - lo + 1) as u64)) as i64
+        }
+    }
+
+    /// The interval of the continuous column (bounds `[0, 2]`) that satisfies every
+    /// row `lo <= a z + a5 y <= hi` with the integer part `z` fixed, or `None`.
+    fn y_range(a: &[[f64; NS]], lo: &[f64], hi: &[f64], z: &[f64]) -> Option<(f64, f64)> {
+        let (mut ylo, mut yhi) = (0.0f64, 2.0f64);
+        for i in 0..M {
+            let act: f64 = (0..NS - 1).map(|j| a[i][j] * z[j]).sum();
+            let c = a[i][NS - 1];
+            let (r_lo, r_hi) = (lo[i] - act, hi[i] - act);
+            if c == 0.0 {
+                if r_lo > 1e-9 || r_hi < -1e-9 {
+                    return None;
+                }
+            } else if c > 0.0 {
+                ylo = ylo.max(r_lo / c);
+                yhi = yhi.min(r_hi / c);
+            } else {
+                ylo = ylo.max(r_hi / c);
+                yhi = yhi.min(r_lo / c);
+            }
+        }
+        (ylo <= yhi + 1e-9).then_some((ylo, yhi.max(ylo)))
+    }
+
+    #[test]
+    fn root_probe_cuts_keep_every_feasible_point() {
+        let (mut checks, mut probe_cuts, mut feasible_models) = (0usize, 0usize, 0usize);
+        for seed in 0..400u64 {
+            let mut g = Lcg(seed.wrapping_mul(0x9E3779B97F4A7C15) + 1);
+            let mut a = [[0.0f64; NS]; M];
+            let (mut lo, mut hi) = (vec![0.0; M], vec![0.0; M]);
+            for i in 0..M {
+                for j in 0..NS {
+                    if g.int(0, 2) > 0 {
+                        a[i][j] = g.int(-3, 3) as f64;
+                    }
+                }
+                let (x, y) = (g.int(-4, 4) as f64, g.int(-4, 4) as f64);
+                lo[i] = if g.int(0, 2) == 0 { -INF } else { x.min(y) };
+                hi[i] = x.max(y) + g.int(0, 1) as f64;
+            }
+            // Standard form `a x - s = 0`, `s` in `[lo, hi]`.
+            let mut dense = vec![0.0; M * N];
+            for i in 0..M {
+                for j in 0..NS {
+                    dense[i * N + j] = a[i][j];
+                }
+                dense[i * N + NS + i] = -1.0;
+            }
+            let csc = SparseCols::from_dense(&dense, M, N);
+            let b = vec![0.0; M];
+            let mut l = vec![0.0; N];
+            let mut u = vec![1.0, 1.0, 1.0, 1.0, 3.0, 2.0];
+            u.extend(hi.iter().copied());
+            for i in 0..M {
+                l[NS + i] = lo[i];
+            }
+            let mut c: Vec<f64> = (0..NS).map(|_| g.int(-5, 5) as f64).collect();
+            c.extend(vec![0.0; M]);
+            let is_int: Vec<bool> = (0..N).map(|j| j < NS - 1).collect();
+            let sol = solve_lp_root_csc(&csc, M, N, &c, &l, &u, &b, &SimplexOptions::default());
+            if sol.status != LpStatus::Optimal {
+                continue;
+            }
+            // Every feasible point, as the continuous column's interval per integer part.
+            let mut keep: Vec<([f64; NS], f64, f64)> = Vec::new();
+            for bits in 0..(1u32 << NBIN) {
+                for k in 0..4 {
+                    let mut z = [0.0f64; NS];
+                    for (j, zj) in z.iter_mut().enumerate().take(NBIN) {
+                        *zj = ((bits >> j) & 1) as f64;
+                    }
+                    z[NBIN] = k as f64;
+                    if let Some((y0, y1)) = y_range(&a, &lo, &hi, &z) {
+                        keep.push((z, y0, y1));
+                    }
+                }
+            }
+            let mut hs = RootSeparation::new(NS, M, M * NS, false);
+            hs.set_root_probe(true);
+            for _ in 0..3 {
+                hs.round(&StdFormRound {
+                    csc: &csc,
+                    m: M,
+                    n: N,
+                    ns: NS,
+                    b: &b,
+                    l: &l,
+                    u: &u,
+                    is_int: &is_int,
+                    x: &sol.x,
+                    y: &sol.dual,
+                    basic_vars: &sol.basis.basic_vars,
+                    deadline: None,
+                    open_nodes: None,
+                    col_dual: None,
+                });
+            }
+            if keep.is_empty() {
+                continue;
+            }
+            feasible_models += 1;
+            assert!(
+                !hs.root_probe_infeasible(),
+                "seed {seed}: probing called a feasible program infeasible"
+            );
+            probe_cuts += hs.root_probe_cuts;
+            for k in hs.export_cuts() {
+                for (z, y0, y1) in &keep {
+                    for y in [*y0, *y1] {
+                        let mut p = *z;
+                        p[NS - 1] = y;
+                        let act: f64 = (0..NS).map(|j| k.coeffs[j] * p[j]).sum();
+                        assert!(
+                            act >= k.rhs - 1e-6 * (1.0 + k.rhs.abs()),
+                            "seed {seed}: cut {:?} >= {} cuts off {p:?}",
+                            k.coeffs,
+                            k.rhs
+                        );
+                        checks += 1;
+                    }
+                }
+            }
+        }
+        // CLAUDE.md §6: the probe fired.
+        assert!(
+            feasible_models > 50,
+            "only {feasible_models} feasible programs"
+        );
+        assert!(probe_cuts > 0, "root probing added no cut");
+        assert!(checks > 1000, "only {checks} checks");
+        eprintln!(
+            "root_probe: {feasible_models} programs, {probe_cuts} probe cuts, {checks} checks"
+        );
     }
 }
 

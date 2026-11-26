@@ -230,6 +230,8 @@ pub(super) fn harness(
     lim: &Limits,
     initial: Option<&(Vec<f64>, f64)>,
     seed_pool: &[GomoryCut],
+    mut hsep: Option<&mut crate::lp::highs_cutgen::bridge::RootSeparation>,
+    root_bound: f64,
 ) {
     let Ok(path) = std::env::var("DISCOPT_NODEBOX_FILE") else {
         return;
@@ -311,7 +313,15 @@ pub(super) fn harness(
         }
         let mut fresh;
         let env: &mut HighsEnv<'_, '_> = if cumulative {
-            shared.get_or_insert_with(|| fresh_env(ctx, lim, initial, seed_pool))
+            // `DISCOPT_HIGHS_SEARCH_SEPA`: the boxes separate on the root's subsystem
+            // in the dump's order, as HiGHS's pool evolved (the search after the
+            // harness then starts from that pool; the harness is diagnostic only).
+            shared.get_or_insert_with(|| {
+                let mut e = fresh_env(ctx, lim, initial, seed_pool);
+                e.hsep = hsep.take();
+                e.root_obj = root_bound;
+                e
+            })
         } else {
             fresh = fresh_env(ctx, lim, initial, seed_pool);
             &mut fresh

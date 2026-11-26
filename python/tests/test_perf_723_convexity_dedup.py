@@ -54,7 +54,10 @@ def test_convexity_dedup_on_nlp_bb_path(monkeypatch):
     monkeypatch.setattr(_cvx, "classify_model", counting)
 
     m = from_nl(str(_NL_DIR / "fac2.nl"))
-    res = solve_model(m, time_limit=60.0, gap_tolerance=1e-4)
+    # gap_tolerance 1e-7, not the default 1e-4: the 1e-6 objective pin below needs a
+    # gap that implies it. At 1e-4, root probing (#2360) stops validly at gap 4.7e-5
+    # on Linux (rel 2.3e-5 from the optimum, bound below it).
+    res = solve_model(m, time_limit=60.0, gap_tolerance=1e-7)
 
     assert str(res.status) == "optimal"
     # The certified objective pins the optimum (correctness). Exact node-count
@@ -62,7 +65,7 @@ def test_convexity_dedup_on_nlp_bb_path(monkeypatch):
     # count is platform-FP-dependent for this nonconvex instance (39 local vs 41
     # CI), so here we only assert it did not blow up.
     assert res.node_count < 100
-    # Optimum pinned to the solver's actual tolerance (abs=1e-6, rel=1e-4), not a
+    # Optimum pinned at rel 1e-6 (the gap requested above implies it), not a
     # spurious 1e-9: pounce#258 (refuse a certificate masked by extreme objective
     # scale, continue to the true minimum) legitimately shifted the last digits on
     # this ~3.3e8-scale nonconvex objective (331837498.18 -> 331837497.84, ~1e-9 rel).

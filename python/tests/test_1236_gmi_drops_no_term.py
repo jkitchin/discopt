@@ -135,8 +135,17 @@ def test_all_milp_backends_agree_on_the_captured_master():
 
 @pytest.mark.smoke
 def test_fac2_end_to_end_matches_the_reference_optimum():
-    """The defect reached the user as a wrong certified MINLP answer; pin that."""
-    result = from_nl(NL).solve(time_limit=60.0)
+    """The defect reached the user as a wrong certified MINLP answer; pin that.
+
+    The 1e-6 objective check is tighter than the default ``gap_tolerance=1e-4``, so
+    the solve asks for a gap that implies it. At the default the solver may stop
+    anywhere inside 1e-4 with a valid certificate. Measured on Linux (CI and docker
+    arm64) with root probing on (#2360): optimal 331845161.42, bound 331829473.02
+    (below the reference), gap 4.7e-5, so rel 2.3e-5 from the reference. That is a
+    legitimate gap stop, not a false certificate. With ``gap_tolerance=1e-7`` the same
+    build reaches 331837498.18 (gap 1.8e-12). The earlier exactness at the default
+    tolerance was path luck."""
+    result = from_nl(NL).solve(time_limit=60.0, gap_tolerance=1e-7)
     assert result.status == "optimal", result.status
     assert result.objective is not None
     rel = abs(result.objective - FAC2_REFERENCE) / abs(FAC2_REFERENCE)
@@ -150,6 +159,9 @@ def test_fac2_end_to_end_matches_the_reference_optimum():
     # slack. Measured margin on this instance is -1.12e-4 (the bound sits BELOW the
     # incumbent, as it must), so 1.0 is ~9000x the observed noise and still catches
     # a violation four orders of magnitude smaller than the one this test exists for.
+    assert result.bound <= FAC2_REFERENCE + ABS_SLACK_DRIVER, (
+        f"bound {result.bound!r} above the reference optimum {FAC2_REFERENCE}"
+    )
     assert result.bound <= result.objective + ABS_SLACK_DRIVER, (
         f"bound {result.bound!r} above incumbent {result.objective!r}"
     )

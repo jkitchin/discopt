@@ -26,8 +26,9 @@
 //! clique table, root rounds only) are ported behind their levers.
 
 use super::clique::{CliqueDomain, CliqueReason, CliqueRows, CliqueTable};
-use super::domain::BoundType;
+use super::domain::{BoundType, Domain as PropDomain, DomainModel};
 use super::pool::{CutPool, NoObserver};
+use super::probing::{Implications, Prober};
 use super::separators::{
     CutSink, LpAggregator, PathSeparator, SepContext, TableauContext, TableauSeparator,
 };
@@ -100,6 +101,16 @@ pub struct StdFormRound<'a> {
     /// reblock166 once an incumbent's cutoff box changed the system). Stopping
     /// early only generates fewer cuts.
     pub deadline: Option<std::time::Instant>,
+    /// The search's open nodes (`HighsNodeQueue::numNodesDown/Up`), which
+    /// `HighsImplications::getBestVub/Vlb` prefers a variable bound by: a bound on a
+    /// binary branched in more open nodes wins before the bound's minimum value is
+    /// compared. `None` is an empty queue (the root; every count is 0).
+    pub open_nodes: Option<&'a dyn super::domain::OpenNodeCounts>,
+    /// The structurals' reduced costs at `x` (`lpSolution.col_dual`), which
+    /// `getBestVub/Vlb` break an exact tie by (`kUseDualsForBreakingTies`): the bound
+    /// whose binary has the larger `col_dual / coef` wins. `None` reads 0 for every
+    /// column (no tie is broken by duals).
+    pub col_dual: Option<&'a [f64]>,
 }
 
 /// HiGHS's view of the round's LP.
@@ -474,8 +485,18 @@ struct PoolSink<'a> {
     vb: Option<(&'a mut VarBoundStore, &'a [f64], &'a [f64], &'a [bool])>,
 }
 
-impl CutSink for PoolSink<'_> {
-    fn add_cut(&mut self, inds: &[i32], vals: &[f64], rhs: f64, integral: bool) -> i32 {
+impl PoolSink<'_> {
+    /// `HighsCutPool::addCut` with its `propagate` and `extractCliques` arguments; the
+    /// separators' [`CutSink::add_cut`] passes HiGHS's defaults (both true).
+    fn add_cut_with(
+        &mut self,
+        inds: &[i32],
+        vals: &[f64],
+        rhs: f64,
+        integral: bool,
+        propagate: bool,
+        extract: bool,
+    ) -> i32 {
         if let Some(xr) = self.probe {
             self.checked += 1;
             let act: f64 = inds
@@ -494,13 +515,19 @@ impl CutSink for PoolSink<'_> {
         }
         let idx = self
             .pool
-            .add_cut(&mut NoObserver, inds, vals, rhs, integral, true, false);
-        if idx >= 0 && inds.len() <= 100 {
+            .add_cut(&mut NoObserver, inds, vals, rhs, integral, propagate, false);
+        if extract && idx >= 0 && inds.len() <= 100 {
             if let Some((store, lb, ub, is_int)) = self.vb.as_mut() {
                 store.extract_from_cut(&Domain { lb, ub, is_int }, inds, vals, rhs);
             }
         }
         idx
+    }
+}
+
+impl CutSink for PoolSink<'_> {
+    fn add_cut(&mut self, inds: &[i32], vals: &[f64], rhs: f64, integral: bool) -> i32 {
+        self.add_cut_with(inds, vals, rhs, integral, true, true)
     }
     fn num_cuts(&self) -> i64 {
         self.pool.num_cuts()
@@ -622,6 +649,70 @@ pub struct RootSeparation {
     pub cuts_generated: usize,
     /// Structural columns (the pool's cuts are over them).
     ns: usize,
+    /// `DISCOPT_HIGHS_SEPA_ROOT_PROBE`: the root's global domain and implications;
+    /// `None` until [`RootSeparation::probe_root`] first runs.
+    root_probe: Option<RootProbe>,
+    /// [`root_probe_enabled`] when this state was created.
+    probe_on: bool,
+    /// Cuts probing added to the pool (global bounds and implied-bound cuts).
+    pub root_probe_cuts: usize,
+}
+
+/// HiGHS's `mipdata_->domain` and `mipdata_->implications` at the root, for
+/// [`RootSeparation::probe_root`]: a propagation domain over the model rows and the
+/// root's global box, at its global baseline between rounds.
+struct RootProbe {
+    dom: PropDomain,
+    implics: Implications,
+    is_int: Vec<bool>,
+    /// The bounds already sent to the pool as single-column cuts.
+    sent_lb: Vec<f64>,
+    sent_ub: Vec<f64>,
+}
+
+impl RootProbe {
+    /// The domain's bounds tighter than those sent so far, as single-column cuts
+    /// `vals . x <= rhs` (with whether each is integral), marked sent.
+    #[allow(clippy::type_complexity)]
+    fn new_bound_cuts(&mut self) -> Vec<(Vec<i32>, Vec<f64>, f64, bool)> {
+        let mut cuts = Vec::new();
+        for j in 0..self.sent_lb.len() {
+            let (lb, ub) = (self.dom.col_lower[j], self.dom.col_upper[j]);
+            if lb > self.sent_lb[j] && lb.is_finite() {
+                cuts.push((vec![j as i32], vec![-1.0], -lb, self.is_int[j]));
+                self.sent_lb[j] = lb;
+            }
+            if ub < self.sent_ub[j] && ub.is_finite() {
+                cuts.push((vec![j as i32], vec![1.0], ub, self.is_int[j]));
+                self.sent_ub[j] = ub;
+            }
+        }
+        cuts
+    }
+}
+
+/// `DISCOPT_HIGHS_SEPA_ROOT_PROBE`: probing at the root's separation rounds, as
+/// HiGHS's root does. The first probed round runs presolve probing over every binary
+/// (`HPresolve::runProbing`, which HiGHS runs before its root LP), every probed round
+/// then `separateImpliedBounds` over the round LP's fractional binaries; the global
+/// reductions and the violated implied-bound cuts enter the root's pool as cuts, and
+/// the clique table probing grows is the one clique separation and the search use.
+/// **ON** by default since its differential panel (2026-11-26, 61 MILP instances):
+/// cert-clean, and neutral (node geometric mean 0.996 without one outlier, wall 1.00),
+/// graduated under CLAUDE.md §5 bar 2(a) as a faithful port of a component HiGHS runs
+/// by default (`docs/dev/flag-retirement-audit.md`). `=0` keeps the unprobed root.
+/// Read when the root's separation state is created, refusing garbage.
+pub fn root_probe_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_ROOT_PROBE") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!(
+                "DISCOPT_HIGHS_SEPA_ROOT_PROBE={other:?} is not recognized (expected 1 or 0)"
+            ),
+        },
+    }
 }
 
 /// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the transformed LP substitutes
@@ -693,7 +784,34 @@ impl RootSeparation {
             model_nnz,
             cuts_generated: 0,
             ns,
+            root_probe: None,
+            probe_on: root_probe_enabled(),
+            root_probe_cuts: 0,
         }
+    }
+
+    /// Turn root probing on or off for this state, whatever
+    /// `DISCOPT_HIGHS_SEPA_ROOT_PROBE` says (tests, which share one environment).
+    #[cfg(test)]
+    pub(crate) fn set_root_probe(&mut self, on: bool) {
+        self.probe_on = on;
+    }
+
+    /// The root separation's probing state for the search (`mipdata_->implications`
+    /// and the global domain's bounds after the root's probing), `None` when root
+    /// probing never ran or its domain went infeasible.
+    pub fn root_probed(&self) -> Option<super::probing::RootProbed> {
+        let rp = self.root_probe.as_ref().filter(|p| !p.dom.infeasible())?;
+        Some(super::probing::RootProbed {
+            implics: rp.implics.clone(),
+            col_lower: rp.dom.col_lower.clone(),
+            col_upper: rp.dom.col_upper.clone(),
+        })
+    }
+
+    /// Whether root probing proved the model rows infeasible over the root box.
+    pub fn root_probe_infeasible(&self) -> bool {
+        self.root_probe.as_ref().is_some_and(|p| p.dom.infeasible())
     }
 
     /// The root's clique table (`mipdata_->cliquetable` after the root's
@@ -734,6 +852,44 @@ impl RootSeparation {
         self.pool.lp_cut_removed(index);
     }
 
+    /// The tree search starts. HiGHS separates the search's nodes with the worker's
+    /// own `HighsSeparation` (`HighsMipWorker`'s `sepa_ptr_`), not the root's local
+    /// one (`evaluateRootNode`'s `HighsSeparation sepa(worker)`), so its separators
+    /// start fresh: tableau `numCalls`/`numTries` at 0 and the path separator's
+    /// `randgen` re-initialised to `random_seed`. The cut pool, the variable bounds
+    /// and the LP-iteration count are solver-wide in HiGHS and carry over.
+    pub fn begin_search(&mut self) {
+        self.path = PathSeparator::new(self.random_seed);
+        self.tableau = TableauSeparator::default();
+    }
+
+    /// The separators' persistent state: tableau `numCalls` and `numTries`, path
+    /// `numCalls` and the path generator's state.
+    pub fn separator_state(&self) -> (i64, i64, i64, u64) {
+        (
+            self.tableau.num_calls,
+            self.tableau.num_tries,
+            self.path.num_calls,
+            self.path.rng_state(),
+        )
+    }
+
+    /// Overwrite the separators' persistent state (tests: a subsystem that has
+    /// already separated at the root).
+    #[cfg(test)]
+    pub fn set_separator_state(
+        &mut self,
+        tab_calls: i64,
+        tab_tries: i64,
+        path_calls: i64,
+        rng: u64,
+    ) {
+        self.tableau.num_calls = tab_calls;
+        self.tableau.num_tries = tab_tries;
+        self.path = PathSeparator::with_state(rng);
+        self.path.num_calls = path_calls;
+    }
+
     /// Record LP iterations (they seed each round's cut generators, as in HiGHS).
     pub fn add_lp_iterations(&mut self, iters: i64) {
         self.lp_iterations += iters;
@@ -742,6 +898,27 @@ impl RootSeparation {
     /// One separation round: tableau then path separator into the pool, then the
     /// pool's selection for the LP.
     pub fn round(&mut self, r: &StdFormRound<'_>) -> RoundCuts {
+        self.probe_root(r);
+        self.round_impl(r, None)
+    }
+
+    /// One node separation round of HiGHS's `separationRound` on the search's LP:
+    /// the separators run over the global box (`r.l`/`r.u`, `HighsTransformedLp` over
+    /// the global domain) into this persistent pool, whose selection scores efficacy
+    /// over the node's box (`node_l`/`node_u`, structural columns), as
+    /// `cutpool.separate(sol, propdomain, ...)` does with the local domain.
+    pub fn round_node(
+        &mut self,
+        r: &StdFormRound<'_>,
+        node_l: &[f64],
+        node_u: &[f64],
+    ) -> RoundCuts {
+        let nl: Vec<f64> = node_l[..r.ns].iter().map(|&v| lo_bound(v)).collect();
+        let nu: Vec<f64> = node_u[..r.ns].iter().map(|&v| up_bound(v)).collect();
+        self.round_impl(r, Some((&nl, &nu)))
+    }
+
+    fn round_impl(&mut self, r: &StdFormRound<'_>, sel_box: Option<(&[f64], &[f64])>) -> RoundCuts {
         let mut view = View::build(r);
         if self.vbounds.is_none() && vbounds_enabled() {
             // HiGHS extracts from the model rows once (`extractCliques`, run by its
@@ -760,15 +937,28 @@ impl RootSeparation {
         }
         let empty = Vec::new();
         let vstore = self.vbounds.take();
-        let vubs = |c: i32| vstore.as_ref().map_or_else(|| empty.clone(), |v| v.vubs(c));
-        let vlbs = |c: i32| vstore.as_ref().map_or_else(|| empty.clone(), |v| v.vlbs(c));
+        let on = r.open_nodes;
+        let vubs = |c: i32| {
+            vstore
+                .as_ref()
+                .map_or_else(|| empty.clone(), |v| v.vubs_in(c, on))
+        };
+        let vlbs = |c: i32| {
+            vstore
+                .as_ref()
+                .map_or_else(|| empty.clone(), |v| v.vlbs_in(c, on))
+        };
         let intcols: Vec<i32> = (0..r.ns)
             .filter(|&j| r.is_int[j])
             .map(|j| j as i32)
             .collect();
+        let coldual = match r.col_dual {
+            Some(d) if d.len() >= r.ns => d[..r.ns].to_vec(),
+            _ => vec![0.0; r.ns],
+        };
         let setup = TlSetup {
             col_value: &view.colval.clone(),
-            col_dual: &vec![0.0; r.ns],
+            col_dual: &coldual,
             row_value: &view.rowval.clone(),
             continuous_cols: &view.contcols.clone(),
             integral_cols: &intcols,
@@ -979,14 +1169,10 @@ impl RootSeparation {
         let generated = (self.pool.num_cuts() - before).max(0) as usize;
         self.cuts_generated += generated;
         let mut cutset = Vec::new();
-        let sel = self.pool.separate(
-            &mut NoObserver,
-            &view.colval,
-            &view.cl,
-            &view.cu,
-            FEASTOL,
-            &mut cutset,
-        );
+        let (sl, su) = sel_box.unwrap_or((&view.cl, &view.cu));
+        let sel = self
+            .pool
+            .separate(&mut NoObserver, &view.colval, sl, su, FEASTOL, &mut cutset);
         let cuts = sel
             .into_iter()
             .map(|c| {
@@ -1004,6 +1190,177 @@ impl RootSeparation {
             })
             .collect();
         RoundCuts { cuts, generated }
+    }
+}
+
+impl RootSeparation {
+    /// `DISCOPT_HIGHS_SEPA_ROOT_PROBE` ([`root_probe_enabled`]): the probing HiGHS's
+    /// root runs and discopt's ran only at search start. Needs the clique table, so it
+    /// starts at the round after the one that built it (`extractCliques` runs inside
+    /// the round here, before the LP in HiGHS). That round builds the domain over the
+    /// model rows and the round's global box and runs presolve probing of every binary
+    /// (`HPresolve::runProbing`); each round then probes the round LP's fractional
+    /// binaries not probed yet and finds the implied-bound cuts the LP point violates
+    /// (`HighsImplications::separateImpliedBounds`). Probing grows the root's clique
+    /// table, which clique separation and the search read; the domain's global
+    /// reductions (bounds tighter than its starting box) and the implied-bound cuts go
+    /// to the pool, the only route from here to the root LP. A domain that turns
+    /// infeasible stops probing and makes no claim: the search proves it.
+    fn probe_root(&mut self, r: &StdFormRound<'_>) {
+        if !self.probe_on {
+            return;
+        }
+        let Some((table, cbox)) = self.cliques.as_mut() else {
+            return;
+        };
+        if cbox.infeasible {
+            return;
+        }
+        let ns = r.ns;
+        let mut presolve = None;
+        if self.root_probe.is_none() {
+            let view = View::build(r);
+            let k = self.model_rows.min(view.m);
+            let rows: Vec<(Vec<usize>, Vec<f64>)> = view.rows[..k]
+                .iter()
+                .map(|(ri, rv)| (ri.iter().map(|&j| j as usize).collect(), rv.clone()))
+                .collect();
+            let is_int = view.isint[..ns].to_vec();
+            let model = DomainModel::from_rows(
+                ns,
+                &rows,
+                view.rowlo[..k].to_vec(),
+                view.rowup[..k].to_vec(),
+                is_int.clone(),
+            );
+            let mut dom = PropDomain::new(
+                std::sync::Arc::new(model),
+                &view.cl,
+                &view.cu,
+                FEASTOL,
+                EPSILON,
+            );
+            dom.propagate();
+            if !dom.infeasible() {
+                dom.clear_changed_cols();
+                dom.commit_as_global();
+            }
+            let mut implics = Implications::new(ns);
+            let nnz = dom.num_model_nonzeros() as i64;
+            if !dom.infeasible() {
+                let mut p = Prober::new(&mut dom, table, &mut implics);
+                presolve = Some(p.presolve_probing(!self.top_level, 0, k, nnz));
+                // `HighsImplications::rebuild` after presolve: `hasProbed` reset,
+                // `nextCleanupCall = numNonzero()`, and
+                // `numCliqueEntriesAfterFirstPresolve`.
+                implics.clear_probed();
+            }
+            implics.next_cleanup_call = nnz;
+            table.set_num_entries_after_presolve(table.num_entries());
+            self.root_probe = Some(RootProbe {
+                dom,
+                implics,
+                sent_lb: view.cl,
+                sent_ub: view.cu,
+                is_int,
+            });
+        }
+        let rp = self.root_probe.as_mut().expect("built above");
+        if rp.dom.infeasible() {
+            return;
+        }
+        let x = &r.x[..ns];
+        let frac: Vec<usize> = (0..ns)
+            .filter(|&j| r.is_int[j] && (x[j] - x[j].round()).abs() > FEASTOL)
+            .collect();
+        // The two passes are counted apart, so a panel can tell which one moved the
+        // bound: presolve probing's reductions and the bounds they send, then the
+        // round's.
+        let presolve_cuts = if presolve.is_some() {
+            rp.new_bound_cuts()
+        } else {
+            Vec::new()
+        };
+        let st = super::probing::probe_lp_candidates(&mut rp.dom, table, &mut rp.implics, &frac);
+        // The counters describe the top-level root only: a heuristic sub-MIP runs this
+        // pass on its own restricted problem, and its reductions say nothing about the
+        // panel instance's root bound.
+        let count = self.top_level;
+        if count {
+            use crate::profile::{incr_by, Ctr};
+            if let Some(ps) = presolve {
+                incr_by(Ctr::MilpRootProbePresolve, ps.probed as u64);
+                incr_by(Ctr::MilpRootProbePresolveReductions, ps.reductions as u64);
+                incr_by(
+                    Ctr::MilpRootProbePresolveEntries,
+                    ps.new_entries.max(0) as u64,
+                );
+            }
+            incr_by(Ctr::MilpRootProbeProbed, st.probed as u64);
+            incr_by(Ctr::MilpRootProbeReductions, st.reductions as u64);
+            incr_by(Ctr::MilpRootProbeEntries, st.new_entries.max(0) as u64);
+        }
+        if rp.dom.infeasible() {
+            if count {
+                crate::profile::incr(crate::profile::Ctr::MilpRootProbeInfeasible);
+            }
+            return;
+        }
+        // `vals . x <= rhs`: presolve probing's bounds, the round's bounds not sent
+        // yet, then the implied-bound cuts.
+        let npre = presolve_cuts.len();
+        let mut cuts = presolve_cuts;
+        cuts.extend(rp.new_bound_cuts());
+        let nbounds = cuts.len();
+        for (inds, vals, rhs, integral) in
+            super::probing::implied_bound_cuts(&rp.dom, &rp.implics, x, &frac)
+        {
+            cuts.push((
+                inds.iter().map(|&j| j as i32).collect(),
+                vals.to_vec(),
+                rhs,
+                integral,
+            ));
+        }
+        let probe = if self.top_level { check_point() } else { None };
+        let mut sink = PoolSink {
+            pool: &mut self.pool,
+            source: "root-probe",
+            probe,
+            checked: 0,
+            violated: 0,
+            // `extractCliques` is false for every cut here.
+            vb: None,
+        };
+        let (mut np, mut nb, mut ni) = (0u64, 0u64, 0u64);
+        // HiGHS's arguments (`HighsImplications.cpp:583`): an implied-bound cut is added
+        // with `propagate` and `extractCliques` false; a fixing (there an infeasible
+        // literal, here also a global reduction, which HiGHS applies to the domain
+        // instead) with `propagate` true and `extractCliques` false.
+        for (k, (inds, vals, rhs, integral)) in cuts.iter().enumerate() {
+            if sink.add_cut_with(inds, vals, *rhs, *integral, k < nbounds, false) >= 0 {
+                if k < npre {
+                    np += 1;
+                } else if k < nbounds {
+                    nb += 1;
+                } else {
+                    ni += 1;
+                }
+            }
+        }
+        self.root_probe_cuts += (np + nb + ni) as usize;
+        if count {
+            use crate::profile::{incr_by, Ctr};
+            incr_by(Ctr::MilpRootProbePresolveBoundCuts, np);
+            incr_by(Ctr::MilpRootProbeBoundCuts, nb);
+            incr_by(Ctr::MilpRootProbeImpliedCuts, ni);
+        }
+        if probe.is_some() {
+            eprintln!(
+                "HIGHS_SEPA_CHECK root-probe checked={} violated={}",
+                sink.checked, sink.violated
+            );
+        }
     }
 }
 
@@ -1286,4 +1643,24 @@ pub fn separate_node(r: &StdFormRound<'_>, p: &NodeSepa<'_>) -> Vec<GomoryCut> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod begin_search_tests {
+    use super::*;
+
+    /// `begin_search` leaves the separators as a fresh `HighsSeparation` builds them
+    /// (HiGHS's search separates with the worker's own object, not the root's).
+    #[test]
+    fn begin_search_restores_fresh_separators() {
+        let fresh = RootSeparation::new(4, 2, 6, true).separator_state();
+        assert_eq!(fresh.0, 0);
+        assert_eq!(fresh.1, 0);
+        assert_eq!(fresh.2, 0);
+        let mut hs = RootSeparation::new(4, 2, 6, true);
+        hs.set_separator_state(16, 466, 16, 0x1234_5678_9abc_def0);
+        assert_ne!(hs.separator_state(), fresh);
+        hs.begin_search();
+        assert_eq!(hs.separator_state(), fresh);
+    }
 }
