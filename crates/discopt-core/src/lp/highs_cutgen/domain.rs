@@ -615,6 +615,11 @@ pub struct Domain {
     /// `conflictpool_->resetAge(conflict)` calls made during propagation, as
     /// `(pool, conflict)`, for the caller to apply.
     conflict_age_resets: Vec<(usize, usize)>,
+    /// `DISCOPT_MILP_ORBITOPE`: the model's verified orbitopes (not a HiGHS
+    /// component; see [`super::orbitope`]), and whether one of their columns changed
+    /// since they last propagated.
+    orbitopes: Option<Arc<super::orbitope::Orbitopes>>,
+    orbitope_dirty: bool,
     /// `mipdata_->cliquetable` (`DISCOPT_MILP_CLIQUE_DOMAIN`): when set, fixing a
     /// binary runs `cliquetable.addImplications` from [`Self::change_bound`].
     cliquetable: Option<Arc<CliqueTable>>,
@@ -675,6 +680,8 @@ impl Domain {
             upper_limit: INF,
             conflictpools: Vec::new(),
             conflict_age_resets: Vec::new(),
+            orbitopes: None,
+            orbitope_dirty: false,
             cliquetable: None,
             clique_depth: 0,
             clique_pending: Vec::new(),
@@ -682,6 +689,49 @@ impl Domain {
         };
         d.compute_row_activities();
         d
+    }
+
+    /// Attach the model's verified orbitopes (`DISCOPT_MILP_ORBITOPE`); they propagate
+    /// in [`Self::propagate`] whenever one of their columns changes. Panics when they
+    /// were detected on a different model (`ns`, structural costs `c`).
+    pub fn set_orbitopes(&mut self, o: Arc<super::orbitope::Orbitopes>, c: &[f64]) {
+        assert!(
+            o.matches(self.model.ncols, c),
+            "orbitopes attached to a model they were not detected on"
+        );
+        self.orbitopes = Some(o);
+        self.orbitope_dirty = true;
+    }
+
+    /// Run the orbitopes' propagation (`Reason::Unspecified` changes).
+    fn propagate_orbitopes(&mut self) {
+        let Some(o) = self.orbitopes.clone() else {
+            return;
+        };
+        let mut out = Vec::new();
+        for orb in &o.list {
+            out.clear();
+            orb.propagate(&self.col_lower, &self.col_upper, self.feastol, &mut out);
+            crate::profile::incr_by(crate::profile::Ctr::MilpOrbitopeFixings, out.len() as u64);
+            for &(column, is_lower, boundval) in &out {
+                if self.infeasible {
+                    return;
+                }
+                let boundtype = if is_lower {
+                    BoundType::Lower
+                } else {
+                    BoundType::Upper
+                };
+                self.change_bound(
+                    DomainChange {
+                        boundval,
+                        column,
+                        boundtype,
+                    },
+                    Reason::Unspecified,
+                );
+            }
+        }
     }
 
     /// Attach `mipdata_->cliquetable`: from now on fixing a binary column runs
@@ -1799,6 +1849,31 @@ impl Domain {
         }
     }
 
+    /// Apply symmetry-handling tightenings `(column, is_lower, value)` with
+    /// `Reason::Unspecified`, a non-resolvable leaf of conflict analysis
+    /// (`DISCOPT_MILP_SYM_DYNAMIC`; see [`super::sym_dynamic`]). Stops at an
+    /// infeasibility.
+    pub fn apply_symmetry_tightenings(&mut self, out: &[(usize, bool, f64)]) {
+        for &(column, is_lower, boundval) in out {
+            if self.infeasible {
+                return;
+            }
+            let boundtype = if is_lower {
+                BoundType::Lower
+            } else {
+                BoundType::Upper
+            };
+            self.change_bound(
+                DomainChange {
+                    boundval,
+                    column,
+                    boundtype,
+                },
+                Reason::Unspecified,
+            );
+        }
+    }
+
     /// Whether the domain is infeasible.
     pub fn infeasible(&self) -> bool {
         self.infeasible
@@ -2556,6 +2631,11 @@ impl Domain {
             && self.col_lower[col] == 0.0
             && self.col_upper[col] == 1.0;
         let oldbound = self.do_change_bound(chg);
+        if let Some(o) = &self.orbitopes {
+            if o.member[col] {
+                self.orbitope_dirty = true;
+            }
+        }
         let earlier = prev_pos != -1 && {
             let p = prev_pos as usize;
             self.domchgreason[p] == Reason::Branching || self.chain_branched[p]
@@ -2848,6 +2928,12 @@ impl Domain {
             if self.obj_prop.is_some() {
                 self.obj_propagate();
             }
+            if self.orbitope_dirty {
+                self.orbitope_dirty = false;
+                if !self.infeasible {
+                    self.propagate_orbitopes();
+                }
+            }
             for pool in 0..self.conflictpools.len() {
                 while !self.conflictpools[pool].propagate_conflict_inds.is_empty() {
                     let conflicts =
@@ -2963,6 +3049,7 @@ impl Domain {
     /// `havePropagationRows()`.
     fn have_propagation_rows(&self) -> bool {
         !self.propagateinds.is_empty()
+            || self.orbitope_dirty
             || self.obj_should_be_propagated()
             || self.cutpools.iter().any(|cp| !cp.inds.is_empty())
             || self

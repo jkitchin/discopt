@@ -1153,6 +1153,8 @@ fn domain_from_lp(
     l: &[f64],
     u: &[f64],
     is_int: &[bool],
+    c: &[f64],
+    orbitopes: Option<&std::sync::Arc<crate::lp::highs_cutgen::orbitope::Orbitopes>>,
 ) -> Option<(crate::lp::highs_cutgen::domain::Domain, SlackMap)> {
     let (model, slack_map) = domain_model_from_lp(csc, m, n, ns, b, l, u, is_int);
     let gl: Vec<f64> = l[..ns]
@@ -1170,6 +1172,10 @@ fn domain_from_lp(
         1e-6,
         1e-9,
     );
+    if let Some(o) = orbitopes {
+        // Before the root propagation, so its fixings are global.
+        d.set_orbitopes(std::sync::Arc::clone(o), c);
+    }
     d.propagate();
     if d.infeasible() {
         return None;
@@ -2383,6 +2389,25 @@ pub struct MilpOptions {
     pub bound_hook: Option<std::sync::Arc<dyn MilpBoundHook>>,
     /// Call [`Self::bound_hook`] on every `bound_hook_every`-th batch (`>= 1`).
     pub bound_hook_every: usize,
+    /// `DISCOPT_MILP_ORBITOPE`: verified orbitopes of the model this search solves,
+    /// propagated by its domain. Set only by the driver's symmetry step, on a copy of
+    /// the options for that one model (the domain re-checks the model fingerprint);
+    /// `None` everywhere else.
+    pub orbitopes: Option<std::sync::Arc<crate::lp::highs_cutgen::orbitope::Orbitopes>>,
+    /// `DISCOPT_MILP_SYM_DYNAMIC`: verified automorphisms of the model this search
+    /// solves, for dynamic lex reduction in its branching order. Set only by the
+    /// driver's symmetry step, on a copy of the options for that one model (the
+    /// search re-checks the model fingerprint); `None` everywhere else.
+    pub sym_dynamic: Option<std::sync::Arc<crate::lp::highs_cutgen::sym_dynamic::DynamicLex>>,
+    /// `DISCOPT_MILP_SYM_ORBITAL`: verified automorphisms of the model this search
+    /// solves, for orbital reduction in its branching order. Set and checked as
+    /// `sym_dynamic`; `None` everywhere else.
+    pub sym_orbital: Option<std::sync::Arc<crate::lp::highs_cutgen::sym_orbital::OrbitalReduction>>,
+    /// `DISCOPT_MILP_ORBITOPAL`: verified orbitopes of the model this search solves,
+    /// for dynamic orbitopal fixing in its branching order. Set and checked as
+    /// `sym_dynamic`; `None` everywhere else.
+    pub sym_orbitopal:
+        Option<std::sync::Arc<crate::lp::highs_cutgen::sym_orbitopal::DynamicOrbitopes>>,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
     /// Absolute gap tolerance. When `Some(t)`, the search stops as soon as
@@ -5011,6 +5036,10 @@ pub fn solve_milp_node_hooked(
     // Read the opt-in flags here, so a garbage value is refused on every model,
     // including one that presolve or the root closes before any search reads them.
     let _ = crate::bnb::milp_symmetry::sym_lex_enabled();
+    let _ = crate::bnb::milp_symmetry::orbitope_enabled();
+    let _ = crate::bnb::milp_symmetry::sym_dynamic_enabled();
+    let _ = crate::bnb::milp_symmetry::sym_orbital_enabled();
+    let _ = crate::bnb::milp_symmetry::orbitopal_enabled();
     let _ = highs_env::conflict_enabled();
     if let Some(mask) = opts.relaxable_rows.as_ref() {
         // #2223: the mask trades incumbent feasibility on the marked rows for a
@@ -5142,7 +5171,12 @@ fn solve_milp_node_search_sym(
     lazy: Option<&dyn MilpLazyHook>,
     node: Option<&dyn MilpNodeHook>,
 ) -> MilpResult {
-    let on = crate::bnb::milp_symmetry::sym_lex_enabled()
+    let lex = crate::bnb::milp_symmetry::sym_lex_enabled();
+    let orb = crate::bnb::milp_symmetry::orbitope_enabled();
+    let dynamic = crate::bnb::milp_symmetry::sym_dynamic_enabled();
+    let orbital = crate::bnb::milp_symmetry::sym_orbital_enabled();
+    let orbitopal = crate::bnb::milp_symmetry::orbitopal_enabled();
+    let on = (lex || orb || dynamic || orbital || orbitopal)
         && !in_sub_mip()
         && !opts.integer_cols.is_empty()
         && hook.is_none()
@@ -5174,7 +5208,74 @@ fn solve_milp_node_search_sym(
         is_int: &is_int,
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let s = crate::bnb::milp_symmetry::detect(&f, 1000, Some(deadline));
+    let mut s = crate::bnb::milp_symmetry::detect(&f, 1000, Some(deadline));
+    let orbs = if orb || orbitopal {
+        crate::bnb::milp_symmetry::orbitopes(&f, &s)
+    } else {
+        Vec::new()
+    };
+    let n_orbs = orbs.len();
+    let n_orb_cols: usize = orbs.iter().map(|o| o.cols.len()).sum();
+    // The options copy that carries this model's orbitopes and automorphisms: it
+    // reaches only the search below, on this model (both re-check the fingerprint).
+    // With dynamic orbitopal fixing, the branching-order methods get only the
+    // generators that move no orbitope entry: the two groups then act on disjoint
+    // columns (sharing the orbitope's swaps loses orbits; see the negative control in
+    // `sym_orbitopal`).
+    let mut member = vec![false; opts.n_struct];
+    if orbitopal {
+        for o in &orbs {
+            for col in &o.cols {
+                for &j in col {
+                    member[j] = true;
+                }
+            }
+        }
+    }
+    let rest: Vec<Vec<usize>> = s
+        .generators
+        .iter()
+        .filter(|g| (0..opts.n_struct).all(|j| g[j] == j || !member[j]))
+        .cloned()
+        .collect();
+    let dyn_on = dynamic && !rest.is_empty();
+    let orbital_on = orbital && !rest.is_empty();
+    let mut opts_o;
+    let opts = if orbs.is_empty() && !dyn_on && !orbital_on {
+        opts
+    } else {
+        opts_o = opts.clone();
+        if !orbs.is_empty() {
+            let o = crate::lp::highs_cutgen::orbitope::Orbitopes::new(orbs, opts.n_struct, c);
+            if orbitopal {
+                opts_o.sym_orbitopal =
+                    Some(crate::lp::highs_cutgen::sym_orbitopal::DynamicOrbitopes::new(o));
+            } else {
+                opts_o.orbitopes = Some(o);
+            }
+        }
+        if dyn_on {
+            // The same verified generators; the search applies them in its own
+            // branching order (no rows, no static order).
+            opts_o.sym_dynamic = Some(crate::lp::highs_cutgen::sym_dynamic::DynamicLex::new(
+                &rest,
+                opts.n_struct,
+                c,
+                &is_int,
+            ));
+        }
+        if orbital_on {
+            opts_o.sym_orbital = Some(crate::lp::highs_cutgen::sym_orbital::OrbitalReduction::new(
+                &rest,
+                opts.n_struct,
+                c,
+            ));
+        }
+        &opts_o
+    };
+    if !lex {
+        s.rows.clear();
+    }
     let aug = (!s.rows.is_empty()).then(|| crate::bnb::milp_symmetry::augment(&f, &s.rows));
     let res = match aug {
         Some((csc_a, m_a, n_a, c_a, l_a, u_a, b_a)) => solve_milp_node_search(
@@ -5187,6 +5288,14 @@ fn solve_milp_node_search_sym(
     incr_by(Ctr::MilpSymLexGenerators, s.generators.len() as u64);
     incr_by(Ctr::MilpSymLexTried, s.tried as u64);
     incr_by(Ctr::MilpSymLexRows, s.rows.len() as u64);
+    incr_by(Ctr::MilpOrbitopes, n_orbs as u64);
+    incr_by(Ctr::MilpOrbitopeColumns, n_orb_cols as u64);
+    if dynamic {
+        incr_by(Ctr::MilpSymDynGenerators, rest.len() as u64);
+    }
+    if orbital {
+        incr_by(Ctr::MilpSymOrbGenerators, rest.len() as u64);
+    }
     res
 }
 
@@ -8596,7 +8705,18 @@ fn solve_milp_node_search(
                 h = (h ^ v.to_bits()).wrapping_mul(0x100_0000_01b3);
             }
             if hs_domain.as_ref().is_none_or(|(k, _)| *k != h) {
-                let built = domain_from_lp(csc_rc, m_w, n_w, ns, &b_w, &l_w, &u_w, &is_int_full);
+                let built = domain_from_lp(
+                    csc_rc,
+                    m_w,
+                    n_w,
+                    ns,
+                    &b_w,
+                    &l_w,
+                    &u_w,
+                    &is_int_full,
+                    &[],
+                    None,
+                );
                 crate::profile::incr(crate::profile::Ctr::HsDomainRebuilds);
                 match built {
                     Some((d, slack_map)) => {
@@ -13686,6 +13806,10 @@ mod tests {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -14989,6 +15113,10 @@ mod tests {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -17567,6 +17695,10 @@ mod tests {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -17715,6 +17847,10 @@ pub(crate) mod sparse_milp_diff {
                 rel_gap_max_abs: false,
                 bound_hook: None,
                 bound_hook_every: 1,
+                orbitopes: None,
+                sym_dynamic: None,
+                sym_orbital: None,
+                sym_orbitopal: None,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -18061,6 +18197,10 @@ pub(crate) mod sparse_milp_diff {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -18382,6 +18522,10 @@ mod lazy_separation {
                 rel_gap_max_abs: false,
                 bound_hook: None,
                 bound_hook_every: 1,
+                orbitopes: None,
+                sym_dynamic: None,
+                sym_orbital: None,
+                sym_orbitopal: None,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -18760,6 +18904,10 @@ mod node_separation {
                 rel_gap_max_abs: false,
                 bound_hook: None,
                 bound_hook_every: 1,
+                orbitopes: None,
+                sym_dynamic: None,
+                sym_orbital: None,
+                sym_orbitopal: None,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -19054,6 +19202,10 @@ mod lazy_infeasible_node {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -19204,6 +19356,10 @@ mod root_cut_budget_tests {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -19998,6 +20154,10 @@ mod tiny_entry_tests {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -21019,6 +21179,10 @@ mod hook_stop_2223 {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -21412,6 +21576,10 @@ mod relaxable_rows_2223 {
             rel_gap_max_abs: false,
             bound_hook: None,
             bound_hook_every: 1,
+            orbitopes: None,
+            sym_dynamic: None,
+            sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
