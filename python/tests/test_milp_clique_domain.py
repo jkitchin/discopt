@@ -1,5 +1,6 @@
 """Differential soundness test for ``DISCOPT_MILP_CLIQUE_DOMAIN`` on the Rust MILP
-engine: the root clique table, extended by probing the root LP's fractional binaries,
+engine: the root clique table, extended by HiGHS's presolve probing of every binary
+(``HPresolve::runProbing``) and by probing the root LP's fractional binaries,
 attached with the probing implications to the search's domains (HiGHS
 ``HighsDomain::changeBound`` -> ``cliquetable.addImplications`` and
 ``implications.applyImplications``).
@@ -7,11 +8,20 @@ attached with the probing implications to the search's domains (HiGHS
 Bound-changing (CLAUDE.md §5): every arm must reach HiGHS's verdict and optimum, the
 independent oracle, with and without conflict analysis (which explains the clique
 fixings through their ``Reason::cliqueTable``). The test asserts that the hook fixed
-something and that probing ran (§6: prove the probe fired), and that every solve was
-compared.
+something and that presolve probing ran (§6: prove the probe fired), and that every
+solve was compared.
+
+``test_c513_tables_and_node_probing`` is the regression test for the probing schedule:
+on ``c513_lex_hpre`` the extracted table holds 8 cliques (HiGHS's extraction finds
+none) and HiGHS's 404 come from presolve probing, so the table must reach that size;
+with conflict analysis the search has a global domain, and node separation runs
+``separateImpliedBounds`` on it (probing the node LP's unprobed fractional binaries,
+then the implied-bound cuts the LP point violates).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import discopt._rust as _rust
 import discopt.modeling as dm
@@ -77,7 +87,14 @@ def _cases():
 def test_clique_domain_arms_match_the_oracle(monkeypatch):
     monkeypatch.setenv("DISCOPT_PROFILE", "1")
     compared = 0
-    fired = {"fixings": 0, "probed": 0}
+    keys = {
+        "fixings": "MilpCliqueDomainFixings",
+        "probed": "MilpProbeProbed",
+        "presolve": "MilpProbePresolve",
+        "node": "MilpProbeNode",
+        "ibcuts": "MilpImpliedBoundCuts",
+    }
+    fired = dict.fromkeys(keys, 0)
     for name, build, args in _cases():
         for k in FLAGS + ("DISCOPT_LP_ENGINE",):
             monkeypatch.delenv(k, raising=False)
@@ -96,15 +113,19 @@ def test_clique_domain_arms_match_the_oracle(monkeypatch):
             assert r.objective == pytest.approx(ref.objective, abs=1e-6), (name, arm)
             assert r.gap_certified, (name, arm)
             if arm == "off":
-                assert c.get("MilpCliqueDomainFixings", 0) == 0, (name, c)
-                assert c.get("MilpProbeProbed", 0) == 0, (name, c)
+                for key in keys.values():
+                    assert c.get(key, 0) == 0, (name, key, c)
             else:
-                fired["fixings"] += c.get("MilpCliqueDomainFixings", 0)
-                fired["probed"] += c.get("MilpProbeProbed", 0)
+                for f, key in keys.items():
+                    fired[f] += c.get(key, 0)
+                if arm == "clq":
+                    # Node probing needs the global domain conflict analysis builds.
+                    assert c.get("MilpProbeNode", 0) == 0, (name, c)
             compared += 1
     assert compared == len(_cases()) * len(ARMS)
     assert fired["fixings"] > 0, "the clique hook never fixed a literal: nothing was compared"
     assert fired["probed"] > 0, "probing never ran: the implications were never compared"
+    assert fired["presolve"] > 0, "presolve probing never ran"
 
 
 def test_clique_domain_flag_refuses_garbage(monkeypatch):
@@ -112,3 +133,30 @@ def test_clique_domain_flag_refuses_garbage(monkeypatch):
     monkeypatch.setenv("DISCOPT_MILP_CLIQUE_DOMAIN", "maybe")
     with pytest.raises(BaseException):
         _coloring(6, _rand_graph(6, 0.5, 0), 4).solve(milp_backend="native")
+
+
+C513 = Path(__file__).parent / "data" / "c513_lex_hpre.mps.gz"
+
+
+@pytest.mark.correctness
+def test_c513_tables_and_node_probing(monkeypatch):
+    """``c513_lex_hpre`` (an infeasible subsystem, 144 binaries): presolve probing fills
+    the clique table to HiGHS 1.16's size (404 cliques / 808 entries after its presolve,
+    measured with ``threads=1``, no symmetry), node separation probes and separates
+    implied-bound cuts, and no incumbent is reported for the infeasible program."""
+    for k in FLAGS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DISCOPT_PROFILE", "1")
+    monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
+    monkeypatch.setenv("DISCOPT_MILP_CLIQUE_DOMAIN", "1")
+    monkeypatch.setenv("DISCOPT_MILP_CONFLICT", "1")
+    _rust.profile_reset_py()
+    r = dm.from_mps(str(C513)).solve(threads=1, max_nodes=300, deterministic=True)
+    c = dict(_rust.profile_counters_py())
+    assert r.objective is None, (r.status, r.objective)
+    assert r.status != "optimal", r.status
+    assert c.get("MilpCliqueTableCliques0", 0) < 50, c.get("MilpCliqueTableCliques0")
+    assert c.get("MilpCliqueTableCliques1", 0) >= 380, c.get("MilpCliqueTableCliques1")
+    assert c.get("MilpProbePresolve", 0) >= 144, c.get("MilpProbePresolve")
+    assert c.get("MilpProbeNode", 0) > 0, "node separation never probed"
+    assert c.get("MilpImpliedBoundCuts", 0) > 0, "no implied-bound cut was separated"

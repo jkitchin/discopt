@@ -485,7 +485,12 @@ impl CliqueTable {
     pub fn set_max_entries(&mut self, num_nz: i32) {
         self.max_entries = 2_000_000 + 10 * num_nz;
     }
-    /// Record `mipdata_->numCliqueEntriesAfterPresolve`.
+    /// `mipdata_->numCliqueEntriesAfterPresolve`.
+    pub fn num_entries_after_presolve(&self) -> i32 {
+        self.num_entries_after_presolve
+    }
+
+    /// Set `numCliqueEntriesAfterPresolve`.
     pub fn set_num_entries_after_presolve(&mut self, n: i32) {
         self.num_entries_after_presolve = n;
     }

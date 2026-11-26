@@ -265,6 +265,18 @@ counters!(
     MilpProbeProbed,
     MilpProbeReductions,
     MilpProbeEntries,
+    // Cliques and entries of the table handed to the search, before / after probing.
+    MilpCliqueTableCliques0,
+    MilpCliqueTableEntries0,
+    MilpCliqueTableCliques1,
+    MilpCliqueTableEntries1,
+    // Bound changes applyImplications made in the search.
+    MilpImplApplyFixings,
+    // Columns presolve probing (`HPresolve::runProbing`) and node separation's
+    // `separateImpliedBounds` probed; implied-bound cuts the latter added.
+    MilpProbePresolve,
+    MilpProbeNode,
+    MilpImpliedBoundCuts,
     // #2225: path separator paths abandoned by the substitution progress guard.
     HighsSepaPathSubstCap,
     // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global

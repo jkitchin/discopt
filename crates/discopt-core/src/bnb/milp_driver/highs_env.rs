@@ -432,19 +432,23 @@ pub(super) fn conflict_enabled() -> bool {
 }
 
 /// `DISCOPT_MILP_CLIQUE_DOMAIN`: the root's clique table (`mipdata_->cliquetable`,
-/// the ported `extractCliques` + `runCliqueMerging` of the root separation), extended
-/// at search start by probing the root LP's fractional binaries on the global domain
-/// (`separateImpliedBounds`' probing loop, `HighsImplications::runProbing`, in
-/// `lp/highs_cutgen/probing.rs`), and attached with the probing implications to the
-/// search's local and global domains. Fixing a binary then fixes the other literals of
-/// its cliques (`HighsDomain::changeBound`'s `cliquetable.addImplications`) and
-/// re-applies what its probe implied (`implications.applyImplications`), with
-/// `Reason::cliqueTable` reasons conflict analysis explains. Bound-changing (it
-/// tightens node boxes, and probing tightens the global box). Default OFF: its §5
-/// panel (2026-11-25, row in `docs/dev/flag-retirement-audit.md`) was cert-clean and
-/// neutral, but c513 took 42,941 -> 54,975 nodes and the probing runs once rather than
-/// every separation round as in HiGHS. Porting the per-round probing would change
-/// that. Read per search, garbage refused.
+/// the ported `extractCliques` + `runCliqueMerging` of the root separation), filled by
+/// HiGHS's presolve probing schedule (`HPresolve::runProbing`: every binary, scored and
+/// budgeted as in HiGHS) and by probing the root LP's fractional binaries
+/// (`separateImpliedBounds`' probing loop), both in `lp/highs_cutgen/probing.rs`, then
+/// attached with the probing implications to the search's local and global domains.
+/// Fixing a binary then fixes the other literals of its cliques (`HighsDomain::
+/// changeBound`'s `cliquetable.addImplications`) and re-applies what its probe implied
+/// (`implications.applyImplications`), with `Reason::cliqueTable` reasons conflict
+/// analysis explains. With `DISCOPT_MILP_CONFLICT` (which supplies the global domain)
+/// node separation also runs `separateImpliedBounds`: probe the node LP's unprobed
+/// fractional binaries and add the violated implied-bound cuts. Bound-changing.
+/// Default OFF: its §5 panel (2026-11-26, row in `docs/dev/flag-retirement-audit.md`)
+/// was cert-clean and missed bar 2's node threshold (-0.3 % alone, -8.6 % with
+/// conflict analysis); node probing needs the default-OFF conflict flag, and the
+/// per-round root probing is approximated by one pass at search start. Graduating it
+/// together with `DISCOPT_MILP_CONFLICT` would change that. Read per search, garbage
+/// refused.
 pub(super) fn clique_domain_enabled() -> bool {
     match std::env::var("DISCOPT_MILP_CLIQUE_DOMAIN") {
         Err(_) => false,
@@ -2001,6 +2005,42 @@ impl SearchEnv for HighsEnv<'_, '_> {
         {
             return false;
         }
+        // `separationRound` starts with `implications.separateImpliedBounds` on the
+        // global domain: probe the LP's unprobed fractional binaries, then the
+        // implied-bound cuts the LP point violates, into the cut pool.
+        let mut implied: Vec<GomoryCut> = Vec::new();
+        if clique_domain_enabled() {
+            if let Some(cf) = self.conf.as_mut() {
+                let feastol = self.eval.dom.feastol();
+                let fr: Vec<usize> = (0..ctx.ns)
+                    .filter(|&j| ctx.is_int[j] && frac(x[j]) > feastol)
+                    .collect();
+                let (st, cuts) = crate::lp::highs_cutgen::probing::separate_implied_bounds(
+                    &mut cf.gdom,
+                    &mut self.eval.dom,
+                    &x,
+                    &fr,
+                );
+                // Probing committed its reductions to the global baseline: the next
+                // `sync_global` copies the global bounds into the local baseline.
+                cf.synced = usize::MAX;
+                crate::profile::incr_by(crate::profile::Ctr::MilpProbeNode, st.probed as u64);
+                crate::profile::incr_by(
+                    crate::profile::Ctr::MilpImpliedBoundCuts,
+                    cuts.len() as u64,
+                );
+                for (inds, vals, rhs, _) in cuts {
+                    // `vals . x <= rhs` as `coeffs . x >= rhs`.
+                    let mut coeffs = vec![0.0; self.ctx.n_w];
+                    coeffs[inds[0]] -= vals[0];
+                    coeffs[inds[1]] -= vals[1];
+                    implied.push(GomoryCut { coeffs, rhs: -rhs });
+                }
+            }
+            if self.conf.as_ref().is_some_and(|cf| cf.gdom.infeasible()) {
+                return false;
+            }
+        }
         let mut pick: Vec<(f64, usize)> = Vec::new();
         for (k, cut) in self.pool.iter().enumerate() {
             if self.cut_lp && self.in_lp.contains(&cut_signature(cut)) {
@@ -2020,7 +2060,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
         }
         pick.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         pick.truncate(NODE_GMI_POOL_PER_NODE);
-        let rows: Vec<GomoryCut> = pick
+        let mut rows: Vec<GomoryCut> = pick
             .iter()
             .map(|&(_, k)| {
                 let mut coeffs = self.pool[k].coeffs.clone();
@@ -2031,6 +2071,14 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 }
             })
             .collect();
+        for cut in &implied {
+            let mut coeffs = cut.coeffs.clone();
+            coeffs.resize(ctx.n_w, 0.0);
+            rows.push(GomoryCut {
+                coeffs,
+                rhs: cut.rhs,
+            });
+        }
         self.sep_calls += 1;
         let ref_cur = self.refp.as_ref().map(|rc| rc.current(self.lp.as_ref()));
         if let (Some(rc), Some(xc)) = (self.refp.as_mut(), ref_cur.as_ref()) {
@@ -2072,7 +2120,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             self.eval.pending_lift = Some(g + ctx.obj_const);
         }
         if !self.cut_lp {
-            for cut in lg.new_cuts {
+            for cut in implied.into_iter().chain(lg.new_cuts) {
                 self.pool_add(cut);
             }
             return false;
@@ -2091,7 +2139,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             }
         }
         let mut add: Vec<GomoryCut> = pick.iter().map(|&(_, k)| self.pool[k].clone()).collect();
-        for cut in new_base {
+        for cut in implied.into_iter().chain(new_base) {
             self.pool_add(cut.clone());
             add.push(cut);
         }
@@ -2726,7 +2774,19 @@ pub(super) fn run<'a>(
         let cands: Vec<usize> = (0..ctx.ns.min(x.len()))
             .filter(|&j| ctx.is_int[j] && (x[j] - x[j].round()).abs() > feastol)
             .collect();
-        let st = crate::lp::highs_cutgen::probing::probe_and_attach(&mut env.eval.dom, t, &cands);
+        // HiGHS probes every binary in presolve first (`HPresolve::runProbing`), at
+        // its default `random_seed = 0`.
+        let pp = crate::lp::highs_cutgen::probing::PresolveProbing {
+            submip: lim.submip,
+            random_seed: 0,
+            nrows: ctx.n_orig_rows.min(ctx.m_w),
+        };
+        let st = crate::lp::highs_cutgen::probing::probe_and_attach(
+            &mut env.eval.dom,
+            t,
+            &cands,
+            Some(pp),
+        );
         {
             use crate::profile::{incr_by, Ctr};
             incr_by(Ctr::MilpProbeProbed, st.probed as u64);
