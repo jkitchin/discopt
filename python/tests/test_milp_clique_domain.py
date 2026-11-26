@@ -101,8 +101,8 @@ def test_clique_domain_arms_match_the_oracle(monkeypatch):
         ref = build(*args).solve(milp_backend="highs")
         assert ref.status == "optimal", (name, ref.status)
         for arm, env in ARMS.items():
-            for k in FLAGS:
-                monkeypatch.delenv(k, raising=False)
+            for k in FLAGS:  # both default ON since #2350: an arm turns off what it omits
+                monkeypatch.setenv(k, "0")
             for k, v in env.items():
                 monkeypatch.setenv(k, v)
             monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
@@ -160,3 +160,34 @@ def test_c513_tables_and_node_probing(monkeypatch):
     assert c.get("MilpProbePresolve", 0) >= 144, c.get("MilpProbePresolve")
     assert c.get("MilpProbeNode", 0) > 0, "node separation never probed"
     assert c.get("MilpImpliedBoundCuts", 0) > 0, "no implied-bound cut was separated"
+
+
+@pytest.mark.correctness
+def test_defaults_on_and_zero_opts_out(monkeypatch):
+    """#2350 graduated ``DISCOPT_MILP_CLIQUE_DOMAIN`` and ``DISCOPT_MILP_CONFLICT``
+    jointly: with neither set, both mechanisms run (the clique hook, probing, conflict
+    analysis); ``=0`` turns each off and keeps the legacy search. Same verdict and
+    optimum as HiGHS in all three arms."""
+    for k in FLAGS + ("DISCOPT_LP_ENGINE",):
+        monkeypatch.delenv(k, raising=False)
+    # kp-b reaches the search (measured: 45 hook calls, 28 probes); col-a is settled at
+    # the root with nothing to probe, so it could not tell ON from OFF.
+    name, build, args = next(c for c in _cases() if c[0] == "kp-b")
+    ref = build(*args).solve(milp_backend="highs")
+    assert ref.status == "optimal", (name, ref.status)
+    monkeypatch.setenv("DISCOPT_PROFILE", "1")
+    monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
+    seen = {}
+    for arm, env in {"default": {}, "both=0": dict.fromkeys(FLAGS, "0")}.items():
+        for k in FLAGS:
+            monkeypatch.delenv(k, raising=False)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        _rust.profile_reset_py()
+        r = build(*args).solve(milp_backend="native", time_limit=60)
+        c = dict(_rust.profile_counters_py())
+        assert r.status == "optimal" and r.gap_certified, (arm, r.status)
+        assert r.objective == pytest.approx(ref.objective, abs=1e-6), arm
+        seen[arm] = (c.get("MilpCliqueDomainCalls", 0), c.get("MilpProbeProbed", 0))
+    assert seen["default"][0] > 0 and seen["default"][1] > 0, seen
+    assert seen["both=0"] == (0, 0), seen

@@ -112,8 +112,9 @@ def _cases():
 
 
 def _solve(build, args, env, monkeypatch):
-    for k in ("DISCOPT_MILP_SYM_LEX", "DISCOPT_MILP_CONFLICT"):
-        monkeypatch.delenv(k, raising=False)
+    # DISCOPT_MILP_CONFLICT is default ON since #2350: the "off" arm turns it off.
+    monkeypatch.delenv("DISCOPT_MILP_SYM_LEX", raising=False)
+    monkeypatch.setenv("DISCOPT_MILP_CONFLICT", "0")
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")

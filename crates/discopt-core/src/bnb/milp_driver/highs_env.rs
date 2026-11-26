@@ -418,11 +418,14 @@ pub(super) fn search_cut_lp_enabled() -> bool {
 /// the verified Farkas ray of an infeasible node LP) into a conflict pool that both
 /// the local domain and a global domain propagate (`HighsMipSolverData::
 /// conflictPool`), aged before each round. A conflict propagated to an empty global
-/// domain proves the search complete. Default OFF until its CLAUDE.md §5 panel
-/// (row in `docs/dev/flag-retirement-audit.md`); read per search, garbage refused.
+/// domain proves the search complete. Default ON since 2026-11-26 (#2350): graduated
+/// jointly with `DISCOPT_MILP_CLIQUE_DOMAIN` (the pair is the HiGHS default) on a
+/// CLAUDE.md §5 panel scored with permutation reps (row in
+/// `docs/dev/flag-retirement-audit.md`); `=0` restores the search without conflict
+/// analysis or the cut pool. Read per search, garbage refused.
 pub(super) fn conflict_enabled() -> bool {
     match std::env::var("DISCOPT_MILP_CONFLICT") {
-        Err(_) => false,
+        Err(_) => true,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
@@ -443,15 +446,15 @@ pub(super) fn conflict_enabled() -> bool {
 /// analysis explains. With `DISCOPT_MILP_CONFLICT` (which supplies the global domain)
 /// node separation also runs `separateImpliedBounds`: probe the node LP's unprobed
 /// fractional binaries and add the violated implied-bound cuts. Bound-changing.
-/// Default OFF: its §5 panel (2026-11-26, row in `docs/dev/flag-retirement-audit.md`)
-/// was cert-clean and missed bar 2's node threshold (-0.3 % alone, -8.6 % with
-/// conflict analysis); node probing needs the default-OFF conflict flag, and the
-/// per-round root probing is approximated by one pass at search start. Graduating it
-/// together with `DISCOPT_MILP_CONFLICT` would change that. Read per search, garbage
-/// refused.
+/// Default ON since 2026-11-26 (#2350), graduated jointly with `DISCOPT_MILP_CONFLICT`
+/// on a §5 panel scored with permutation reps (row in
+/// `docs/dev/flag-retirement-audit.md`: cert-clean, nodes -20 % to -22 %, no dual loss,
+/// median primal gap lower at both caps); `=0` restores the search without the table
+/// hook or probing. The per-round root probing is still approximated by one pass at
+/// search start (the root separation has no `Domain`). Read per search, garbage refused.
 pub(super) fn clique_domain_enabled() -> bool {
     match std::env::var("DISCOPT_MILP_CLIQUE_DOMAIN") {
-        Err(_) => false,
+        Err(_) => true,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
