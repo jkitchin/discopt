@@ -59,6 +59,33 @@ const INF: f64 = f64::INFINITY;
 /// `kHighsTiny`.
 const K_HIGHS_TINY: f64 = 1e-14;
 
+/// HiGHS's `small_matrix_value` default. HiGHS drops a matrix entry `|a| <= 1e-9` when
+/// the model is passed in and when presolve combines rows, so its `HighsDomain` never
+/// propagates through one. discopt's presolve keeps such entries in an equality on
+/// purpose (dropping one is not a relaxation; see `Work::cancel_entry` in
+/// `bnb/milp_presolve.rs`), so they reach this port, and the port must refuse them.
+const SMALL_MATRIX_VALUE: f64 = 1e-9;
+
+/// The largest `|a|` that is round-off, not a coefficient, in a row with these
+/// values: `SMALL_MATRIX_VALUE` relative to the row's largest `|a|` (absolute for a
+/// row whose largest is at most 1).
+///
+/// A bound derived from entry `a` is `(rhs - residual activity) / a`, and the
+/// residual activity carries the round-off of the incremental activity updates
+/// (`newbound - oldbound` is rounded before it is accumulated, even into a
+/// `CDouble`), of order `eps` times the row's magnitudes. Dividing that by a
+/// cancellation residue amplifies it beyond any tolerance. Measured (#2362): a
+/// permuted MIPLIB 2122 kept `5.55e-17 x_516` in an equality whose other columns
+/// were all fixed at 0 under a probe; the residual activity read `6.9e-12` instead
+/// of 0, so the row "implied" `x_516 <= -124557` against `x_516 >= 0`, the probe was
+/// declared infeasible, a binary was fixed away from every optimum, and the solve
+/// certified a dual bound 2065 past the true optimum. Refusing to propagate through
+/// such an entry only weakens propagation, so it is always sound; its contribution
+/// to the activity is still counted.
+fn noise_coef_threshold(vals: &[f64]) -> f64 {
+    SMALL_MATRIX_VALUE * vals.iter().fold(1.0f64, |m, v| m.max(v.abs()))
+}
+
 /// `HighsBoundType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundType {
@@ -2100,7 +2127,11 @@ impl Domain {
         if ninfmin > 1 {
             return;
         }
+        let noise = noise_coef_threshold(vals);
         for (&col, &val) in inds.iter().zip(vals) {
+            if val.abs() <= noise {
+                continue;
+            }
             let contrib = activity_contribution_min(val, self.col_lower[col], self.col_upper[col]);
             let minresact = if ninfmin == 1 {
                 if contrib != -INF {
@@ -2143,9 +2174,14 @@ impl Domain {
         }
         let maxactivity = self.activitymax[row];
         let rlower = self.model.row_lower[row];
-        for k in self.model.ar_start[row]..self.model.ar_start[row + 1] {
+        let (s, e) = (self.model.ar_start[row], self.model.ar_start[row + 1]);
+        let noise = noise_coef_threshold(&self.model.ar_value[s..e]);
+        for k in s..e {
             let col = self.model.ar_index[k];
             let val = self.model.ar_value[k];
+            if val.abs() <= noise {
+                continue;
+            }
             let contrib = activity_contribution_max(val, self.col_lower[col], self.col_upper[col]);
             let maxresact = if ninfmax == 1 {
                 if contrib != INF {
@@ -4643,6 +4679,67 @@ mod tests {
         assert_eq!(d.objective_lower(), Some((1.0, 0)));
         assert_eq!(d.col_upper[0], 2.0);
         assert_eq!(d.domchgreason.last(), Some(&Reason::Objective));
+    }
+
+    /// #2362: `x0 + 5.55e-17 x1 = -1e-12` with `x0 in [0, 1]`, `x1 in [0, 7000]`.
+    /// `(0, 0)` satisfies the row within `feastol`; the `-1e-12` stands for the
+    /// round-off the incremental activity carries (measured 6.9e-12 on the permuted
+    /// MIPLIB 2122). Dividing it by the cancellation residue "implied" `x1 <= -18018`
+    /// and proved the row infeasible. A noise entry must not be propagated through;
+    /// a real one in the same row still is.
+    #[test]
+    fn a_noise_coefficient_is_not_propagated_through() {
+        let rows = vec![(vec![0usize, 1], vec![1.0, 5.551115123125783e-17])];
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &rows,
+            vec![-1e-12],
+            vec![-1e-12],
+            vec![false; 2],
+        ));
+        let mut d = Domain::new(Arc::clone(&model), &[0.0, 0.0], &[1.0, 7000.0], 1e-6, 1e-9);
+        d.propagate();
+        assert!(!d.infeasible(), "a feasible row was proved infeasible");
+        assert_eq!((d.col_lower[1], d.col_upper[1]), (0.0, 7000.0));
+        // The real coefficient still propagates: x0 is fixed at (round-off of) 0.
+        assert_eq!(d.col_upper[0], 0.0);
+
+        // The same row as a cut: the cut path shares the rule.
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &[],
+            vec![],
+            vec![],
+            vec![false; 2],
+        ));
+        let mut d = Domain::new(Arc::clone(&model), &[0.0, 0.0], &[1.0, 7000.0], 1e-6, 1e-9);
+        let pool = d.add_cutpool();
+        d.cut_added(
+            pool,
+            0,
+            &[0, 1],
+            &[1.0, 5.551115123125783e-17],
+            -1e-12,
+            false,
+        );
+        d.propagate();
+        assert!(!d.infeasible(), "a feasible cut was proved infeasible");
+        assert_eq!((d.col_lower[1], d.col_upper[1]), (0.0, 7000.0));
+
+        // Control: a small but real coefficient (1e-3 of the row's largest) is not
+        // noise. `x0 + 1e-3 x1 <= 1` with `x0 >= 0.5` bounds `x1 <= 500`.
+        let rows = vec![(vec![0usize, 1], vec![1.0, 1e-3])];
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &rows,
+            vec![-INF],
+            vec![1.0],
+            vec![false; 2],
+        ));
+        let mut d = Domain::new(Arc::clone(&model), &[0.5, 0.0], &[1.0, 7000.0], 1e-6, 1e-9);
+        d.propagate();
+        assert!(!d.infeasible());
+        assert!((d.col_upper[1] - 500.0).abs() < 1e-9, "{}", d.col_upper[1]);
     }
 
     #[test]
