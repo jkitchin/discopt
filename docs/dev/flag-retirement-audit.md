@@ -1018,5 +1018,44 @@ analysis alone, 32,619 both. Medians that moved the wrong way but stay within OF
 spread (no dual loss): `neos-911970` at 5k (primal 0.0013 -> 0.0126, dual gap 0.0023 ->
 0.0090) and `bell5` primal at 2k (4e-5 -> 1.5e-4); `neos17` and `23588` improve. The 53
 `highs_parity/iis` infeasible fixtures agree (presolve settles them, the flags never fire).
+
+**Re-panel after the CI fixes (commits `1de50f4c9`/`efbe4c60a`, same population and rule).**
+2,000 nodes: every bar passes; solved 47 = 47; nodes over both-certified 6,341 -> 4,551;
+median primal gap 0.00199 -> 0.00060. 5,000 nodes: every bar except 2d passes; solved 54 = 54;
+nodes 8,719 -> 7,122; median primal gap 2.5e-5 -> 1.2e-11; bar 1 clean, 0 dual losses.
+2d failed on a single incumbent: `neos-2624317-amur` had one in 3/7 orderings OFF and 2/7 ON.
+(In ordering r4, the earlier ON arm at `e988254cb` found 18.26 at exactly node 5,000; the new one found none.)
+**Accepted as noise (owner decision, 2026-11-26)**, with these 21-ordering counts:
+- `amur` incumbents: OFF 12/21, ON 11/21 (neither arm certifies any);
+- `bell5` certified: OFF 9/21, ON 11/21.
+
+A one-ordering difference at a node cap on an instance that neither arm certifies lies within the spread that the ordering alone produces.
+
+**Wall panel (`0a34ec19b`, 6 instances x caps 10k/50k/200k x 2 reps, 1 thread).** This panel checks whether
+the per-node cost ratio grows with depth. It does not:
+- `bell5` per-node ON/OFF is 0.47 / 0.61 / 0.75;
+- `market_split` is 1.57 / 1.84 / 1.12 (both arms hit the cap);
+- `mik-250-20-75-5` is 0.77 / 1.08 / 1.35, and ON certifies in fewer nodes (10,982 vs 13,851);
+- `c513` is 1.13 / 1.03 / 1.03, and ON proves it infeasible at 30,374 nodes while OFF hits 200k.
+
+`neos17` reports `feasible` in both arms. ON stops at 7,711 nodes on a floored gap that `Model.solve` refuses.
+That is pre-existing and not caused by these flags: the native engine had no absolute gap tolerance (#2357).
+With `abs_gap_tolerance=1e-6`, ON certifies at 4,230 nodes in 23 s.
+
+**OA route (convex MINLP; no in-repo corpus instance reaches the flags any other way).**
+- (a) *Master replay*: 149 OA masters captured from 8 corpus instances, 3 interleaved reps per arm.
+  - Without #2354: bar 1 clean (298 checks, 0 bound crossings), certified 136 vs 135, nodes 432,711 vs 560,212.
+    Wall ON 14.8 +- 1.8 s vs OFF 12.4 +- 0.4 s, and the difference is master 33 (4.9 s vs 0.9 s).
+    That master's postsolved point fails the original rows and is cold re-solved (#2354).
+  - With #2354 (#2355): ON 10.2 +- 0.4 s vs OFF 11.9 +- 0.1 s; node geo-mean ratio 0.975; still 0 crossings.
+- (b) *Explicit OA solves* (`solver="mip-nlp", mip_nlp_method="oa"`) of the same 8 instances, 2 reps.
+  - Status, objective and certification are identical in both arms on all 8.
+  - Wall ratios are 0.95-1.10, except **`portfol_roundlot`, the known outlier**: +61% without #2354 and +35% with it (11.8 s vs 8.7 s).
+    95 % of that wall is in the MILP masters (11.3 s vs 8.2 s), and ON runs 41 masters against OFF's 39.
+    The per-master trees vary in both directions.
+    ON takes more nodes on masters 33 (74.7k vs 41.5k), 15 (90k vs 63k) and 31 (49k vs 42k), and fewer on 11 (60k vs 174k), 29 and 9.
+    The per-node rate is similar (master 33: 23 vs 20 us/node).
+  - ON's `portfol` incumbent failed `examine()`'s unscaled 1e-6 check. That was the incumbent repair declining on inconsistent fixed-integer equalities, fixed by #2356 (PR #2358).
+- Graduated on bar 2 as "no broad regression beyond the spread" (owner decision, 2026-11-26).
 c513 (infeasible): ON certifies in 27,824 nodes / 28 s; OFF hits a 200k-node limit.
 
