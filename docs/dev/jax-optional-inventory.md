@@ -135,7 +135,7 @@ iteration counts and objectives on all four, while running about 10× faster
 | `dm.argmin` / `argmin_layer` | `modeling/argmin.py` (`_build_layer`, `argmin`) |
 | `dm.implicit` / `implicit_full_space` | `modeling/implicit.py` (`_implicit_solver`, `implicit`) |
 | `dm.external` | `modeling/external.py:_build_composite` |
-| `discopt.estimate` (exact sensitivity Jacobian) | `estimate.py:_response_jacobian_wrt_parameters` |
+| `discopt.estimate` (only for a response the tape cannot represent: `dm.custom`, `dm.external`; the constraint system and ordinary responses are JAX-free since #2367) | `estimate.py:_response_jacobian` |
 | `discopt.sensitivity` chain rule (`d()`) | `sensitivity.py:_chain_rule` |
 | `pounce_sensitivity` (sIPOPT) | `solvers/sipopt.py` |
 | `discopt.parametric` / `_relax/parametric.py` | module guard on `_relax/parametric.py` |

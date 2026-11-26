@@ -47,10 +47,22 @@ print(result.summary())
 - `objective: float` — final weighted-sum-of-squares.
 - `n_observations: int` — **total scalar residuals**, not response keys. Array observations contribute their full length.
 - `solve_result: SolveResult` — underlying `Model.solve()` result (status, wall time, etc.).
+- `active_bounds: dict[str, str]` — parameters on a bound (`"lower"`/`"upper"`/`"fixed"`). Their covariance rows/columns are `nan`: the covariance is `inv(FIM)` on the free parameters only (#2367).
+- `information: FisherInformation` — the full `fisher()` result.
 - Properties: `standard_errors`, `confidence_intervals`, `correlation_matrix`, `summary()`.
 
+### `fisher()` — sensitivities on any solved model (#2367)
+`discopt.estimate.fisher(result, parameters, responses, sigma, hessian="gauss-newton" | "observed")`
+works on any model (hand-built, `DAEBuilder`, `MOLBuilder`), not only `Experiment`s, and is the
+single implementation `estimate_parameters` calls. It uses the tape's sparse constraint Jacobian
+and a sparse LU of the state block (no JAX, no dense `(m, n)` matrix; 229,380 equality rows in
+0.36 s), reports parameters on a bound, warns on a singular free FIM, and with
+`hessian="observed"` projects the exact Lagrangian Hessian through the constraints
+(`Zᵀ ∇²L Z`, multipliers from `G_zᵀλ = -∇_z f`, so solver duals are not needed).
+`reduced_gradient` is the bound multiplier of an active parameter bound.
+
 ### Key files
-- `python/discopt/estimate.py` — `estimate_parameters` (residual construction lines 321–338 iterate every element of array-valued observations), `_compute_estimation_fim` (lines 392+, accepts `n_reps` per response).
+- `python/discopt/estimate.py` — `estimate_parameters` (residual construction lines 321–338 iterate every element of array-valued observations), `fisher` (the FIM, sensitivities and bound-aware covariance; accepts `n_reps` per response).
 - `profile.py` in the [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
   (`pip install discopt-doe`) — profile likelihood builds on `estimate_parameters`
   via `fixed_parameters`. Not in this repo; DOE was extracted in #389.
