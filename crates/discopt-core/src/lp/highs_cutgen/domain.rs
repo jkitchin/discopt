@@ -59,6 +59,37 @@ const INF: f64 = f64::INFINITY;
 /// `kHighsTiny`.
 const K_HIGHS_TINY: f64 = 1e-14;
 
+/// HiGHS's `small_matrix_value` default (`HighsOptions.h`, `small_matrix_value`,
+/// default 1e-9). HiGHS keeps an entry only when `abs_value > small_matrix_value`
+/// (`HighsMatrixUtils.cpp:257`, `assessMatrix`) when the model is passed in, and
+/// presolve drops the same when it combines rows, so its `HighsDomain` never
+/// propagates through one. discopt's presolve keeps such entries in an equality on
+/// purpose (dropping one is not a relaxation; see `Work::cancel_entry` in
+/// `bnb/milp_presolve.rs`), so they reach this port, and the port must refuse them.
+const SMALL_MATRIX_VALUE: f64 = 1e-9;
+
+/// Whether `a` is round-off rather than a coefficient: `|a| <= SMALL_MATRIX_VALUE`,
+/// HiGHS's absolute rule. (#2363 first made it relative to the row's largest `|a|`;
+/// that skipped real unit coefficients in AMP's McCormick rows over a `1e9` box,
+/// `w >= 2e9 x - ...`, which HiGHS would propagate. The absolute rule is the one the
+/// propagation was written against.)
+///
+/// A bound derived from entry `a` is `(rhs - residual activity) / a`, and the
+/// residual activity carries the round-off of the incremental activity updates
+/// (`newbound - oldbound` is rounded before it is accumulated, even into a
+/// `CDouble`), of order `eps` times the row's magnitudes. Dividing that by a
+/// cancellation residue amplifies it beyond any tolerance. Measured (#2362): a
+/// permuted MIPLIB 2122 kept `5.55e-17 x_516` in an equality whose other columns
+/// were all fixed at 0 under a probe; the residual activity read `6.9e-12` instead
+/// of 0, so the row "implied" `x_516 <= -124557` against `x_516 >= 0`, the probe was
+/// declared infeasible, a binary was fixed away from every optimum, and the solve
+/// certified a dual bound 2065 past the true optimum. Refusing to propagate through
+/// such an entry only weakens propagation, so it is always sound; its contribution
+/// to the activity is still counted.
+fn is_noise_coef(a: f64) -> bool {
+    a.abs() <= SMALL_MATRIX_VALUE
+}
+
 /// `HighsBoundType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundType {
@@ -2101,6 +2132,9 @@ impl Domain {
             return;
         }
         for (&col, &val) in inds.iter().zip(vals) {
+            if is_noise_coef(val) {
+                continue;
+            }
             let contrib = activity_contribution_min(val, self.col_lower[col], self.col_upper[col]);
             let minresact = if ninfmin == 1 {
                 if contrib != -INF {
@@ -2143,9 +2177,13 @@ impl Domain {
         }
         let maxactivity = self.activitymax[row];
         let rlower = self.model.row_lower[row];
-        for k in self.model.ar_start[row]..self.model.ar_start[row + 1] {
+        let (s, e) = (self.model.ar_start[row], self.model.ar_start[row + 1]);
+        for k in s..e {
             let col = self.model.ar_index[k];
             let val = self.model.ar_value[k];
+            if is_noise_coef(val) {
+                continue;
+            }
             let contrib = activity_contribution_max(val, self.col_lower[col], self.col_upper[col]);
             let maxresact = if ninfmax == 1 {
                 if contrib != INF {
@@ -3466,17 +3504,31 @@ impl<'a> ConflictSet<'a> {
                             k -= 1;
                             continue;
                         }
-                        self.resolved_domain_changes[ku].1.boundval = relax_lb;
-                        if relax_lb - glb <= eps {
+                        // Departure from HiGHS (#2363): a drop or relaxation is taken
+                        // only when the explanation still covers `mupper` afterwards
+                        // (`covered <= ft`, the invariant asserted below). HiGHS's drop
+                        // test `relax - glb <= epsilon` is in bound units and moves the
+                        // activity by up to `epsilon * |a|`; the relaxed product carries
+                        // `|a| * |bound|` round-off. Either can leave the explanation
+                        // short of the conflict it is used for. Keeping the bound
+                        // instead only makes the explanation stronger, so it stays
+                        // valid; where the invariant held, nothing changes.
+                        let dropped = m - cand.delta;
+                        let relaxed = m + vals[i] * (relax_lb - lb);
+                        if relax_lb - glb <= eps && (dropped - mupper).to_f64() <= ft {
                             // Dropped from the explanation altogether.
                             let last = self.resolved_domain_changes.len() - 1;
                             self.resolved_domain_changes.swap(last, ku);
                             self.resolved_domain_changes.truncate(last);
-                            m -= cand.delta;
-                        } else {
+                            m = dropped;
+                        } else if (relaxed - mupper).to_f64() <= ft {
+                            self.resolved_domain_changes[ku].1.boundval = relax_lb;
                             self.resolved_domain_changes[ku].0 =
                                 self.walk_back_lower(pos, relax_lb);
-                            m += vals[i] * (relax_lb - lb);
+                            m = relaxed;
+                        } else {
+                            k -= 1;
+                            continue;
                         }
                         covered = (m - mupper).to_f64();
                         if covered >= -ft {
@@ -3493,16 +3545,21 @@ impl<'a> ConflictSet<'a> {
                             k -= 1;
                             continue;
                         }
-                        self.resolved_domain_changes[ku].1.boundval = relax_ub;
-                        if relax_ub - gub >= -eps {
+                        let dropped = m - cand.delta;
+                        let relaxed = m + vals[i] * (relax_ub - ub);
+                        if relax_ub - gub >= -eps && (dropped - mupper).to_f64() <= ft {
                             let last = self.resolved_domain_changes.len() - 1;
                             self.resolved_domain_changes.swap(last, ku);
                             self.resolved_domain_changes.truncate(last);
-                            m -= cand.delta;
-                        } else {
+                            m = dropped;
+                        } else if (relaxed - mupper).to_f64() <= ft {
+                            self.resolved_domain_changes[ku].1.boundval = relax_ub;
                             self.resolved_domain_changes[ku].0 =
                                 self.walk_back_upper(pos, relax_ub);
-                            m += vals[i] * (relax_ub - ub);
+                            m = relaxed;
+                        } else {
+                            k -= 1;
+                            continue;
                         }
                         covered = (m - mupper).to_f64();
                         if covered >= -ft {
@@ -3557,16 +3614,23 @@ impl<'a> ConflictSet<'a> {
                             k -= 1;
                             continue;
                         }
-                        self.resolved_domain_changes[ku].1.boundval = relax_lb;
-                        if relax_lb - glb <= eps {
+                        // As in `resolve_linear_geq`: only when the explanation still
+                        // covers `mlower` afterwards (`covered >= -ft`).
+                        let dropped = m - cand.delta;
+                        let relaxed = m + vals[i] * (relax_lb - lb);
+                        if relax_lb - glb <= eps && (dropped - mlower).to_f64() >= -ft {
                             let last = self.resolved_domain_changes.len() - 1;
                             self.resolved_domain_changes.swap(last, ku);
                             self.resolved_domain_changes.truncate(last);
-                            m -= cand.delta;
-                        } else {
+                            m = dropped;
+                        } else if (relaxed - mlower).to_f64() >= -ft {
+                            self.resolved_domain_changes[ku].1.boundval = relax_lb;
                             self.resolved_domain_changes[ku].0 =
                                 self.walk_back_lower(pos, relax_lb);
-                            m += vals[i] * (relax_lb - lb);
+                            m = relaxed;
+                        } else {
+                            k -= 1;
+                            continue;
                         }
                         covered = (m - mlower).to_f64();
                         if covered <= ft {
@@ -3583,16 +3647,21 @@ impl<'a> ConflictSet<'a> {
                             k -= 1;
                             continue;
                         }
-                        self.resolved_domain_changes[ku].1.boundval = relax_ub;
-                        if relax_ub - gub >= -eps {
+                        let dropped = m - cand.delta;
+                        let relaxed = m + vals[i] * (relax_ub - ub);
+                        if relax_ub - gub >= -eps && (dropped - mlower).to_f64() >= -ft {
                             let last = self.resolved_domain_changes.len() - 1;
                             self.resolved_domain_changes.swap(last, ku);
                             self.resolved_domain_changes.truncate(last);
-                            m -= cand.delta;
-                        } else {
+                            m = dropped;
+                        } else if (relaxed - mlower).to_f64() >= -ft {
+                            self.resolved_domain_changes[ku].1.boundval = relax_ub;
                             self.resolved_domain_changes[ku].0 =
                                 self.walk_back_upper(pos, relax_ub);
-                            m += vals[i] * (relax_ub - ub);
+                            m = relaxed;
+                        } else {
+                            k -= 1;
+                            continue;
                         }
                         covered = (m - mlower).to_f64();
                         if covered <= ft {
@@ -4643,6 +4712,149 @@ mod tests {
         assert_eq!(d.objective_lower(), Some((1.0, 0)));
         assert_eq!(d.col_upper[0], 2.0);
         assert_eq!(d.domchgreason.last(), Some(&Reason::Objective));
+    }
+
+    /// #2362: `x0 + 5.55e-17 x1 = -1e-12` with `x0 in [0, 1]`, `x1 in [0, 7000]`.
+    /// `(0, 0)` satisfies the row within `feastol`; the `-1e-12` stands for the
+    /// round-off the incremental activity carries (measured 6.9e-12 on the permuted
+    /// MIPLIB 2122). Dividing it by the cancellation residue "implied" `x1 <= -18018`
+    /// and proved the row infeasible. A noise entry must not be propagated through;
+    /// a real one in the same row still is.
+    #[test]
+    fn a_noise_coefficient_is_not_propagated_through() {
+        let rows = vec![(vec![0usize, 1], vec![1.0, 5.551115123125783e-17])];
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &rows,
+            vec![-1e-12],
+            vec![-1e-12],
+            vec![false; 2],
+        ));
+        let mut d = Domain::new(Arc::clone(&model), &[0.0, 0.0], &[1.0, 7000.0], 1e-6, 1e-9);
+        d.propagate();
+        assert!(!d.infeasible(), "a feasible row was proved infeasible");
+        assert_eq!((d.col_lower[1], d.col_upper[1]), (0.0, 7000.0));
+        // The real coefficient still propagates: x0 is fixed at (round-off of) 0.
+        assert_eq!(d.col_upper[0], 0.0);
+
+        // The same row as a cut: the cut path shares the rule.
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &[],
+            vec![],
+            vec![],
+            vec![false; 2],
+        ));
+        let mut d = Domain::new(Arc::clone(&model), &[0.0, 0.0], &[1.0, 7000.0], 1e-6, 1e-9);
+        let pool = d.add_cutpool();
+        d.cut_added(
+            pool,
+            0,
+            &[0, 1],
+            &[1.0, 5.551115123125783e-17],
+            -1e-12,
+            false,
+        );
+        d.propagate();
+        assert!(!d.infeasible(), "a feasible cut was proved infeasible");
+        assert_eq!((d.col_lower[1], d.col_upper[1]), (0.0, 7000.0));
+
+        // Control: a small but real coefficient (1e-3 of the row's largest) is not
+        // noise. `x0 + 1e-3 x1 <= 1` with `x0 >= 0.5` bounds `x1 <= 500`.
+        let rows = vec![(vec![0usize, 1], vec![1.0, 1e-3])];
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &rows,
+            vec![-INF],
+            vec![1.0],
+            vec![false; 2],
+        ));
+        let mut d = Domain::new(Arc::clone(&model), &[0.5, 0.0], &[1.0, 7000.0], 1e-6, 1e-9);
+        d.propagate();
+        assert!(!d.infeasible());
+        assert!((d.col_upper[1] - 500.0).abs() < 1e-9, "{}", d.col_upper[1]);
+    }
+
+    /// `resolveLinearLeq`/`Geq` relax the explanation's bounds until the residual
+    /// activity just covers the target, and a relaxed bound within `epsilon` of the
+    /// global one is dropped. The `epsilon` test is in bound units; dropping moves
+    /// the activity by up to `epsilon * |a|`, which for `|a| > feastol / epsilon`
+    /// (1e3 here) leaves the explanation short of the target by more than `feastol`:
+    /// the `covered >= -feastol` (`<= feastol`) invariant fails, a debug build
+    /// panics (#2363 CI, `test_amp_trig_inflection_1506`), and a release build keeps
+    /// an explanation that does not imply the conflict it is used for.
+    ///
+    /// The proof row `1e4 x0 + x1 <= 0.999995` (x0 continuous in [0, 1], x1 binary)
+    /// with local `x0 >= 1.000002e-4`, `x1 >= 1`; the `>=` side is its mirror. The
+    /// relaxed `x0` bound is 5e-10; dropping it leaves the activity 5e-6 short.
+    #[test]
+    fn conflict_relaxation_never_leaves_the_explanation_short() {
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &[],
+            vec![],
+            vec![],
+            vec![false, true],
+        ));
+        let mut global = Domain::new(Arc::clone(&model), &[0.0, 0.0], &[1.0, 1.0], 1e-6, 1e-9);
+        global.set_global(true);
+        let x0_lb = 1.000002e-4;
+        let rhs: f64 = 0.999995;
+        let mut checked = 0;
+        for sign in [1.0f64, -1.0] {
+            let mut local = global.clone();
+            local.set_global(false);
+            local.change_bound(lit(0, true, x0_lb), Reason::Branching);
+            local.change_bound(lit(1, true, 1.0), Reason::Branching);
+            let vals = [sign * 1e4, sign * 1.0];
+            let mut glob = global.clone();
+            let links = ConflictLinks {
+                local: None,
+                global: None,
+            };
+            let mut cs = ConflictSet::new(&mut local, &mut glob, links, &NoOpenNodes);
+            // As `explainInfeasibilityLeq`/`Geq` queue them: x0 (priority 1.000002)
+            // ahead of x1 (priority 1).
+            cs.resolve_buffer = vec![
+                ResolveCandidate {
+                    delta: vals[0] * x0_lb,
+                    base_bound: 0.0,
+                    prio: (vals[0] * x0_lb).abs(),
+                    bound_pos: 0,
+                    value_pos: 0,
+                },
+                ResolveCandidate {
+                    delta: vals[1],
+                    base_bound: 0.0,
+                    prio: 1.0,
+                    bound_pos: 1,
+                    value_pos: 1,
+                },
+            ];
+            let target = sign * (rhs + 10.0 * 1e-6);
+            let ok = if sign > 0.0 {
+                cs.resolve_linear_leq(CDouble::from(0.0), target, &vals)
+            } else {
+                cs.resolve_linear_geq(CDouble::from(0.0), target, &vals)
+            };
+            assert!(ok);
+            // The explanation's activity, every column at its explained bound (the
+            // global one when it is not in the explanation), must reach the target.
+            let mut bound = [0.0f64, 0.0];
+            for (_, d) in &cs.resolved_domain_changes {
+                assert_eq!(d.boundtype, BoundType::Lower);
+                bound[d.column] = d.boundval;
+            }
+            let act = vals[0] * bound[0] + vals[1] * bound[1];
+            assert!(
+                sign * (act - target) >= -1e-6,
+                "sign {sign}: activity {act}, target {target}"
+            );
+            // And it really is a conflict: the proof row is violated.
+            assert!(sign * act > rhs);
+            checked += 1;
+        }
+        assert_eq!(checked, 2);
     }
 
     #[test]
