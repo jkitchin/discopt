@@ -197,6 +197,25 @@ def test_watchdog_exits_before_the_limit(tmp_path):
     assert hard < 12.0 and lo < hard
 
 
+def test_solution_is_a_world_readable_regular_file_replacing_a_symlink(tmp_path):
+    """PROGRAM_INTERFACE.md: SOLUTION must be a regular file (a symlink is
+    rejected), and the harness, running as another uid than the container's,
+    must be able to read it. mkstemp's 0600 made the answer unreadable to it."""
+    target = tmp_path / "elsewhere.json"
+    target.write_text("untouched")
+    out = tmp_path / "sol.json"
+    out.symlink_to(target)
+    mipcc.write_atomic(str(out), {"rows": {}})
+    st = os.lstat(out)
+    import stat
+
+    assert stat.S_ISREG(st.st_mode), "the symlink must be replaced, not written through"
+    assert stat.S_IMODE(st.st_mode) == 0o644
+    assert target.read_text() == "untouched"
+    assert json.loads(out.read_text()) == {"rows": {}}
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".mipcc_")] == []
+
+
 def test_budget_leaves_a_margin():
     for limit in (12.0, 60.0, 600.0, 3600.0):
         engine, hard = mipcc.budget(limit)
