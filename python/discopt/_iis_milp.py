@@ -2761,6 +2761,24 @@ def milp_iis_arrays(
     if not include_bounds:
         return res  # the post-pass needs every applied bound listed (see _polish)
     deadline = None if total_time_limit is None else t_start + float(total_time_limit)
+    alts = res.alternatives or []
+    n_par = min(1 + len(alts), (os.cpu_count() or 1) if workers is None else int(workers))
+    if (
+        portfolio is not None
+        and alts
+        and deadline is not None
+        and n_par > 1
+        and res.complete
+        and os.environ.get("DISCOPT_IIS_POLISH_ALTERNATIVES", "1") != "0"
+        and os.environ.get("DISCOPT_IIS_POLISH_PARALLEL", "1") != "0"
+    ):
+        return _polish_answers_parallel(
+            arrays,
+            res,
+            n_par,
+            deadline,
+            dict(cert_tol=cert_tol, time_limit=time_limit, engine=iis_engine),
+        )
     swept: set = set()  # the sets the add-one move ran from, across the post-passes
     out = _polish(
         arrays,
@@ -4014,9 +4032,20 @@ def _portfolio_child() -> None:
     deadline_wall = job["deadline_wall"]
     total = None if deadline_wall is None else max(0.0, deadline_wall - time.time())
     try:
-        res = _milp_iis_arrays(
-            job["arrays"], **job["kwargs"], order=job["order"], total_time_limit=total
-        )
+        if job.get("polish") is not None:
+            # A post-pass job (_polish_parallel): the answer to polish and its
+            # keywords; the deadline is the job's, on this process's clock.
+            assert deadline_wall is not None
+            res = _polish(
+                job["arrays"],
+                job["polish"],
+                **job["kwargs"],
+                deadline=time.perf_counter() + max(0.0, deadline_wall - time.time()),
+            )
+        else:
+            res = _milp_iis_arrays(
+                job["arrays"], **job["kwargs"], order=job["order"], total_time_limit=total
+            )
         out: tuple = ("ok", res)
     except TimeoutError as e:
         out = ("timeout", str(e))
@@ -4024,6 +4053,129 @@ def _portfolio_child() -> None:
         out = ("error", e)
     with open(job["result_path"], "wb") as f:
         pickle.dump(out, f)
+
+
+def _polish_answers_parallel(
+    arrays: tuple, res: MilpIIS, n_workers: int, deadline: float, kwargs: dict
+) -> MilpIIS:
+    """The post-pass on the portfolio's answer and on each of its alternatives
+    (see :func:`_polish_alternatives`) at once, in member processes: the
+    portfolio's workers are idle by then, and run one after another the
+    alternatives' post-passes took most of the time left (MIPcc27 smallset
+    stein45inf, 600 s: the winning alternative's re-hold move needs ~120 s and
+    was cut off after two others). The alternatives get ``beat`` = the portfolio
+    answer's size, which prunes exactly what the incumbent after its post-pass
+    would: an alternative is never smaller than the portfolio answer, so it is
+    smaller than neither. Returns the smallest result (ties: the portfolio
+    answer, then portfolio order); a post-pass that did not return in time
+    counts as its unpolished answer, which its member confirmed.
+    ``DISCOPT_IIS_POLISH_PARALLEL=0`` runs them one after another instead."""
+    alts = list(res.alternatives or [])
+    answers = [res] + alts
+    betas: list[Optional[int]] = [None] + [_iis_size(res)] * len(alts)
+    got = _polish_parallel(arrays, answers, betas, n_workers, deadline, kwargs)
+    best = got[0] if got[0] is not None else replace(res, alternatives=None)
+    for g in got[1:]:
+        if g is not None and _iis_size(g) < _iis_size(best):
+            best = g
+    return replace(best, members=res.members, alternatives=None)
+
+
+def _polish_parallel(
+    arrays: tuple,
+    answers: list[MilpIIS],
+    betas: list[Optional[int]],
+    n_workers: int,
+    deadline: float,
+    kwargs: dict,
+) -> list[Optional[MilpIIS]]:
+    """Run :func:`_polish` on each of ``answers`` (with ``beat=betas[k]``) in
+    portfolio member processes, at most ``n_workers`` at a time, all against the
+    overall ``deadline`` (``time.perf_counter()`` clock). Returns each result, or
+    ``None`` for a post-pass that did not return by the deadline (it is killed)
+    or was never started (too little time left). An error in a post-pass is
+    re-raised, as for a portfolio member."""
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    wall_deadline = time.time() + (deadline - time.perf_counter())
+    margin = min(
+        _PORTFOLIO_MARGIN_S, _PORTFOLIO_MARGIN_FRACTION * max(deadline - time.perf_counter(), 0.0)
+    )
+    boot = (
+        f"import sys; sys.path[:0] = {list(sys.path)!r}; "
+        "from discopt._iis_milp import _portfolio_child; _portfolio_child()"
+    )
+    out: list[Optional[MilpIIS]] = [None] * len(answers)
+    todo = list(range(len(answers)))
+    running: dict[int, tuple[Any, str, Any]] = {}
+    with tempfile.TemporaryDirectory(prefix="discopt_iis_polish_") as tmp:
+        try:
+            while todo or running:
+                while (
+                    todo
+                    and len(running) < n_workers
+                    and wall_deadline - time.time() >= 4 * _MIN_SOLVE_S
+                ):
+                    k = todo.pop(0)
+                    result_path = os.path.join(tmp, f"polish{k}.pkl")
+                    err = open(os.path.join(tmp, f"polish{k}.err"), "w+b")
+                    proc = subprocess.Popen(
+                        [sys.executable, "-c", boot],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=err,
+                    )
+                    assert proc.stdin is not None
+                    job = dict(
+                        arrays=arrays,
+                        polish=replace(answers[k], alternatives=None, members=None),
+                        kwargs=dict(kwargs, beat=betas[k]),
+                        order=None,
+                        deadline_wall=wall_deadline - margin,
+                        result_path=result_path,
+                        discopt_dir=_DISCOPT_DIR,
+                    )
+                    pickle.dump(job, proc.stdin)
+                    proc.stdin.flush()  # kept open: the child exits on EOF
+                    running[k] = (proc, result_path, err)
+                if not running:
+                    break  # the rest never start: too little time left
+                finished = [k for k, r in running.items() if r[0].poll() is not None]
+                if not finished:
+                    if time.time() >= wall_deadline:
+                        break  # the rest are killed below
+                    time.sleep(0.02)
+                    continue
+                for k in finished:
+                    proc, result_path, err = running.pop(k)
+                    assert proc.stdin is not None
+                    proc.stdin.close()
+                    if proc.returncode != 0 or not os.path.exists(result_path):
+                        err.seek(0)
+                        tail = err.read().decode(errors="replace").strip()[-2000:]
+                        err.close()
+                        raise RuntimeError(
+                            f"compute_iis post-pass {k} exited without a result "
+                            f"(exit code {proc.returncode}):\n{tail}"
+                        )
+                    err.close()
+                    with open(result_path, "rb") as f:
+                        kind, payload = pickle.load(f)
+                    if kind == "error":
+                        raise payload
+                    if kind == "ok":
+                        out[k] = payload
+        finally:
+            for proc, _, err in running.values():
+                proc.kill()
+                proc.wait()
+                assert proc.stdin is not None
+                proc.stdin.close()
+                err.close()
+    return out
 
 
 def _grace_extra(

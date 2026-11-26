@@ -817,3 +817,25 @@ def test_the_add_one_move_does_not_repeat_a_sweep_from_the_same_set(monkeypatch)
         frozenset({0, 1, 2, 3}),
         frozenset({0, 1, 2, 3, 4}),
     ]
+
+
+def test_post_passes_run_in_member_processes_and_the_smallest_wins():
+    """The portfolio answer's and the alternatives' post-passes run at once in
+    member processes (the portfolio's workers are idle by then); each result is
+    confirmed in its process, the smallest is kept, the members record stays.
+    Before the change there was no parallel post-pass."""
+    pre = _answer({0, 1, 2, 3})
+    pre.members = [{"order": "ICB"}]
+    pre.alternatives = [_answer({0, 1, 2, 3, 4})]
+    kw = dict(cert_tol=1e-6, time_limit=10.0, engine="highs")
+    got = E._polish_parallel(
+        _PAIRS, [pre, pre.alternatives[0]], [None, 4], 2, time.perf_counter() + 60.0, kw
+    )
+    assert len(got) == 2 and all(g is not None for g in got)
+    # The portfolio answer's post-pass moves (add-one from {0,1,2,3} reaches a pair).
+    assert len(got[0].constraints) == 2 and set(got[0].constraints) < {0, 1, 2, 3}
+    # Not smaller than beat=4, and re-hold cannot change it: pruned, unchanged.
+    assert got[1].constraints == [0, 1, 2, 3, 4]
+    out = E._polish_answers_parallel(_PAIRS, pre, 2, time.perf_counter() + 60.0, kw)
+    assert len(out.constraints) == 2 and out.members == [{"order": "ICB"}]
+    assert out.alternatives is None
