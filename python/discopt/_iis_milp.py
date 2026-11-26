@@ -1020,6 +1020,46 @@ def _element_keys(cons, bounds, ints) -> list[tuple]:
     )
 
 
+def _filter_integrality(
+    probe, eng: _Engine, j: int, cons: set, bounds: set, ints: set, pending: dict
+) -> bool:
+    """One deletion-filter step on held integrality ``j`` of a post pass, in
+    place on ``bounds``/``ints``; returns False when a probe was undecided.
+
+    Pass 1 relaxes the integrality jointly with its column's box (a held
+    column's bounds are not elements). If that stays infeasible the integrality
+    goes; a feasible point inside the box is its certificate. A point outside the
+    box certifies nothing (a relaxed integrality keeps its box), so pass 2, as
+    in the integrality phase, relaxes the integrality alone with the box kept:
+    if that stays infeasible the integrality is not needed, it goes and its
+    finite bounds become elements (left to the caller's bound stage). Without
+    pass 2 such an integrality was kept with no certificate and the answer was
+    not irreducible: measured on MIPcc27 stein45inf through a re-hold pass built
+    on this same step (zz02 at -1 outside [0, 1], checker minimal=False, 215 of
+    216 certified). :func:`_add_one`'s final re-filter had the same step.
+    """
+    v, x = probe(cons, bounds, ints - {j})
+    if v is True:
+        ints.discard(j)
+        return True
+    if v is None:
+        return False
+    lo_j, hi_j = float(eng.col_lb[j]), float(eng.col_ub[j])
+    if x is not None and lo_j <= x[j] <= hi_j:
+        pending[("integrality", j)] = x
+        return True
+    box = {(j, s) for s, f in (("lower", lo_j > -_INF), ("upper", hi_j < _INF)) if f}
+    v, x = probe(cons, bounds | box, ints - {j})
+    if v is True:
+        ints.discard(j)
+        bounds |= box
+    elif v is None:
+        return False
+    elif x is not None:
+        pending[("integrality", j)] = x
+    return True
+
+
 def _add_one(
     eng: _Engine,
     cons: set[int],
@@ -1035,8 +1075,9 @@ def _add_one(
     goes on from the new set. Integralities and bounds stay fixed during the
     scan (more of them only makes a deletion harder, so a constraint the scan
     keeps stays needed once some are dropped) and are re-filtered once at the
-    end: each integrality jointly with its column's box, as the integrality
-    phase does, then each bound.
+    end: each integrality as the integrality phase does it
+    (:func:`_filter_integrality`: jointly with its column's box, then alone with
+    the box kept), then each bound.
 
     Returns ``(new_set or None, pending, decided, tried)``: ``new_set`` only
     when a move was adopted; ``pending`` the probe points of the final
@@ -1122,13 +1163,8 @@ def _add_one(
     new_c, new_b, new_i = set(best), set(bounds), set(ints)
     pending: dict[tuple, np.ndarray] = {}
     for j in sorted(new_i):
-        v, x = eng.probe(new_c, new_b, new_i - {j})
-        if v is True:
-            new_i.discard(j)
-        elif v is None:
+        if not _filter_integrality(eng.probe, eng, j, new_c, new_b, new_i, pending):
             decided = False
-        elif x is not None:
-            pending[("integrality", j)] = x
     for jb in sorted(new_b):
         v, x = eng.probe(new_c, new_b - {jb}, new_i)
         if v is True:
@@ -2224,9 +2260,13 @@ def milp_iis_arrays(
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
     iis_engine: Optional[str] = None,
+    threads: Optional[int] = None,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
+
+    ``threads`` (portfolio only): the portfolio's thread budget, shared out among the
+    members; see :func:`_portfolio_iis`.
 
     ``arrays`` is ``(A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)``:
     a CSR matrix; row bounds with ``±_INF`` (1e20) for "none"; ``row_groups``
@@ -2278,10 +2318,13 @@ def milp_iis_arrays(
             filter_limit,
             grace=grace,
             grace_window=grace_window,
+            threads=threads,
         )
     else:
         if grace != math.inf or grace_window is not None:
             raise ValueError("grace= / grace_window= need portfolio=")
+        if threads is not None:
+            raise ValueError("threads= needs portfolio=; a single order runs in-process")
         res = _milp_iis_arrays(
             arrays, **kwargs, order=order, total_time_limit=filter_limit, t_start=t_start
         )
@@ -3509,6 +3552,11 @@ def _portfolio_child() -> None:
         os._exit(3)
 
     threading.Thread(target=_orphan_watch, daemon=True).start()
+    # Before any solve: this member's share of the caller's thread budget, not
+    # HiGHS's automatic scheduler (see pin_highs_threads).
+    from discopt._iis_backend import pin_highs_threads
+
+    pin_highs_threads(int(job["highs_threads"]))
     deadline_wall = job["deadline_wall"]
     total = None if deadline_wall is None else max(0.0, deadline_wall - time.time())
     try:
@@ -3545,9 +3593,14 @@ def _portfolio_iis(
     total_time_limit: Optional[float],
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
+    threads: Optional[int] = None,
 ) -> MilpIIS:
     """Run one deletion filter per order in ``portfolio``, each in its own process,
     against one shared budget, and return the smallest complete result.
+
+    ``threads``: the thread budget for the whole portfolio (default: every core).
+    Each member's HiGHS scheduler gets ``max(1, threads // workers)`` threads, set
+    before its first solve (:func:`discopt._iis_backend.pin_highs_threads`).
 
     Each member is an ordinary :func:`milp_iis` run, so each result is sound on its
     own (confirmed infeasible under both presolve configurations, certificates
@@ -3588,6 +3641,12 @@ def _portfolio_iis(
     n_workers = min(len(orders), os.cpu_count() or 1) if workers is None else int(workers)
     if n_workers < 1:
         raise ValueError(f"workers must be >= 1, got {workers}")
+    budget_threads = (os.cpu_count() or 1) if threads is None else int(threads)
+    if budget_threads < 1:
+        raise ValueError(f"threads must be >= 1, got {threads}")
+    # Each member's HiGHS gets an equal share, so all the members together stay
+    # within the thread budget.
+    member_threads = max(1, budget_threads // n_workers)
     if not grace >= 1.0:
         raise ValueError(f"grace must be >= 1, got {grace}")
     if grace_window is not None:
@@ -3638,6 +3697,7 @@ def _portfolio_iis(
                         deadline_wall=member_deadline,
                         result_path=result_path,
                         discopt_dir=_DISCOPT_DIR,
+                        highs_threads=member_threads,
                     )
                     pickle.dump(job, proc.stdin)
                     # Kept open: the member exits on EOF, so it cannot outlive us.

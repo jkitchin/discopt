@@ -1601,6 +1601,17 @@ and is re-written by P4.1.**
   instance and the class the task names has no infeasible nodes; the change (conflict
   pool + propagation + panel) is not justified by this measurement. Nothing was built;
   the `Conflict*` counters stay (bound-neutral, profile-gated).
+  **Reopened 2026-11-25 (owner: build the full symmetry + conflicts stack, all on, and
+  measure).** The 2026-11-06 measurement stands: conflicts *alone* do not help the named
+  class. They are now built together with verified-symmetry lex rows
+  (`DISCOPT_MILP_SYM_LEX`, `bnb/milp_symmetry.rs`). Both flags are default OFF, and the
+  flag-audit rows are recorded. On `no-ip-65059` (MIPLIB, infeasible; 1 thread, Rust
+  engine), the both-ON arm **certified infeasible in 270.8 s / 12,730 nodes**. Conflicts
+  alone and neither flag hit the 300 s limit; lex rows alone was not measured (owner: no
+  ablation). HiGHS on the lex-augmented model needed 1,559 nodes / 7.4 s, so per-node
+  speed and node count (about 8x) are a separate follow-up. The differential test
+  (`test_milp_sym_conflict.py`, makespan and colouring) gives OFF = ON = HiGHS optimum
+  exactly. Owed: the §5 corpus panel (in-repo MILP corpus plus MIPLIB-38).
 - [x] **P4.8 — Dimension-reducing MILP presolve with postsolve. DEFERRED 2026-11-06 (owner).** *(≤ 3 iterations, last:
   worth ≤ 2 instances / 1.7× in HiGHS's own ablation, §1c)*. Scope: reuse P2.4's LP
   reductions + integer-aware rounding, `presolve/substitute.rs` where it applies. Flag

@@ -48,7 +48,8 @@ use crate::bnb::highs_search::search::{
     SearchEnv, NO_NODE_LIMIT,
 };
 use crate::bnb::node::{BranchRecord, NodeStatus};
-use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
+use crate::lp::highs_cutgen::conflict_pool::{ConflictDomainObservers, ConflictPool};
+use crate::lp::highs_cutgen::domain::{BoundType, ConflictLinks, Domain, DomainChange, Reason};
 
 mod nodebox;
 mod refcheck;
@@ -232,6 +233,11 @@ pub(super) struct Outcome {
     pub seeded_pool: usize,
     /// `performAging(true)` epochs on the search's LP.
     pub cut_epochs: u32,
+    /// The evaluation's verdict counters.
+    pub eval: super::highs_eval::EvalStats,
+    /// `DISCOPT_MILP_CONFLICT`: (conflicts from infeasible domains, from LP dual
+    /// proofs, global bound changes carried into the local baseline).
+    pub conflicts: (u64, u64, u64),
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -399,6 +405,141 @@ pub(super) fn search_cut_lp_enabled() -> bool {
             }
         },
     }
+}
+
+/// `DISCOPT_MILP_CONFLICT`: HiGHS conflict analysis in the search (`HighsSearch`'s
+/// `conflictAnalysis` at every infeasible local domain, `addInfeasibleConflict` from
+/// the verified Farkas ray of an infeasible node LP) into a conflict pool that both
+/// the local domain and a global domain propagate (`HighsMipSolverData::
+/// conflictPool`), aged before each round. A conflict propagated to an empty global
+/// domain proves the search complete. Default OFF until its CLAUDE.md §5 panel
+/// (row in `docs/dev/flag-retirement-audit.md`); read per search, garbage refused.
+pub(super) fn conflict_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_CONFLICT") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_MILP_CONFLICT={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// The search's conflict state (`DISCOPT_MILP_CONFLICT`).
+///
+/// Scope: one [`run`] on one model. A conflict or a global fixing is derived from that
+/// model's rows, which under `DISCOPT_MILP_SYM_LEX` include the lex-leader rows: it
+/// is valid only for the symmetry-reduced problem. Nothing here leaves the run. The
+/// pool is created in `enable_conflicts` and dropped with the environment. The
+/// driver's result carries only `status`, `x`, `obj` and `bound`. Each of those is
+/// valid for the unreduced model: the rows keep a lex-max point of every orbit, so
+/// they keep the optimal value and the feasibility verdict. No thread-local or static
+/// state holds a conflict. A re-entry or re-solve builds a fresh pool on its own model.
+pub(super) struct Conflicts {
+    /// HiGHS `conflictPool(5 * mip_pool_age_limit, mip_pool_soft_limit)`.
+    pool: ConflictPool,
+    /// The global domain (HiGHS `mipdata_->domain`): the local domain's baseline
+    /// plus the pool's globally valid consequences.
+    gdom: Domain,
+    /// The pool's index in both domains.
+    cp: usize,
+    /// `gdom`'s change-stack length at the last sync into the local baseline.
+    synced: usize,
+    /// Conflicts from infeasible domains, from LP dual proofs, and global bound
+    /// changes carried into the local baseline.
+    pub added: u64,
+    pub proof_added: u64,
+    pub global_fixings: u64,
+}
+
+/// `HighsLpRelaxation::computeDualInfProof` in discopt's working form: the verified
+/// Farkas ray `ray` (solve coordinates) of an infeasible node LP, times `sgn`, as a
+/// proof row `vals . x[inds] <= rhs` over the structurals that every point the
+/// incumbent check accepts satisfies (so it is valid globally, not just at the node).
+///
+/// With `y` the ray in original units and `w = A^T y` over all `n_w` columns, every
+/// `x` with `A [x; s] = b` has `sum_{j<ns} w_j x_j = y.b - sum_{j>=ns} w_j s_j`, so over
+/// the GLOBAL slack box `-sum_{j<ns} w_j x_j <= -(y.b - sum_{j>=ns} max(w_j l_j, w_j
+/// u_j))`. The rhs is widened by `sum_i |y_i| eps_i` (each row's acceptance tolerance,
+/// [`row_tolerances`] over the global box) and a relative margin, and a structural with
+/// a negligible coefficient is moved to the rhs at its worst global bound. `None` when
+/// a slack (or such a structural) the proof needs is unbounded.
+fn farkas_proof_row(
+    ctx: &NodeCtx<'_>,
+    ray: &[f64],
+    sgn: f64,
+) -> Option<(Vec<usize>, Vec<f64>, f64)> {
+    let (m, n, ns) = (ctx.m_w, ctx.n_w, ctx.ns);
+    let mut y: Vec<f64> = ray.iter().take(m).map(|v| sgn * v).collect();
+    if y.len() < m {
+        return None;
+    }
+    if let Some(sc) = ctx.scaling {
+        sc.unscale_dual(&mut y);
+    }
+    let (l, u) = (ctx.l_w, ctx.u_w);
+    let eps = row_tolerances(ctx.csc_rc, m, n, ctx.b_w, l, u);
+    let mut w = vec![0.0f64; n];
+    for (j, wj) in w.iter_mut().enumerate() {
+        let (rows, vals) = ctx.csc_rc.col(j);
+        *wj = rows
+            .iter()
+            .zip(vals)
+            .filter(|(i, _)| **i < m)
+            .map(|(&i, &a)| a * y[i])
+            .sum();
+    }
+    let yb: f64 = (0..m).map(|i| y[i] * ctx.b_w[i]).sum();
+    let mut scale = 1.0 + (0..m).map(|i| (y[i] * ctx.b_w[i]).abs()).sum::<f64>();
+    let mut beta = yb;
+    for j in ns..n {
+        let wj = w[j];
+        if wj == 0.0 {
+            continue;
+        }
+        let hi = if wj > 0.0 { u[j] } else { l[j] };
+        if hi.abs() >= INF {
+            return None;
+        }
+        beta -= wj * hi;
+        scale += (wj * hi).abs();
+    }
+    let wmax = w[..ns].iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    if wmax == 0.0 {
+        return None;
+    }
+    let mut rhs = -beta + (0..m).map(|i| y[i].abs() * eps[i]).sum::<f64>();
+    let (mut inds, mut vals) = (Vec::new(), Vec::new());
+    for j in 0..ns {
+        let a = -w[j];
+        if a == 0.0 {
+            continue;
+        }
+        let mag = [l[j], u[j]]
+            .iter()
+            .filter(|v| v.abs() < INF)
+            .fold(0.0f64, |acc, v| acc.max(v.abs()));
+        scale += a.abs() * mag;
+        if a.abs() <= 1e-12 * wmax {
+            // Drop `a x_j`: the rest is `<= rhs - a x_j <= rhs - min(a l_j, a u_j)`
+            // over the global box.
+            let lo = if a > 0.0 { l[j] } else { u[j] };
+            if lo.abs() >= INF {
+                inds.push(j);
+                vals.push(a);
+                continue;
+            }
+            rhs -= a * lo;
+            continue;
+        }
+        inds.push(j);
+        vals.push(a);
+    }
+    if inds.is_empty() || !rhs.is_finite() {
+        return None;
+    }
+    rhs += 1e-9 * scale;
+    Some((inds, vals, rhs))
 }
 
 /// Cut rows the search's LP may carry at once, beyond the root's: bounds the per-LP
@@ -612,6 +753,8 @@ pub(super) struct HighsEnv<'a, 'b> {
     progress: (f64, i64, i64),
     /// Consecutive stall installs (`numStallNodes`).
     stall_nodes: usize,
+    /// `DISCOPT_MILP_CONFLICT`.
+    conf: Option<Conflicts>,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -1249,6 +1392,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
     }
     fn domain_install(&mut self, node: &OpenNode) {
         self.eval.dom.backtrack_to_global();
+        self.sync_global();
         let stack: Vec<DomainChange> = node.domchgstack.iter().map(from_q).collect();
         let br: Vec<usize> = node.branchings.iter().map(|&p| p as usize).collect();
         self.eval.dom.set_domain_change_stack(&stack, &br);
@@ -1303,11 +1447,13 @@ impl SearchEnv for HighsEnv<'_, '_> {
     }
     fn domain_backtrack_to_global(&mut self) {
         self.eval.dom.backtrack_to_global();
+        self.sync_global();
     }
     fn domain_propagate_after_backtrack(&mut self, _depth: i32) -> bool {
         let was_in = self.ref_in_domain();
         self.eval.dom.propagate();
         self.ref_box_kept("prop-backtrack", was_in);
+        self.analyse_conflict();
         self.eval.dom.infeasible()
     }
     fn domain_try_sibling(&mut self, d: QDomainChange, skip_propagate: bool) -> bool {
@@ -1323,6 +1469,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             self.eval.dom.propagate();
         }
         self.ref_box_kept("prop-sibling", was_in);
+        self.analyse_conflict();
         self.eval.dom.infeasible()
     }
     fn domain_undo_sibling(&mut self) {
@@ -1335,6 +1482,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
         self.eval.dom.propagate();
         self.ref_box_kept("prop-queue", was_in);
         self.eval.dom.clear_changed_cols_from(n);
+        self.analyse_conflict();
         self.eval.dom.infeasible()
     }
     fn domain_reduced_stack(&mut self) -> (Vec<QDomainChange>, Vec<i32>) {
@@ -1350,9 +1498,15 @@ impl SearchEnv for HighsEnv<'_, '_> {
             _ => f64::NEG_INFINITY,
         }
     }
-    fn global_propagate(&mut self) {}
+    fn global_propagate(&mut self) {
+        let lim = self.eval.cutoff - self.ctx.obj_const;
+        if let Some(cf) = self.conf.as_mut() {
+            cf.gdom.set_upper_limit(lim);
+            cf.gdom.propagate();
+        }
+    }
     fn global_infeasible(&self) -> bool {
-        false
+        self.conf.as_ref().is_some_and(|cf| cf.gdom.infeasible())
     }
     fn evaluate(
         &mut self,
@@ -1382,6 +1536,20 @@ impl SearchEnv for HighsEnv<'_, '_> {
             .eval
             .evaluate(&ctx, node, parent, &mut self.pc, false, limit);
         self.dual_fresh = self.eval.dual_epoch != dual_epoch0;
+        match r {
+            SearchResult::DomainInfeasible => self.analyse_conflict(),
+            SearchResult::LpInfeasible => {
+                let proofs: Vec<_> = match (self.conf.is_some(), self.eval.ray.take()) {
+                    (true, Some(ray)) => [1.0, -1.0]
+                        .iter()
+                        .filter_map(|&sgn| farkas_proof_row(&ctx, &ray, sgn))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                self.analyse_infeasible_lp(proofs)
+            }
+            _ => {}
+        }
         if !matches!(
             r,
             SearchResult::DomainInfeasible | SearchResult::LpInfeasible
@@ -1927,7 +2095,176 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             queue_pruned: 0.0,
             progress: (0.0, 0, 0),
             stall_nodes: 0,
+            conf: None,
         })
+    }
+
+    /// Turn on conflict analysis: register the pool on the local domain and take the
+    /// global domain as a copy of its committed baseline.
+    fn enable_conflicts(&mut self) {
+        let cp = self.eval.dom.add_conflict_pool();
+        let mut gdom = self.eval.dom.clone();
+        gdom.backtrack_to_global();
+        gdom.set_global(true);
+        self.eval.keep_ray = true;
+        let synced = gdom.domain_change_stack().len();
+        self.conf = Some(Conflicts {
+            pool: ConflictPool::new(150, 10000),
+            gdom,
+            cp,
+            synced,
+            added: 0,
+            proof_added: 0,
+            global_fixings: 0,
+        });
+    }
+
+    /// HiGHS `conflictPool.performAging()` (before each dive).
+    fn age_conflicts(&mut self) {
+        let Some(cf) = self.conf.as_mut() else {
+            return;
+        };
+        let mut obs =
+            ConflictDomainObservers(vec![(&mut self.eval.dom, cf.cp), (&mut cf.gdom, cf.cp)]);
+        cf.pool.perform_aging(false, &mut obs);
+    }
+
+    /// The conflicts the domains used while propagating (`resetAge`).
+    fn reset_conflict_ages(&mut self) {
+        let Some(cf) = self.conf.as_mut() else {
+            return;
+        };
+        let resets: Vec<(usize, usize)> = self
+            .eval
+            .dom
+            .take_conflict_age_resets()
+            .into_iter()
+            .chain(cf.gdom.take_conflict_age_resets())
+            .collect();
+        for (pool, c) in resets {
+            if pool == cf.cp {
+                cf.pool.reset_age(c);
+            }
+        }
+    }
+
+    /// `localdom.conflictAnalysis(conflictPool)` on an infeasible local domain.
+    fn analyse_conflict(&mut self) {
+        let lim = self.eval.cutoff - self.ctx.obj_const;
+        let Some(cf) = self.conf.as_mut() else {
+            return;
+        };
+        if !self.eval.dom.infeasible() {
+            return;
+        }
+        cf.gdom.set_upper_limit(lim);
+        let links = ConflictLinks {
+            local: Some(cf.cp),
+            global: Some(cf.cp),
+        };
+        let added = self.eval.dom.conflict_analysis(
+            &mut cf.pool,
+            links,
+            &mut cf.gdom,
+            &mut self.pc,
+            &self.q,
+        );
+        cf.added += added.len() as u64;
+        self.reset_conflict_ages();
+    }
+
+    /// `addInfeasibleConflict`: the verified Farkas ray of the infeasible node LP as
+    /// a globally valid proof row over the structurals ([`farkas_proof_row`]),
+    /// explained by conflict analysis.
+    fn analyse_infeasible_lp(&mut self, proofs: Vec<(Vec<usize>, Vec<f64>, f64)>) {
+        if self.conf.is_none() {
+            return;
+        }
+        let lim = self.eval.cutoff - self.ctx.obj_const;
+        for (inds, vals, rhs) in proofs {
+            let cf = self.conf.as_mut().expect("checked above");
+            cf.gdom.set_upper_limit(lim);
+            let links = ConflictLinks {
+                local: Some(cf.cp),
+                global: Some(cf.cp),
+            };
+            let added = self.eval.dom.conflict_analysis_proof(
+                &inds,
+                &vals,
+                rhs,
+                &mut cf.pool,
+                links,
+                &mut cf.gdom,
+                &mut self.pc,
+                &self.q,
+            );
+            cf.proof_added += added.len() as u64;
+            self.reset_conflict_ages();
+            if !added.is_empty() {
+                break;
+            }
+        }
+    }
+
+    /// Carry the global domain's bounds into the local domain's baseline (just after
+    /// `backtrack_to_global`), as HiGHS's local domain starts from the global one.
+    /// The baseline then equals the global domain's bounds, the condition conflict
+    /// analysis rests on: a baseline bound has no stack position, so explanations
+    /// treat it as globally valid.
+    fn sync_global(&mut self) {
+        let lim = self.eval.cutoff - self.ctx.obj_const;
+        let Some(cf) = self.conf.as_mut() else {
+            return;
+        };
+        cf.gdom.set_upper_limit(lim);
+        cf.gdom.propagate();
+        let len = cf.gdom.domain_change_stack().len();
+        if cf.gdom.infeasible() || len == cf.synced {
+            return;
+        }
+        let dom = &mut self.eval.dom;
+        if dom.infeasible() {
+            return;
+        }
+        assert!(
+            dom.domain_change_stack().is_empty(),
+            "sync_global needs the local domain at its global baseline"
+        );
+        cf.synced = len;
+        let mut k = 0u64;
+        for j in 0..dom.col_lower.len().min(cf.gdom.col_lower.len()) {
+            let (gl, gu) = (cf.gdom.col_lower[j], cf.gdom.col_upper[j]);
+            if gl > dom.col_lower[j] {
+                dom.change_bound(
+                    DomainChange {
+                        boundval: gl,
+                        column: j,
+                        boundtype: BoundType::Lower,
+                    },
+                    Reason::Unspecified,
+                );
+                k += 1;
+            }
+            if gu < dom.col_upper[j] {
+                dom.change_bound(
+                    DomainChange {
+                        boundval: gu,
+                        column: j,
+                        boundtype: BoundType::Upper,
+                    },
+                    Reason::Unspecified,
+                );
+                k += 1;
+            }
+        }
+        if k > 0 {
+            assert!(
+                !dom.infeasible(),
+                "the global domain's bounds are consistent"
+            );
+            dom.commit_as_global();
+            cf.global_fixings += k;
+        }
     }
 
     /// Step 2.1: HiGHS's search starts with the root's whole cut pool (every separated
@@ -2019,8 +2356,18 @@ pub(super) fn run<'a>(
     };
     let mut ml = MainLoop::default();
     let mut root = true;
+    if conflict_enabled() {
+        env.enable_conflicts();
+    }
     while !env.queue_is_empty() {
+        env.age_conflicts();
         let stop = ml.round(&mut env, &mut search, root, NO_NODE_LIMIT);
+        if env.global_infeasible() {
+            // Conflict propagation emptied the global domain: every conflict is
+            // valid for each improving point, so no open node holds one.
+            env.q.clear();
+            break;
+        }
         // An unbounded LP anywhere: no bound from this search is a certificate.
         // Hand the problem back to the driver (its batched search decides
         // Unbounded), as for an unbounded root.
@@ -2068,6 +2415,11 @@ pub(super) fn run<'a>(
         cut_rows_deleted: env.cut_rows_deleted,
         cut_epochs: env.lp.as_ref().map_or(0, |l| l.epochs),
         seeded_pool: env.seeded_pool,
+        eval: env.eval.stats.clone(),
+        conflicts: env
+            .conf
+            .as_ref()
+            .map_or((0, 0, 0), |c| (c.added, c.proof_added, c.global_fixings)),
     })
 }
 
