@@ -178,7 +178,9 @@ in the audit.
 
 **Terminology (PR #2196 review).** A "dual loss" (`d2_flag_panel.py`) is an instance neither arm certified whose ON median final gap at the time limit is worse than OFF's by more than OFF's own run-to-run spread: a performance measure. Bound validity is bar 1 (no bound past the oracle), checked separately.
 
-<!-- live-solver-math-gates: 70 -->
+<!-- live-solver-math-gates: 71 -->
+
+_70 -> 71 (2026-11-26, #2350): `MILP_CLIQUE_DOMAIN` added default OFF; its §5 panels are on its row. A joint graduation with `MILP_CONFLICT` is blocked by bar 1b on `bell5`._
 
 _68 -> 70 (2026-11-25): `MILP_SYM_LEX` and `MILP_CONFLICT` added default OFF; their §5 corpus panel is owed (rows under "Rows added 2026-11-25")._
 
