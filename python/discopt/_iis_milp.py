@@ -1900,9 +1900,17 @@ def _polish_alternatives(
             beat=_iis_size(best),
             swept=swept,
         )
-        if _iis_size(got) < _iis_size(best):
+        if _post_key(got) < _post_key(best):
             best = got
     return replace(best, members=res.members, alternatives=None)
+
+
+def _post_key(res: MilpIIS) -> tuple:
+    """How post-passed answers rank: smaller first, but under the closing pass an
+    answer with a checked witness for every element outranks a smaller one
+    without (the same rule as :func:`_rank_answers`)."""
+    uncertified = _close_enabled() and len(res.certificates) != _iis_size(res)
+    return (uncertified, _iis_size(res))
 
 
 #: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof and
@@ -2772,12 +2780,14 @@ def milp_iis_arrays(
         and os.environ.get("DISCOPT_IIS_POLISH_ALTERNATIVES", "1") != "0"
         and os.environ.get("DISCOPT_IIS_POLISH_PARALLEL", "1") != "0"
     ):
+        budget_threads = (os.cpu_count() or 1) if threads is None else int(threads)
         return _polish_answers_parallel(
             arrays,
             res,
             n_par,
             deadline,
             dict(cert_tol=cert_tol, time_limit=time_limit, engine=iis_engine),
+            highs_threads=max(1, budget_threads // n_par),
         )
     swept: set = set()  # the sets the add-one move ran from, across the post-passes
     out = _polish(
@@ -4056,7 +4066,12 @@ def _portfolio_child() -> None:
 
 
 def _polish_answers_parallel(
-    arrays: tuple, res: MilpIIS, n_workers: int, deadline: float, kwargs: dict
+    arrays: tuple,
+    res: MilpIIS,
+    n_workers: int,
+    deadline: float,
+    kwargs: dict,
+    highs_threads: int = 1,
 ) -> MilpIIS:
     """The post-pass on the portfolio's answer and on each of its alternatives
     (see :func:`_polish_alternatives`) at once, in member processes: the
@@ -4073,10 +4088,12 @@ def _polish_answers_parallel(
     alts = list(res.alternatives or [])
     answers = [res] + alts
     betas: list[Optional[int]] = [None] + [_iis_size(res)] * len(alts)
-    got = _polish_parallel(arrays, answers, betas, n_workers, deadline, kwargs)
+    got = _polish_parallel(
+        arrays, answers, betas, n_workers, deadline, kwargs, highs_threads=highs_threads
+    )
     best = got[0] if got[0] is not None else replace(res, alternatives=None)
     for g in got[1:]:
-        if g is not None and _iis_size(g) < _iis_size(best):
+        if g is not None and _post_key(g) < _post_key(best):
             best = g
     return replace(best, members=res.members, alternatives=None)
 
@@ -4088,10 +4105,12 @@ def _polish_parallel(
     n_workers: int,
     deadline: float,
     kwargs: dict,
+    highs_threads: int = 1,
 ) -> list[Optional[MilpIIS]]:
     """Run :func:`_polish` on each of ``answers`` (with ``beat=betas[k]``) in
     portfolio member processes, at most ``n_workers`` at a time, all against the
-    overall ``deadline`` (``time.perf_counter()`` clock). Returns each result, or
+    overall ``deadline`` (``time.perf_counter()`` clock), each with
+    ``highs_threads`` HiGHS threads as a portfolio member gets. Returns each result, or
     ``None`` for a post-pass that did not return by the deadline (it is killed)
     or was never started (too little time left). An error in a post-pass is
     re-raised, as for a portfolio member."""
@@ -4137,6 +4156,7 @@ def _polish_parallel(
                         deadline_wall=wall_deadline - margin,
                         result_path=result_path,
                         discopt_dir=_DISCOPT_DIR,
+                        highs_threads=highs_threads,
                     )
                     pickle.dump(job, proc.stdin)
                     proc.stdin.flush()  # kept open: the child exits on EOF

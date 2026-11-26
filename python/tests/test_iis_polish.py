@@ -681,6 +681,9 @@ def test_add_one_also_runs_from_the_answer_the_rehold_move_replaced(monkeypatch)
 def test_add_one_from_both_starts_keeps_the_rehold_path_on_a_tie(monkeypatch):
     for v in ("DISCOPT_IIS_REHOLD", "DISCOPT_IIS_ADD_ONE"):
         monkeypatch.delenv(v, raising=False)
+    # The fakes return a non-minimal {2, 3, 4}; the closing pass would drop row
+    # 4 and hide which path was kept.
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "0")
 
     def fake_rehold(eng, cons, bounds, ints, stop_at, known=None):
         return ({2, 3, 4}, set(), set()), {}, True
@@ -839,3 +842,22 @@ def test_post_passes_run_in_member_processes_and_the_smallest_wins():
     out = E._polish_answers_parallel(_PAIRS, pre, 2, time.perf_counter() + 60.0, kw)
     assert len(out.constraints) == 2 and out.members == [{"order": "ICB"}]
     assert out.alternatives is None
+
+
+def test_post_passed_answers_rank_a_fully_certified_one_first_under_the_closing_pass(
+    monkeypatch,
+):
+    """The alternatives' post-passes pick the winner with the portfolio's rule:
+    under the closing pass a smaller answer missing a witness loses to a fully
+    certified one (it is not an IIS under the checker's rule)."""
+    small = MilpIIS(constraints=[0, 1], bounds=[], integrality=[], certificates={})
+    big = MilpIIS(
+        constraints=[0, 1, 2],
+        bounds=[],
+        integrality=[],
+        certificates={("constraint", k): np.zeros(2) for k in range(3)},
+    )
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "1")
+    assert E._post_key(big) < E._post_key(small)
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "0")
+    assert E._post_key(small) < E._post_key(big)
