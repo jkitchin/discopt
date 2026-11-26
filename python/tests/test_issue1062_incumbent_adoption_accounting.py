@@ -39,6 +39,17 @@ import pytest
 from discopt._relax import primal_heuristics as ph
 from discopt.solver import solve_model
 
+#: The work budget for the stubbed solves below (#1062 de-flake). The constructor is
+#: replaced by a replay, but the counts asserted on still depend on the rest of the
+#: solve (whether another heuristic lands an incumbent first, whether the deferred
+#: and fallback constructors run), which under ``deterministic=False`` is scheduled
+#: by wall-clock shares of ``time_limit``. ``deterministic=True`` with ``max_nodes``
+#: makes it a function of the model, the same budget the sibling #1062 tests use
+#: (see ``test_issue1062_subnlp_attempt_accounting._WORK_BUDGET`` for the
+#: measurement). ``time_limit`` is only a backstop; ``status == "optimal"`` checks it
+#: never bound.
+_WORK_BUDGET = dict(deterministic=True, max_nodes=1000, time_limit=300.0)
+
 
 def _three_feasible_disjuncts():
     """A one-hot disjunction whose three disjuncts are all feasible and ranked.
@@ -134,8 +145,9 @@ def _solve_with_replayed_points(monkeypatch, order):
         return list(ordered)
 
     monkeypatch.setattr(ph, "one_hot_config_subnlp", _stub)
-    res = solve_model(_three_feasible_disjuncts(), nlp_bb=True, time_limit=30.0)
+    res = solve_model(_three_feasible_disjuncts(), nlp_bb=True, **_WORK_BUDGET)
     assert res.nlp_bb is True, "test must exercise the NLP-BB path to be meaningful"
+    assert res.status == "optimal", f"the work budget did not terminate the solve: {res.status}"
     assert res.subnlp_feasible >= 3, (
         f"the stubbed points did not reach the injection loop (feasible="
         f"{res.subnlp_feasible}); this run measures nothing"
