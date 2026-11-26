@@ -37,13 +37,18 @@ out = R.solve_milp_csc_py(*args, root_cuts=int(d["root_cuts"]), cut_rounds=int(d
                           cut_select=True, cmir_cuts=True, time_limit_s=120.0)
 np.save(sys.argv[2], np.asarray(out[1], dtype=float))
 print("RESULT", out[0], repr(out[2]), repr(out[3]), out[4], flush=True)
+ctr = dict(R.profile_counters_py())
+print("COUNTERS", ctr["MilpPresolveRepairAttempts"], ctr["MilpPresolveRepaired"],
+      ctr["MilpPresolveRepairSeeded"], flush=True)
 """
 
 
 def test_postsolved_point_is_repaired_and_verifies(tmp_path):
     xfile = tmp_path / "x.npy"
     env = dict(os.environ, DISCOPT_MILP_PRESOLVE_LOG="1", RAYON_NUM_THREADS="1")
-    env.pop("DISCOPT_PROFILE", None)
+    # The repair counters accumulate only under DISCOPT_PROFILE; the probe reads the
+    # cumulative totals (`profile_counters_py`), which the end-of-solve dump leaves intact.
+    env["DISCOPT_PROFILE"] = "1"
     proc = subprocess.run(
         [sys.executable, "-c", _PROBE, str(DATA), str(xfile)],
         capture_output=True,
@@ -60,6 +65,12 @@ def test_postsolved_point_is_repaired_and_verifies(tmp_path):
     assert "repaired by the fixed-integer LP" in log, log[-4000:]
     assert "failed verification; solving the original" not in log
     assert "repair did not verify" not in log
+    # The instrument must see the path the log shows (section 6): a counter reading 0
+    # here would let a probe report "no repairs" on a run that made one.
+    ctr = next(s for s in proc.stdout.splitlines() if s.startswith("COUNTERS"))
+    attempts, repaired, seeded = (int(v) for v in ctr.split()[1:])
+    assert attempts >= 1 and repaired >= 1, ctr
+    assert seeded == 0, ctr
 
     line = next(s for s in proc.stdout.splitlines() if s.startswith("RESULT"))
     _, status, obj, bound, _nodes = line.split()
