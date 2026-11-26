@@ -22,6 +22,7 @@
 //! `getBestVub`/`getBestVlb` can break exact ties differently.
 
 use super::cdouble::CDouble;
+use super::domain::OpenNodeCounts;
 use super::stdalgo::partition;
 use super::transformed_lp::{VarBound, VbEntry};
 
@@ -107,6 +108,15 @@ impl VarBoundStore {
                 nodes_up: 0,
             })
             .collect()
+    }
+    /// [`Self::vubs`] with each binary's open-node counts (`numNodesDown/Up`, which
+    /// `getBestVub` reads at the call); `None` is an empty node queue.
+    pub fn vubs_in(&self, col: i32, open: Option<&dyn OpenNodeCounts>) -> Vec<VbEntry> {
+        with_counts(self.vubs(col), open)
+    }
+    /// [`Self::vlbs`] with each binary's open-node counts (`getBestVlb`).
+    pub fn vlbs_in(&self, col: i32, open: Option<&dyn OpenNodeCounts>) -> Vec<VbEntry> {
+        with_counts(self.vlbs(col), open)
     }
     /// A column's VLBs.
     pub fn vlbs(&self, col: i32) -> Vec<VbEntry> {
@@ -367,6 +377,17 @@ impl VarBoundStore {
             }
         }
     }
+}
+
+/// Fill each entry's `nodes_down`/`nodes_up` from the node queue.
+fn with_counts(mut v: Vec<VbEntry>, open: Option<&dyn OpenNodeCounts>) -> Vec<VbEntry> {
+    if let Some(q) = open {
+        for e in &mut v {
+            e.nodes_down = q.num_nodes_down(e.col as usize);
+            e.nodes_up = q.num_nodes_up(e.col as usize);
+        }
+    }
+    v
 }
 
 #[cfg(test)]

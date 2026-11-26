@@ -277,6 +277,23 @@ counters!(
     MilpProbePresolve,
     MilpProbeNode,
     MilpImpliedBoundCuts,
+    // `DISCOPT_HIGHS_SEPA_ROOT_PROBE`: probing at the root's separation rounds. The
+    // presolve-probing pass (first probed round): binaries probed, global reductions,
+    // clique entries, global bounds added to the root pool. The per-round
+    // `separateImpliedBounds` pass: fractional binaries probed, global reductions,
+    // clique entries, global bounds and implied-bound cuts added to the pool. Root
+    // domains probing proved infeasible. Top-level solve only; heuristic sub-MIPs
+    // run the pass uncounted.
+    MilpRootProbePresolve,
+    MilpRootProbePresolveReductions,
+    MilpRootProbePresolveEntries,
+    MilpRootProbePresolveBoundCuts,
+    MilpRootProbeProbed,
+    MilpRootProbeReductions,
+    MilpRootProbeEntries,
+    MilpRootProbeBoundCuts,
+    MilpRootProbeImpliedCuts,
+    MilpRootProbeInfeasible,
     // #2225: path separator paths abandoned by the substitution progress guard.
     HighsSepaPathSubstCap,
     // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global
@@ -607,6 +624,9 @@ counters!(
     //     solve not `Optimal`), which fall through to the unperturbed path.
     DualCostPerturbAttempts,
     DualCostPerturbAccepted,
+    // A perturbed attempt's primal clean-up that the warm primal could not finish:
+    // rejected instead of re-solved cold (`perturb_cleanup_primal`).
+    DualCostPerturbCleanupRefused,
     DualCostPerturbRejected,
     // Perturbed attempts whose certified Farkas ray settled the true LP infeasible.
     DualCostPerturbInfeasible,
@@ -929,6 +949,14 @@ counters!(
     HighsMipSearchProofHits,
     HighsMipSearchDomConflictCalls,
     HighsMipSearchDomConflictHits,
+    // `DISCOPT_HIGHS_SEARCH_SEPA`: `separationRound`s the search ran on the root's
+    // separation subsystem, and the cut rows they added to the search LP.
+    HighsMipSearchSepaRounds,
+    HighsMipSearchSepaRows,
+    // `DISCOPT_HIGHS_NODE_ITER_LIMIT`: node iteration limits set, and search LP
+    // solves that ended at an iteration limit.
+    HighsMipSearchIterLimitSet,
+    HighsMipSearchIterLimitHits,
     // `DISCOPT_MILP_SYM_LEX`: verified formulation automorphisms, candidates
     // checked, and the lexicographic-leader rows appended.
     MilpSymLexGenerators,

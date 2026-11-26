@@ -61,6 +61,10 @@ mod refcheck;
 thread_local! {
     /// Searches run on this thread (tests prove the route fired).
     pub(super) static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The simplex `max_iter` each node evaluation of the search solved under
+    /// ([`node_iter_limit_enabled`]'s regression test).
+    pub(super) static NODE_MAX_ITER: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Limits and tolerances for [`run`].
@@ -93,6 +97,10 @@ pub(super) struct Limits {
     pub submip: bool,
     /// LP iterations the driver spent before the search (root LP and cut loop).
     pub iters_before: i64,
+    /// Root LP solves behind `iters_before` (their mean is `avgrootlpiters`).
+    pub root_solves: usize,
+    /// [`node_iter_limit_enabled`]: HiGHS's node iteration limit on the search's LPs.
+    pub node_iter_limit: bool,
     /// `MilpOptions::max_stall_nodes` (0 = none).
     pub max_stall_nodes: usize,
     /// `MilpOptions::max_leaves` (0 = none).
@@ -390,6 +398,87 @@ impl<'a> Debugger<'a> {
             bound: f64::NEG_INFINITY,
             last_inc,
         }
+    }
+}
+
+/// `mipdata_->feastol` in `HighsSeparation::separate`'s progress test.
+const FEASTOL_SEPA: f64 = 1e-6;
+
+/// `DISCOPT_HIGHS_NODE_ITER_LIMIT`: the search's LP solves run under HiGHS's node
+/// iteration limit. `processNodes` sets `iterlimit = max(10000, 10 * max(avgiter,
+/// avgrootlpiters), 3 * firstrootlpiters / 2)` on the worker's LP before each dive
+/// (`HighsMipSolver.cpp`, HiGHS 1.16 `f3f113d`), and it holds until set again, so
+/// it also bounds the next node's evaluation, strong-branching probes and separation
+/// re-solves; before the first node the root's `max(10000, 10 * avgrootlpiters)`
+/// holds. Here it is the simplex's `max_iter` (capped by the driver's own), a per
+/// simplex-run cap where HiGHS's counts the whole solve. A solve that reaches it ends
+/// `IterLimit`, which a node takes as untrusted: it stays open on the bound it
+/// inherited and is never fathomed (HiGHS's `kError`; its 200-iteration IPM rescue
+/// is not ported). Read once per search, garbage refused. Entry evidence (neos17, 2,000
+/// nodes, deterministic, with [`search_sepa_enabled`]): 1,244,493 primal phase-1
+/// pivots against 35,192 without it, from warm starts the dual refuses as dual
+/// infeasible (`DualPrepRejectDualInf` 104 against 74) that fall to a warm primal
+/// solve grinding to the 100,000-pivot default; `NodeLpSolve` took 209 of 213 s.
+/// With the limit (same build, 3 interleaved reps, load ~11): phase-1 pivots
+/// 1,244,493 -> 171,123, LP iterations 223,557 -> 133,877, wall 115.2 +/- 10.4 s ->
+/// 24.5 +/- 2.7 s (separation off: 11.3 +/- 1.2 s), same incumbent and bound at the
+/// cap; neos-911970 unchanged (713,488 -> 715,507 iterations, 41.6 -> 40.5 s).
+///
+/// Default OFF until its §5 panel; the row is in `docs/dev/flag-retirement-audit.md`.
+pub(super) fn node_iter_limit_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_NODE_ITER_LIMIT") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!(
+                "DISCOPT_HIGHS_NODE_ITER_LIMIT={other:?} is not recognized (expected 1 or 0)"
+            ),
+        },
+    }
+}
+
+/// HiGHS's node iteration limit (see [`node_iter_limit_enabled`]).
+pub(super) fn node_iteration_limit(
+    avgiter: f64,
+    avg_root_iters: f64,
+    first_root_iters: i64,
+) -> usize {
+    let iterlimit = (10.0 * avgiter.max(avg_root_iters)) as i64;
+    10_000i64.max(iterlimit).max((3 * first_root_iters) / 2) as usize
+}
+
+/// `DISCOPT_HIGHS_SEARCH_SEPA`: node separation in the search is HiGHS's
+/// `HighsSeparation::separationRound` on the root's persistent separation subsystem
+/// (clique, tableau, path and mod-k separators into the global cut pool, the pool's
+/// selection over the node's box, the cuts entering the search LP as rows), instead
+/// of discopt's per-node GMI over a fresh pool. Needs the search cut LP
+/// ([`search_cut_lp_enabled`]). As in HiGHS, the search's separators start fresh
+/// ([`RootSeparation::begin_search`]: `HighsMipWorker` owns its own
+/// `HighsSeparation`), and the transformed LP's variable-bound choice reads the node
+/// queue's open-node counts and the node LP's reduced costs (`getBestVub/Vlb`'s
+/// `numNodesDown/Up` rank and `kUseDualsForBreakingTies`). Read per solve, garbage
+/// refused. Entry evidence (bell5, presolve off, matched node boxes): at the first
+/// diverging node HiGHS's round adds 3 rows and raises the bound by 3,762 while
+/// discopt's adds 1 row and 164; downstream discopt is weaker on 1,349 of 1,727 boxes.
+///
+/// Default OFF: its 2026-11-26 §5 panel (MIPLIB-38 + M, 2,000 nodes) was bar-1 clean
+/// with -35 % nodes over the both-certified rows, but lost bell5's certificate at the
+/// node cap (one draw; four permutations all favour the flag) and failed bars 2a/2e.
+/// It graduates as a member of `DISCOPT_HIGHS_CONFIG` on a passing re-panel; the row
+/// is in `docs/dev/flag-retirement-audit.md`.
+///
+/// [`RootSeparation::begin_search`]: crate::lp::highs_cutgen::bridge::RootSeparation::begin_search
+pub(super) fn search_sepa_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEARCH_SEPA") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEARCH_SEPA={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
     }
 }
 
@@ -885,7 +974,15 @@ impl SearchLp {
 
 /// The working LP the search's components see: the driver's, or the search's own once
 /// it carries cut rows.
-fn make_ctx<'x>(base: &NodeCtx<'x>, lp: &'x Option<SearchLp>) -> NodeCtx<'x> {
+fn make_ctx<'x>(
+    base: &NodeCtx<'x>,
+    lp: &'x Option<SearchLp>,
+    simplex: &'x Option<SimplexOptions>,
+) -> NodeCtx<'x> {
+    let base = &NodeCtx {
+        simplex: simplex.as_ref().unwrap_or(base.simplex),
+        ..*base
+    };
     let Some(lp) = lp else { return *base };
     NodeCtx {
         b_w: &lp.b,
@@ -975,6 +1072,30 @@ pub(super) struct HighsEnv<'a, 'b> {
     stall_nodes: usize,
     /// `DISCOPT_MILP_CONFLICT`.
     conf: Option<Conflicts>,
+    /// `DISCOPT_HIGHS_SEARCH_SEPA`: the root's separation subsystem (separators,
+    /// clique table, variable bounds and cut pool), carried into the search as HiGHS
+    /// carries `mipdata.cutpool` and the `HighsSeparation` separators; node separation
+    /// then runs [`RootSeparation::round_node`] on the search's LP. `None` runs
+    /// discopt's node GMI.
+    hsep: Option<&'a mut crate::lp::highs_cutgen::bridge::RootSeparation>,
+    /// [`node_iter_limit_enabled`]: the simplex options of the search's LP solves,
+    /// `max_iter` the node iteration limit; `None` uses the driver's.
+    node_simplex: Option<SimplexOptions>,
+    /// `mipdata_->avgrootlpiters` and `firstrootlpiters`.
+    avg_root_iters: f64,
+    first_root_iters: i64,
+    /// Pool index of each search-LP cut row that came from [`Self::hsep`] (by the
+    /// base-form cut's signature), reported back when the row leaves the LP.
+    hsep_ids: std::collections::HashMap<Vec<(u32, i64)>, i32>,
+    /// LP iterations already reported to [`Self::hsep`] (its separators' seed).
+    hsep_iters: i64,
+    /// The root LP's objective (`rootlpsolobj`), the reference of
+    /// [`Self::separate_highs`]'s progress test.
+    root_obj: f64,
+    /// The node LP's objective at its last evaluation or separation resolve.
+    last_lp_obj: f64,
+    /// The last separation resolve was not trusted (`!scaledOptimal`).
+    resolved_untrusted: bool,
     /// `DISCOPT_MILP_SYM_DYNAMIC` / `DISCOPT_MILP_SYM_ORBITAL` (top-level search
     /// only).
     shadow: Option<SymShadow>,
@@ -1118,6 +1239,14 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     /// `idx[k]` is `cuts[k]`'s conflict-`cutpool` index when it was selected from it;
     /// a selected cut that does not enter (no room, already a row) is released at once.
     fn append_cut_rows(&mut self, cuts: &[GomoryCut], idx: &[Option<i32>]) {
+        self.append_cut_rows_tagged(cuts, idx, &[]);
+    }
+
+    /// [`Self::append_cut_rows`], with also the [`Self::hsep`] pool index of each cut
+    /// (`ids[k]` for `cuts[k]`; empty when the cuts are not that pool's). A cut from
+    /// either pool that does not enter the LP (no room, already in it) is reported
+    /// back to its pool at once, so the pool offers it again.
+    fn append_cut_rows_tagged(&mut self, cuts: &[GomoryCut], idx: &[Option<i32>], ids: &[i32]) {
         debug_assert_eq!(cuts.len(), idx.len());
         if cuts.is_empty() {
             return;
@@ -1128,9 +1257,12 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         let room = search_cut_cap(base.m_w).saturating_sub(lp.rows.len());
         let mut add: Vec<GomoryCut> = Vec::new();
         let mut released: Vec<i32> = Vec::new();
-        for (cut, &k) in cuts.iter().zip(idx) {
+        let mut refused: Vec<i32> = Vec::new();
+        for (j, (cut, &k)) in cuts.iter().zip(idx).enumerate() {
+            let id = ids.get(j).copied();
             if add.len() >= room {
                 released.extend(k);
+                refused.extend(id);
                 continue;
             }
             let c = lp.to_base(cut, n0);
@@ -1140,16 +1272,25 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             let sig = cut_signature(&c);
             if self.in_lp.insert(sig.clone()) {
                 if let Some(k) = k {
-                    self.pool_lp.insert(sig, k);
+                    self.pool_lp.insert(sig.clone(), k);
+                }
+                if let Some(id) = id {
+                    self.hsep_ids.insert(sig, id);
                 }
                 add.push(c);
             } else {
                 released.extend(k);
+                refused.extend(id);
             }
         }
         if let Some(cf) = self.conf.as_mut() {
             for k in released {
                 cf.cutpool.lp_cut_removed(k);
+            }
+        }
+        if let Some(hs) = self.hsep.as_deref_mut() {
+            for id in refused {
+                hs.lp_cut_removed(id);
             }
         }
         if add.is_empty() {
@@ -1193,6 +1334,166 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             d.resize(n, 0.0);
         }
         self.clear_lp_caches();
+    }
+
+    /// `HighsSeparation::separate` at a node (`DISCOPT_HIGHS_SEARCH_SEPA`): rounds of
+    /// `separationRound` -- the clique, tableau, path and mod-k separators of the
+    /// root's subsystem on the search LP's point, the persistent pool's selection
+    /// over the node's box, the selected cuts appended to the search LP as rows
+    /// (`lp->addCuts`), the LP resolved over the node's box and aged with deletion --
+    /// while a round adds cuts, the LP stays optimal and fractional, and the objective
+    /// keeps improving by more than 1 % of the last round's gain over the root's.
+    /// Every cut is a globally valid inequality of the pool, so the LP bound it gives
+    /// holds on the node's box; the dive's next evaluation of the node takes it.
+    /// Returns whether the global domain became infeasible (never here).
+    fn separate_highs(&mut self) -> bool {
+        let ns = self.ctx.ns;
+        let fractional = |x: &[f64]| (0..ns).any(|j| self.ctx.is_int[j] && frac(x[j]) > INT_TOL);
+        let ok = self.eval.last_dual_raw.is_some()
+            && self.eval.basis.is_some()
+            && self.eval.last_box.is_some()
+            && self.eval.point_full.as_deref().is_some_and(fractional);
+        if !ok {
+            // `separate`'s else branch: no optimal LP or no fractional integer, just
+            // ageing.
+            self.age_cut_rows(true);
+            return false;
+        }
+        let first = self.root_obj;
+        loop {
+            if self.last_lp_obj >= self.optlim()
+                || self
+                    .lim
+                    .deadline
+                    .is_some_and(|d| std::time::Instant::now() >= d)
+            {
+                break;
+            }
+            let last = self.last_lp_obj;
+            if !self.separation_round() {
+                break;
+            }
+            let still = self.eval.point_full.as_deref().is_some_and(fractional);
+            if !still || self.resolved_untrusted {
+                break;
+            }
+            if self.last_lp_obj - first <= f64::max(last - first, FEASTOL_SEPA) * 1.01 {
+                break;
+            }
+        }
+        false
+    }
+
+    /// One `separationRound` on the node's current LP point; whether it added cuts
+    /// and the resolve over the node's box was trusted (`scaledOptimal`).
+    fn separation_round(&mut self) -> bool {
+        let ns = self.ctx.ns;
+        let (Some(x), Some(y), Some(basis), Some((fl, fu))) = (
+            self.eval.point_full.clone(),
+            self.eval.last_dual_raw.clone(),
+            self.eval.basis.clone(),
+            self.eval.last_box.clone(),
+        ) else {
+            return false;
+        };
+        let iters = self.eval.lp_iters + self.eval.sb_iters;
+        let rc = {
+            let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
+            if x.len() != ctx.n_w || y.len() != ctx.m_w {
+                return false;
+            }
+            let Some(hs) = self.hsep.as_deref_mut() else {
+                return false;
+            };
+            hs.add_lp_iterations(iters - self.hsep_iters);
+            hs.round_node(
+                &crate::lp::highs_cutgen::bridge::StdFormRound {
+                    csc: ctx.csc_rc,
+                    m: ctx.m_w,
+                    n: ctx.n_w,
+                    ns,
+                    b: ctx.b_w,
+                    l: ctx.l_w,
+                    u: ctx.u_w,
+                    is_int: ctx.is_int_full,
+                    x: &x,
+                    y: &y,
+                    basic_vars: &basis.basic_vars,
+                    deadline: self.lim.deadline,
+                    open_nodes: Some(&self.q),
+                    col_dual: self.eval.redcost.as_deref(),
+                },
+                &fl[..ns],
+                &fu[..ns],
+            )
+        };
+        self.hsep_iters = iters;
+        self.sep_calls += 1;
+        crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, rc.generated as u64);
+        let (ids, mut cuts): (Vec<i32>, Vec<GomoryCut>) = rc.cuts.into_iter().unzip();
+        let mut idx: Vec<Option<i32>> = vec![None; cuts.len()];
+        // `separationRound`'s `mipdata.cutpool.separate`: discopt keeps the search's
+        // conflict / dual-proof cuts in their own cutpool (#2350), so it is separated
+        // here too, as `separate` does on the default path.
+        if let Some(cf) = self.conf.as_mut() {
+            let n_w = make_ctx(self.ctx, &self.lp, &self.node_simplex).n_w;
+            let mut cutset = Vec::new();
+            let mut obs =
+                DomainObservers(vec![(&mut cf.gdom, cf.cpi), (&mut self.eval.dom, cf.cpi)]);
+            let sel =
+                cf.cutpool
+                    .separate(&mut obs, &x[..ns], &fl[..ns], &fu[..ns], 1e-6, &mut cutset);
+            for c in sel {
+                // `vals . x <= rhs` as `coeffs . x >= rhs` over the working columns.
+                let mut coeffs = vec![0.0; n_w];
+                for (&j, &v) in c.inds.iter().zip(&c.vals) {
+                    coeffs[j as usize] = -v;
+                }
+                cuts.push(GomoryCut {
+                    coeffs,
+                    rhs: -c.rhs,
+                });
+                idx.push(Some(c.index));
+            }
+        }
+        let rows0 = self.cut_rows_added;
+        self.append_cut_rows_tagged(&cuts, &idx, &ids);
+        crate::profile::incr(crate::profile::Ctr::HighsMipSearchSepaRounds);
+        crate::profile::incr_by(
+            crate::profile::Ctr::HighsMipSearchSepaRows,
+            (self.cut_rows_added - rows0) as u64,
+        );
+        if self.cut_rows_added == rows0 {
+            return false;
+        }
+        // `lp->resolveLp(&propdomain)` over the node's box, then `performAging(true)`.
+        let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
+        let (fl, fu) = self.eval.lp_box(&ctx);
+        let start = super::highs_eval::fit_basis_to_box(
+            self.eval.basis.clone(),
+            self.eval.basis_d.as_deref(),
+            &fl,
+            &fu,
+        );
+        let nl = node_lp(&ctx, start, &fl, &fu);
+        self.eval.lp_iters += nl.sol.iters as i64;
+        self.eval.note_solve(&nl.sol);
+        self.resolved_untrusted = true;
+        if let NodeLpVerdict::Bound { .. } = nl.verdict {
+            self.resolved_untrusted = false;
+            self.eval.basis = Some(nl.sol.basis.clone());
+            self.eval.redcost = Some(super::highs_eval::structural_redcost(&ctx, &nl));
+            self.eval.last_dual = Some(nl.rc_dual().to_vec());
+            self.eval.dual_epoch += 1;
+            self.eval.basis_d = Some(super::highs_eval::full_redcost(&ctx, &nl));
+            self.eval.last_dual_raw = Some(nl.sol.dual.clone());
+            self.eval.last_box = Some((fl, fu));
+            self.eval.point = Some(nl.sol.x[..ns].to_vec());
+            self.eval.point_full = Some(nl.sol.x.clone());
+            self.last_lp_obj = nl.sol.obj + ctx.obj_const;
+        }
+        self.age_cut_rows(true);
+        !self.resolved_untrusted
     }
 
     fn clear_lp_caches(&mut self) {
@@ -1265,10 +1566,16 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         }
         for r in &gone {
             let sig = cut_signature(&r.cut);
-            self.in_lp.remove(&sig);
             if let (Some(k), Some(cf)) = (self.pool_lp.remove(&sig), self.conf.as_mut()) {
                 cf.cutpool.lp_cut_removed(k);
             }
+            if let Some(id) = self.hsep_ids.remove(&sig) {
+                if let Some(hs) = self.hsep.as_deref_mut() {
+                    // `HighsLpRelaxation::removeCuts` -> `cutpool.lpCutRemoved`.
+                    hs.lp_cut_removed(id);
+                }
+            }
+            self.in_lp.remove(&sig);
         }
         let d = delete_cut_rows(&lp.csc, lp.m, lp.n, &lp.b, &mut gone, &mut kept);
         let col_map = d.col_map.clone();
@@ -1443,6 +1750,19 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     fn dual_bound(&self, inc: f64) -> f64 {
         inc.min(self.lift(self.q.best_lower_bound()))
             .min(self.lift(self.eval.unresolved_floor))
+    }
+
+    /// `setIterationLimit(limit)` on the search's LP (see
+    /// [`node_iter_limit_enabled`]); a no-op when the flag is off.
+    fn set_iteration_limit(&mut self, limit: usize) {
+        if !self.lim.node_iter_limit {
+            self.node_simplex = None;
+            return;
+        }
+        let mut o = self.ctx.simplex.clone();
+        o.max_iter = o.max_iter.min(limit);
+        crate::profile::incr(crate::profile::Ctr::HighsMipSearchIterLimitSet);
+        self.node_simplex = Some(o);
     }
 
     fn optlim(&self) -> f64 {
@@ -1794,7 +2114,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
         // Before the reference-point check: a symmetric copy of the point may be
         // what this node keeps.
         self.sym_dynamic(node);
-        let ctx = make_ctx(self.ctx, &self.lp);
+        let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
+        #[cfg(test)]
+        NODE_MAX_ITER.with(|v| v.borrow_mut().push(ctx.simplex.max_iter));
         let ns = self.ctx.ns;
         let ref_in = self.refp.as_ref().map(|rc| {
             rc.contains(
@@ -1808,6 +2130,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             .eval
             .evaluate(&ctx, node, parent, &mut self.pc, false, limit);
         self.dual_fresh = self.eval.dual_epoch != dual_epoch0;
+        self.last_lp_obj = node.lp_objective;
         match r {
             SearchResult::DomainInfeasible => self.analyse_conflict(),
             SearchResult::LpInfeasible => {
@@ -1907,7 +2230,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             child_rule: ChildSelectionRule::RootSol,
             inheuristic: false,
         };
-        let ctx = make_ctx(self.ctx, &self.lp);
+        let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
         let ns = self.ctx.ns;
         let ref_box = self.refp.as_ref().map(|_| {
             (
@@ -2027,6 +2350,13 @@ impl SearchEnv for HighsEnv<'_, '_> {
         });
         (s, a)
     }
+    fn avg_solve_iters(&self) -> f64 {
+        self.eval.avg_solve_iters
+    }
+    fn set_node_iteration_limit(&mut self, avgiter: f64) {
+        let limit = node_iteration_limit(avgiter, self.avg_root_iters, self.first_root_iters);
+        self.set_iteration_limit(limit);
+    }
     fn separate(&mut self) -> bool {
         // `separateAndStoreBasis` with discopt's node separation: node-local Gomory
         // rounds plus the pool cuts this node violates, on a copy of the node LP; the
@@ -2034,7 +2364,10 @@ impl SearchEnv for HighsEnv<'_, '_> {
         // re-evaluates it. Under `DISCOPT_HIGHS_SEARCH_CUT_LP` (step 2.1) the cuts also
         // join the search's LP as persistent rows, as HiGHS adds its cuts to the shared
         // LP; otherwise they stay node-local and in the pool.
-        let ctx = make_ctx(self.ctx, &self.lp);
+        if self.hsep.is_some() && self.cut_lp {
+            return self.separate_highs();
+        }
+        let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
         let ctx = &ctx;
         if !ctx.node_gmi {
             return false;
@@ -2469,6 +2802,19 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             progress: (0.0, 0, 0),
             stall_nodes: 0,
             conf: None,
+            hsep: None,
+            node_simplex: None,
+            avg_root_iters: if lim.root_solves > 0 {
+                lim.iters_before as f64 / lim.root_solves as f64
+            } else {
+                0.0
+            },
+            first_root_iters: lim.iters_before,
+            hsep_ids: std::collections::HashMap::new(),
+            hsep_iters: 0,
+            root_obj: f64::NEG_INFINITY,
+            last_lp_obj: f64::NEG_INFINITY,
+            resolved_untrusted: false,
             // Only the search on the model they were verified on (never a sub-MIP's);
             // `run` also drops it below the top level.
             shadow: {
@@ -2974,7 +3320,12 @@ pub(super) fn run<'a>(
     dbg: Option<Debugger<'a>>,
     seed_pool: Vec<GomoryCut>,
     top_level: bool,
-    cliques: Option<(crate::lp::highs_cutgen::clique::CliqueTable, Vec<f64>)>,
+    cliques: Option<(
+        crate::lp::highs_cutgen::clique::CliqueTable,
+        Vec<f64>,
+        Option<crate::lp::highs_cutgen::probing::RootProbed>,
+    )>,
+    mut hsep: Option<&'a mut crate::lp::highs_cutgen::bridge::RootSeparation>,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -2982,9 +3333,25 @@ pub(super) fn run<'a>(
     // boxes on environments of their own, built exactly as this search's, before the
     // search starts; the search below is untouched by it.
     if top_level {
-        nodebox::harness(ctx, lim, initial.as_ref(), &seed_pool);
+        nodebox::harness(
+            ctx,
+            lim,
+            initial.as_ref(),
+            &seed_pool,
+            hsep.as_deref_mut(),
+            root_bound,
+        );
     }
     let mut env = HighsEnv::new(ctx, lim, sub_mip, dbg, refcheck::RefCheck::load(ctx))?;
+    if let Some(hs) = hsep.as_deref_mut() {
+        hs.begin_search();
+    }
+    env.hsep = hsep;
+    env.root_obj = root_bound;
+    // The root's `setIterationLimit(max(10000, 10 * avgrootlpiters))`, in force until
+    // the first `processNodes` sets the node limit.
+    let root_limit = 10_000usize.max((10.0 * env.avg_root_iters) as usize);
+    env.set_iteration_limit(root_limit);
     if !top_level {
         // `DISCOPT_MILP_PREINC_SCORE` acts on the top-level search only.
         env.preinc_score = false;
@@ -3008,7 +3375,7 @@ pub(super) fn run<'a>(
     // first (`separateImpliedBounds`' probing loop over the root LP's fractional
     // binaries), on the domain at its global baseline.
     let mut probe_infeasible = false;
-    if let Some((t, x)) = cliques {
+    if let Some((t, x, root_probed)) = cliques {
         assert_eq!(
             t.num_cols(),
             ctx.ns,
@@ -3025,17 +3392,23 @@ pub(super) fn run<'a>(
             .filter(|&j| ctx.is_int[j] && (x[j] - x[j].round()).abs() > feastol)
             .collect();
         // HiGHS probes every binary in presolve first (`HPresolve::runProbing`), at
-        // its default `random_seed = 0`.
-        let pp = crate::lp::highs_cutgen::probing::PresolveProbing {
-            submip: lim.submip,
-            random_seed: 0,
-            nrows: ctx.n_orig_rows.min(ctx.m_w),
-        };
-        let st = crate::lp::highs_cutgen::probing::probe_and_attach(
+        // its default `random_seed = 0`, once: when the root separation already ran
+        // it (`DISCOPT_HIGHS_SEPA_ROOT_PROBE`), the search takes the root's
+        // implications and global reductions instead of probing from scratch.
+        let pp =
+            root_probed
+                .is_none()
+                .then_some(crate::lp::highs_cutgen::probing::PresolveProbing {
+                    submip: lim.submip,
+                    random_seed: 0,
+                    nrows: ctx.n_orig_rows.min(ctx.m_w),
+                });
+        let st = crate::lp::highs_cutgen::probing::probe_and_attach_with(
             &mut env.eval.dom,
             t,
             &cands,
-            Some(pp),
+            pp,
+            root_probed,
         );
         {
             use crate::profile::{incr_by, Ctr};

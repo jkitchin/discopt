@@ -661,13 +661,89 @@ pub struct PresolveProbing {
 /// better than the cutoff).
 pub fn probe_and_attach(
     dom: &mut Domain,
-    mut table: CliqueTable,
+    table: CliqueTable,
     cands: &[usize],
     presolve: Option<PresolveProbing>,
 ) -> ProbeStats {
+    probe_and_attach_with(dom, table, cands, presolve, None)
+}
+
+/// What the root separation's probing (`DISCOPT_HIGHS_SEPA_ROOT_PROBE`) leaves for the
+/// search: HiGHS's `mipdata_->implications` and the global domain's bounds after
+/// presolve probing and the root rounds' `separateImpliedBounds`. HiGHS runs presolve
+/// probing once and the tree reads the root's implications; a search handed this runs
+/// neither presolve probing nor `HighsImplications::rebuild` again.
+#[derive(Clone, Debug)]
+pub struct RootProbed {
+    /// The implications, with `hasProbed` for the columns the root probed.
+    pub implics: Implications,
+    /// The root probing domain's global lower bounds.
+    pub col_lower: Vec<f64>,
+    /// The root probing domain's global upper bounds.
+    pub col_upper: Vec<f64>,
+}
+
+/// [`probe_and_attach`], or, with `prior`, the search start after the root separation
+/// probed: its global reductions are applied to `dom` (then propagated and made the
+/// baseline), its implications (with `hasProbed`) are kept, `table` keeps its
+/// `numCliqueEntriesAfterFirstPresolve`, `presolve` must be `None`, and only `cands`
+/// not probed yet are probed.
+pub fn probe_and_attach_with(
+    dom: &mut Domain,
+    mut table: CliqueTable,
+    cands: &[usize],
+    presolve: Option<PresolveProbing>,
+    prior: Option<RootProbed>,
+) -> ProbeStats {
     let n = dom.col_lower.len();
-    let mut implics = Implications::new(n);
     let nnz = dom.num_model_nonzeros() as i64;
+    let had_prior = prior.is_some();
+    let mut implics = match prior {
+        None => Implications::new(n),
+        Some(rp) => {
+            assert!(
+                presolve.is_none(),
+                "presolve probing ran at the root; HiGHS runs it once"
+            );
+            assert_eq!(
+                rp.col_lower.len(),
+                n,
+                "root probing's domain has the search's columns"
+            );
+            for j in 0..n {
+                if dom.infeasible() {
+                    break;
+                }
+                if rp.col_lower[j] > dom.col_lower[j] {
+                    dom.change_bound(
+                        DomainChange {
+                            boundval: rp.col_lower[j],
+                            column: j,
+                            boundtype: BoundType::Lower,
+                        },
+                        Reason::Unspecified,
+                    );
+                }
+                if !dom.infeasible() && rp.col_upper[j] < dom.col_upper[j] {
+                    dom.change_bound(
+                        DomainChange {
+                            boundval: rp.col_upper[j],
+                            column: j,
+                            boundtype: BoundType::Upper,
+                        },
+                        Reason::Unspecified,
+                    );
+                }
+            }
+            if !dom.infeasible() {
+                dom.propagate();
+            }
+            if !dom.infeasible() {
+                dom.commit_as_global();
+            }
+            rp.implics
+        }
+    };
     crate::profile::record_max(
         crate::profile::Ctr::MilpCliqueTableCliques0,
         table.num_cliques() as u64,
@@ -685,9 +761,15 @@ pub fn probe_and_attach(
     }
     // `numCliqueEntriesAfterFirstPresolve`, and `nextCleanupCall = numNonzero()`
     // (`HighsImplications::rebuild`).
-    let entries0 = table.num_entries() as i64;
-    table.set_num_entries_after_presolve(entries0 as i32);
-    implics.next_cleanup_call = nnz;
+    let entries0 = if had_prior {
+        table.num_entries_after_presolve() as i64
+    } else {
+        table.num_entries() as i64
+    };
+    if !had_prior {
+        table.set_num_entries_after_presolve(entries0 as i32);
+        implics.next_cleanup_call = nnz;
+    }
     if !dom.infeasible() {
         let mut p = Prober::new(dom, &mut table, &mut implics);
         let mut next = p.implics.next_cleanup_call;
@@ -741,49 +823,10 @@ pub fn separate_implied_bounds(
         if !gdom.domain_change_stack().is_empty() {
             gdom.commit_as_global();
         }
-        let entries_after = table.num_entries_after_presolve() as i64;
-        let old_queries = table.num_neighbourhood_queries;
-        let mut p = Prober::new(gdom, &mut table, &mut implics);
-        let mut next = p.implics.next_cleanup_call;
-        st = p.probe_candidates(frac, &mut next, entries_after);
-        p.implics.next_cleanup_call = next;
-        table.num_neighbourhood_queries = old_queries;
+        st = probe_lp_candidates(gdom, &mut table, &mut implics, frac);
     }
     if !gdom.infeasible() {
-        let feastol = gdom.feastol();
-        for &col in frac {
-            if gdom.col_lower[col] != 0.0 || gdom.col_upper[col] != 1.0 {
-                continue;
-            }
-            for val in 0..2u8 {
-                for (&ic, imp) in implics.implications_of(col, val) {
-                    let (glb, gub) = (gdom.col_lower[ic], gdom.col_upper[ic]);
-                    let integral = gdom.is_int(ic);
-                    let mut cand: Vec<([usize; 2], [f64; 2], f64)> = Vec::new();
-                    if val == 1 {
-                        if imp.ub + feastol < gub {
-                            cand.push(([ic, col], [1.0, gub - imp.ub], gub));
-                        }
-                        if imp.lb - feastol > glb {
-                            cand.push(([ic, col], [-1.0, imp.lb - glb], -glb));
-                        }
-                    } else {
-                        if imp.ub + feastol < gub {
-                            cand.push(([ic, col], [1.0, imp.ub - gub], imp.ub));
-                        }
-                        if imp.lb - feastol > glb {
-                            cand.push(([ic, col], [-1.0, glb - imp.lb], -imp.lb));
-                        }
-                    }
-                    for (inds, vals, rhs) in cand {
-                        let viol = x[inds[0]] * vals[0] + x[inds[1]] * vals[1] - rhs;
-                        if viol > feastol && rhs.is_finite() && vals.iter().all(|v| v.is_finite()) {
-                            cuts.push((inds, vals, rhs, integral));
-                        }
-                    }
-                }
-            }
-        }
+        cuts = implied_bound_cuts(gdom, &implics, x, frac);
     }
     let table = Arc::new(table);
     let implics = Arc::new(implics);
@@ -792,6 +835,78 @@ pub fn separate_implied_bounds(
     gdom.set_clique_table(Some(table));
     gdom.set_implications(Some(implics));
     (st, cuts)
+}
+
+/// The probing loop of `separateImpliedBounds` on `gdom` (at its global baseline, no
+/// table or implications attached): probe the candidates `frac` not probed yet,
+/// `runCliqueMerging` by `nextCleanupCall`, and leave the table's neighbourhood-query
+/// count as it was (HiGHS restores `numNeighbourhoodQueries`). Commits the global
+/// reductions probing finds to `gdom`'s baseline.
+pub fn probe_lp_candidates(
+    gdom: &mut Domain,
+    table: &mut CliqueTable,
+    implics: &mut Implications,
+    frac: &[usize],
+) -> ProbeStats {
+    let entries_after = table.num_entries_after_presolve() as i64;
+    let old_queries = table.num_neighbourhood_queries;
+    let mut p = Prober::new(gdom, table, implics);
+    let mut next = p.implics.next_cleanup_call;
+    let st = p.probe_candidates(frac, &mut next, entries_after);
+    p.implics.next_cleanup_call = next;
+    table.num_neighbourhood_queries = old_queries;
+    st
+}
+
+/// The cut loop of `separateImpliedBounds`: for each binary in `frac` still free in
+/// `gdom`, the implied-bound cuts `vals . x <= rhs` from its cached implications that
+/// `x` violates by more than `gdom`'s feasibility tolerance, each with whether it is
+/// integral (`!isColContinuous(implCol)`).
+pub fn implied_bound_cuts(
+    gdom: &Domain,
+    implics: &Implications,
+    x: &[f64],
+    frac: &[usize],
+) -> Vec<([usize; 2], [f64; 2], f64, bool)> {
+    let mut cuts = Vec::new();
+    let feastol = gdom.feastol();
+    for &col in frac {
+        if gdom.col_lower[col] != 0.0 || gdom.col_upper[col] != 1.0 {
+            continue;
+        }
+        for val in 0..2u8 {
+            for (&ic, imp) in implics.implications_of(col, val) {
+                let (glb, gub) = (gdom.col_lower[ic], gdom.col_upper[ic]);
+                let integral = gdom.is_int(ic);
+                let mut cand: Vec<([usize; 2], [f64; 2], f64)> = Vec::new();
+                // HiGHS's list is sorted by `HighsDomainChange::operator<`, (column,
+                // boundtype) with kLower < kUpper, so a column's lower-bound cut comes
+                // first; the order fixes the pool's row indices and so its tie-breaks.
+                if val == 1 {
+                    if imp.lb - feastol > glb {
+                        cand.push(([ic, col], [-1.0, imp.lb - glb], -glb));
+                    }
+                    if imp.ub + feastol < gub {
+                        cand.push(([ic, col], [1.0, gub - imp.ub], gub));
+                    }
+                } else {
+                    if imp.lb - feastol > glb {
+                        cand.push(([ic, col], [-1.0, glb - imp.lb], -imp.lb));
+                    }
+                    if imp.ub + feastol < gub {
+                        cand.push(([ic, col], [1.0, imp.ub - gub], imp.ub));
+                    }
+                }
+                for (inds, vals, rhs) in cand {
+                    let viol = x[inds[0]] * vals[0] + x[inds[1]] * vals[1] - rhs;
+                    if viol > feastol && rhs.is_finite() && vals.iter().all(|v| v.is_finite()) {
+                        cuts.push((inds, vals, rhs, integral));
+                    }
+                }
+            }
+        }
+    }
+    cuts
 }
 
 #[cfg(test)]

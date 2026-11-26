@@ -294,6 +294,15 @@ pub trait SearchEnv {
     }
     /// `runHeuristics` after its node evaluation: randomized rounding, RENS/RINS.
     fn run_heuristics(&mut self);
+    /// `mipdata_->getLp().getAvgSolveIters()`: the running mean of the simplex
+    /// iterations of the search LP's optimal solves, read when `processNodes` starts.
+    fn avg_solve_iters(&self) -> f64 {
+        0.0
+    }
+    /// `worker.getLpRelaxation().setIterationLimit(iterlimit)` before the dive, with
+    /// `avgiter` the value [`Self::avg_solve_iters`] gave when this node's processing
+    /// started. The limit holds for every LP solve until it is set again.
+    fn set_node_iteration_limit(&mut self, _avgiter: f64) {}
 
     // --- recorded decision points (dump events) ---
     /// `MI`.
@@ -977,6 +986,8 @@ impl MainLoop {
         plunge_limit: i64,
     ) {
         let mut nodes_explored: i64 = 0;
+        // `processNodes(..., mipdata_->getLp().getAvgSolveIters())`.
+        let avgiter = env.avg_solve_iters();
         if !skip_separation {
             // evaluateNode lambda
             if search.evaluate_node(env) == NodeResult::SubOptimal {
@@ -1005,6 +1016,9 @@ impl MainLoop {
                 return;
             }
         }
+        // `HighsInt iterlimit = 10 * max(avgiter, avgrootlpiters); ...
+        // setIterationLimit(iterlimit)`, after the separation and before the dive.
+        env.set_node_iteration_limit(avgiter);
         let mut consider_heuristics = true;
         env.note_search_progress(
             search.treeweight,
