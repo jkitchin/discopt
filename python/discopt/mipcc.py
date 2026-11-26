@@ -473,6 +473,8 @@ def _run(
                 forced=[res.n_forced, res.n_forced_certified],
                 add_one=[res.n_add_one_tried, res.n_add_one_moves],
                 relaxed=res.n_relaxed,
+                closed=[res.n_exchanged, res.n_close_dropped],
+                proven=res.proven_irreducible,
                 wall=round(time.perf_counter() - t0, 2),
             )
         ),
