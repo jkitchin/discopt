@@ -30,6 +30,15 @@ INF = im._INF
 BIG_M = 8
 INNER = [(x, y) for x in (-1, 0, 1) for y in (-1, 0, 1)]
 OUTER = [(x, y) for x in range(-2, 3) for y in range(-2, 3) if max(abs(x), abs(y)) == 2]
+# A smaller geometry on the same path, for the tests that run a whole filter: a
+# five-point inner cross, and the eight boundary points that are neither corners
+# nor edge midpoints. Three blocks cannot cover it either (two cannot, four can),
+# and the full-stack run arms the same steps (block proofs and points, orbit
+# drops, an ordering-row cross-check that agrees) with 509 master decisions where
+# the full geometry takes 1614: 2.0 s against 6.5 s on a dev machine, two
+# interleaved repetitions each; the full geometry was 15.4 s on CI (#2348).
+SMALL_INNER = [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
+SMALL_OUTER = [p for p in OUTER if 0 not in p and abs(p[0]) != abs(p[1])]
 FLAGS = (
     "DISCOPT_IIS_BLOCK_MASTER",
     "DISCOPT_IIS_BLOCK_LEX",
@@ -39,27 +48,29 @@ FLAGS = (
 )
 
 
-def cover_model(n_blocks: int):
+def cover_model(n_blocks: int, inner=None, outer=None):
     """``(A, row_lo, row_hi, col_lb, col_ub, is_int)`` of the fixture, plus the
-    column layout ``(core, sat)``: ``core[b] = (c1, c2, d)``, ``sat[b][k]``."""
+    column layout ``(core, sat)``: ``core[b] = (c1, c2, d)``, ``sat[b][k]``.
+    ``inner``/``outer`` replace the point sets (default ``INNER``/``OUTER``)."""
+    INNER_, OUTER_ = (INNER if inner is None else inner), (OUTER if outer is None else outer)
     rows, lo, hi = [], [], []
     core = [(3 * b, 3 * b + 1, 3 * b + 2) for b in range(n_blocks)]
     n = 3 * n_blocks
     sat = []
     for b in range(n_blocks):
-        sat.append(list(range(n, n + len(OUTER))))
-        n += len(OUTER)
+        sat.append(list(range(n, n + len(OUTER_))))
+        n += len(OUTER_)
     for b in range(n_blocks):
         c1, c2, d = core[b]
-        for x, y in INNER:  # the half-plane contains no inner point
+        for x, y in INNER_:  # the half-plane contains no inner point
             rows.append({c1: x, c2: y, d: 1})
             lo.append(-INF)
             hi.append(0.0)
-        for k, (x, y) in enumerate(OUTER):  # z = 1 only if it contains the point
+        for k, (x, y) in enumerate(OUTER_):  # z = 1 only if it contains the point
             rows.append({c1: x, c2: y, d: 1, sat[b][k]: -BIG_M})
             lo.append(1.0 - BIG_M)
             hi.append(INF)
-    for k in range(len(OUTER)):  # every boundary point is in some half-plane
+    for k in range(len(OUTER_)):  # every boundary point is in some half-plane
         rows.append({sat[b][k]: 1 for b in range(n_blocks)})
         lo.append(1.0)
         hi.append(INF)
@@ -330,7 +341,7 @@ def test_flags_opted_out_leave_the_engine_untouched(engine_name, monkeypatch):
     for f in FLAGS:
         monkeypatch.setenv(f, "0")
     assert not any(im._block_flags().values())
-    model, _ = cover_model(2)
+    model, _ = cover_model(2, SMALL_INNER, SMALL_OUTER)
     res = im.milp_iis_arrays(_arrays_arg(model), iis_engine=engine_name, total_time_limit=120.0)
     assert res.n_block_proofs == res.n_block_points == res.n_orbit_dropped == 0
     assert _independent_confirm(model, res, engine_name) is True
@@ -340,7 +351,7 @@ def test_flags_opted_out_leave_the_engine_untouched(engine_name, monkeypatch):
 def test_full_stack_answer_is_confirmed_independently(engine_name, monkeypatch, order):
     for f in FLAGS:
         monkeypatch.setenv(f, "1")
-    model, _ = cover_model(3)
+    model, _ = cover_model(3, SMALL_INNER, SMALL_OUTER)
     res = im.milp_iis_arrays(
         _arrays_arg(model), iis_engine=engine_name, order=order, total_time_limit=120.0
     )
@@ -366,7 +377,7 @@ def test_full_stack_answer_is_confirmed_independently(engine_name, monkeypatch, 
 def test_each_flag_alone_gives_a_confirmed_answer(engine_name, monkeypatch, extra):
     """The two-block fixture: the same code path as three blocks at a fraction of
     the time (five three-block runs took 154 s on CI)."""
-    model, _ = cover_model(2)
+    model, _ = cover_model(2, SMALL_INNER, SMALL_OUTER)
     for f in FLAGS:
         monkeypatch.setenv(f, "0")
     monkeypatch.setenv(FLAGS[0], "1")
