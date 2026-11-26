@@ -101,6 +101,16 @@ pub struct StdFormRound<'a> {
     /// reblock166 once an incumbent's cutoff box changed the system). Stopping
     /// early only generates fewer cuts.
     pub deadline: Option<std::time::Instant>,
+    /// The search's open nodes (`HighsNodeQueue::numNodesDown/Up`), which
+    /// `HighsImplications::getBestVub/Vlb` prefers a variable bound by: a bound on a
+    /// binary branched in more open nodes wins before the bound's minimum value is
+    /// compared. `None` is an empty queue (the root; every count is 0).
+    pub open_nodes: Option<&'a dyn super::domain::OpenNodeCounts>,
+    /// The structurals' reduced costs at `x` (`lpSolution.col_dual`), which
+    /// `getBestVub/Vlb` break an exact tie by (`kUseDualsForBreakingTies`): the bound
+    /// whose binary has the larger `col_dual / coef` wins. `None` reads 0 for every
+    /// column (no tie is broken by duals).
+    pub col_dual: Option<&'a [f64]>,
 }
 
 /// HiGHS's view of the round's LP.
@@ -830,6 +840,44 @@ impl RootSeparation {
         self.pool.lp_cut_removed(index);
     }
 
+    /// The tree search starts. HiGHS separates the search's nodes with the worker's
+    /// own `HighsSeparation` (`HighsMipWorker`'s `sepa_ptr_`), not the root's local
+    /// one (`evaluateRootNode`'s `HighsSeparation sepa(worker)`), so its separators
+    /// start fresh: tableau `numCalls`/`numTries` at 0 and the path separator's
+    /// `randgen` re-initialised to `random_seed`. The cut pool, the variable bounds
+    /// and the LP-iteration count are solver-wide in HiGHS and carry over.
+    pub fn begin_search(&mut self) {
+        self.path = PathSeparator::new(self.random_seed);
+        self.tableau = TableauSeparator::default();
+    }
+
+    /// The separators' persistent state: tableau `numCalls` and `numTries`, path
+    /// `numCalls` and the path generator's state.
+    pub fn separator_state(&self) -> (i64, i64, i64, u64) {
+        (
+            self.tableau.num_calls,
+            self.tableau.num_tries,
+            self.path.num_calls,
+            self.path.rng_state(),
+        )
+    }
+
+    /// Overwrite the separators' persistent state (tests: a subsystem that has
+    /// already separated at the root).
+    #[cfg(test)]
+    pub fn set_separator_state(
+        &mut self,
+        tab_calls: i64,
+        tab_tries: i64,
+        path_calls: i64,
+        rng: u64,
+    ) {
+        self.tableau.num_calls = tab_calls;
+        self.tableau.num_tries = tab_tries;
+        self.path = PathSeparator::with_state(rng);
+        self.path.num_calls = path_calls;
+    }
+
     /// Record LP iterations (they seed each round's cut generators, as in HiGHS).
     pub fn add_lp_iterations(&mut self, iters: i64) {
         self.lp_iterations += iters;
@@ -839,6 +887,26 @@ impl RootSeparation {
     /// pool's selection for the LP.
     pub fn round(&mut self, r: &StdFormRound<'_>) -> RoundCuts {
         self.probe_root(r);
+        self.round_impl(r, None)
+    }
+
+    /// One node separation round of HiGHS's `separationRound` on the search's LP:
+    /// the separators run over the global box (`r.l`/`r.u`, `HighsTransformedLp` over
+    /// the global domain) into this persistent pool, whose selection scores efficacy
+    /// over the node's box (`node_l`/`node_u`, structural columns), as
+    /// `cutpool.separate(sol, propdomain, ...)` does with the local domain.
+    pub fn round_node(
+        &mut self,
+        r: &StdFormRound<'_>,
+        node_l: &[f64],
+        node_u: &[f64],
+    ) -> RoundCuts {
+        let nl: Vec<f64> = node_l[..r.ns].iter().map(|&v| lo_bound(v)).collect();
+        let nu: Vec<f64> = node_u[..r.ns].iter().map(|&v| up_bound(v)).collect();
+        self.round_impl(r, Some((&nl, &nu)))
+    }
+
+    fn round_impl(&mut self, r: &StdFormRound<'_>, sel_box: Option<(&[f64], &[f64])>) -> RoundCuts {
         let mut view = View::build(r);
         if self.vbounds.is_none() && vbounds_enabled() {
             // HiGHS extracts from the model rows once (`extractCliques`, run by its
@@ -857,15 +925,28 @@ impl RootSeparation {
         }
         let empty = Vec::new();
         let vstore = self.vbounds.take();
-        let vubs = |c: i32| vstore.as_ref().map_or_else(|| empty.clone(), |v| v.vubs(c));
-        let vlbs = |c: i32| vstore.as_ref().map_or_else(|| empty.clone(), |v| v.vlbs(c));
+        let on = r.open_nodes;
+        let vubs = |c: i32| {
+            vstore
+                .as_ref()
+                .map_or_else(|| empty.clone(), |v| v.vubs_in(c, on))
+        };
+        let vlbs = |c: i32| {
+            vstore
+                .as_ref()
+                .map_or_else(|| empty.clone(), |v| v.vlbs_in(c, on))
+        };
         let intcols: Vec<i32> = (0..r.ns)
             .filter(|&j| r.is_int[j])
             .map(|j| j as i32)
             .collect();
+        let coldual = match r.col_dual {
+            Some(d) if d.len() >= r.ns => d[..r.ns].to_vec(),
+            _ => vec![0.0; r.ns],
+        };
         let setup = TlSetup {
             col_value: &view.colval.clone(),
-            col_dual: &vec![0.0; r.ns],
+            col_dual: &coldual,
             row_value: &view.rowval.clone(),
             continuous_cols: &view.contcols.clone(),
             integral_cols: &intcols,
@@ -1076,14 +1157,10 @@ impl RootSeparation {
         let generated = (self.pool.num_cuts() - before).max(0) as usize;
         self.cuts_generated += generated;
         let mut cutset = Vec::new();
-        let sel = self.pool.separate(
-            &mut NoObserver,
-            &view.colval,
-            &view.cl,
-            &view.cu,
-            FEASTOL,
-            &mut cutset,
-        );
+        let (sl, su) = sel_box.unwrap_or((&view.cl, &view.cu));
+        let sel = self
+            .pool
+            .separate(&mut NoObserver, &view.colval, sl, su, FEASTOL, &mut cutset);
         let cuts = sel
             .into_iter()
             .map(|c| {
@@ -1554,4 +1631,24 @@ pub fn separate_node(r: &StdFormRound<'_>, p: &NodeSepa<'_>) -> Vec<GomoryCut> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod begin_search_tests {
+    use super::*;
+
+    /// `begin_search` leaves the separators as a fresh `HighsSeparation` builds them
+    /// (HiGHS's search separates with the worker's own object, not the root's).
+    #[test]
+    fn begin_search_restores_fresh_separators() {
+        let fresh = RootSeparation::new(4, 2, 6, true).separator_state();
+        assert_eq!(fresh.0, 0);
+        assert_eq!(fresh.1, 0);
+        assert_eq!(fresh.2, 0);
+        let mut hs = RootSeparation::new(4, 2, 6, true);
+        hs.set_separator_state(16, 466, 16, 0x1234_5678_9abc_def0);
+        assert_ne!(hs.separator_state(), fresh);
+        hs.begin_search();
+        assert_eq!(hs.separator_state(), fresh);
+    }
 }

@@ -510,7 +510,7 @@ pub(super) fn integral_incumbent(ctx: &NodeCtx<'_>, x_full: &[f64]) -> (Vec<f64>
 }
 
 /// Reduced costs `c_j - a_j^T y` of every working column at an LP.
-fn full_redcost(ctx: &NodeCtx<'_>, nl: &NodeLp) -> Vec<f64> {
+pub(super) fn full_redcost(ctx: &NodeCtx<'_>, nl: &NodeLp) -> Vec<f64> {
     let y = nl.rc_dual();
     (0..ctx.n_w)
         .map(|j| ctx.c_w[j] - ctx.csc_rc.dot(j, y))
@@ -518,7 +518,7 @@ fn full_redcost(ctx: &NodeCtx<'_>, nl: &NodeLp) -> Vec<f64> {
 }
 
 /// The structurals' reduced costs `c_j - a_j^T y` at an LP (`col_dual`).
-fn structural_redcost(ctx: &NodeCtx<'_>, nl: &NodeLp) -> Vec<f64> {
+pub(super) fn structural_redcost(ctx: &NodeCtx<'_>, nl: &NodeLp) -> Vec<f64> {
     let y = nl.rc_dual();
     (0..ctx.ns)
         .map(|j| ctx.c_w[j] - ctx.csc_rc.dot(j, y))

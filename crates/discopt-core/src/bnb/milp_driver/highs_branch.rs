@@ -1046,6 +1046,11 @@ pub(super) mod e2e {
         /// (default `1e-9`), and whether to start without the tree's incumbent.
         pub cfg_gap_tol: Option<f64>,
         pub cfg_no_initial: bool,
+        /// Pass the search a separation subsystem whose separators have already run
+        /// (`RootSeparation` with root-like counts), and report their state after it.
+        pub cfg_hsep: bool,
+        /// [`RootSeparation::separator_state`] after the search (with `cfg_hsep`).
+        pub hsep_state: Option<(i64, i64, i64, u64)>,
     }
 
     thread_local! {
@@ -1065,10 +1070,18 @@ pub(super) mod e2e {
         if !armed {
             return;
         }
-        let (cfg_gap_tol, cfg_no_initial) = E2E.with(|e| {
+        let (cfg_gap_tol, cfg_no_initial, cfg_hsep) = E2E.with(|e| {
             let e = e.borrow();
             let r = e.as_ref().unwrap();
-            (r.cfg_gap_tol, r.cfg_no_initial)
+            (r.cfg_gap_tol, r.cfg_no_initial, r.cfg_hsep)
+        });
+        let mut hsep = cfg_hsep.then(|| {
+            let mut hs =
+                crate::lp::highs_cutgen::bridge::RootSeparation::new(ctx.ns, ctx.m_w, 1, false);
+            // What a root that separated 16 rounds leaves behind (bell5 p0's HiGHS
+            // dump: tableau numCalls 16, numTries 439).
+            hs.set_separator_state(16, 439, 16, 0x0123_4567_89ab_cdef);
+            hs
         });
         let lim = Limits {
             max_nodes: 200_000,
@@ -1113,6 +1126,7 @@ pub(super) mod e2e {
             Vec::new(),
             false,
             None,
+            hsep.as_mut(),
         ) {
             Some(o) => {
                 res.best = o.best;
@@ -1126,6 +1140,7 @@ pub(super) mod e2e {
             }
             None => res.bound = f64::INFINITY,
         }
+        res.hsep_state = hsep.as_ref().map(|h| h.separator_state());
         E2E.with(|e| *e.borrow_mut() = Some(res));
     }
 }
