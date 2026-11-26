@@ -885,7 +885,9 @@ class DAEBuilder:
         points inside every gap between the element's nodes, using the solved
         values of every variable the right-hand side refers to (parameters being
         estimated included). The per-element estimate is ``h_i * max |r|``: to
-        first order, a bound on the state error element ``i`` adds.
+        first order (Gronwall on ``x_p - x``), a bound on the state error element
+        ``i`` adds. Residual control of this kind is the mesh-assessment basis in
+        :cite:t:`Biegler2010`, ch. 10; it is conservative on stiff, damped states.
 
         It also records every check point at which the polynomial leaves the
         state's declared bounds (by more than ``bound_tol * (1 + |bound|)``)

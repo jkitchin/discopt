@@ -51,12 +51,20 @@ def _quiet_estimate(builder, result, **kw):
         return builder.error_estimate(result, **kw)
 
 
-def test_estimate_bounds_true_interior_error_and_shrinks():
-    """The estimate is >= the true error between the nodes and falls with h."""
+@pytest.mark.parametrize("ncp", [2, 3])
+def test_estimate_bounds_true_interior_error_and_converges_at_order(ncp):
+    """The estimate is >= the true error between the nodes, and it converges at
+    close to order ncp + 1 (the defect is O(h**ncp), times h).
+
+    Measured on x' = -5 x over [0, 2], nfe 4 -> 8 -> 16 -> 32: observed orders
+    2.18, 2.50, 2.72 (ncp=2) and 3.13, 3.51, 3.74 (ncp=3), approaching ncp + 1
+    from below. The finest pair is asserted >= ncp + 0.5 so a lost order fails,
+    not only a wrong direction.
+    """
     checks = 0
-    prev = np.inf
-    for nfe in (2, 4, 8, 16):
-        m, d = _decay(np.linspace(0.0, 2.0, nfe + 1))
+    worst = []
+    for nfe in (4, 8, 16, 32):
+        m, d = _decay(np.linspace(0.0, 2.0, nfe + 1), ncp=ncp)
         r = m.solve()
         assert r.x is not None
         est = _quiet_estimate(d, r)
@@ -64,14 +72,15 @@ def test_estimate_bounds_true_interior_error_and_shrinks():
         for i in range(nfe):
             tt = np.linspace(eb[i], eb[i + 1], 51)
             true = np.max(np.abs(d.evaluate_state(r, "x", tt) - np.exp(-5.0 * tt)))
-            # Error is accumulated across elements; compare the element's local
-            # contribution with the estimate summed over elements up to it.
+            # Error is accumulated across elements; compare it with the estimate
+            # summed over the elements up to this one.
             assert true <= np.sum(est.error["x"][: i + 1]) * (1 + 1e-9) + 1e-12
             checks += 1
-        worst = float(np.max(est.error["x"]))
-        assert worst < prev
-        prev = worst
-    assert checks == 30
+        worst.append(float(np.max(est.error["x"])))
+    assert checks == 60
+    orders = np.log2(np.array(worst[:-1]) / np.array(worst[1:]))
+    assert np.all(orders > 0), orders
+    assert orders[-1] >= ncp + 0.5, orders
 
 
 def test_polynomial_solution_has_zero_defect_radau_and_legendre():

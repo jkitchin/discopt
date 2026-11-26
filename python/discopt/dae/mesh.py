@@ -17,9 +17,10 @@ This module measures that error after the solve.
   construction; at the check points it is what the solve did not enforce. To
   first order (a Gronwall argument on ``x_p - x``) the state error an element adds
   is bounded by the integral of ``|r|`` over it, which ``h_i * max |r|`` bounds in
-  turn. It also lists every check point where the polynomial leaves the declared
-  state bounds although the nodes stay inside them, the cheap signature of
-  undershoot.
+  turn. This is the residual (defect) control used to assess and refine a
+  collocation mesh in :cite:t:`Biegler2010`, ch. 10. It also lists every check
+  point where the polynomial leaves the declared state bounds although the nodes
+  stay inside them, the cheap signature of undershoot.
 * :meth:`MeshErrorEstimate.refined_boundaries` splits the flagged elements. It
   only *adds* boundaries, so every boundary the user placed (observation times,
   input discontinuities) survives refinement.
