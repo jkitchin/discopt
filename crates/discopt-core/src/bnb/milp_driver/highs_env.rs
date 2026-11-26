@@ -513,9 +513,7 @@ impl StructRows {
             if let Some((c, coef)) = sl {
                 slack_row.insert(c, (i, coef));
             }
-            other[i] = nonstruct[i]
-                .iter()
-                .any(|&j| sl.map_or(true, |(c, _)| c != j));
+            other[i] = nonstruct[i].iter().any(|&j| sl.is_none_or(|(c, _)| c != j));
         }
         StructRows {
             ns,
