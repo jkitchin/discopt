@@ -9,9 +9,9 @@ every optimum, and the solve certified ``optimal`` at node 1 with bound -189678.
 true optimum is -187612.94 (HiGHS, ``mip_rel_gap=0``, ``mip_abs_gap=0``, 1 thread), so
 that bound was 2065 below it.
 
-The fix (``domain.rs``: ``noise_coef_threshold``) refuses to derive a bound through an
-entry ``|a| <= 1e-9 max(1, max|a_row|)``, which is what HiGHS's ``small_matrix_value``
-keeps out of its own domain. The unit test
+The fix (``domain.rs``: ``is_noise_coef``) refuses to derive a bound through an entry
+``|a| <= 1e-9``, HiGHS's absolute ``small_matrix_value`` rule, which keeps such entries
+out of its own domain. The unit test
 ``domain::tests::a_noise_coefficient_is_not_propagated_through`` pins the arithmetic;
 this test pins the end-to-end certificate.
 """
