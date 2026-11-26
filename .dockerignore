@@ -1,0 +1,17 @@
+# Allow-list for container builds from the repo root (docker/mipcc27/Dockerfile).
+# Everything is excluded except what the wheel and the image are built from, so
+# local build trees (target/), test data and scratch files never enter the context.
+*
+!Cargo.toml
+!Cargo.lock
+!pyproject.toml
+!README.md
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!crates/
+!python/discopt/
+!docker/mipcc27/
+**/__pycache__
+**/*.pyc
+**/*.so
+**/target

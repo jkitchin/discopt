@@ -1,0 +1,12 @@
+#!/bin/sh
+# MIPcc27 entry point: <entrypoint> INSTANCE SOLUTION (PROGRAM_INTERFACE.md).
+# Prints the discopt build baked into the image, then hands over to the solver.
+# `exec` makes python the direct child of the container's init, so SIGTERM at the
+# limit reaches it and its exit status is the container's.
+set -e
+if [ "${1:-}" = "--version" ]; then
+    cat /opt/discopt/BUILD_INFO
+    exit 0
+fi
+echo "mipcc: $(tr '\n' ' ' < /opt/discopt/BUILD_INFO)" >&2
+exec python -m discopt.mipcc "$@"

@@ -22,6 +22,10 @@ the solution atomically. The whole model is written first and stays the answer i
 engine fails or runs out of time; a watchdog exits 0 before the limit. The library API is
 `compute_iis(model, include_integrality=True, portfolio=..., portfolio_wait="fast"|"all")`.
 
+The submission is a container image: `docker/mipcc27/` holds the `Dockerfile`, a build
+script that records the commit in the image, and a README covering build, run and the
+run contract.
+
 ## The rule that is not relaxed
 
 Every returned subsystem is proven infeasible twice (#1634): by presolve-on HiGHS and by

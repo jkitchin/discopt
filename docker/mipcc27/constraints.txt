@@ -1,0 +1,6 @@
+# Exact runtime versions installed into the MIPcc27 image (pip -c). These are the
+# versions the entry was developed and measured against; bump deliberately.
+highspy==1.16.0
+numpy==2.4.6
+scipy==1.18.0
+pounce-solver==0.19.0

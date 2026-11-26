@@ -225,11 +225,27 @@ def solution_json(data: dict, res=None) -> dict:
 
 
 def write_atomic(path: str, doc: dict) -> None:
+    """Write ``doc`` to ``path`` as a regular, world-readable file, atomically.
+
+    ``os.replace`` swaps the directory entry itself, so a symlink already at
+    ``path`` is replaced by a regular file, never written through (the harness
+    rejects a symlink). ``mkstemp`` creates the file ``0600``; the container runs
+    under a uid the organizers choose, and unless that uid maps onto the host user
+    of the harness that copies the answer out of ``/out`` (``--userns=keep-id``
+    does; a plain ``--user <uid>`` on a Linux host does not), a ``0600`` file is
+    unreadable to it. So the mode is set to ``0644`` before the rename."""
     d = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp = tempfile.mkstemp(prefix=".mipcc_", dir=d)
-    with os.fdopen(fd, "w") as f:
-        json.dump(doc, f, separators=(",", ":"))
-    os.replace(tmp, path)
+    try:
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f, separators=(",", ":"))
+        os.replace(tmp, path)
+    except BaseException:
+        # Leave no stray temporary file next to the answer.
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def main(argv: Optional[list[str]] = None, t_launch: Optional[float] = None) -> int:
