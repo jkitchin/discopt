@@ -34,9 +34,11 @@
 //! `conflictAnalysis`), `HighsDomain::conflictAnalysis` (both overloads) and
 //! `conflictAnalyzeReconvergence`. The conflict pool is [`super::conflict_pool`].
 //!
-//! Not yet ported (later layers of the search port): clique-table and implication
-//! fixings on binaries (this port never produces a `kCliqueTable` reason; the
-//! explanation of one needs no clique table and is translated), redundant-row
+//! Fixing a binary runs `changeBound`'s hook when a clique table or probing
+//! implications are attached ([`Domain::set_clique_table`],
+//! [`Domain::set_implications`], `DISCOPT_MILP_CLIQUE_DOMAIN`):
+//! `cliquetable.addImplications`, then `implications.applyImplications`
+//! ([`super::probing`]). Not yet ported (later layers of the search port): redundant-row
 //! recording, `tightenCoefficients`, `fixCol`, the debug-solution checks.
 //!
 //! Conflict analysis reads two things HiGHS takes from other components: pseudocost
@@ -45,8 +47,10 @@
 //! the translations of those components plug in.
 
 use super::cdouble::CDouble;
+use super::clique::{CliqueTable, GlobalDomainView};
 use super::conflict_pool::{ConflictDomainObservers, ConflictPool};
 use super::objective::ObjectiveFunction;
+use super::probing::Implications;
 use super::stdalgo::pdqsort;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
@@ -98,7 +102,7 @@ pub enum Reason {
     /// conflict `conflict` of the domain's conflict pool `pool`.
     Conflict(usize, usize),
     /// `Reason::cliqueTable(col, val)`: implied by column `col` fixed to `val`
-    /// (never produced until the clique table is ported).
+    /// (produced by an attached clique table, [`Domain::set_clique_table`]).
     CliqueTable(usize, usize),
 }
 
@@ -616,7 +620,21 @@ pub struct Domain {
     /// since they last propagated.
     orbitopes: Option<Arc<super::orbitope::Orbitopes>>,
     orbitope_dirty: bool,
+    /// `mipdata_->cliquetable` (`DISCOPT_MILP_CLIQUE_DOMAIN`): when set, fixing a
+    /// binary runs `cliquetable.addImplications` from [`Self::change_bound`].
+    cliquetable: Option<Arc<CliqueTable>>,
+    /// Nesting depth of `addImplications` inside `change_bound` (HiGHS recurses; past
+    /// [`CLIQUE_MAX_DEPTH`] the literal is queued in `clique_pending` and handled by
+    /// the outermost call, so a long implication chain cannot overflow the stack).
+    clique_depth: u32,
+    clique_pending: Vec<(usize, u8)>,
+    /// `mipdata_->implications` (probing, [`super::probing`]): when set, fixing a
+    /// binary also runs `implications.applyImplications` from [`Self::change_bound`].
+    implications: Option<Arc<Implications>>,
 }
+
+/// Recursion depth of `addImplications` before fixings are queued instead.
+const CLIQUE_MAX_DEPTH: u32 = 256;
 
 impl Domain {
     /// `HighsDomain(mipsolver)` + `computeRowActivities()`, over the global bounds.
@@ -664,6 +682,10 @@ impl Domain {
             conflict_age_resets: Vec::new(),
             orbitopes: None,
             orbitope_dirty: false,
+            cliquetable: None,
+            clique_depth: 0,
+            clique_pending: Vec::new(),
+            implications: None,
         };
         d.compute_row_activities();
         d
@@ -709,6 +731,109 @@ impl Domain {
                     Reason::Unspecified,
                 );
             }
+        }
+    }
+
+    /// Attach `mipdata_->cliquetable`: from now on fixing a binary column runs
+    /// `addImplications` (HiGHS `changeBound`). The table must hold only cliques
+    /// valid over this domain's global box (a clique is a model-implied inequality,
+    /// so it stays valid in every sub-box).
+    pub fn set_clique_table(&mut self, table: Option<Arc<CliqueTable>>) {
+        self.cliquetable = table;
+    }
+
+    /// Whether a clique table is attached.
+    pub fn has_clique_table(&self) -> bool {
+        self.cliquetable.is_some()
+    }
+
+    /// Detach the clique table (probing extends it, then attaches it again).
+    pub fn take_clique_table(&mut self) -> Option<Arc<CliqueTable>> {
+        self.cliquetable.take()
+    }
+
+    /// Attach `mipdata_->implications`: from now on fixing a binary column also runs
+    /// `applyImplications` (HiGHS `changeBound`). The implications must hold over
+    /// this domain's global box (probing derives them on it).
+    pub fn set_implications(&mut self, implications: Option<Arc<Implications>>) {
+        self.implications = implications;
+    }
+
+    /// Detach the implications.
+    pub fn take_implications(&mut self) -> Option<Arc<Implications>> {
+        self.implications.take()
+    }
+
+    /// The reasons of the domain change stack.
+    pub fn domain_change_reasons(&self) -> &[Reason] {
+        &self.domchgreason
+    }
+
+    /// `feastol()`.
+    pub fn feastol(&self) -> f64 {
+        self.feastol
+    }
+
+    /// Column integrality of the domain's model.
+    pub fn is_int(&self, col: usize) -> bool {
+        self.model.is_int[col]
+    }
+
+    /// `isBinary(col)`.
+    pub fn is_binary(&self, col: usize) -> bool {
+        self.model.is_int[col] && self.col_lower[col] == 0.0 && self.col_upper[col] == 1.0
+    }
+
+    /// Model nonzeros (`numNonzero()`).
+    pub fn num_model_nonzeros(&self) -> usize {
+        self.model.ar_index.len()
+    }
+
+    /// `cliquetable.addImplications(*this, col, val)`, then the literals queued past
+    /// the depth limit when this is the outermost call.
+    fn clique_implications(&mut self, col: usize, val: u8) {
+        if self.cliquetable.is_none() && self.implications.is_none() {
+            return;
+        }
+        if self.clique_depth >= CLIQUE_MAX_DEPTH {
+            self.clique_pending.push((col, val));
+            return;
+        }
+        crate::profile::incr(crate::profile::Ctr::MilpCliqueDomainCalls);
+        self.clique_depth += 1;
+        self.fixing_implications(col, val);
+        if self.clique_depth == 1 {
+            while let Some((c, v)) = self.clique_pending.pop() {
+                if self.infeasible {
+                    break;
+                }
+                self.fixing_implications(c, v);
+            }
+            self.clique_pending.clear();
+        }
+        self.clique_depth -= 1;
+    }
+
+    /// HiGHS `changeBound` on fixing binary `col` to `val`:
+    /// `cliquetable.addImplications`, then (when still feasible)
+    /// `implications.applyImplications`.
+    fn fixing_implications(&mut self, col: usize, val: u8) {
+        if let Some(table) = self.cliquetable.clone() {
+            let model = Arc::clone(&self.model);
+            let feastol = self.feastol;
+            let mut view = GlobalDomainView {
+                dom: self,
+                is_int: &model.is_int,
+                feastol,
+                num_model_nonzeros: model.ar_index.len(),
+            };
+            table.add_implications(&mut view, col, val);
+        }
+        if self.infeasible {
+            return;
+        }
+        if let Some(implics) = self.implications.clone() {
+            implics.apply_implications(self, col, val);
         }
     }
 
@@ -2505,6 +2630,11 @@ impl Domain {
         if reason == Reason::Branching {
             self.branch_pos.push(self.domchgstack.len());
         }
+        // `bool binary = isBinary(boundchg.column)`, read before the change.
+        let binary = (self.cliquetable.is_some() || self.implications.is_some())
+            && self.model.is_int[col]
+            && self.col_lower[col] == 0.0
+            && self.col_upper[col] == 1.0;
         let oldbound = self.do_change_bound(chg);
         if let Some(o) = &self.orbitopes {
             if o.member[col] {
@@ -2519,6 +2649,13 @@ impl Domain {
         self.prevboundval.push((oldbound, prev_pos));
         self.domchgstack.push(chg);
         self.domchgreason.push(reason);
+        if let Reason::CliqueTable(..) = reason {
+            crate::profile::incr(crate::profile::Ctr::MilpCliqueDomainFixings);
+        }
+        if binary && !self.infeasible && self.col_lower[col] == self.col_upper[col] {
+            let val = (self.col_lower[col] > 0.5) as u8;
+            self.clique_implications(col, val);
+        }
     }
 
     /// `backtrack()`: undo to (and including) the last branching change, which is
@@ -3847,7 +3984,12 @@ impl<'a> ConflictSet<'a> {
         increase_conflict_score: bool,
     ) -> i64 {
         self.resolve_queue.clear();
-        let branch_pos = self.localdom.branch_pos.clone();
+        // Read in place, never cloned: this runs once per depth per conflict, and
+        // the stack is as deep as the search. A per-call clone made a conflict
+        // O(depth^2): measured on an OA master of portfol_roundlot (depth ~1500,
+        // ~800k calls), 70% of the solve was the clone's memmove, 12.2 s vs 0.9 s
+        // with conflict analysis off. HiGHS reads `localdom.branchPos_` in place.
+        let branch_pos = &self.localdom.branch_pos;
         let start_pos = if depth_level == 0 {
             0
         } else {

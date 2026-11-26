@@ -44,7 +44,7 @@ import math
 import os
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import numpy as np
@@ -139,7 +139,10 @@ class MilpIIS:
     n_artifacts: int = 0  # ... whose point did not survive rounding (verdict -> undecided)
     sat_rows: Optional[int] = None  # constraints in the SAT-core candidate (None: not used)
     sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
-    parity_rows: Optional[int] = None  # constraints in the mod-2 candidate (None: not used)
+    # Constraints in the lattice candidate (:func:`_lattice_candidate`; None: not
+    # used). The name is from the mod-2 candidate it generalizes.
+    parity_rows: Optional[int] = None
+    n_lattice: int = 0  # probes proven infeasible by the exact lattice test, no solve
     n_exact: int = 0  # confirmations decided exactly when presolve-off could not
     ladder_size: Optional[int] = None  # elements left by the oracle ladder (None: not run)
     ladder_calls: int = 0  # oracle calls the ladder made
@@ -153,6 +156,13 @@ class MilpIIS:
     # certificate (a contradiction that only tolerances can produce).
     n_sweep_reverted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
+    # The answer's post-pass (:func:`_polish`): elements the forced-violation
+    # repair tried / certified, add-one candidates tried and moves adopted.
+    n_forced: int = 0
+    n_forced_certified: int = 0
+    n_add_one_tried: int = 0
+    n_add_one_moves: int = 0
+    n_relaxed: int = 0  # integralities the anytime relaxation (_relax_integrality) traded away
     # Portfolio runs only: one entry per member, in portfolio order, with keys
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
     # and a timed-out member's own TimeoutError message.
@@ -217,6 +227,11 @@ class _Engine:
         self.n_reduced_confirmed = 0  # ... that proved the set infeasible
         self.n_exact_refuted = 0  # ... that found it feasible
         self.n_artifacts = 0
+        # The exact lattice test (:mod:`discopt._iis_lattice`): constraint id ->
+        # its integer equality rows, set by :meth:`arm_lattice` only when the
+        # whole model is lattice-infeasible (None: disarmed, no cost per probe).
+        self._lat: Optional[dict[int, list]] = None
+        self.n_lattice = 0
         # Held-integer columns and their declared box in the current configuration.
         self._held = np.zeros(0, dtype=np.int64)
         self._cfg: tuple[np.ndarray, ...] = ()
@@ -226,6 +241,41 @@ class _Engine:
         self.engine = engine
         self._inf = self.backend.inf
 
+    def arm_lattice(self, stop_at: Optional[float] = None) -> bool:
+        """Arm the lattice test when the whole model is lattice-infeasible.
+
+        The test is monotone -- dropping a row, or relaxing an integrality, never
+        turns a lattice-feasible system infeasible -- so when the full model passes
+        it, every subsystem the filter will probe passes too, and the per-probe
+        test could never fire: it is left disarmed. On MIPcc27's smallset it arms
+        on enlight4, enlight11 and neos-807454 only."""
+        from discopt._iis_lattice import integer_rows, lattice_infeasible
+
+        rows = integer_rows(self.A, self.row_lo, self.row_hi)
+        lat: dict[int, list] = {}
+        for ci, rs in self.row_groups.items():
+            got = [rows[int(r)] for r in np.asarray(rs).ravel() if int(r) in rows]
+            if got:
+                lat[ci] = got
+        allrows = [t for ci in sorted(lat) for t in lat[ci]]
+        held = set(int(j) for j in np.flatnonzero(self.is_int))
+        if lattice_infeasible(allrows, held, stop_at) is True:
+            self._lat = lat
+        return self._lat is not None
+
+    def _lattice_proves(self, active_cons, active_int) -> bool:
+        """The set's integer equality rows are infeasible over the integers it
+        holds, whatever its bounds: an exact proof (:mod:`discopt._iis_lattice`)."""
+        if self._lat is None:
+            return False
+        from discopt._iis_lattice import lattice_infeasible
+
+        lat = self._lat
+        rows = [t for ci in sorted(active_cons) if ci in lat for t in lat[ci]]
+        if not rows:
+            return False
+        return lattice_infeasible(rows, active_int, self.deadline) is True
+
     def _configure(
         self,
         active_cons: set[int],
@@ -233,6 +283,15 @@ class _Engine:
         active_int: set[int],
     ) -> None:
         """Load one probe's rows, bounds and integrality into the solver."""
+        self._load(*self._arrays(active_cons, active_bounds, active_int))
+
+    def _arrays(
+        self,
+        active_cons: set[int],
+        active_bounds: set[tuple[int, str]],
+        active_int: set[int],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """``(rlo, rhi, lb, ub, integ)`` of one probe, in the backend's infinity."""
         inf = self._inf
         n, m = self.col_lb.size, self.row_lo.size
         rlo = np.full(m, -inf)
@@ -259,7 +318,10 @@ class _Engine:
                 ub[j] = self.col_ub[j]
         lb = np.where(lb <= -_INF, -inf, lb)
         ub = np.where(ub >= _INF, inf, ub)
-        self._held = held
+        return rlo, rhi, lb, ub, integ
+
+    def _load(self, rlo, rhi, lb, ub, integ) -> None:
+        self._held = np.flatnonzero(integ)
         self._cfg = (rlo, rhi, lb, ub)  # what this probe imposes, for witness checks
         self.backend.configure(rlo, rhi, lb, ub, integ)
 
@@ -306,7 +368,9 @@ class _Engine:
     def _point(self) -> np.ndarray:
         return np.asarray(self.backend.point(), dtype=np.float64)
 
-    def _witness(self, stop_at: Optional[float] = None) -> Optional[np.ndarray]:
+    def _witness(
+        self, stop_at: Optional[float] = None, tol: Optional[float] = None
+    ) -> Optional[np.ndarray]:
         """An exact-integer feasible point behind the ``Optimal`` status just
         returned, or ``None`` if the point is a tolerance artifact.
 
@@ -324,6 +388,10 @@ class _Engine:
         (rows met to 9.4e-8), at the LP's 1e-7 seven more (rows met to 1.7e-7, a
         point HiGHS's MIP accepted). osun's artifacts fail at 1e-9, 1e-7 and 1e-6
         alike.
+
+        ``tol`` replaces ``mip_feasibility_tolerance`` as the row standard (the
+        certificate repair retries at 1e-9 when a point met its rows only to the
+        MIP tolerance and so failed the certificate check).
         """
         x = self._point()
         held = self._held
@@ -331,7 +399,7 @@ class _Engine:
             return x
         self.n_repairs += 1
         xr = np.round(x[held])
-        mip_tol = self.backend.mip_tol()
+        mip_tol = self.backend.mip_tol() if tol is None else float(tol)
         # Rounding often breaks nothing: then the rounded point itself is the
         # exact-integer witness, checked here by arithmetic. (The repair LP can
         # misjudge exactly this case: on dell an integral point meeting its rows
@@ -380,6 +448,13 @@ class _Engine:
         Without it a presolve-on ``Infeasible`` is acted on directly and the
         caller MUST confirm the final subsystem with :meth:`confirm_infeasible`.
         """
+        if self._lattice_proves(active_cons, active_int):
+            # Exact, so it needs no presolve-free cross-check either; and it
+            # decides in milliseconds sets HiGHS spent the probe limit on (relaxed
+            # columns left unbounded by the filter: enlight11).
+            self.n_lattice += 1
+            self._record_proven(active_cons, active_bounds, active_int)
+            return True, None
         self._configure(active_cons, active_bounds, active_int)
         ms = self._solve("choose")
         if ms == _bk.OPTIMAL:
@@ -469,10 +544,10 @@ class _Engine:
         all_infeasible = True
         for p in presolve:
             if p == "off":
-                rlo, rhi, _, _ = self._cfg
-                if self._parity_infeasible(rlo, rhi):
-                    # A mod-2 certificate: an exact proof in milliseconds, where
-                    # a presolve-free solve needed 47 s on enlight11's set.
+                if self._lattice_proves(active_cons, active_int):
+                    # An integer Farkas certificate: an exact proof in
+                    # milliseconds, where a presolve-free solve needed 47 s on
+                    # enlight11's set.
                     self.n_exact += 1
                     self.n_exact_confirmed += 1
                     continue
@@ -547,30 +622,89 @@ class _Engine:
         self.n_exact += 1
         return exact_feasible(self.A, rlo, rhi, lb, ub, self._held, stop_at=stop)
 
-    def _parity_infeasible(self, rlo, rhi) -> bool:
-        """The configured set's equality rows over held integer columns (integer
-        data) contain a mod-2 contradiction: an exact proof of infeasibility, in
-        integer arithmetic, whatever the bounds (:func:`_gf2_certificates`)."""
-        held = np.zeros(self.col_lb.size, dtype=bool)
-        held[self._held] = True
-        A = self.A
-        bits: list[tuple[int, int]] = []
-        for r in np.flatnonzero(np.isfinite(rlo) & (rlo == rhi)):
-            b = rlo[r]
-            if b != round(b):
-                continue
-            s0, e0 = A.indptr[r], A.indptr[r + 1]
-            cols, vals = A.indices[s0:e0], A.data[s0:e0]
-            if cols.size == 0 or not bool(np.all(held[cols])):
-                continue
-            if not bool(np.all(vals == np.round(vals))):
-                continue
-            mask = 0
-            for j, a in zip(cols, vals):
-                if int(round(a)) % 2:
-                    mask |= 1 << int(j)
-            bits.append((mask, int(round(b)) % 2))
-        return bool(bits) and bool(_gf2_certificates(bits))
+    def forced_point(
+        self,
+        cons: set[int],
+        bounds: set[tuple[int, str]],
+        ints: set[int],
+        key: tuple,
+        margin: float,
+        stop_at: Optional[float],
+        tol: Optional[float] = None,
+    ) -> tuple[Optional[np.ndarray], bool]:
+        """A candidate certificate for element ``key`` of the set: a point of the
+        set without ``key`` that is forced to violate ``key`` by ``margin`` -- a
+        row beyond one of its sides, a bound beyond its value, an integer column
+        held inside ``[f + margin, f + 1 - margin]`` (its box still applies, the
+        checker's rule for a relaxed integrality). Integers are rounded and the
+        rest re-solved by :meth:`_witness` (row standard ``tol``).
+
+        Returns ``(point, exhausted)``: ``point`` is None when no variant gave
+        one; ``exhausted`` is True when every variant was proven infeasible, so
+        no certificate with this margin exists. The point is only a candidate:
+        the caller checks it by arithmetic (:func:`_check_certificates`). This
+        decides nothing about the set; it is never an infeasibility claim."""
+        kind = key[0]
+        c2, b2, i2 = set(cons), set(bounds), set(ints)
+        if kind == "constraint":
+            c2.discard(key[1])
+        elif kind == "bound":
+            b2.discard((key[1], key[2]))
+        else:
+            i2.discard(key[1])
+        rlo, rhi, lb, ub, integ = self._arrays(c2, b2, i2)
+        inf = self._inf
+        variants: list[tuple[str, int, float, float]] = []  # (row|col, index, lo, hi)
+        if kind == "constraint":
+            for r in np.asarray(self.row_groups[key[1]]).ravel():
+                r = int(r)
+                if self.row_hi[r] < _INF:
+                    variants.append(("row", r, self.row_hi[r] + margin, inf))
+                if self.row_lo[r] > -_INF:
+                    variants.append(("row", r, -inf, self.row_lo[r] - margin))
+        elif kind == "bound":
+            j = key[1]
+            if key[2] == "lower":
+                variants.append(("col", j, -inf, self.col_lb[j] - margin))
+            else:
+                variants.append(("col", j, self.col_ub[j] + margin, inf))
+        else:
+            j = key[1]
+            lo, hi = self.col_lb[j], self.col_ub[j]
+            if lo > -_INF and hi < _INF and hi - lo <= _FORCED_INT_SPAN:
+                fs = list(range(int(math.floor(lo)), int(math.ceil(hi))))
+            else:
+                # A wide or unbounded integer: take the fractional parts next to
+                # where the set without the integrality puts the column.
+                box_lb, box_ub = lb.copy(), ub.copy()
+                box_lb[j] = -inf if lo <= -_INF else lo
+                box_ub[j] = inf if hi >= _INF else hi
+                self._load(rlo, rhi, box_lb, box_ub, integ)
+                if self._solve("choose", stop_at) != _bk.OPTIMAL:
+                    return None, False
+                xj = float(self._point()[j])
+                fs = [int(math.floor(xj)), int(math.floor(xj)) - 1]
+            for f in fs:
+                vlo = f + margin if lo <= -_INF else max(lo, f + margin)
+                vhi = f + 1 - margin if hi >= _INF else min(hi, f + 1 - margin)
+                if vlo <= vhi:
+                    variants.append(("col", j, vlo, vhi))
+        exhausted = bool(variants)
+        for where, i, vlo, vhi in variants:
+            r_lo, r_hi, c_lb, c_ub = rlo.copy(), rhi.copy(), lb.copy(), ub.copy()
+            if where == "row":
+                r_lo[i], r_hi[i] = vlo, vhi
+            else:
+                c_lb[i], c_ub[i] = vlo, vhi
+            self._load(r_lo, r_hi, c_lb, c_ub, integ)
+            st = self._solve("choose", stop_at)
+            if st != _bk.INFEASIBLE:
+                exhausted = False
+            if st == _bk.OPTIMAL:
+                y = self._witness(stop_at, tol)
+                if y is not None:
+                    return y, False
+        return None, exhausted
 
 
 def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
@@ -593,10 +727,13 @@ def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
     return iis_engine
 
 
-def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) -> dict:
+def _check_certificates(
+    pending: dict, eng: _Engine, cons, bounds, ints, tol, own_min: Optional[float] = None
+) -> dict:
     """The points in ``pending`` that certify their element: ``x`` satisfies the
     final subsystem minus ``key`` (every other row, applied bound and integrality
-    within ``tol``) and violates ``key`` by more than ``tol``.
+    within ``tol``) and violates ``key`` by more than ``tol`` (``own_min``
+    instead, when given).
 
     The final set's masks are built once and each point is checked with one
     sparse product and vector operations. Rebuilding the set per point cost
@@ -653,9 +790,513 @@ def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) ->
             float(np.max(ubv, initial=0.0)),
             float(np.max(iv, initial=0.0)),
         )
-        if rest <= tol and e > tol:
+        if rest <= tol and e > (tol if own_min is None else own_min):
             out[key] = x
     return out
+
+
+#: Forced-violation certificate repair (:func:`_polish`): margins tried in order.
+#: Fable's measurement on kedron / otra / osun / dijle / dingo / enlight11 (every
+#: missing certificate found): several elements failed at 1e-3 and passed at 1e-4.
+#: The last is just above the strong-certificate floor ``_STRONG_OWN`` (2e-5),
+#: the thinnest violation a certificate kept here can have: on otra, twelve
+#: integralities in a big-M row (coefficient 1e5) admit fractional parts only up
+#: to ~2.9e-5, so every margin down to 3e-5 is proven infeasible for them.
+_FORCED_MARGINS = (1e-3, 1e-4, 3e-5, 2.1e-5)
+#: A certificate counts as present for the repair only when it holds with margin:
+#: every other element within ``_STRONG_OTHERS`` and its own violated by more than
+#: ``_STRONG_OWN``. A point that passes the engine's ``cert_tol`` (1e-6) but
+#: violates its element by, say, 5e-6 fails a checker at 1e-5; the repair then
+#: looks for a stronger one and keeps the weak one if it finds none. Measured on
+#: otra: 2 of 11 engine certificates were dropped by ``discopt.mipcc``'s check
+#: (the same margins).
+_STRONG_OTHERS = 5e-6
+_STRONG_OWN = 2e-5
+#: An integer column whose box spans at most this many units gets one variant per
+#: unit interval; a wider one gets the two next to a relaxed solution's value.
+_FORCED_INT_SPAN = 4
+
+
+#: Add-one neighbourhood (:func:`_add_one`): the sweep's extent is a probe count
+#: (deterministic: the same answer on any machine), and its share of the time
+#: left is only a stop -- a sweep cut short by it is discarded, never half-used.
+#: The same share caps the confirmation of a set it changed. The strategy's kill
+#: criterion: a sweep must not cost more than 10% of the budget. Measured (600 s
+#: budget, highspy 1.16): osun's move is found within its full 586-candidate
+#: sweep; otra's full sweep, 2132 candidates and 12,796 probes, took 145 s and
+#: found none, so the cap keeps such a sweep to ~45 s (11 ms a probe there).
+#: The share saturates at ``_ADD_ONE_CAP_S`` (#1153 role 2): the sweep's work is
+#: the probe count, so a bigger budget must not buy it a longer stop. The cap is
+#: ``_ADD_ONE_FRACTION`` of a 600 s budget, so it never binds at <= 600 s (the time
+#: left is at most the budget) and only stops the share growing beyond that.
+_ADD_ONE_FRACTION = 0.10
+_ADD_ONE_CAP_S = 60.0
+_ADD_ONE_MAX_PROBES = 4000
+
+
+def _element_keys(cons, bounds, ints) -> list[tuple]:
+    return (
+        [("constraint", c) for c in sorted(cons)]
+        + [("integrality", j) for j in sorted(ints)]
+        + [("bound", j, side) for j, side in sorted(bounds)]
+    )
+
+
+def _filter_integrality(
+    probe, eng: _Engine, j: int, cons: set, bounds: set, ints: set, pending: dict
+) -> bool:
+    """One deletion-filter step on held integrality ``j`` of a post pass, in
+    place on ``bounds``/``ints``; returns False when a probe was undecided.
+
+    Pass 1 relaxes the integrality jointly with its column's box (a held
+    column's bounds are not elements). If that stays infeasible the integrality
+    goes; a feasible point inside the box is its certificate. A point outside the
+    box certifies nothing (a relaxed integrality keeps its box), so pass 2, as
+    in the integrality phase, relaxes the integrality alone with the box kept:
+    if that stays infeasible the integrality is not needed, it goes and its
+    finite bounds become elements (left to the caller's bound stage). Without
+    pass 2 such an integrality was kept with no certificate and the answer was
+    not irreducible: measured on MIPcc27 stein45inf through a re-hold pass built
+    on this same step (zz02 at -1 outside [0, 1], checker minimal=False, 215 of
+    216 certified). :func:`_add_one`'s final re-filter had the same step.
+    """
+    v, x = probe(cons, bounds, ints - {j})
+    if v is True:
+        ints.discard(j)
+        return True
+    if v is None:
+        return False
+    lo_j, hi_j = float(eng.col_lb[j]), float(eng.col_ub[j])
+    if x is not None and lo_j <= x[j] <= hi_j:
+        pending[("integrality", j)] = x
+        return True
+    box = {(j, s) for s, f in (("lower", lo_j > -_INF), ("upper", hi_j < _INF)) if f}
+    v, x = probe(cons, bounds | box, ints - {j})
+    if v is True:
+        ints.discard(j)
+        bounds |= box
+    elif v is None:
+        return False
+    elif x is not None:
+        pending[("integrality", j)] = x
+    return True
+
+
+def _add_one(
+    eng: _Engine,
+    cons: set[int],
+    bounds: set,
+    ints: set[int],
+    stop_at: float,
+    max_probes: int = _ADD_ONE_MAX_PROBES,
+) -> tuple[Optional[tuple[set[int], set, set[int]]], dict, bool, int]:
+    """Add-one neighbourhood over constraints: for each constraint outside the
+    answer that shares a column with it (most shared columns first), add it and
+    re-run the constraint deletion filter over the answer's constraints, then
+    test the added one. A move is adopted when the set shrinks, and the scan
+    goes on from the new set. Integralities and bounds stay fixed during the
+    scan (more of them only makes a deletion harder, so a constraint the scan
+    keeps stays needed once some are dropped) and are re-filtered once at the
+    end: each integrality as the integrality phase does it
+    (:func:`_filter_integrality`: jointly with its column's box, then alone with
+    the box kept), then each bound.
+
+    Returns ``(new_set or None, pending, decided, tried)``: ``new_set`` only
+    when a move was adopted; ``pending`` the probe points of the final
+    re-filter (candidate certificates); ``decided`` whether every probe behind
+    the new set was decided; ``tried`` the candidates scanned. Probes run under
+    the engine's policy (a presolve-on verdict is acted on), so the caller must
+    confirm the new set (:meth:`_Engine.confirm_infeasible`).
+
+    The scan stops after ``max_probes`` probes (the moves found so far stand:
+    the count fixes them). Reaching ``stop_at`` first raises :class:`_OutOfTime`,
+    so the caller discards the sweep: the clock decides whether there is a
+    result, never which one.
+
+    The smallest local search over IISs (strategy-for-smaller-iis, steps 2-3);
+    measured by Fable's prototype: osun 20 -> 19, otra 23 -> 22."""
+    A = eng.A
+    cols_of: dict[int, set[int]] = {}
+
+    def cols(c: int) -> set[int]:
+        got = cols_of.get(c)
+        if got is None:
+            got = set()
+            for r in np.asarray(eng.row_groups[c]).ravel():
+                got.update(A.indices[A.indptr[r] : A.indptr[r + 1]].tolist())
+            cols_of[c] = got
+        return got
+
+    best = set(cons)
+    decided = True
+    tried = 0
+    moved = False
+    scanned: set[int] = set()
+    n_probes = [0]
+
+    def probe(c2: set[int]) -> Optional[bool]:
+        if time.perf_counter() >= stop_at:
+            raise _OutOfTime
+        n_probes[0] += 1
+        return eng.probe(c2, bounds, ints)[0]
+
+    while n_probes[0] < max_probes:
+        supp: set[int] = set()
+        for c in best:
+            supp |= cols(c)
+        cand = [
+            (-len(cols(c) & supp), c)
+            for c in eng.row_groups
+            if c not in best and c not in scanned and cols(c) & supp
+        ]
+        improved = False
+        for _, c in sorted(cand):
+            if n_probes[0] >= max_probes:
+                break
+            scanned.add(c)
+            tried += 1
+            R = best | {c}
+            und = False
+            old = sorted(best)
+            for k, q in enumerate(old):
+                # A move needs two of the old constraints gone.
+                if (len(best) + 1 - len(R)) + (len(old) - k) < 2:
+                    break
+                v = probe(R - {q})
+                if v is True:
+                    R.discard(q)
+                elif v is None:
+                    und = True
+            if len(R) > len(best):
+                continue
+            v = probe(R - {c})
+            if v is True:
+                R.discard(c)
+            elif v is None:
+                und = True
+            if len(R) < len(best):
+                best, moved, improved = R, True, True
+                decided = decided and not und
+                break  # rescan around the new set
+        if not improved:
+            break
+    if not moved:
+        return None, {}, True, tried
+    new_c, new_b, new_i = set(best), set(bounds), set(ints)
+    pending: dict[tuple, np.ndarray] = {}
+    for j in sorted(new_i):
+        if not _filter_integrality(eng.probe, eng, j, new_c, new_b, new_i, pending):
+            decided = False
+    for jb in sorted(new_b):
+        v, x = eng.probe(new_c, new_b - {jb}, new_i)
+        if v is True:
+            new_b.discard(jb)
+        elif v is None:
+            decided = False
+        elif x is not None:
+            pending[("bound", jb[0], jb[1])] = x
+    # The constraints once more, for their points (and in case dropping an
+    # integrality or bound above changed nothing they rely on: then each stays).
+    for q in sorted(new_c):
+        v, x = eng.probe(new_c - {q}, new_b, new_i)
+        if v is True:
+            new_c.discard(q)
+        elif v is None:
+            decided = False
+        elif x is not None:
+            pending[("constraint", q)] = x
+    return (new_c, new_b, new_i), pending, decided, tried
+
+
+#: Integrality relaxation of an anytime answer (:func:`_relax_integrality`):
+#: counterexample rounds per stage (each round restores at least one element, so
+#: the cap only bounds a stage that would restore one at a time; it fixes the
+#: result, the clock only stops it), and the share of the time left the pass may
+#: use. Measured by Fable's prototype on dingo's 2197-element anytime answer:
+#: 66 solves in 17 s, 1867 elements; on dijle's, 6 solves in 1.8 s.
+#: The share saturates at ``_RELAX_CAP_S`` (#1153 role 2), ``_RELAX_FRACTION`` of
+#: a 600 s budget: it never binds at <= 600 s and stops growing beyond.
+_RELAX_MAX_ROUNDS = 64
+_RELAX_FRACTION = 0.25
+_RELAX_CAP_S = 150.0
+#: Share of ``total_time_limit`` the filter leaves for the post-pass
+#: (:func:`_polish`): an anytime answer arrives at the deadline otherwise, with no
+#: time to relax or certify it. 10% of mipcc's 600 s run is ~57 s; the prototype's
+#: post-pass (relaxation and every certificate) took ~36 s on dingo, ~12 s on dijle.
+#: The reserve saturates at ``_POLISH_RESERVE_CAP_S`` (#1153 role 2): the post-pass
+#: is bounded by counts (``_RELAX_MAX_ROUNDS``, ``_ADD_ONE_MAX_PROBES``, the forced
+#: margins), so a reserve that kept growing with the budget would only take
+#: filtering time it cannot use. The cap is the 10% of a 600 s budget, so it never
+#: binds at <= 600 s; beyond that every extra second goes to the filter.
+_POLISH_RESERVE_FRACTION = 0.10
+_POLISH_RESERVE_CAP_S = 60.0
+#: Below this a relaxed column's value counts as integral / inside its bound.
+_RELAX_TOL = 1e-9
+
+
+def _relax_integrality(
+    eng: _Engine,
+    cons: set[int],
+    bounds: set,
+    ints: set[int],
+    keep: set[int],
+    stop_at: float,
+    max_rounds: int = _RELAX_MAX_ROUNDS,
+) -> Optional[tuple[set[int], set, set[int]]]:
+    """Trade held integralities of an answer for fewer or certifiable elements,
+    by counterexample-guided refinement: relax a whole block at once; a feasible
+    point names the columns it needs back (those it puts off-integer, or past a
+    dropped bound), which are restored, and the block is re-solved until the set
+    is infeasible again.
+
+    1. General integers (box wider than one unit, or unbounded): relaxed with
+       their bounds (one element less each).
+    2. Binaries: relaxed keeping both bounds, then the upper bounds are dropped,
+       then the lower bounds of the columns that kept their upper one. A column
+       left with both bounds is held integer again (one element, not two), so
+       the size never grows; a column with one bound costs what its integrality
+       did, but a bound has a certificate where, under the checker's rule (a
+       relaxed integrality keeps its box), the integrality may have none.
+
+    ``keep``: integralities not to relax (those already holding a certificate).
+    Every restore only tightens the set, so an infeasible set stays infeasible;
+    probes run under the engine's policy, so the caller confirms the result
+    (:meth:`_Engine.confirm_infeasible`). Returns the new set, or None when it
+    is not smaller-or-equal and different. Each stage is bounded by
+    ``max_rounds`` solves (deterministic); reaching ``stop_at`` raises
+    :class:`_OutOfTime` and the caller discards the pass. Not run on a complete
+    answer: there every integrality was already deletion-tested.
+    """
+    c0, b0, i0 = set(cons), set(bounds), set(ints)
+    lb, ub = eng.col_lb, eng.col_ub
+
+    def probe(b: set, i: set) -> tuple[Optional[bool], Optional[np.ndarray]]:
+        if time.perf_counter() >= stop_at:
+            raise _OutOfTime
+        return eng.probe(c0, b, i)
+
+    def frac(x: np.ndarray, j: int) -> bool:
+        return abs(float(x[j]) - round(float(x[j]))) > _RELAX_TOL
+
+    b, i = set(b0), set(i0)
+    # Stage 1: general integers with their bounds.
+    gen = {j for j in i - keep if not (lb[j] > -_INF and ub[j] < _INF and ub[j] - lb[j] <= 1)}
+    relaxed = set(gen)
+    for _ in range(max_rounds):
+        if not relaxed:
+            break
+        v, x = probe(b, i - relaxed)
+        if v is True:
+            i -= relaxed
+            break
+        if v is None or x is None:
+            relaxed = set()
+            break
+        back = {
+            j
+            for j in relaxed
+            if frac(x, j) or x[j] < lb[j] - _RELAX_TOL or x[j] > ub[j] + _RELAX_TOL
+        }
+        if not back:
+            relaxed = set()
+            break
+        relaxed -= back
+    # Stage 2: binaries, keeping their box first.
+    binr = {j for j in i - keep if lb[j] > -_INF and ub[j] < _INF and ub[j] - lb[j] <= 1}
+    box = {(j, s) for j in binr for s in ("lower", "upper")}
+
+    def refine(cand: set, test) -> set:
+        """The subset of ``cand`` that ``test(subset)`` accepts, by restoring
+        the counterexample's columns; empty when undecided or stuck."""
+        cur = set(cand)
+        for _ in range(max_rounds):
+            if not cur:
+                return cur
+            v, x, back = test(cur)
+            if v is True:
+                return cur
+            if v is None or not back:
+                return set()
+            cur -= back
+        return set()
+
+    def t_int(cur):
+        v, x = probe(b | {(j, s) for j in cur for s in ("lower", "upper")}, i - cur)
+        return v, x, (set() if x is None else {j for j in cur if frac(x, j)})
+
+    rel = refine(binr, t_int)
+    if rel:
+        bb = (b - box) | {(j, s) for j in rel for s in ("lower", "upper")}
+        ii = i - rel
+
+        def t_up(cur):
+            v, x = probe(bb - {(j, "upper") for j in cur}, ii)
+            return v, x, (set() if x is None else {j for j in cur if x[j] > ub[j] + _RELAX_TOL})
+
+        no_up = refine(rel, t_up)
+        bb -= {(j, "upper") for j in no_up}
+
+        def t_lo(cur):
+            v, x = probe(bb - {(j, "lower") for j in cur}, ii)
+            return v, x, (set() if x is None else {j for j in cur if x[j] < lb[j] - _RELAX_TOL})
+
+        no_lo = refine(rel - no_up, t_lo)
+        bb -= {(j, "lower") for j in no_lo}
+        # Both bounds left: hold the integrality again (tighter, one element).
+        both = {j for j in rel if (j, "lower") in bb and (j, "upper") in bb}
+        bb -= {(j, s) for j in both for s in ("lower", "upper")}
+        b, i = bb, ii | both
+    size = len(b) + len(i)
+    if (b, i) == (b0, i0) or size > len(b0) + len(i0):
+        return None
+    return c0, b, i
+
+
+def _polish(
+    arrays: tuple,
+    res: MilpIIS,
+    *,
+    cert_tol: float,
+    time_limit: float,
+    engine: str,
+    deadline: Optional[float],
+) -> MilpIIS:
+    """Post-pass on the answer: on an anytime (incomplete) answer the
+    integrality relaxation (:func:`_relax_integrality`, at most
+    ``_RELAX_FRACTION`` of the time left, at most ``_RELAX_CAP_S``; the filter
+    stops ``_POLISH_RESERVE_FRACTION`` of the budget, at most
+    ``_POLISH_RESERVE_CAP_S``, early to leave it room); on a complete one the
+    add-one move (:func:`_add_one`; only with an overall budget, capped at
+    ``_ADD_ONE_FRACTION`` of the time left, at most ``_ADD_ONE_CAP_S``); then a
+    forced-violation certificate for every kept element that still has none
+    (:meth:`_Engine.forced_point`, margins :data:`_FORCED_MARGINS`).
+
+    Soundness: a set the add-one move changed replaces the answer only when
+    :meth:`_Engine.confirm_infeasible` confirms it under both presolve
+    configurations, as for every answer; otherwise the answer stands unchanged.
+    The same holds for a set the relaxation changed.
+    A certificate is kept only when :func:`_check_certificates` accepts it by
+    arithmetic on the final set. Needs ``res.bounds`` to be every bound the set
+    applies, i.e. ``include_bounds=True``. ``DISCOPT_IIS_ADD_ONE=0`` /
+    ``DISCOPT_IIS_CERT_REPAIR=0`` / ``DISCOPT_IIS_RELAX_INT=0`` are opt-outs for
+    A/B measurement."""
+    add_one = (
+        os.environ.get("DISCOPT_IIS_ADD_ONE", "1") != "0" and res.complete and deadline is not None
+    )
+    relax = (
+        os.environ.get("DISCOPT_IIS_RELAX_INT", "1") != "0"
+        and not res.complete
+        and deadline is not None
+        and bool(res.integrality)
+    )
+    repair = os.environ.get("DISCOPT_IIS_CERT_REPAIR", "1") != "0"
+    if not add_one and not relax and not repair:
+        return res
+    t0 = time.perf_counter()
+    if deadline is not None and deadline - t0 < 4 * _MIN_SOLVE_S:
+        return res
+    A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int = arrays
+    eng = _Engine(
+        A,
+        row_lo,
+        row_hi,
+        col_lb,
+        col_ub,
+        is_int,
+        row_groups,
+        time_limit,
+        False,
+        deadline=deadline,
+        reserve_confirm=False,
+        engine=engine,
+    )
+    eng.arm_lattice(deadline)
+    cons, bounds, ints = set(res.constraints), set(res.bounds), set(res.integrality)
+    pending: dict[tuple, np.ndarray] = dict(res.certificates)
+    proven = res.proven_irreducible
+    tried = moves = n_relaxed = 0
+    s_tol = min(cert_tol, _STRONG_OTHERS)
+    if relax:
+        assert deadline is not None
+        share = min(_RELAX_FRACTION * max(deadline - t0, 0.0), _RELAX_CAP_S)
+        keep = {
+            k[1]
+            for k in _check_certificates(pending, eng, cons, bounds, ints, s_tol, _STRONG_OWN)
+            if k[0] == "integrality"
+        }
+        try:
+            got = _relax_integrality(eng, cons, bounds, ints, keep, t0 + share)
+            if got is not None:
+                t_c = time.perf_counter()
+                verdict = eng.confirm_infeasible(
+                    *got,
+                    stop_at=min(deadline, t_c + share),
+                    presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
+                )
+                if verdict is True:
+                    n_relaxed = len(ints - got[2])
+                    cons, bounds, ints = got
+        except _OutOfTime:
+            pass  # the relaxation or its confirmation ran out of time: the answer stands
+    if add_one:
+        assert deadline is not None
+        share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
+        try:
+            got, pend, decided, tried = _add_one(eng, cons, bounds, ints, t0 + share)
+            if got is not None:
+                t_c = time.perf_counter()
+                verdict = eng.confirm_infeasible(
+                    *got,
+                    stop_at=min(deadline, t_c + share),
+                    presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
+                )
+                if verdict is True:
+                    cons, bounds, ints = got
+                    pending.update(pend)
+                    proven = proven and decided
+                    moves = 1
+        except _OutOfTime:
+            pass  # the sweep or its confirmation ran out of time: the answer stands
+    certs = _check_certificates(pending, eng, cons, bounds, ints, cert_tol)
+    n_forced = n_forced_ok = 0
+    if repair:
+        strong = _check_certificates(certs, eng, cons, bounds, ints, s_tol, _STRONG_OWN)
+        try:
+            for key in _element_keys(cons, bounds, ints):
+                if key in strong:
+                    continue
+                n_forced += 1
+                for margin in _FORCED_MARGINS:
+                    for tol in (None, 1e-9):
+                        y, _ = eng.forced_point(cons, bounds, ints, key, margin, deadline, tol)
+                        if y is None:
+                            break
+                        ok = _check_certificates(
+                            {key: y}, eng, cons, bounds, ints, s_tol, _STRONG_OWN
+                        )
+                        if ok:
+                            strong.update(ok)
+                            certs.update(ok)
+                            break
+                    if key in strong:
+                        n_forced_ok += 1
+                        break
+        except _OutOfTime:
+            pass  # the certificates found so far stand
+    return replace(
+        res,
+        constraints=sorted(cons),
+        bounds=sorted(bounds),
+        integrality=sorted(ints),
+        certificates=certs,
+        n_solves=res.n_solves + eng.n_solves,
+        proven_irreducible=proven,
+        n_forced=n_forced,
+        n_forced_certified=n_forced_ok,
+        n_add_one_tried=tried,
+        n_add_one_moves=moves,
+        n_relaxed=n_relaxed,
+    )
 
 
 #: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof and
@@ -794,90 +1435,43 @@ def _encode_geq(
     return nv
 
 
-def _gf2_certificates(rows: list[tuple[int, int]]) -> list[int]:
-    """Row subsets (bitmasks over ``rows``) whose sum is ``0 = 1`` mod 2.
+def _lattice_candidate(A, row_lo, row_hi, is_int, row_groups, stop_at):
+    """A small constraint set that is infeasible by the lattice test alone
+    (:func:`discopt._iis_lattice.lattice_core`), or None.
 
-    ``rows[i] = (lhs_mask, rhs_bit)``: the odd-coefficient columns and the rhs
-    parity of an integer equality row. Gaussian elimination over GF(2), tracking
-    which input rows each reduced row combines."""
-    piv: dict[int, tuple[int, int, int]] = {}
-    out = []
-    for i, (lhs, rhs) in enumerate(rows):
-        comb = 1 << i
-        while lhs:
-            top = lhs.bit_length() - 1
-            if top not in piv:
-                piv[top] = (lhs, rhs, comb)
-                break
-            pl, pr, pc = piv[top]
-            lhs ^= pl
-            rhs ^= pr
-            comb ^= pc
-        else:
-            if rhs:
-                out.append(comb)
-    return out
+    Returns ``(constraints, held integer columns, columns the rows touch)``: a
+    proposal -- the caller holds those integralities, keeps the bounds of the
+    touched columns, drops every other element, and has the base probe prove it
+    infeasible before using it. Only constraints with a single row enter.
 
-
-def _parity_core(A, row_lo, row_hi, is_int, row_groups) -> Optional[tuple[set, set]]:
-    """A small constraint set that is infeasible by a mod-2 argument alone.
-
-    Eligible: equality constraints whose rows have integer coefficients and rhs
-    over integer columns only. A subset of them summing to ``even.x = odd`` mod
-    2 has no integer solution, whatever the bounds. The smallest such subset
-    found is shrunk to a minimal one (no proper subset is a certificate) and
-    returned as ``(constraints, columns they touch)``: a proposal -- the caller
-    holds the integrality of those columns, drops every other element, and has
-    HiGHS prove it infeasible before using it.
-
-    On MIPcc27's smallset certificates exist for enlight4 (8 rows), enlight11 (48)
-    and neos-807454 (9; Gurobi's IIS there is those 9 rows and 56 integralities);
-    the elimination takes milliseconds.
+    On MIPcc27's smallset it exists for enlight4 (8 rows + 10 integralities),
+    enlight11 (48 + 48) and neos-807454 (9 + 32; Gurobi's IIS there is those 9
+    rows and 56 integralities), at 0.01-3 s; the mod-2 core it replaced gave 8,
+    48 and 9 rows with every touched column held.
     """
-    elig: list[int] = []  # constraint indices
-    rowbits: list[tuple[int, int]] = []
-    for ci in sorted(row_groups):
-        rs = row_groups[ci]
-        if len(rs) != 1:
-            continue
-        r = int(rs[0])
-        if row_lo[r] != row_hi[r] or row_lo[r] != round(row_lo[r]) or abs(row_lo[r]) >= _INF:
-            continue
-        s0, e0 = A.indptr[r], A.indptr[r + 1]
-        cols, vals = A.indices[s0:e0], A.data[s0:e0]
-        if cols.size == 0 or not bool(np.all(is_int[cols])):
-            continue
-        if not bool(np.all(vals == np.round(vals))):
-            continue
-        mask = 0
-        for j, a in zip(cols, vals):
-            if int(round(a)) % 2:
-                mask |= 1 << int(j)
-        elig.append(ci)
-        rowbits.append((mask, int(round(row_lo[r])) % 2))
-    certs = _gf2_certificates(rowbits)
-    if not certs:
+    from discopt._iis_lattice import integer_rows, lattice_core
+
+    rows = integer_rows(A, row_lo, row_hi)
+    by_con = {
+        ci: rows[int(rs[0])] for ci, rs in row_groups.items() if len(rs) == 1 and int(rs[0]) in rows
+    }
+    if not by_con:
         return None
-    best = min(certs, key=lambda c: bin(c).count("1"))
-    support = [i for i in range(len(rowbits)) if best >> i & 1]
-    # Deletion to a minimal certificate: drop a row whenever the rest still
-    # contains one (then restrict to that one).
-    k = 0
-    while k < len(support):
-        rest = support[:k] + support[k + 1 :]
-        sub = _gf2_certificates([rowbits[i] for i in rest])
-        if sub:
-            c = min(sub, key=lambda c: bin(c).count("1"))
-            support = [rest[t] for t in range(len(rest)) if c >> t & 1]
-            k = 0
-            continue
-        k += 1
-    cons = {elig[i] for i in support}
+    held = set(int(j) for j in np.flatnonzero(is_int))
+    core = lattice_core(by_con, held, orders=_LATTICE_ORDERS, stop_at=stop_at)
+    if core is None:
+        return None
+    cons, ints = core
     touched: set[int] = set()
     for ci in cons:
-        r = int(row_groups[ci][0])
-        touched.update(int(j) for j in A.indices[A.indptr[r] : A.indptr[r + 1]])
-    return cons, touched
+        touched.update(by_con[ci][0])
+    return cons, ints, touched
+
+
+#: Deletion orders :func:`_lattice_candidate` tries (deterministic seeds; the
+#: smallest core is kept). Each is a few hundred lattice tests. On the smallset
+#: the best cores (18 / 96 / 41) first appear at orders 3 / 4 / 1 of 0-15.
+_LATTICE_ORDERS = 16
 
 
 def _integral(x) -> bool:
@@ -1397,8 +1991,8 @@ def milp_iis(
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
 
     ``sat_candidate``: start from a small candidate subsystem instead of the
-    full model -- a mod-2 certificate over integer equality rows
-    (:func:`_parity_core`) when one exists, else, on a pure-binary model with
+    full model -- a minimal lattice (integer Farkas) certificate over integer
+    equality rows (:func:`_lattice_candidate`) when one exists, else, on a pure-binary model with
     integral coefficients, an unsatisfiable constraint set found by discopt's
     CDCL solver (:func:`_binary_core`). Either is only a proposal: it is used if
     HiGHS proves it infeasible (the base probe), otherwise the full model is
@@ -1485,9 +2079,13 @@ def milp_iis_arrays(
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
     iis_engine: Optional[str] = None,
+    threads: Optional[int] = None,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
+
+    ``threads`` (portfolio only): the portfolio's thread budget, shared out among the
+    members; see :func:`_portfolio_iis`.
 
     ``arrays`` is ``(A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)``:
     a CSR matrix; row bounds with ``±_INF`` (1e20) for "none"; ``row_groups``
@@ -1518,21 +2116,46 @@ def milp_iis_arrays(
         raise ValueError(f"iis_engine={iis_engine!r}: expected one of {ENGINES}")
     if workers is not None and portfolio is None:
         raise ValueError("workers= needs portfolio=; a single order runs in-process")
+    # The filter stops early enough to leave the post-pass its share
+    # (_POLISH_RESERVE_FRACTION, saturating at _POLISH_RESERVE_CAP_S); the
+    # post-pass runs against the whole budget.
+    filter_limit = total_time_limit
+    if (
+        total_time_limit is not None
+        and include_bounds
+        and os.environ.get("DISCOPT_IIS_RELAX_INT", "1") != "0"
+    ):
+        reserve = min(_POLISH_RESERVE_FRACTION * float(total_time_limit), _POLISH_RESERVE_CAP_S)
+        filter_limit = float(total_time_limit) - reserve
     if portfolio is not None:
-        return _portfolio_iis(
+        res = _portfolio_iis(
             arrays,
             kwargs,
             portfolio,
             workers,
             t_start,
-            total_time_limit,
+            filter_limit,
             grace=grace,
             grace_window=grace_window,
+            threads=threads,
         )
-    if grace != math.inf or grace_window is not None:
-        raise ValueError("grace= / grace_window= need portfolio=")
-    return _milp_iis_arrays(
-        arrays, **kwargs, order=order, total_time_limit=total_time_limit, t_start=t_start
+    else:
+        if grace != math.inf or grace_window is not None:
+            raise ValueError("grace= / grace_window= need portfolio=")
+        if threads is not None:
+            raise ValueError("threads= needs portfolio=; a single order runs in-process")
+        res = _milp_iis_arrays(
+            arrays, **kwargs, order=order, total_time_limit=filter_limit, t_start=t_start
+        )
+    if not include_bounds:
+        return res  # the post-pass needs every applied bound listed (see _polish)
+    return _polish(
+        arrays,
+        res,
+        cert_tol=cert_tol,
+        time_limit=time_limit,
+        engine=iis_engine,
+        deadline=None if total_time_limit is None else t_start + float(total_time_limit),
     )
 
 
@@ -1669,19 +2292,18 @@ def _milp_iis_arrays(
     sat_conflicts = 0
     parity_rows: Optional[int] = None
     full_state = (set(cons), set(bounds), set(ints_active))
-    if sat_candidate:
-        pc = _parity_core(A, row_lo, row_hi, is_int, row_groups)
+    if eng.arm_lattice(deadline) and sat_candidate:
+        pc = _lattice_candidate(A, row_lo, row_hi, is_int, row_groups, deadline)
         if pc is not None:
-            # The certificate needs only its rows and the integrality of the
-            # columns they touch. The bounds of those columns are kept as well
-            # (elements once a column's integrality is relaxed, filtered like any
-            # other): dropping them left relaxed columns unbounded, and their
-            # probe points then failed the 1e-6 certificate check (neos-807454:
-            # 9 of 65 members certified instead of 65) and led to a larger IIS
-            # (enlight4: 19 instead of 18).
+            # The certificate needs only its rows and the integralities the
+            # core holds. The bounds of the columns the rows touch are kept as
+            # well (elements, filtered like any other): dropping them up front
+            # left relaxed columns unbounded, and their probe points then failed
+            # the 1e-6 certificate check (neos-807454: 9 of 65 members certified
+            # instead of 65).
             cons = set(pc[0])
             ints_active &= pc[1]
-            bounds = {jb for jb in bounds if jb[0] in pc[1]}
+            bounds = {jb for jb in bounds if jb[0] in pc[2]}
             parity_rows = len(cons)
     if sat_candidate and parity_rows is None:
         # The clause-core stage gets a share of an overall budget that SATURATES
@@ -1695,7 +2317,7 @@ def _milp_iis_arrays(
         # The share starts when the stage does, as every later stage's does
         # (``min(deadline, now + budget)``), and the overall deadline still caps
         # it. It used to start at ``t_start``, which charged model extraction,
-        # first-call imports and ``_parity_core`` to it: where those outlasted
+        # first-call imports and the lattice candidate to it: where those outlasted
         # the share, the stage began past its own deadline and did no work at
         # all, so whether the candidate ran depended on machine speed (#2318,
         # CI on PR #2311; #912 role 2).
@@ -2302,6 +2924,7 @@ def _milp_iis_arrays(
         n_rolling=n_rolling,
         n_reduced_confirmed=eng.n_reduced_confirmed,
         n_exact_confirmed=eng.n_exact_confirmed,
+        n_lattice=eng.n_lattice,
         n_exact_refuted=eng.n_exact_refuted,
         n_swept=n_swept,
         n_sweep_reverted=n_sweep_reverted,
@@ -2409,6 +3032,11 @@ def _portfolio_child() -> None:
         os._exit(3)
 
     threading.Thread(target=_orphan_watch, daemon=True).start()
+    # Before any solve: this member's share of the caller's thread budget, not
+    # HiGHS's automatic scheduler (see pin_highs_threads).
+    from discopt._iis_backend import pin_highs_threads
+
+    pin_highs_threads(int(job["highs_threads"]))
     deadline_wall = job["deadline_wall"]
     total = None if deadline_wall is None else max(0.0, deadline_wall - time.time())
     try:
@@ -2445,9 +3073,14 @@ def _portfolio_iis(
     total_time_limit: Optional[float],
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
+    threads: Optional[int] = None,
 ) -> MilpIIS:
     """Run one deletion filter per order in ``portfolio``, each in its own process,
     against one shared budget, and return the smallest complete result.
+
+    ``threads``: the thread budget for the whole portfolio (default: every core).
+    Each member's HiGHS scheduler gets ``max(1, threads // workers)`` threads, set
+    before its first solve (:func:`discopt._iis_backend.pin_highs_threads`).
 
     Each member is an ordinary :func:`milp_iis` run, so each result is sound on its
     own (confirmed infeasible under both presolve configurations, certificates
@@ -2488,6 +3121,12 @@ def _portfolio_iis(
     n_workers = min(len(orders), os.cpu_count() or 1) if workers is None else int(workers)
     if n_workers < 1:
         raise ValueError(f"workers must be >= 1, got {workers}")
+    budget_threads = (os.cpu_count() or 1) if threads is None else int(threads)
+    if budget_threads < 1:
+        raise ValueError(f"threads must be >= 1, got {threads}")
+    # Each member's HiGHS gets an equal share, so all the members together stay
+    # within the thread budget.
+    member_threads = max(1, budget_threads // n_workers)
     if not grace >= 1.0:
         raise ValueError(f"grace must be >= 1, got {grace}")
     if grace_window is not None:
@@ -2538,6 +3177,7 @@ def _portfolio_iis(
                         deadline_wall=member_deadline,
                         result_path=result_path,
                         discopt_dir=_DISCOPT_DIR,
+                        highs_threads=member_threads,
                     )
                     pickle.dump(job, proc.stdin)
                     # Kept open: the member exits on EOF, so it cannot outlive us.

@@ -12805,6 +12805,72 @@ def _ipx_lift_point_refusal(source_model, result) -> Optional[str]:
     return None if verdict.ok else (verdict.reason or "refused")
 
 
+def _ipx_lift_report_source_objective(
+    source_model, result: "SolveResult", entry_args: dict, is_maximize: bool
+) -> "SolveResult":
+    """``result`` with its objective re-read from the UN-LIFTED model at its point.
+
+    #2252 follow-up. Call only after :func:`_ipx_lift_point_refusal` passed. The
+    lift's objective is the lifted MILP's linear expansion, evaluated on bits and
+    McCormick product columns that each sit inside the engine's 1e-6 row
+    tolerance; on integer ``x`` with objective ``x - 1/x`` it reported
+    ``1.4999999986`` at ``x = 2``, a value no point attains (the #1331 class).
+    ``result.objective`` claims the returned ``x`` achieves it, so it is the source
+    model's objective there. The lift's bound stays: the lifted MILP is an exact
+    formulation solved to a tolerance that only enlarges its feasible set. A
+    certificate is kept only when the re-read pair still closes the caller's gap.
+    """
+    from discopt.validation.feasibility import verify_point
+
+    xd = getattr(result, "x", None)
+    if not xd or getattr(result, "status", None) not in ("optimal", "feasible"):
+        return result
+    flat = np.concatenate(
+        [
+            np.atleast_1d(np.asarray(xd[v.name], dtype=np.float64)).ravel()
+            for v in source_model._variables
+        ]
+    )
+    verdict = verify_point(source_model, flat, with_objective=True)
+    if not verdict.ok or verdict.objective is None:
+        # The refusal check above verified this very point; reaching here means the
+        # objective alone could not be evaluated, which is not a value to report.
+        raise RuntimeError(
+            f"integer-bilinear lift: verified point has no source objective ({verdict.reason})"
+        )
+    obj = float(verdict.objective)
+    if result.objective is not None and obj == float(result.objective):
+        return result
+    result.objective = obj
+    # The search capped its bound at the value it converged on (here the lifted
+    # expansion); once the objective is re-valued the cap belongs at the new value,
+    # exactly as ``Model._reconcile_objective_with_model`` re-caps it. Without this
+    # the stale cap stayed: on #2262's convex IQP (NLP-BB on the lift) the bound
+    # sat at the expansion value -1.18e-6 on CI while the proved bound was
+    # -3.8e-10, so re-reading the objective to 0.0 withdrew a sound certificate.
+    bound = getattr(result, "bound", None)
+    recapped = _recap_bound_at_objective(
+        bound, obj, getattr(result, "_proved_bound", None), is_maximize
+    )
+    if recapped is not None and recapped != bound:
+        result._set_bound(recapped, valid=result.bound_valid, source=result.bound_source)
+        bound = recapped
+    result.gap = _relative_gap_from_objective_bound(obj, bound)
+    if result.status == "optimal" and bound is not None:
+        abs_tol = entry_args.get("abs_gap_tolerance")
+        closed = _recertify_gap_closed(
+            obj,
+            float(bound),
+            is_maximize,
+            float(entry_args.get("gap_tolerance", 1e-4)),
+            _DEFAULT_ABS_GAP_TOL if abs_tol is None else float(abs_tol),
+        )
+        if not closed:
+            result.status = "feasible"
+            result.gap_certified = False
+    return result
+
+
 def _ipx_strip_unverified(result: "SolveResult", why: str) -> "SolveResult":
     """``result`` with its incumbent withdrawn; its dual bound is kept.
 
@@ -12849,7 +12915,7 @@ def _ipx_lift_checked(entry_args: dict, solve_t0: float, is_maximize: bool) -> "
     lifted = _run("lift", time_limit - (time.perf_counter() - solve_t0))
     why = _ipx_lift_point_refusal(source, lifted)
     if why is None:
-        return lifted
+        return _ipx_lift_report_source_objective(source, lifted, entry_args, is_maximize)
     logger.warning(
         "integer-bilinear lift: the lifted MILP's incumbent fails verify_point on the "
         "un-lifted model (%s); solving the un-lifted model on the time left",
@@ -12928,6 +12994,10 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         # model refuses; the un-lifted slice below then runs as for any lift
         # that did not certify.
         lifted = _ipx_strip_unverified(lifted, _why_lift)
+    else:
+        lifted = _ipx_lift_report_source_objective(
+            entry_args["model"], lifted, entry_args, is_maximize
+        )
     if _result_certifies(lifted):
         return _done(lifted)
     spent = int(getattr(lifted, "node_count", 0) or 0)
@@ -12956,6 +13026,10 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         _why_final = _ipx_lift_point_refusal(entry_args["model"], final)
         if _why_final is not None:
             final = _ipx_strip_unverified(final, _why_final)
+        else:
+            final = _ipx_lift_report_source_objective(
+                entry_args["model"], final, entry_args, is_maximize
+            )
     return _done(_merge_route_and_fallback(merged, final, is_maximize))
 
 
@@ -19371,9 +19445,8 @@ def solve_model(
                     initial_point=initial_point,
                     deferred=_deferred,
                     prefer_pounce=nlp_solver == "pounce",
-                    # The caller's raw value, not the resolved one: ``None``
-                    # means "this route's established default", which for
-                    # this engine is no absolute criterion at all (#1315).
+                    # ``None`` resolves inside to the default the published
+                    # pair is judged by (#2357).
                     abs_gap_tolerance=abs_gap_tolerance,
                     incumbent_time_extension=incumbent_time_extension,
                     node_callback=node_callback,
@@ -25966,6 +26039,30 @@ def solve_model(
                 _NLPBB_EXIT_ABS_TOL,
                 _sx_cmp,
             )
+
+        # #2352: the reported objective must describe the reported POINT. ``obj_val``
+        # is the tree's value for the NLP point it stored; the C-3 integer snap above
+        # replaces ``sol_flat`` and left that number in place (only an adopted polish
+        # rewrote it). Measured on main 944a50522: an integer model returned the
+        # verified point (8, 1) with ``objective`` 3.75e-9 BELOW ``f(8, 1)``,
+        # ``optimal`` and ``gap_certified``. NLP-BB carries the same rule. The value
+        # is the arbiter's model (the pre-lift model when the factorable lift ran),
+        # in the evaluator's minimise sense, so the one negation below applies.
+        # Unconditional, like NLP-BB's: a threshold would keep a smaller lie. The
+        # certificate is re-tested on the final pair (``_withhold_stale_certificate``).
+        try:
+            _obj_at_point = float(_arb.evaluator.evaluate_objective(_arb.view(sol_flat)))
+        except Exception as _oe:  # pragma: no cover - evaluator robustness
+            raise RuntimeError(
+                "spatial B&B could not evaluate the objective at the point it is "
+                f"about to report: {type(_oe).__name__}: {_oe}"
+            ) from _oe
+        if not np.isfinite(_obj_at_point):
+            raise RuntimeError(
+                f"spatial B&B: the objective at the reported point is {_obj_at_point}, "
+                "which is not a reportable value"
+            )
+        obj_val = _obj_at_point
 
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
@@ -40087,8 +40184,9 @@ def _solve_milp_simplex(
     tolerance at all, so ``Model.solve(abs_gap_tolerance=...)`` was a documented
     control that did nothing whenever a MILP reached this engine -- which the
     default route does, and the public ``nlp_solver="simplex"`` option always does.
-    ``None`` is passed through as ``None`` (no absolute criterion), which is this
-    engine's established default and keeps an omitted argument bound-neutral.
+    ``None`` resolves to :data:`_DEFAULT_ABS_GAP_TOL`, the tolerance the published
+    pair is judged by (#2357). It used to mean "no absolute criterion", which
+    let the engine stop on a gap ``Model.solve`` then refused.
 
     ``relu_cuts`` (#2157) is an ``AndersonCutSeparator.native_milp_spec`` dict:
     the engine then separates Anderson et al.'s ideal ReLU inequalities natively
@@ -40310,12 +40408,20 @@ def _solve_milp_simplex(
     # the #291 stall slice enforced by the driver only while it has no incumbent.
     _run1_time = _milp_budget
     _run1_stall: dict = {}
+    # #2357: the engine stops on the criterion ``Model.solve`` judges its pair by.
+    # ``_refuse_unclosed_published_pair`` applies ``_gap_criterion`` with the
+    # resolved absolute tolerance (1e-6 when omitted) and the unfloored relative
+    # test. Passing ``None`` through used to leave the driver on its floored test
+    # ``(ub - lb) / max(|ub|, 1)`` with no absolute criterion, so on an objective
+    # below 1 it closed at an absolute gap up to ``gap_tolerance`` that the caller
+    # then refused: neos17 (|ub| = 0.15) stopped at 7,711 nodes, absolute gap
+    # 9.8e-5, relative 6.5e-4, and was published "feasible" with its certificate
+    # dropped. The HiGHS route already resolves ``None`` the same way.
+    abs_gap_tolerance = _resolve_abs_gap_tolerance(abs_gap_tolerance)
     # R4 (retirement step 6, #1243): an absolute tolerance tighter than the relative
     # one asks for the Python tree's unfloored relative test,
     # ``max(|ub|, |lb|, 1e-10)``; the driver applies it (``rel_gap_max_abs``).
-    _rel_gap_max_abs = abs_gap_tolerance is not None and float(abs_gap_tolerance) < float(
-        gap_tolerance
-    )
+    _rel_gap_max_abs = float(abs_gap_tolerance) < float(gap_tolerance)
     # Python-MILP-tree retirement (formerly DISCOPT_MILP_NO_STALL_TREE, graduated and
     # then made unconditional when the tree was deleted): with no incumbent at the
     # #291 slice, run 1's deadline moves to the whole remaining budget. Under
@@ -40403,7 +40509,7 @@ def _solve_milp_simplex(
             float(lp_data.obj_const),
             _run1_nodes,
             float(gap_tolerance),
-            abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+            abs_gap_tol=float(abs_gap_tolerance),
             rel_gap_max_abs=_rel_gap_max_abs,
             initial_incumbent=_seed,
             time_limit_s=float(_run1_time),
@@ -40599,7 +40705,7 @@ def _solve_milp_simplex(
                     # spent its whole budget on a tree the caller's absolute
                     # criterion had already closed, and returned `feasible` with
                     # |obj-bound| inside the requested tolerance.
-                    abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+                    abs_gap_tol=float(abs_gap_tolerance),
                     rel_gap_max_abs=_rel_gap_max_abs,
                     initial_incumbent=_seed2,
                     time_limit_s=float(_reentry_remaining),

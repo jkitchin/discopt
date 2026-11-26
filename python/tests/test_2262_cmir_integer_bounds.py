@@ -183,3 +183,38 @@ def test_random_convex_integer_qp_nlp_bb_bound_is_sound(seed):
     assert r.bound is None or r.bound <= best + tol, (r.bound, best)
     if r.gap_certified and r.status == "optimal":
         assert abs(r.objective - best) <= tol, (r.objective, best)
+
+
+def test_lift_objective_reread_recaps_the_bound(monkeypatch):
+    """The integer-bilinear lift re-reads the objective at the returned point; the
+    bound the search capped at the old (lifted-expansion) value must be re-capped at
+    the new one, as ``Model._reconcile_objective_with_model`` does.
+
+    CI on #2350 returned this instance ``feasible``: the lift reported objective
+    and bound -1.177e-6 (the linear expansion, inside the row tolerance), the
+    re-read gave 0.0, and the stale cap left a 1.18e-6 gap above the 1e-6 absolute
+    tolerance although the proved bound was -3.8e-10. Locally the lift lands closer
+    to 0, so the test pins CI's lifted numbers and checks the certificate survives.
+    """
+    import discopt.solver as S
+
+    orig = S._ipx_lift_report_source_objective
+    calls = []
+
+    def ci_numbers(src, res, entry_args, is_max):
+        res.bound = -1.177159163081462e-06
+        res.objective = res.bound
+        out = orig(src, res, entry_args, is_max)
+        calls.append((out.status, out.objective, out.bound))
+        return out
+
+    monkeypatch.setattr(S, "_ipx_lift_report_source_objective", ci_numbers)
+    r = _issue_model().solve(time_limit=20, nlp_bb=True)
+    assert calls, "the lift's objective re-read never ran"
+    status, obj, bound = calls[-1]
+    assert obj == 0.0, calls
+    assert bound > -1e-6, calls  # re-capped at min(proved, objective)
+    assert bound <= obj, calls
+    assert status == "optimal", calls
+    assert r.status == "optimal", (r.status, r.objective, r.bound, r.algorithm_route)
+    assert r.bound is not None and r.bound <= 1e-9, r.bound

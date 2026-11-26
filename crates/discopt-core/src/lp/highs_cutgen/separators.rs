@@ -175,16 +175,38 @@ impl LpAggregator {
 
 /// `HighsDomain::tightenCoefficients` on the global domain.
 pub fn tighten_coefficients(ctx: &dyn TlContext, inds: &[i32], vals: &mut [f64], rhs: &mut f64) {
+    tighten_coefficients_with(
+        &|c| ctx.col_lower(c),
+        &|c| ctx.col_upper(c),
+        &|c| ctx.is_col_integral(c),
+        ctx.feastol(),
+        inds,
+        vals,
+        rhs,
+    )
+}
+
+/// [`tighten_coefficients`] over bound and integrality lookups (for a caller with a
+/// global [`super::domain::Domain`] rather than a transformed-LP context).
+pub fn tighten_coefficients_with(
+    col_lower: &dyn Fn(i32) -> f64,
+    col_upper: &dyn Fn(i32) -> f64,
+    is_col_integral: &dyn Fn(i32) -> bool,
+    feastol: f64,
+    inds: &[i32],
+    vals: &mut [f64],
+    rhs: &mut f64,
+) {
     let mut maxactivity = CDouble::new(0.0);
     for i in 0..inds.len() {
         if vals[i] > 0.0 {
-            let u = ctx.col_upper(inds[i]);
+            let u = col_upper(inds[i]);
             if u == INF {
                 return;
             }
             maxactivity += u * vals[i];
         } else {
-            let l = ctx.col_lower(inds[i]);
+            let l = col_lower(inds[i]);
             if l == -INF {
                 return;
             }
@@ -192,21 +214,21 @@ pub fn tighten_coefficients(ctx: &dyn TlContext, inds: &[i32], vals: &mut [f64],
         }
     }
     let maxabscoef = maxactivity - *rhs;
-    if maxabscoef > ctx.feastol() {
+    if maxabscoef > feastol {
         let mut upper = CDouble::new(*rhs);
         let mut tightened = 0;
         for i in 0..inds.len() {
-            if !ctx.is_col_integral(inds[i]) {
+            if !is_col_integral(inds[i]) {
                 continue;
             }
             if vals[i] > maxabscoef.to_f64() {
                 let delta = vals[i] - maxabscoef;
-                upper -= delta * ctx.col_upper(inds[i]);
+                upper -= delta * col_upper(inds[i]);
                 vals[i] = maxabscoef.to_f64();
                 tightened += 1;
             } else if vals[i] < -maxabscoef.to_f64() {
                 let delta = -vals[i] - maxabscoef;
-                upper += delta * ctx.col_lower(inds[i]);
+                upper += delta * col_lower(inds[i]);
                 vals[i] = -maxabscoef.to_f64();
                 tightened += 1;
             }

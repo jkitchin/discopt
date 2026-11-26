@@ -61,6 +61,7 @@ pub mod modk;
 pub mod objective;
 pub mod orbitope;
 pub mod pool;
+pub mod probing;
 pub mod random;
 pub mod separators;
 pub mod sparse_vec;

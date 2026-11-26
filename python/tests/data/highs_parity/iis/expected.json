@@ -454,7 +454,7 @@
      []
     ]
    ],
-   "n_solves": 5,
+   "n_solves": 4,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -464,6 +464,10 @@
     "python/tests/test_iis_integrality.py::test_lp_feasible_mip_infeasible_keeps_only_needed_integrality (call)"
    ],
    "n_solves_history": [
+    {
+     "n_solves": 5,
+     "until": "the exact lattice test (iis/lattice-gate, 2026-11-25): one probe decided without a solve, same IIS"
+    },
     {
      "n_solves": 7,
      "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"

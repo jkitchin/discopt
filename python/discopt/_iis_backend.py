@@ -52,6 +52,49 @@ MIP_FEASIBILITY_TOLERANCE = 1e-6
 ENGINES = ("rust", "highs")
 
 
+def pin_highs_threads(n: int) -> bool:
+    """Size HiGHS's process-wide task scheduler to ``n`` threads; ``False`` if no HiGHS.
+
+    HiGHS keeps one scheduler per process. The first ``run()`` sizes it from that
+    run's ``threads`` option. ``0``, the default every discopt HiGHS instance keeps
+    (see ``solvers/lp_milp_highs._new_highs``), means "automatic", about half the
+    machine's cores. Later runs with ``threads=0`` reuse whatever size it has. The
+    IIS portfolio's members are separate processes, so each one sized its own
+    automatic scheduler, whatever thread budget the caller had. Running one trivial
+    model with ``threads=n`` first fixes the size, and every later run in the
+    process keeps ``threads=0`` and uses it.
+
+    Call it before any other HiGHS run in the process. If the scheduler was already
+    sized differently, HiGHS refuses the run, and this raises ``RuntimeError``
+    rather than continuing at the wrong size.
+    """
+    from discopt._optional_highs import highs_available, require_highspy
+
+    if n < 1:
+        raise ValueError(f"pin_highs_threads needs n >= 1, got {n}")
+    if not highs_available():
+        return False
+    highspy = require_highspy("pinning the HiGHS thread count")
+    h = highspy.Highs()
+    h.silent()
+    h.setOptionValue("output_flag", False)
+    h.setOptionValue("threads", int(n))
+    lp = highspy.HighsLp()
+    lp.num_col_ = 1
+    lp.num_row_ = 0
+    lp.col_cost_ = np.zeros(1)
+    lp.col_lower_ = np.zeros(1)
+    lp.col_upper_ = np.ones(1)
+    h.passModel(lp)
+    status = run_checked(h)
+    if status != highspy.HighsStatus.kOk:
+        raise RuntimeError(
+            f"could not size HiGHS's scheduler to {n} threads (run status {status}); "
+            "a HiGHS run in this process had already sized it differently"
+        )
+    return True
+
+
 def make_backend(engine: str, A: Any, row_lo, row_hi, col_lb, col_ub, is_int) -> Any:
     """The backend ``engine`` names, holding the model ``row_lo <= A x <= row_hi``,
     ``col_lb <= x <= col_ub``, ``x_j`` integer where ``is_int``."""

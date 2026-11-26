@@ -217,7 +217,10 @@ def test_every_infeasible_verdict_is_cross_checked_without_presolve(monkeypatch)
     m.subject_to(x[0] + x[1] <= 1.5, name="c1")
     m.subject_to(x[0] + x[1] >= 2.5, name="c2")
     m.subject_to(x[0] - x[1] <= 0, name="c3")
-    m.subject_to(2 * x[0] == 1, name="half")
+    # 1 <= 2 x0 <= 1 as two inequalities: the lattice test (equality rows only)
+    # would decide ``2 x0 == 1`` with no solve and leave nothing to cross-check.
+    m.subject_to(2 * x[0] >= 1, name="half_lo")
+    m.subject_to(2 * x[0] <= 1, name="half_hi")
     m.minimize(0 * x[0])
     res = milp_iis(m, confirm="each")
 

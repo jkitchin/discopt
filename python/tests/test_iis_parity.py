@@ -1,24 +1,24 @@
-"""Mod-2 (GF(2)) certificates in the MILP IIS engine.
+"""Parity (mod-2) infeasibility in the MILP IIS engine.
 
 Integer equality rows whose sum is ``even.x = odd`` mod 2 have no integer
-solution, whatever the bounds -- an exact proof in integer arithmetic. The engine
-uses it twice:
+solution, whatever the bounds. The engine first used a GF(2) elimination for
+these; the exact lattice test (:mod:`discopt._iis_lattice`, tested in
+``test_iis_lattice.py``) now decides them as a special case. These tests keep
+the parity behaviour pinned:
 
-* as a candidate (``_parity_core``): a minimal certificate's rows plus the
-  integrality and bounds of the columns they touch, proven by HiGHS like the SAT
-  core before use (MIPcc27 neos-807454: Gurobi's 9 rows + 56 integralities in
-  ~6 s, was 46 s; enlight11: the 197-element certificate set instead of the full
-  363-element model);
-* in the second confirmation route (``_Engine._parity_infeasible``): a set that
-  contains a certificate is confirmed without a presolve-free solve -- which
-  needed 47 s on enlight11's set and stopped checkpoint 0 inside a 60 s budget.
+* as a candidate (``_lattice_candidate``): a minimal certificate's rows plus the
+  integralities it needs and the bounds of the columns it touches, proven like the
+  SAT core before use;
+* in the second confirmation route: a set that contains a certificate is confirmed
+  without a presolve-free solve -- which needed 47 s on enlight11's set and
+  stopped checkpoint 0 inside a 60 s budget.
 """
 
 import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import _iis_milp
-from discopt._iis_milp import _gf2_certificates, _parity_core, milp_iis
+from discopt._iis_milp import _lattice_candidate, milp_iis
 
 highspy = pytest.importorskip("highspy")
 
@@ -37,15 +37,6 @@ def _odd_cycle(n, noise=10):
     return m
 
 
-def test_gf2_elimination_finds_exactly_the_contradictions():
-    # rows over bits: x0+x1=1, x1+x2=1, x0+x2=1 -> sum: 0 = 1 (mod 2)
-    rows = [(0b011, 1), (0b110, 1), (0b101, 1)]
-    certs = _gf2_certificates(rows)
-    assert certs == [0b111]
-    # make the third rhs even: consistent, no certificate
-    assert _gf2_certificates([(0b011, 1), (0b110, 1), (0b101, 0)]) == []
-
-
 @pytest.mark.smoke
 def test_odd_cycle_candidate_gives_a_certified_iis():
     n = 5
@@ -60,7 +51,7 @@ def test_odd_cycle_candidate_gives_a_certified_iis():
     assert len(res.certificates) == len(res.constraints) + len(res.integrality)
 
 
-def test_parity_core_returns_a_minimal_certificate():
+def test_lattice_candidate_returns_a_minimal_certificate():
     # Two disjoint odd cycles (5 and 3): the core is the smaller, alone.
     m = dm.Model("two")
     a = m.binary("a", shape=(5,))
@@ -82,14 +73,15 @@ def test_parity_core_returns_a_minimal_certificate():
     for r, src in enumerate(lin.row_source):
         groups.setdefault(src, []).append(r)
     groups = {k: np.asarray(v) for k, v in groups.items()}
-    cons, cols = _parity_core(A, lo, hi, np.ones(8, dtype=bool), groups)
+    cons, held, cols = _lattice_candidate(A, lo, hi, np.ones(8, dtype=bool), groups, None)
     assert sorted(m._constraints[i].name for i in cons) == ["b0", "b1", "b2"]
     assert cols == {5, 6, 7}
+    assert len(held) == 1 and held <= cols  # one integral variable decides it
 
 
 def test_parity_confirms_a_set_beyond_the_exact_caps_without_presolve_off(monkeypatch):
     """Checkpoint 0 on a 45-binary odd cycle (past EXACT_MAX_INTS, so only
-    parity can decide it exactly) is confirmed by the certificate alone."""
+    the lattice test can decide it exactly) is confirmed by the certificate alone."""
     m = _odd_cycle(45, noise=0)
     solves: list[str] = []
     real_solve = _iis_milp._Engine._solve

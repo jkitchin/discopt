@@ -49,7 +49,10 @@ use crate::bnb::highs_search::search::{
 };
 use crate::bnb::node::{BranchRecord, NodeStatus};
 use crate::lp::highs_cutgen::conflict_pool::{ConflictDomainObservers, ConflictPool};
+use crate::lp::highs_cutgen::core::{CutGenCore, CutGenParams};
 use crate::lp::highs_cutgen::domain::{BoundType, ConflictLinks, Domain, DomainChange, Reason};
+use crate::lp::highs_cutgen::pool::{CutPool, DomainObservers};
+use crate::lp::highs_cutgen::separators::tighten_coefficients_with;
 
 mod nodebox;
 mod refcheck;
@@ -238,6 +241,9 @@ pub(super) struct Outcome {
     /// `DISCOPT_MILP_CONFLICT`: (conflicts from infeasible domains, from LP dual
     /// proofs, global bound changes carried into the local baseline).
     pub conflicts: (u64, u64, u64),
+    /// `DISCOPT_MILP_CONFLICT`: (conflict cuts `generateConflict` added to the cut
+    /// pool, pool cuts the search's domains propagate).
+    pub conflict_cuts: (u64, u64),
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -412,15 +418,49 @@ pub(super) fn search_cut_lp_enabled() -> bool {
 /// the verified Farkas ray of an infeasible node LP) into a conflict pool that both
 /// the local domain and a global domain propagate (`HighsMipSolverData::
 /// conflictPool`), aged before each round. A conflict propagated to an empty global
-/// domain proves the search complete. Default OFF until its CLAUDE.md §5 panel
-/// (row in `docs/dev/flag-retirement-audit.md`); read per search, garbage refused.
+/// domain proves the search complete. Default ON since 2026-11-26 (#2350): graduated
+/// jointly with `DISCOPT_MILP_CLIQUE_DOMAIN` (the pair is the HiGHS default) on a
+/// CLAUDE.md §5 panel scored with permutation reps (row in
+/// `docs/dev/flag-retirement-audit.md`); `=0` restores the search without conflict
+/// analysis or the cut pool. Read per search, garbage refused.
 pub(super) fn conflict_enabled() -> bool {
     match std::env::var("DISCOPT_MILP_CONFLICT") {
-        Err(_) => false,
+        Err(_) => true,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
             other => panic!("DISCOPT_MILP_CONFLICT={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// `DISCOPT_MILP_CLIQUE_DOMAIN`: the root's clique table (`mipdata_->cliquetable`,
+/// the ported `extractCliques` + `runCliqueMerging` of the root separation), filled by
+/// HiGHS's presolve probing schedule (`HPresolve::runProbing`: every binary, scored and
+/// budgeted as in HiGHS) and by probing the root LP's fractional binaries
+/// (`separateImpliedBounds`' probing loop), both in `lp/highs_cutgen/probing.rs`, then
+/// attached with the probing implications to the search's local and global domains.
+/// Fixing a binary then fixes the other literals of its cliques (`HighsDomain::
+/// changeBound`'s `cliquetable.addImplications`) and re-applies what its probe implied
+/// (`implications.applyImplications`), with `Reason::cliqueTable` reasons conflict
+/// analysis explains. With `DISCOPT_MILP_CONFLICT` (which supplies the global domain)
+/// node separation also runs `separateImpliedBounds`: probe the node LP's unprobed
+/// fractional binaries and add the violated implied-bound cuts. Bound-changing.
+/// Default ON since 2026-11-26 (#2350), graduated jointly with `DISCOPT_MILP_CONFLICT`
+/// on a §5 panel scored with permutation reps (row in
+/// `docs/dev/flag-retirement-audit.md`: cert-clean, nodes -20 % to -22 %, no dual loss,
+/// median primal gap lower at both caps); `=0` restores the search without the table
+/// hook or probing. The per-round root probing is still approximated by one pass at
+/// search start (the root separation has no `Domain`). Read per search, garbage refused.
+pub(super) fn clique_domain_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_CLIQUE_DOMAIN") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_CLIQUE_DOMAIN={other:?} is not recognized (expected 1 or 0)")
+            }
         },
     }
 }
@@ -450,6 +490,144 @@ pub(super) struct Conflicts {
     pub added: u64,
     pub proof_added: u64,
     pub global_fixings: u64,
+    /// HiGHS `mipdata_->cutpool`: the conflict cuts `generateConflict` derives from
+    /// LP dual proofs and the search's pool cuts, propagated by both domains
+    /// (`addCutpool`, HiGHS's `CutpoolPropagation`). Same validity scope as the
+    /// conflicts: one run, this model.
+    cutpool: CutPool,
+    /// The cut pool's index among both domains' cut pools.
+    cpi: usize,
+    /// The working rows' structural parts, for rewriting a working-LP cut over the
+    /// structurals ([`StructRows::to_struct`]).
+    srows: StructRows,
+    pub conflict_cuts: u64,
+    pub pool_cuts: u64,
+}
+
+/// The working rows `A [x; s] = b` split into their structural part and their
+/// singleton slack, to rewrite a cut over working columns (slacks included) as a row
+/// over the structurals the domains propagate.
+struct StructRows {
+    ns: usize,
+    rows: Vec<(Vec<usize>, Vec<f64>)>,
+    /// The row holds a non-structural column other than its singleton slack.
+    other: Vec<bool>,
+    /// Slack column -> (its row, its coefficient).
+    slack_row: std::collections::HashMap<usize, (usize, f64)>,
+    b: Vec<f64>,
+    /// Each row's acceptance tolerance ([`row_tolerances`] over the global box).
+    eps: Vec<f64>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+}
+
+impl StructRows {
+    fn new(ctx: &NodeCtx<'_>, slacks: &[Option<(usize, f64)>]) -> Self {
+        let (m, n, ns) = (ctx.m_w, ctx.n_w, ctx.ns);
+        let mut rows: Vec<(Vec<usize>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
+        let mut nonstruct: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for j in 0..n {
+            let (ri, rv) = ctx.csc_rc.col(j);
+            for (&i, &a) in ri.iter().zip(rv) {
+                if i >= m || a == 0.0 {
+                    continue;
+                }
+                if j < ns {
+                    rows[i].0.push(j);
+                    rows[i].1.push(a);
+                } else {
+                    nonstruct[i].push(j);
+                }
+            }
+        }
+        let mut slack_row = std::collections::HashMap::new();
+        let mut other = vec![false; m];
+        for i in 0..m {
+            let sl = slacks.get(i).copied().flatten();
+            if let Some((c, coef)) = sl {
+                slack_row.insert(c, (i, coef));
+            }
+            other[i] = nonstruct[i].iter().any(|&j| sl.is_none_or(|(c, _)| c != j));
+        }
+        StructRows {
+            ns,
+            rows,
+            other,
+            slack_row,
+            b: ctx.b_w[..m].to_vec(),
+            eps: row_tolerances(ctx.csc_rc, m, n, ctx.b_w, ctx.l_w, ctx.u_w),
+            l: ctx.l_w[..ns].to_vec(),
+            u: ctx.u_w[..ns].to_vec(),
+        }
+    }
+
+    /// The working-LP cut `cut.coeffs . [x; s] >= cut.rhs` as `vals . x[inds] <= rhs`
+    /// over the structurals, valid for every point the incumbent check accepts: each
+    /// slack is replaced through its row (`s = (b_r - A_r x) / c`), the rhs widened by
+    /// the row's acceptance tolerance times the multiplier, plus a relative margin as
+    /// in [`farkas_proof_row`]. `None` when a slack has no singleton row, a used row
+    /// holds another non-structural column, or nothing structural remains.
+    fn to_struct(&self, cut: &GomoryCut) -> Option<(Vec<i32>, Vec<f64>, f64)> {
+        let ns = self.ns;
+        let mut w = vec![0.0f64; ns];
+        let mut r = cut.rhs;
+        let mut widen = 0.0f64;
+        let mut scale = 1.0 + cut.rhs.abs();
+        for (j, &a) in cut.coeffs.iter().enumerate() {
+            if a == 0.0 {
+                continue;
+            }
+            if j < ns {
+                w[j] += a;
+                continue;
+            }
+            let &(i, c) = self.slack_row.get(&j)?;
+            if self.other[i] || c == 0.0 {
+                return None;
+            }
+            let f = a / c;
+            r -= f * self.b[i];
+            scale += (f * self.b[i]).abs();
+            widen += f.abs() * self.eps[i];
+            let (ri, rv) = &self.rows[i];
+            for (&k, &v) in ri.iter().zip(rv) {
+                w[k] -= f * v;
+            }
+        }
+        // `w . x >= r - widen`, i.e. `-w . x <= widen - r`.
+        let wmax = w.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        if wmax == 0.0 || !r.is_finite() {
+            return None;
+        }
+        let mut rhs = widen - r;
+        let (mut inds, mut vals) = (Vec::new(), Vec::new());
+        for (j, &wj) in w.iter().enumerate() {
+            let a = -wj;
+            if a == 0.0 {
+                continue;
+            }
+            let (lj, uj) = (self.l[j], self.u[j]);
+            let mag = [lj, uj]
+                .iter()
+                .filter(|v| v.abs() < INF)
+                .fold(0.0f64, |acc, v| acc.max(v.abs()));
+            scale += a.abs() * mag;
+            if a.abs() <= 1e-12 * wmax {
+                let lo = if a > 0.0 { lj } else { uj };
+                if lo.abs() < INF {
+                    rhs -= a * lo;
+                    continue;
+                }
+            }
+            inds.push(j as i32);
+            vals.push(a);
+        }
+        if inds.is_empty() || !rhs.is_finite() {
+            return None;
+        }
+        rhs += 1e-9 * scale;
+        Some((inds, vals, rhs))
+    }
 }
 
 /// `HighsLpRelaxation::computeDualInfProof` in discopt's working form: the verified
@@ -477,20 +655,59 @@ fn farkas_proof_row(
     if let Some(sc) = ctx.scaling {
         sc.unscale_dual(&mut y);
     }
-    let (l, u) = (ctx.l_w, ctx.u_w);
-    let eps = row_tolerances(ctx.csc_rc, m, n, ctx.b_w, l, u);
-    let mut w = vec![0.0f64; n];
-    for (j, wj) in w.iter_mut().enumerate() {
-        let (rows, vals) = ctx.csc_rc.col(j);
-        *wj = rows
-            .iter()
+    proof_row_from_dual(ctx.csc_rc, m, n, ns, ctx.b_w, ctx.l_w, ctx.u_w, y)
+}
+
+/// The body of [`farkas_proof_row`] once the ray `y` is in original units, over the
+/// unscaled working matrix `csc` (`m` rows, `n` columns, the first `ns` structural)
+/// with rhs `b` and the global box `l`/`u`.
+#[allow(clippy::too_many_arguments)]
+fn proof_row_from_dual(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    ns: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    mut y: Vec<f64>,
+) -> Option<(Vec<usize>, Vec<f64>, f64)> {
+    let eps = row_tolerances(csc, m, n, b, l, u);
+    let col_w = |j: usize, y: &[f64]| -> f64 {
+        let (rows, vals) = csc.col(j);
+        rows.iter()
             .zip(vals)
             .filter(|(i, _)| **i < m)
             .map(|(&i, &a)| a * y[i])
-            .sum();
+            .sum()
+    };
+    // HiGHS `storeDualInfProof` aggregates only the rows whose ray weight points at a
+    // finite side (`if (lp.row_upper_[iRow] == kHighsInf) continue;` and the lower
+    // mirror): a row whose weight would need its infinite side is left out of the
+    // aggregation instead of failing the proof. Any subset of the rows, each with a
+    // weight of the sign its finite side allows, aggregates to a valid inequality, so
+    // dropping a row is sound (the proof can only get weaker, and conflict analysis
+    // then simply finds nothing). In this working form a row's sides are its singleton
+    // slack's bounds: the weight `w_s = sigma * y_i` needs `u_s` when positive and `l_s`
+    // when negative. A slack shared by several rows is not dropped (`None` below).
+    for j in ns..n {
+        let (rows, vals) = csc.col(j);
+        let mut it = rows.iter().zip(vals).filter(|(i, a)| **i < m && **a != 0.0);
+        let (Some((&i, &sigma)), None) = (it.next(), it.next()) else {
+            continue;
+        };
+        let wj = sigma * y[i];
+        if wj == 0.0 {
+            continue;
+        }
+        let side = if wj > 0.0 { u[j] } else { l[j] };
+        if side.abs() >= INF {
+            y[i] = 0.0;
+        }
     }
-    let yb: f64 = (0..m).map(|i| y[i] * ctx.b_w[i]).sum();
-    let mut scale = 1.0 + (0..m).map(|i| (y[i] * ctx.b_w[i]).abs()).sum::<f64>();
+    let w: Vec<f64> = (0..n).map(|j| col_w(j, &y)).collect();
+    let yb: f64 = (0..m).map(|i| y[i] * b[i]).sum();
+    let mut scale = 1.0 + (0..m).map(|i| (y[i] * b[i]).abs()).sum::<f64>();
     let mut beta = yb;
     for j in ns..n {
         let wj = w[j];
@@ -740,6 +957,9 @@ pub(super) struct HighsEnv<'a, 'b> {
     /// The last evaluation stored duals of the current LP (`last_dual`).
     dual_fresh: bool,
     in_lp: std::collections::HashSet<Vec<(u32, i64)>>,
+    /// LP cut rows selected from the conflict `cutpool` (signature -> pool index):
+    /// HiGHS `lpCutRemoved` when the row leaves the LP, so the cut ages again.
+    pool_lp: std::collections::HashMap<Vec<(u32, i64)>, i32>,
     pub cut_rows_added: usize,
     pub cut_rows_deleted: usize,
     /// Root cuts the pool started with (step 2.1).
@@ -894,7 +1114,11 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     }
 
     /// Append `cuts` (over the current columns) to the search's LP as persistent rows.
-    fn append_cut_rows(&mut self, cuts: &[GomoryCut]) {
+    ///
+    /// `idx[k]` is `cuts[k]`'s conflict-`cutpool` index when it was selected from it;
+    /// a selected cut that does not enter (no room, already a row) is released at once.
+    fn append_cut_rows(&mut self, cuts: &[GomoryCut], idx: &[Option<i32>]) {
+        debug_assert_eq!(cuts.len(), idx.len());
         if cuts.is_empty() {
             return;
         }
@@ -903,16 +1127,29 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         let lp = self.lp.get_or_insert_with(|| SearchLp::from_base(base));
         let room = search_cut_cap(base.m_w).saturating_sub(lp.rows.len());
         let mut add: Vec<GomoryCut> = Vec::new();
-        for cut in cuts {
+        let mut released: Vec<i32> = Vec::new();
+        for (cut, &k) in cuts.iter().zip(idx) {
             if add.len() >= room {
-                break;
+                released.extend(k);
+                continue;
             }
             let c = lp.to_base(cut, n0);
             if let Some(rc) = self.refp.as_mut() {
                 rc.cut("lp-row", self.nodes, &c, &rc.x.clone());
             }
-            if self.in_lp.insert(cut_signature(&c)) {
+            let sig = cut_signature(&c);
+            if self.in_lp.insert(sig.clone()) {
+                if let Some(k) = k {
+                    self.pool_lp.insert(sig, k);
+                }
                 add.push(c);
+            } else {
+                released.extend(k);
+            }
+        }
+        if let Some(cf) = self.conf.as_mut() {
+            for k in released {
+                cf.cutpool.lp_cut_removed(k);
             }
         }
         if add.is_empty() {
@@ -1027,7 +1264,11 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             return;
         }
         for r in &gone {
-            self.in_lp.remove(&cut_signature(&r.cut));
+            let sig = cut_signature(&r.cut);
+            self.in_lp.remove(&sig);
+            if let (Some(k), Some(cf)) = (self.pool_lp.remove(&sig), self.conf.as_mut()) {
+                cf.cutpool.lp_cut_removed(k);
+            }
         }
         let d = delete_cut_rows(&lp.csc, lp.m, lp.n, &lp.b, &mut gone, &mut kept);
         let col_map = d.col_map.clone();
@@ -1570,13 +1811,24 @@ impl SearchEnv for HighsEnv<'_, '_> {
         match r {
             SearchResult::DomainInfeasible => self.analyse_conflict(),
             SearchResult::LpInfeasible => {
-                let proofs: Vec<_> = match (self.conf.is_some(), self.eval.ray.take()) {
+                use crate::profile::{incr, Ctr};
+                let ray = self.eval.ray.take();
+                if self.conf.is_some() {
+                    incr(Ctr::HighsMipSearchProofCalls);
+                    if ray.is_none() {
+                        incr(Ctr::HighsMipSearchProofNoRay);
+                    }
+                }
+                let proofs: Vec<_> = match (self.conf.is_some(), ray) {
                     (true, Some(ray)) => [1.0, -1.0]
                         .iter()
                         .filter_map(|&sgn| farkas_proof_row(&ctx, &ray, sgn))
                         .collect(),
                     _ => Vec::new(),
                 };
+                if self.conf.is_some() && proofs.is_empty() {
+                    incr(Ctr::HighsMipSearchProofNoRow);
+                }
                 self.analyse_infeasible_lp(proofs)
             }
             _ => {}
@@ -1811,6 +2063,42 @@ impl SearchEnv for HighsEnv<'_, '_> {
         {
             return false;
         }
+        // `separationRound` starts with `implications.separateImpliedBounds` on the
+        // global domain: probe the LP's unprobed fractional binaries, then the
+        // implied-bound cuts the LP point violates, into the cut pool.
+        let mut implied: Vec<GomoryCut> = Vec::new();
+        if clique_domain_enabled() {
+            if let Some(cf) = self.conf.as_mut() {
+                let feastol = self.eval.dom.feastol();
+                let fr: Vec<usize> = (0..ctx.ns)
+                    .filter(|&j| ctx.is_int[j] && frac(x[j]) > feastol)
+                    .collect();
+                let (st, cuts) = crate::lp::highs_cutgen::probing::separate_implied_bounds(
+                    &mut cf.gdom,
+                    &mut self.eval.dom,
+                    &x,
+                    &fr,
+                );
+                // Probing committed its reductions to the global baseline: the next
+                // `sync_global` copies the global bounds into the local baseline.
+                cf.synced = usize::MAX;
+                crate::profile::incr_by(crate::profile::Ctr::MilpProbeNode, st.probed as u64);
+                crate::profile::incr_by(
+                    crate::profile::Ctr::MilpImpliedBoundCuts,
+                    cuts.len() as u64,
+                );
+                for (inds, vals, rhs, _) in cuts {
+                    // `vals . x <= rhs` as `coeffs . x >= rhs`.
+                    let mut coeffs = vec![0.0; self.ctx.n_w];
+                    coeffs[inds[0]] -= vals[0];
+                    coeffs[inds[1]] -= vals[1];
+                    implied.push(GomoryCut { coeffs, rhs: -rhs });
+                }
+            }
+            if self.conf.as_ref().is_some_and(|cf| cf.gdom.infeasible()) {
+                return false;
+            }
+        }
         let mut pick: Vec<(f64, usize)> = Vec::new();
         for (k, cut) in self.pool.iter().enumerate() {
             if self.cut_lp && self.in_lp.contains(&cut_signature(cut)) {
@@ -1830,7 +2118,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
         }
         pick.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         pick.truncate(NODE_GMI_POOL_PER_NODE);
-        let rows: Vec<GomoryCut> = pick
+        let mut rows: Vec<GomoryCut> = pick
             .iter()
             .map(|&(_, k)| {
                 let mut coeffs = self.pool[k].coeffs.clone();
@@ -1841,6 +2129,42 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 }
             })
             .collect();
+        for cut in &implied {
+            let mut coeffs = cut.coeffs.clone();
+            coeffs.resize(ctx.n_w, 0.0);
+            rows.push(GomoryCut {
+                coeffs,
+                rhs: cut.rhs,
+            });
+        }
+        // `separationRound` ends with `cutpool.separate`: the conflict cuts this LP
+        // point violates, scored and filtered for parallelism; a cut it passes over
+        // ages, and is deleted past the age limit.
+        let mut from_pool: Vec<(i32, GomoryCut)> = Vec::new();
+        if let Some(cf) = self.conf.as_mut() {
+            let ns = ctx.ns;
+            let mut cutset = Vec::new();
+            let mut obs =
+                DomainObservers(vec![(&mut cf.gdom, cf.cpi), (&mut self.eval.dom, cf.cpi)]);
+            let sel =
+                cf.cutpool
+                    .separate(&mut obs, &x[..ns], &fl[..ns], &fu[..ns], 1e-6, &mut cutset);
+            for c in sel {
+                // `vals . x <= rhs` as `coeffs . x >= rhs` over the working columns.
+                let mut coeffs = vec![0.0; ctx.n_w];
+                for (&j, &v) in c.inds.iter().zip(&c.vals) {
+                    coeffs[j as usize] = -v;
+                }
+                from_pool.push((
+                    c.index,
+                    GomoryCut {
+                        coeffs,
+                        rhs: -c.rhs,
+                    },
+                ));
+            }
+        }
+        rows.extend(from_pool.iter().map(|(_, c)| c.clone()));
         self.sep_calls += 1;
         let ref_cur = self.refp.as_ref().map(|rc| rc.current(self.lp.as_ref()));
         if let (Some(rc), Some(xc)) = (self.refp.as_mut(), ref_cur.as_ref()) {
@@ -1882,9 +2206,13 @@ impl SearchEnv for HighsEnv<'_, '_> {
             self.eval.pending_lift = Some(g + ctx.obj_const);
         }
         if !self.cut_lp {
-            for cut in lg.new_cuts {
-                if self.pool_sigs.insert(cut_signature(&cut)) {
-                    self.pool.push(cut);
+            for cut in implied.into_iter().chain(lg.new_cuts) {
+                self.pool_add(cut);
+            }
+            // The selected pool cuts served this node's lift only: out of the LP.
+            if let Some(cf) = self.conf.as_mut() {
+                for (k, _) in &from_pool {
+                    cf.cutpool.lp_cut_removed(*k);
                 }
             }
             return false;
@@ -1902,16 +2230,29 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 rc.cut("node-new-base", self.nodes, c, &xb);
             }
         }
-        let mut add: Vec<GomoryCut> = pick.iter().map(|&(_, k)| self.pool[k].clone()).collect();
-        for cut in new_base {
-            if self.pool_sigs.insert(cut_signature(&cut)) {
-                self.pool.push(cut.clone());
-            }
-            add.push(cut);
+        let mut add: Vec<(GomoryCut, Option<i32>)> = pick
+            .iter()
+            .map(|&(_, k)| (self.pool[k].clone(), None))
+            .collect();
+        add.extend(from_pool.into_iter().map(|(k, c)| (c, Some(k))));
+        for cut in implied.into_iter().chain(new_base) {
+            self.pool_add(cut.clone());
+            add.push((cut, None));
         }
-        add.truncate(SEARCH_CUTS_PER_NODE);
+        if add.len() > SEARCH_CUTS_PER_NODE {
+            let over: Vec<i32> = add
+                .drain(SEARCH_CUTS_PER_NODE..)
+                .filter_map(|(_, k)| k)
+                .collect();
+            if let Some(cf) = self.conf.as_mut() {
+                for k in over {
+                    cf.cutpool.lp_cut_removed(k);
+                }
+            }
+        }
+        let (add, idx): (Vec<GomoryCut>, Vec<Option<i32>>) = add.into_iter().unzip();
         let rows0 = self.cut_rows_added;
-        self.append_cut_rows(&add);
+        self.append_cut_rows(&add, &idx);
         if self.cut_rows_added > rows0 {
             // `separationRound`: cuts went into the LP, so its resolve ages with
             // deletion (`HighsSeparation.cpp:122-124`).
@@ -2119,6 +2460,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             dual_fresh: false,
             lp: None,
             in_lp: std::collections::HashSet::new(),
+            pool_lp: std::collections::HashMap::new(),
             cut_rows_added: 0,
             cut_rows_deleted: 0,
             seeded_pool: 0,
@@ -2280,6 +2622,17 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     /// global domain as a copy of its committed baseline.
     fn enable_conflicts(&mut self) {
         let cp = self.eval.dom.add_conflict_pool();
+        let cpi = self.eval.dom.add_cutpool();
+        let (model_nnz, model_rows) = {
+            let m0 = self.ctx.n_orig_rows.min(self.ctx.m_w);
+            let nnz: usize = (0..self.ctx.ns)
+                .map(|j| self.ctx.csc_rc.col(j).0.iter().filter(|&&i| i < m0).count())
+                .sum();
+            (nnz.max(1) as i64, m0.max(1) as i64)
+        };
+        // HiGHS `cutpool(numCol, mip_pool_age_limit = 30, mip_pool_soft_limit = 10000)`.
+        let cutpool = CutPool::new(self.ctx.ns, 30, 10000, model_nnz, model_rows);
+        let srows = StructRows::new(self.ctx, &self.eval.slacks);
         let mut gdom = self.eval.dom.clone();
         gdom.backtrack_to_global();
         gdom.set_global(true);
@@ -2293,7 +2646,114 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             added: 0,
             proof_added: 0,
             global_fixings: 0,
+            cutpool,
+            cpi,
+            srows,
+            conflict_cuts: 0,
+            pool_cuts: 0,
         });
+    }
+
+    /// A pool cut over the working columns into the propagated cut pool (HiGHS adds
+    /// every separated cut to `mipdata_->cutpool`, which both domains propagate).
+    fn propagate_pool_cut(&mut self, cut: &GomoryCut) {
+        let Some(cf) = self.conf.as_mut() else {
+            return;
+        };
+        if cf.gdom.infeasible() || self.eval.dom.infeasible() {
+            return;
+        }
+        let Some((inds, vals, rhs)) = cf.srows.to_struct(cut) else {
+            return;
+        };
+        let is_int = self.ctx.is_int_full;
+        let integral = inds.iter().all(|&c| is_int[c as usize]);
+        let mut obs = DomainObservers(vec![(&mut cf.gdom, cf.cpi), (&mut self.eval.dom, cf.cpi)]);
+        if cf
+            .cutpool
+            .add_cut(&mut obs, &inds, &vals, rhs, integral, true, false)
+            != -1
+        {
+            cf.pool_cuts += 1;
+        }
+    }
+
+    /// A cut for the node-separation pool, deduplicated, and into the propagated
+    /// cut pool under conflict analysis.
+    fn pool_add(&mut self, cut: GomoryCut) {
+        if self.pool_sigs.insert(cut_signature(&cut)) {
+            self.propagate_pool_cut(&cut);
+            self.pool.push(cut);
+        }
+    }
+
+    /// HiGHS `HighsCutGeneration::generateConflict` on a dual proof `vals . x[inds]
+    /// <= rhs` of the current (infeasible) node: a lifted cover or c-MIR cut from the
+    /// proof complemented at the global bounds, post-processed, its coefficients
+    /// tightened on the global domain (`tightenCoefficients`) and added to the cut
+    /// pool, which both domains propagate (`HighsCutGeneration.cpp:1208-1299`). The
+    /// cut is valid wherever the proof is: it is a valid inequality of the proof row
+    /// over the global box.
+    fn generate_conflict(&mut self, inds: &[usize], vals: &[f64], rhs: f64) {
+        let ns = self.ctx.ns;
+        let is_int = self.ctx.is_int_full;
+        let Some(cf) = self.conf.as_mut() else {
+            return;
+        };
+        if cf.gdom.infeasible() || inds.iter().any(|&j| j >= ns) {
+            return;
+        }
+        let pinds: Vec<i32> = inds.iter().map(|&j| j as i32).collect();
+        let glb: Vec<f64> = inds.iter().map(|&j| cf.gdom.col_lower[j]).collect();
+        let gub: Vec<f64> = inds.iter().map(|&j| cf.gdom.col_upper[j]).collect();
+        let llb: Vec<f64> = inds.iter().map(|&j| self.eval.dom.col_lower[j]).collect();
+        let lub: Vec<f64> = inds.iter().map(|&j| self.eval.dom.col_upper[j]).collect();
+        let col_integral: Vec<bool> = inds.iter().map(|&j| is_int[j]).collect();
+        let p = CutGenParams {
+            feastol: 1e-6,
+            epsilon: 1e-9,
+            num_cols: ns,
+        };
+        let mut gen = CutGenCore::seeded(p, 0, self.eval.lp_iters, cf.cutpool.num_cuts() as i32);
+        let Some(core) = gen.generate_conflict_core(
+            &pinds,
+            vals,
+            rhs,
+            &glb,
+            &gub,
+            &llb,
+            &lub,
+            &col_integral,
+            &self.q,
+        ) else {
+            return;
+        };
+        let gd = &cf.gdom;
+        let lb = |c: i32| gd.col_lower[c as usize];
+        let ub = |c: i32| gd.col_upper[c as usize];
+        let isi = |c: i32| is_int[c as usize];
+        let Some(cut) = gen.postprocess_cut(core, &lb, &ub, &isi) else {
+            return;
+        };
+        let integral = cut.integral_support && cut.integral_coefficients;
+        let (cinds, mut cvals, mut crhs) = (cut.inds, cut.vals, cut.rhs.to_f64());
+        tighten_coefficients_with(&lb, &ub, &isi, 1e-6, &cinds, &mut cvals, &mut crhs);
+        if cinds.is_empty() || !crhs.is_finite() {
+            return;
+        }
+        let mut obs = DomainObservers(vec![(&mut cf.gdom, cf.cpi), (&mut self.eval.dom, cf.cpi)]);
+        if cf
+            .cutpool
+            .add_cut(&mut obs, &cinds, &cvals, crhs, integral, true, true)
+            == -1
+        {
+            return;
+        }
+        cf.conflict_cuts += 1;
+        // Node separation reaches the cut through `cutpool.separate` (HiGHS
+        // `separationRound`), which ages it out once it stops being violated. It used
+        // to be copied into the never-pruned `pool` as well, whose per-node scan grew
+        // with the run (market split, 80k nodes: 5.2x the wall without conflicts).
     }
 
     /// HiGHS `conflictPool.performAging()` (before each dive).
@@ -2304,6 +2764,8 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         let mut obs =
             ConflictDomainObservers(vec![(&mut self.eval.dom, cf.cp), (&mut cf.gdom, cf.cp)]);
         cf.pool.perform_aging(false, &mut obs);
+        let mut obs = DomainObservers(vec![(&mut cf.gdom, cf.cpi), (&mut self.eval.dom, cf.cpi)]);
+        cf.cutpool.perform_aging(&mut obs);
     }
 
     /// The conflicts the domains used while propagating (`resetAge`).
@@ -2321,6 +2783,18 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         for (pool, c) in resets {
             if pool == cf.cp {
                 cf.pool.reset_age(c);
+            }
+        }
+        let cut_resets: Vec<(usize, usize)> = self
+            .eval
+            .dom
+            .take_cut_age_resets()
+            .into_iter()
+            .chain(cf.gdom.take_cut_age_resets())
+            .collect();
+        for (pool, c) in cut_resets {
+            if pool == cf.cpi && cf.cutpool.is_live(c as i32) {
+                cf.cutpool.reset_age(c as i32);
             }
         }
     }
@@ -2347,6 +2821,10 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             &self.q,
         );
         cf.added += added.len() as u64;
+        crate::profile::incr(crate::profile::Ctr::HighsMipSearchDomConflictCalls);
+        if !added.is_empty() {
+            crate::profile::incr(crate::profile::Ctr::HighsMipSearchDomConflictHits);
+        }
         self.reset_conflict_ages();
     }
 
@@ -2377,7 +2855,9 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             );
             cf.proof_added += added.len() as u64;
             self.reset_conflict_ages();
+            self.generate_conflict(&inds, &vals, rhs);
             if !added.is_empty() {
+                crate::profile::incr(crate::profile::Ctr::HighsMipSearchProofHits);
                 break;
             }
         }
@@ -2448,6 +2928,19 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     /// cut, and the ones root cleanup dropped from the LP); with persistent cuts on,
     /// so does this one (the pool feeds the LP when a node violates a cut).
     fn seed_pool(&mut self, seed_pool: Vec<GomoryCut>) {
+        if self.conf.is_some() {
+            // HiGHS's search domains propagate the root's whole cut pool.
+            let root: Vec<GomoryCut> = self
+                .ctx
+                .gmi_pool
+                .iter()
+                .chain(seed_pool.iter())
+                .cloned()
+                .collect();
+            for cut in &root {
+                self.propagate_pool_cut(cut);
+            }
+        }
         if self.cut_lp {
             for cut in self.ctx.gmi_pool.iter().cloned().chain(seed_pool) {
                 if self.pool_sigs.insert(cut_signature(&cut)) {
@@ -2481,6 +2974,7 @@ pub(super) fn run<'a>(
     dbg: Option<Debugger<'a>>,
     seed_pool: Vec<GomoryCut>,
     top_level: bool,
+    cliques: Option<(crate::lp::highs_cutgen::clique::CliqueTable, Vec<f64>)>,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -2507,6 +3001,53 @@ pub(super) fn run<'a>(
         }
         rc.bound("root", 0, root_bound, f64::INFINITY, "");
     }
+    // `DISCOPT_MILP_CLIQUE_DOMAIN`: `mipdata_->cliquetable` and `mipdata_->implications`
+    // on the local domain before the global one is cloned from it
+    // (`enable_conflicts`), so both domains run `addImplications` and
+    // `applyImplications`. The table is the root separation's; probing extends it
+    // first (`separateImpliedBounds`' probing loop over the root LP's fractional
+    // binaries), on the domain at its global baseline.
+    let mut probe_infeasible = false;
+    if let Some((t, x)) = cliques {
+        assert_eq!(
+            t.num_cols(),
+            ctx.ns,
+            "the clique table must index the search's structural columns"
+        );
+        assert!(
+            env.eval.dom.domain_change_stack().is_empty(),
+            "probing needs the search's domain at its global baseline"
+        );
+        let feastol = env.eval.dom.feastol();
+        // `separateImpliedBounds` probes the binaries the LP solution leaves
+        // fractional; here, those of the final root LP.
+        let cands: Vec<usize> = (0..ctx.ns.min(x.len()))
+            .filter(|&j| ctx.is_int[j] && (x[j] - x[j].round()).abs() > feastol)
+            .collect();
+        // HiGHS probes every binary in presolve first (`HPresolve::runProbing`), at
+        // its default `random_seed = 0`.
+        let pp = crate::lp::highs_cutgen::probing::PresolveProbing {
+            submip: lim.submip,
+            random_seed: 0,
+            nrows: ctx.n_orig_rows.min(ctx.m_w),
+        };
+        let st = crate::lp::highs_cutgen::probing::probe_and_attach(
+            &mut env.eval.dom,
+            t,
+            &cands,
+            Some(pp),
+        );
+        {
+            use crate::profile::{incr_by, Ctr};
+            incr_by(Ctr::MilpProbeProbed, st.probed as u64);
+            incr_by(Ctr::MilpProbeReductions, st.reductions as u64);
+            incr_by(Ctr::MilpProbeEntries, st.new_entries.max(0) as u64);
+        }
+        probe_infeasible = env.eval.dom.infeasible();
+    }
+    if conflict_enabled() {
+        env.enable_conflicts();
+    }
     env.seed_pool(seed_pool);
     let root_id = env.dbg.as_ref().map_or(0, |d| d.root_id);
     if let Some(d) = env.dbg.as_mut() {
@@ -2516,24 +3057,30 @@ pub(super) fn run<'a>(
         // `IncumbentFound` when it improves on the last one the driver reported.
         env.accept(x, v);
     }
-    let (slot, _) = env
-        .q
-        .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
-    env.q.set_ident(
-        slot,
-        NodeIdent {
-            id: root_id,
-            parent: None,
-            branch: None,
-        },
-    );
-    if let Some(sh) = env.shadow.as_mut() {
-        sh.tree.insert(root_id, (None, None));
-        let ns = ctx.ns;
-        sh.root_lo = env.eval.dom.col_lower[..ns].to_vec();
-        sh.root_hi = env.eval.dom.col_upper[..ns].to_vec();
-        if let Some(orb) = sh.orb.as_ref() {
-            sh.broken = orb.broken(&sh.root_lo, &sh.root_hi);
+    // Probing proved the global box holds no (improving) point: the queue starts
+    // empty, as when conflict propagation empties the global domain.
+    if !probe_infeasible {
+        let (slot, _) = env
+            .q
+            .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
+        env.q.set_ident(
+            slot,
+            NodeIdent {
+                id: root_id,
+                parent: None,
+                branch: None,
+            },
+        );
+        // The shadow tree's root box is the global box after probing: generators
+        // that do not map it onto itself are marked broken.
+        if let Some(sh) = env.shadow.as_mut() {
+            sh.tree.insert(root_id, (None, None));
+            let ns = ctx.ns;
+            sh.root_lo = env.eval.dom.col_lower[..ns].to_vec();
+            sh.root_hi = env.eval.dom.col_upper[..ns].to_vec();
+            if let Some(orb) = sh.orb.as_ref() {
+                sh.broken = orb.broken(&sh.root_lo, &sh.root_hi);
+            }
         }
     }
     let mut search = Search {
@@ -2543,9 +3090,6 @@ pub(super) fn run<'a>(
     };
     let mut ml = MainLoop::default();
     let mut root = true;
-    if conflict_enabled() {
-        env.enable_conflicts();
-    }
     while !env.queue_is_empty() {
         env.age_conflicts();
         let stop = ml.round(&mut env, &mut search, root, NO_NODE_LIMIT);
@@ -2607,7 +3151,69 @@ pub(super) fn run<'a>(
             .conf
             .as_ref()
             .map_or((0, 0, 0), |c| (c.added, c.proof_added, c.global_fixings)),
+        conflict_cuts: env
+            .conf
+            .as_ref()
+            .map_or((0, 0), |c| (c.conflict_cuts, c.pool_cuts)),
     })
+}
+
+#[cfg(test)]
+mod proof_tests {
+    use super::*;
+
+    /// HiGHS `storeDualInfProof` skips a row whose ray weight needs its infinite side
+    /// instead of giving up on the proof. Working form `A [x; s] = b`, `x in [0,1]^2`:
+    /// row 0 `x0 + x1 - s0 = 0`, `s0 >= 3` (the infeasible row); row 1 `x0 - s1 = 0`,
+    /// `s1 <= 5` (a row with only an upper side). The ray `y = (1, 0.5)` gives row 1's
+    /// slack the weight `-0.5`, which needs `s1`'s missing lower side. Before the fix
+    /// the whole proof was `None`; now row 1 is left out and the proof is row 0,
+    /// `-(x0 + x1) <= -3`, which separates the box. Soundness: every point satisfying
+    /// the rows (structurals sampled in `[-6, 6]^2`, far past their box, since the
+    /// proof must not rely on them) satisfies the proof.
+    #[test]
+    fn proof_row_drops_a_row_whose_needed_side_is_infinite() {
+        let (m, n, ns) = (2, 4, 2);
+        // columns x0 x1 s0 s1
+        let a = [1.0, 1.0, -1.0, 0.0, 1.0, 0.0, 0.0, -1.0];
+        let csc = SparseCols::from_dense(&a, m, n);
+        let b = [0.0, 0.0];
+        let l = [0.0, 0.0, 3.0, -INF];
+        let u = [1.0, 1.0, INF, 5.0];
+        let (inds, vals, rhs) =
+            proof_row_from_dual(&csc, m, n, ns, &b, &l, &u, vec![1.0, 0.5]).expect("a proof");
+        // The proof row is violated by every point of the structural box.
+        let max_act = inds
+            .iter()
+            .zip(&vals)
+            .map(|(&j, &v)| if v > 0.0 { v * u[j] } else { v * l[j] })
+            .sum::<f64>();
+        let min_act = inds
+            .iter()
+            .zip(&vals)
+            .map(|(&j, &v)| if v > 0.0 { v * l[j] } else { v * u[j] })
+            .sum::<f64>();
+        assert!(max_act >= min_act);
+        assert!(
+            min_act > rhs,
+            "proof {vals:?} <= {rhs} does not separate the box"
+        );
+        let mut checked = 0;
+        for i0 in -24..=24 {
+            for i1 in -24..=24 {
+                let x = [i0 as f64 * 0.25, i1 as f64 * 0.25];
+                let s0 = x[0] + x[1];
+                let s1 = x[0];
+                if s0 < l[2] || s1 > u[3] {
+                    continue;
+                }
+                let act: f64 = inds.iter().zip(&vals).map(|(&j, &v)| v * x[j]).sum();
+                assert!(act <= rhs + 1e-12, "row-feasible {x:?} violates the proof");
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "only {checked} row-feasible points checked");
+    }
 }
 
 #[cfg(test)]

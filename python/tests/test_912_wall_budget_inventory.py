@@ -541,6 +541,19 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "sat_stop = time.perf_counter() + sat_budget",
         "residual",
     ),
+    # The answer's post-pass (``_polish``) runs against the caller's own
+    # ``total_time_limit``. Its add-one sweep (``_add_one``) is bounded by a probe
+    # count (``_ADD_ONE_MAX_PROBES``), which fixes the moves it makes; the time
+    # share (``_ADD_ONE_FRACTION`` of what is left) and the deadline only stop it,
+    # and a sweep or confirmation they cut short is discarded whole, so the clock
+    # decides whether the post-pass result exists, not which one. ``contract``.
+    # (Certificate repair under the same deadline keeps the certificates found
+    # before it; they change no element, only what is shown for one.)
+    (
+        "_iis_milp.py",
+        "deadline=None if total_time_limit is None else t_start + float(total_time_limit),",
+        "contract",
+    ),
     # The exact-reduction second route (``_Engine._reduced``) runs inside a
     # confirmation and takes the confirmation's own ``stop_at``; without one it
     # gets one probe's limit, exactly as a presolve-free solve would. The clock
