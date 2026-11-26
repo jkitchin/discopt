@@ -1707,11 +1707,11 @@ def _polish(
         for c0, b0, i0, pr0, nr0 in starts:
             end = (c0, b0, i0, pr0, nr0, 0)
             if swept is not None:
-                key = (frozenset(c0), frozenset(b0), frozenset(i0))
-                if key in swept:
+                sweep_key = (frozenset(c0), frozenset(b0), frozenset(i0))
+                if sweep_key in swept:
                     ends.append(end)
                     continue
-                swept.add(key)
+                swept.add(sweep_key)
             t0 = time.perf_counter()
             share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
             try:
