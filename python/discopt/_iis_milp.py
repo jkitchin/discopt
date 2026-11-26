@@ -155,6 +155,17 @@ class MilpIIS:
     # Sweeps undone because they would have dropped an element holding a
     # certificate (a contradiction that only tolerances can produce).
     n_sweep_reverted: int = 0
+    # The block-master stack (:mod:`discopt._iis_blocks`; all 0 when disarmed).
+    n_block_proofs: int = 0  # probes / confirmations the block master proved infeasible
+    n_block_points: int = 0  # probes it answered with a verified feasible point
+    n_block_unsupported: int = 0  # probes outside its rule
+    n_lex_agree: int = 0  # ordering-row cross-checks that agreed with the master
+    n_lex_undecided: int = 0  # ... that reached no verdict in their budget
+    n_lex_points: int = 0  # ordering-row solves that returned a verified point
+    n_lex_unadopted: int = 0  # ordering-row infeasibility claims with no exact proof
+    n_orbit_dropped: int = 0  # elements the orbit phase dropped
+    n_confined_kept: int = 0  # deletable elements kept to preserve block symmetry
+    n_confined_carried: int = 0  # certificates carried over by a block swap, checked
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
     # The answer's post-pass (:func:`_polish`): elements the forced-violation
     # repair tried / certified, add-one candidates tried and moves adopted.
@@ -232,6 +243,18 @@ class _Engine:
         # whole model is lattice-infeasible (None: disarmed, no cost per probe).
         self._lat: Optional[dict[int, list]] = None
         self.n_lattice = 0
+        # The block-master oracle (:mod:`discopt._iis_blocks`), set by
+        # :meth:`arm_blocks`; None: disarmed, no cost per probe.
+        self._blk: Any = None
+        self._blk_lex = False  # ordering-row solves: cross-check and fallback
+        self.lex_cross = False  # cross-check the master in confirm_infeasible
+        self.n_block_proofs = 0
+        self.n_block_points = 0
+        self.n_block_unsupported = 0
+        self.n_lex_agree = 0
+        self.n_lex_undecided = 0
+        self.n_lex_points = 0
+        self.n_lex_unadopted = 0
         # Held-integer columns and their declared box in the current configuration.
         self._held = np.zeros(0, dtype=np.int64)
         self._cfg: tuple[np.ndarray, ...] = ()
@@ -275,6 +298,96 @@ class _Engine:
         if not rows:
             return False
         return lattice_infeasible(rows, active_int, self.deadline) is True
+
+    def arm_blocks(
+        self, stop_at: Optional[float] = None, *, implied_int: bool = False, lex: bool = False
+    ) -> bool:
+        """Arm the block-master oracle (:mod:`discopt._iis_blocks`) when the model
+        has its structure AND the master proves the whole model infeasible.
+
+        Like the lattice test it is armed by a rule on the matrix, never by a
+        name, and only when it decides the full model: a model the master finds
+        feasible, cannot enumerate or cannot settle in the budget leaves the
+        engine exactly as without it."""
+        from discopt._iis_blocks import BlockMaster, Unsupported
+
+        try:
+            bm = BlockMaster(
+                self.A,
+                self.row_lo,
+                self.row_hi,
+                self.col_lb,
+                self.col_ub,
+                self.is_int,
+                self.engine,
+                implied_int=implied_int,
+            )
+            every = {(int(j), "lower") for j in np.flatnonzero(self.col_lb > -_INF)}
+            every |= {(int(j), "upper") for j in np.flatnonzero(self.col_ub < _INF)}
+            arrs = self._arrays(
+                set(self.row_groups), every, set(int(j) for j in np.flatnonzero(self.is_int))
+            )
+            verdict, _ = bm.decide(*arrs, stop=stop_at)
+        except Unsupported:
+            return False
+        if verdict is True:
+            self._blk = bm
+            self._blk_lex = lex
+        return self._blk is not None
+
+    def _blocks_decide(
+        self, active_cons, active_bounds, active_int, stop_at: Optional[float] = None
+    ) -> tuple[Optional[bool], Optional[np.ndarray], bool]:
+        """The block master's verdict on one set: ``(True, None, True)`` proven
+        infeasible; ``(False, x, True)`` feasible at the arithmetic-checked point
+        ``x``; ``(None, None, supported)`` no verdict (``supported`` False: the
+        set is outside the master's rule)."""
+        from discopt._iis_blocks import Unsupported
+
+        now = time.perf_counter()
+        stop = now + float(self.probe_tl) if stop_at is None else stop_at
+        if self.deadline is not None:
+            stop = min(stop, self.deadline)
+        arrs = self._arrays(active_cons, active_bounds, active_int)
+        try:
+            verdict, x = self._blk.decide(*arrs, stop=stop)
+        except Unsupported:
+            self.n_block_unsupported += 1
+            return None, None, False
+        if verdict is True:
+            self.n_block_proofs += 1
+        elif verdict is False:
+            self.n_block_points += 1
+        return verdict, x, True
+
+    def _lex_decide(
+        self,
+        active_cons,
+        active_bounds,
+        active_int,
+        stop_at: Optional[float],
+        presolve: tuple[str, ...],
+    ) -> tuple[Optional[bool], Optional[np.ndarray], int]:
+        """One set through an ordinary MILP solve with the ordering rows of the
+        blocks interchangeable **in that set** (:func:`discopt._iis_blocks.lex_decide`).
+        A feasible verdict is returned only with a point that meets the set by
+        arithmetic once its held integers are rounded."""
+        from discopt._iis_blocks import lex_decide
+
+        now = time.perf_counter()
+        stop = now + float(self.probe_tl) if stop_at is None else stop_at
+        if self.deadline is not None:
+            stop = min(stop, self.deadline)
+        arrs = self._arrays(active_cons, active_bounds, active_int)
+        verdict, x, k = lex_decide(self._blk, *arrs, stop=stop, presolve=presolve)
+        if verdict is False:
+            assert x is not None
+            held = np.flatnonzero(arrs[4])
+            x = x.copy()
+            x[held] = np.round(x[held])
+            if not self._blk.verify(x, *arrs, tol=1e-6):
+                return None, None, k
+        return verdict, x, k
 
     def _configure(
         self,
@@ -455,6 +568,46 @@ class _Engine:
             self.n_lattice += 1
             self._record_proven(active_cons, active_bounds, active_int)
             return True, None
+        if self._blk is not None:
+            # Exact as well: an enumeration of every block and a covering IP
+            # solved under both presolve configurations (see _iis_blocks).
+            bv, bx, supported = self._blocks_decide(active_cons, active_bounds, active_int)
+            if bv is True:
+                self._record_proven(active_cons, active_bounds, active_int)
+                return True, None
+            if bv is False:
+                return False, bx
+            if not supported and self._blk_lex:
+                # Outside the master's rule: the ordering rows make the solve
+                # tractable, but an infeasibility claim that rests on them has
+                # no exact proof behind it and is NOT acted on -- only a
+                # verified feasible point is used (it certifies the element).
+                # A claim sends the set to the plain probe below, which proves
+                # it or not on the original rows alone (``hole9``: every one of
+                # 14 such claims, in milliseconds); no claim and no point means
+                # the plain probe would not decide it either.
+                lv, lx, k = self._lex_decide(
+                    active_cons, active_bounds, active_int, None, ("choose",)
+                )
+                if k:
+                    if lv is False:
+                        self.n_lex_points += 1
+                        return False, lx
+                    if lv is not True:
+                        return None, None
+                    out = self._probe_plain(active_cons, active_bounds, active_int)
+                    if out[0] is not True:
+                        self.n_lex_unadopted += 1
+                    return out
+        return self._probe_plain(active_cons, active_bounds, active_int)
+
+    def _probe_plain(
+        self,
+        active_cons: set[int],
+        active_bounds: set[tuple[int, str]],
+        active_int: set[int],
+    ) -> tuple[Optional[bool], Optional[np.ndarray]]:
+        """The MILP backend's verdict on the set as it stands (see :meth:`probe`)."""
         self._configure(active_cons, active_bounds, active_int)
         ms = self._solve("choose")
         if ms == _bk.OPTIMAL:
@@ -541,6 +694,31 @@ class _Engine:
         "feasible" status whose point is a tolerance artifact). ``presolve``
         restricts the check to configurations not already proven for this set."""
         self._configure(active_cons, active_bounds, active_int)
+        if self._blk is not None:
+            bv, _bx, _sup = self._blocks_decide(active_cons, active_bounds, active_int, stop_at)
+            if bv is False:
+                return False  # a point checked by arithmetic
+            if bv is True:
+                # The master's proof is exact and already rests on both presolve
+                # configurations of its covering IP. With ``lex_cross`` an
+                # independent route -- the original rows plus ordering rows,
+                # through the MILP backend -- must not contradict it.
+                if self.lex_cross and self._blk_lex:
+                    lv, _lx, k = self._lex_decide(
+                        active_cons, active_bounds, active_int, stop_at, ("choose", "off")
+                    )
+                    if lv is False:
+                        raise RuntimeError(
+                            "compute_iis: the block master proved a set infeasible that "
+                            "has a verified feasible point; refusing to answer"
+                        )
+                    if lv is True:
+                        self.n_lex_agree += 1
+                    elif k:
+                        self.n_lex_undecided += 1
+                self.n_exact += 1
+                self.n_exact_confirmed += 1
+                return True
         all_infeasible = True
         for p in presolve:
             if p == "off":
@@ -1175,6 +1353,9 @@ def _polish(
         engine=engine,
     )
     eng.arm_lattice(deadline)
+    pf = _block_flags()
+    if pf["master"] and res.n_block_proofs:
+        eng.arm_blocks(deadline, implied_int=pf["implied_int"], lex=pf["lex"])
     cons, bounds, ints = set(res.constraints), set(res.bounds), set(res.integrality)
     pending: dict[tuple, np.ndarray] = dict(res.certificates)
     proven = res.proven_irreducible
@@ -2116,6 +2297,200 @@ def milp_iis_arrays(
     )
 
 
+def _block_flags() -> dict[str, bool]:
+    """The block-master stack's flags (all default OFF; see
+    ``docs/dev/flag-retirement-audit.md``):
+
+    - ``DISCOPT_IIS_BLOCK_MASTER``: arm the exact block-master oracle
+      (:mod:`discopt._iis_blocks`) on models with its structure.
+    - ``DISCOPT_IIS_BLOCK_LEX``: ordering rows over the blocks interchangeable in
+      the probed set -- an independent cross-check of the answer's proof, and
+      feasible points for sets outside the master's rule.
+    - ``DISCOPT_IIS_ORBIT_QX``: delete whole orbits first (QuickXplain).
+    - ``DISCOPT_IIS_BLOCK_CONFINED``: confine single-element deletions to one
+      block per class, so the others stay interchangeable.
+    - ``DISCOPT_IIS_IMPLIED_INT``: the master enumerates a relaxed core column
+      over integers when its rows imply integrality.
+    """
+    return {
+        "master": os.environ.get("DISCOPT_IIS_BLOCK_MASTER", "0") == "1",
+        "lex": os.environ.get("DISCOPT_IIS_BLOCK_LEX", "0") == "1",
+        "orbit": os.environ.get("DISCOPT_IIS_ORBIT_QX", "0") == "1",
+        "confined": os.environ.get("DISCOPT_IIS_BLOCK_CONFINED", "0") == "1",
+        "implied_int": os.environ.get("DISCOPT_IIS_IMPLIED_INT", "0") == "1",
+    }
+
+
+def _row_elements(row_groups: dict) -> Optional[dict[int, int]]:
+    """row -> constraint id when every constraint element owns exactly one row
+    (the orbit and confinement logic names rows); None otherwise."""
+    out: dict[int, int] = {}
+    for ci, rs in row_groups.items():
+        rs = np.asarray(rs).ravel()
+        if rs.size != 1:
+            return None
+        out[int(rs[0])] = ci
+    return out
+
+
+def _orbit_phase(eng: _Engine, row_groups: dict, cons: set, bounds: set, ints: set) -> int:
+    """Delete whole orbits of the armed block structure, in place; returns the
+    number of elements dropped.
+
+    A deletion that takes one element from one block breaks the symmetry between
+    the blocks; one that takes the element's whole orbit keeps it. So orbits go
+    first, each stage by QuickXplain (Junker 2004) over groups:
+
+    1. per linking row: the row, the block rows of its satellites, and the
+       satellites themselves (integrality and bounds);
+    2. per orbit of block rows under the swaps of the blocks interchangeable in
+       the current set: one row of each block;
+    3. per orbit of columns: integrality and bounds of one column of each block.
+
+    Every drop rests on a proof from :meth:`_Engine.probe`; the classes are
+    recomputed on the current set before each stage. On :class:`_OutOfTime` the
+    stage under way is undone and the exception propagates.
+    """
+    bm = eng._blk
+    row_ci = _row_elements(row_groups)
+    if bm is None or row_ci is None:
+        return 0
+    before = len(cons) + len(bounds) + len(ints)
+
+    def qx(groups: list[tuple[list, list]]) -> None:
+        """Leave active a subset of ``groups`` (cons, columns) that keeps the set
+        infeasible and loses that when any one group is removed (given truthful
+        probes; an undecided probe keeps more)."""
+        groups = [
+            (
+                [c for c in gc if c in cons],
+                [j for j in gj if j in ints or (j, "lower") in bounds or (j, "upper") in bounds],
+            )
+            for gc, gj in groups
+        ]
+        groups = [g for g in groups if g[0] or g[1]]
+        if not groups:
+            return
+        snap = (set(cons), set(bounds), set(ints))
+        saved: dict[int, tuple] = {}
+
+        def remove(idx: list[int]) -> None:
+            for g in idx:
+                gc, gj = groups[g]
+                gone_b = [(j, s) for j in gj for s in ("lower", "upper") if (j, s) in bounds]
+                gone_i = [j for j in gj if j in ints]
+                saved[g] = (gone_b, gone_i)
+                cons.difference_update(gc)
+                bounds.difference_update(gone_b)
+                ints.difference_update(gone_i)
+
+        def add(idx: list[int]) -> None:
+            for g in idx:
+                gone_b, gone_i = saved.pop(g)
+                cons.update(groups[g][0])
+                bounds.update(gone_b)
+                ints.update(gone_i)
+
+        def rec(has_delta: bool, cand: list[int]) -> list[int]:
+            if has_delta and eng.probe(cons, bounds, ints)[0] is True:
+                return []
+            if len(cand) == 1:
+                return cand
+            h = len(cand) // 2
+            c1, c2 = cand[:h], cand[h:]
+            add(c1)
+            d2 = rec(True, c2)
+            remove(c1)
+            add(d2)
+            d1 = rec(bool(d2), c1)
+            remove(d2)
+            return d1 + d2
+
+        every = list(range(len(groups)))
+        try:
+            remove(every)
+            if eng.probe(cons, bounds, ints)[0] is not True:
+                add(rec(False, every))
+        except _OutOfTime:
+            for target, src in zip((cons, bounds, ints), snap):
+                target.clear()
+                target.update(src)
+            raise
+
+    def current() -> tuple:
+        every = {jb for jb in bounds}
+        return eng._arrays(cons, every, ints)
+
+    # 1. linking rows with what hangs on them
+    qx([([row_ci[r]] + [row_ci[q] for q in brs], sats) for r, brs, sats in bm.link_groups()])
+    # 2. orbits of block rows
+    stage: list[tuple[list, list]] = []
+    for cls in bm.classes(*current()):
+        stage += [([row_ci[r] for r in orb], []) for orb in bm.element_orbits(cls)["rows"]]
+    qx(stage)
+    # 3. orbits of columns (core columns first, then satellites)
+    stage = []
+    for cls in bm.classes(*current()):
+        orbits = bm.element_orbits(cls)
+        stage += [([], orb) for orb in orbits["cols"] + orbits["sats"]]
+    qx(stage)
+    # The filter's invariant: the current set's proof is on record.
+    eng.probe(cons, bounds, ints)
+    return before - (len(cons) + len(bounds) + len(ints))
+
+
+def _confined_keys(
+    eng: _Engine, row_groups: dict, cons: set, bounds: set, ints: set
+) -> dict[tuple, tuple[tuple, np.ndarray]]:
+    """Element keys of every block but the last of each class of blocks
+    interchangeable in the current set, each with its image in that last (free)
+    block and the column swap of the two blocks. Single-element deletions are
+    confined to the free block, so the others stay interchangeable (their
+    ordering rows stay valid, which keeps the cross-check solve tractable); the
+    swap carries a certificate found in the free block to its frozen images."""
+    bm = eng._blk
+    row_ci = _row_elements(row_groups)
+    out: dict[tuple, tuple[tuple, np.ndarray]] = {}
+    if bm is None or row_ci is None:
+        return out
+    for cls in bm.classes(*eng._arrays(cons, set(bounds), ints)):
+        orb = bm.element_orbits(cls)
+        for t in range(len(cls) - 1):
+            perm = np.arange(eng.col_lb.size, dtype=np.int64)
+            for o in orb["cols"] + orb["sats"]:
+                perm[o[t]], perm[o[-1]] = o[-1], o[t]
+            for o in orb["rows"]:
+                out[("constraint", row_ci[o[t]])] = (("constraint", row_ci[o[-1]]), perm)
+            for o in orb["cols"] + orb["sats"]:
+                a, b = int(o[t]), int(o[-1])
+                out[("integrality", a)] = (("integrality", b), perm)
+                for side in ("lower", "upper"):
+                    out[("bound", a, side)] = (("bound", b, side), perm)
+    return out
+
+
+def _orbit_mates(
+    eng: _Engine, row_groups: dict, cons: set, bounds: set, ints: set, k: tuple
+) -> set[tuple]:
+    """The element keys that a swap of two blocks interchangeable in the current
+    set carries ``k`` onto (empty when ``k`` lies in no such block)."""
+    bm = eng._blk
+    row_ci = _row_elements(row_groups)
+    if bm is None or row_ci is None:
+        return set()
+    ci_row = {ci: r for r, ci in row_ci.items()}
+    kind = "rows" if k[0] == "constraint" else "cols"
+    ident = ci_row.get(k[1]) if kind == "rows" else k[1]
+    for cls in bm.classes(*eng._arrays(cons, set(bounds), ints)):
+        orb = bm.element_orbits(cls)
+        for o in orb["rows"] if kind == "rows" else orb["cols"] + orb["sats"]:
+            if ident in o:
+                if kind == "rows":
+                    return {("constraint", row_ci[r]) for r in o} - {k}
+                return {(k[0], int(j)) + k[2:] for j in o} - {k}
+    return set()
+
+
 def _parse_order(order: str) -> tuple[str, bool, bool, bool]:
     """``"ICB"`` -> (``"ICB"``, reverse=False, sat=True, ladder=False).
 
@@ -2203,6 +2578,17 @@ def _milp_iis_arrays(
     two_pass = os.environ.get("DISCOPT_IIS_INT_TWO_PASS", "1") != "0"
     n_swept = 0
     n_sweep_reverted = 0
+    # The block-master stack, each part behind its own default-OFF flag (rows in
+    # docs/dev/flag-retirement-audit.md). The last three act only once the
+    # oracle is armed.
+    blk_flags = _block_flags()
+    n_orbit_dropped = 0
+    n_confined_kept = 0
+    n_confined_carried = 0
+    frozen: set[tuple] = set()  # element keys a confined filter may not drop
+    # Per frozen key: its image in the class's free block and the column swap.
+    images: dict[tuple, tuple[tuple, np.ndarray]] = {}
+    undecided: set[tuple] = set()  # keys kept on an inconclusive single probe
     A_csr = A.tocsr() if use_sweep else None
     A_csc = A.tocsc() if use_sweep else None
 
@@ -2262,7 +2648,14 @@ def _milp_iis_arrays(
             ints_active &= pc[1]
             bounds = {jb for jb in bounds if jb[0] in pc[2]}
             parity_rows = len(cons)
-    if sat_candidate and parity_rows is None:
+    blocks_armed = (
+        blk_flags["master"]
+        and parity_rows is None
+        and eng.arm_blocks(deadline, implied_int=blk_flags["implied_int"], lex=blk_flags["lex"])
+    )
+    # With the oracle armed every probe is exact and cheap: the clause-core
+    # candidate and the staged-oracle ladder have nothing to add.
+    if sat_candidate and parity_rows is None and not blocks_armed:
         # The clause-core stage gets a share of an overall budget that SATURATES
         # at a constant ceiling (#1153): where it pays off it needs seconds, so a
         # bigger budget must buy filtering, not a longer give-up on pigeonhole.
@@ -2335,6 +2728,54 @@ def _milp_iis_arrays(
     if cap < 1:
         raise ValueError(f"max_batch must be >= 1, got {max_batch}")
 
+    def confined(k: tuple) -> Optional[bool]:
+        """Settle frozen element ``k`` (already taken out of the active set) from
+        what its image in the free block of its class got, without a probe:
+        ``True`` settled, ``None`` not (the caller probes).
+
+        The image's certificate, carried over by the column swap of the two
+        blocks, is adopted only when it meets the current set by arithmetic
+        (later deletions in the free block can break the swap). An image left
+        undecided settles ``k`` as kept without a certificate: its probe would
+        be the image's probe up to the swap while the two blocks still match,
+        and keeping an element is always sound. An image that was *dropped*
+        settles nothing: the same element of a second block may or may not go
+        as well, so it is probed (measured on ``hole9``: keeping those cost 16
+        elements, 495 against 479)."""
+        nonlocal proven, n_confined_kept, n_confined_carried
+        hit = images.get(k)
+        if hit is None or eng._blk is None:
+            return None
+        rk, perm = hit
+        if rk in undecided:
+            proven = False
+            n_confined_kept += 1
+            return True
+        x = pending.get(rk)
+        if x is not None:
+            y = np.asarray(x, dtype=np.float64)[perm]
+            if eng._blk.verify(y, *eng._arrays(cons, bounds, ints_active)):
+                pending[k] = y
+                n_confined_carried += 1
+                return True
+        return None
+
+    def mark_undecided(k: tuple) -> None:
+        """Record a single probe of ``k`` that reached no verdict, with the
+        elements that the swaps of the blocks interchangeable in the current set
+        carry ``k`` onto: their probes are the same problem up to the swap, so
+        they are kept without one (keeping is always sound)."""
+        undecided.add(k)
+        if blocks_armed and blk_flags["orbit"]:
+            undecided.update(_orbit_mates(eng, row_groups, cons, bounds, ints_active, k))
+
+    def free_first(cands: list, key) -> list:
+        """Free elements before frozen ones, each group in the given order, so a
+        frozen element's image is settled before it is reached."""
+        if not frozen:
+            return cands
+        return [e for e in cands if key(e) not in frozen] + [e for e in cands if key(e) in frozen]
+
     def batch_filter(cands: list, active: set, key) -> None:
         """Adaptive batch deletion (SCIP 10's dynamic batching of the deletion
         filter; Guieu & Chinneck's one-at-a-time filter is ``cap == 1``).
@@ -2348,10 +2789,37 @@ def _milp_iis_arrays(
         ``proven_irreducible``. Worst case (every element needed) ~ n + log n
         probes; when few are needed ~ k log(n / k).
         """
-        nonlocal proven
+        nonlocal proven, n_confined_kept
+        cands = free_first(cands, key)
         i, size = 0, 1
         while i < len(cands):
+            if key(cands[i]) in undecided:
+                proven = False
+                i += 1
+                continue
             batch = cands[i : i + size]
+            if frozen:
+                nf = next((t for t, e in enumerate(batch) if key(e) in frozen), len(batch))
+                if nf == 0:
+                    # Confined: probed for its certificate, never dropped.
+                    e = batch[0]
+                    active.discard(e)
+                    try:
+                        if confined(key(e)):
+                            i += 1
+                            continue
+                        res, x = eng.probe(cons, bounds, ints_active)
+                    finally:
+                        active.add(e)
+                    if res is False:
+                        assert x is not None
+                        pending[key(e)] = x
+                    else:
+                        proven = False
+                        n_confined_kept += res is True
+                    i += 1
+                    continue
+                batch = batch[:nf]
             for e in batch:
                 active.discard(e)
             try:
@@ -2372,6 +2840,7 @@ def _milp_iis_arrays(
                 continue
             if res is None:
                 proven = False
+                mark_undecided(key(batch[0]))
             else:
                 # ``probe`` returns a point with every feasible verdict.
                 assert x is not None
@@ -2398,7 +2867,7 @@ def _milp_iis_arrays(
         probe of this pass can only shrink the counted size. ``first`` is the
         size of the opening batch.
         """
-        nonlocal proven
+        nonlocal proven, n_confined_kept
         deferred: list = []
 
         def relax(j) -> list:
@@ -2408,9 +2877,42 @@ def _milp_iis_arrays(
                 bounds.discard(jb)
             return gone
 
+        cols = free_first(cols, lambda j: ("integrality", j))
         i, size = 0, max(1, min(first, cap))
         while i < len(cols):
+            if ("integrality", cols[i]) in undecided:
+                proven = False
+                i += 1
+                continue
             batch = cols[i : i + size]
+            if frozen:
+                nf = next(
+                    (t for t, j in enumerate(batch) if ("integrality", j) in frozen), len(batch)
+                )
+                if nf == 0:
+                    # Confined: its integrality is probed for a certificate only.
+                    j = batch[0]
+                    if joint_only:
+                        deferred.append(j)  # the integrality-only pass settles it
+                        i += 1
+                        continue
+                    ints_active.discard(j)
+                    try:
+                        if confined(("integrality", j)):
+                            i += 1
+                            continue
+                        res, x = eng.probe(cons, bounds, ints_active)
+                    finally:
+                        ints_active.add(j)
+                    if res is False:
+                        assert x is not None
+                        pending[("integrality", j)] = x
+                    else:
+                        proven = False
+                        n_confined_kept += res is True
+                    i += 1
+                    continue
+                batch = batch[:nf]
             removed = {j: relax(j) for j in batch}
             try:
                 res, x = eng.probe(cons, bounds, ints_active)
@@ -2452,6 +2954,7 @@ def _milp_iis_arrays(
                 ints_active.add(j)
             if res is None:
                 proven = False
+                mark_undecided(("integrality", j))
             else:
                 assert x is not None
                 pending[("integrality", j)] = x
@@ -2641,7 +3144,7 @@ def _milp_iis_arrays(
     ladder_calls = 0
     ladder_size: Optional[int] = None
     ladder_rejected = False
-    if use_ladder:
+    if use_ladder and not blocks_armed:
         # Staged-oracle ladder: the deletion filter run first with oracles that
         # are cheap but incomplete -- HiGHS presolve alone, then a MIP capped at
         # a multiple of the measured base proof -- dropping an element only on a
@@ -2741,6 +3244,12 @@ def _milp_iis_arrays(
         if include_bounds and phase_order.index("B") < phase_order.index("I"):
             # B runs before I: bounds of columns I releases are filtered at the end.
             phases.append(phase_bounds)
+        if blocks_armed and blk_flags["orbit"]:
+            n_orbit_dropped = _orbit_phase(eng, row_groups, cons, bounds, ints_active)
+            roll()
+        if blocks_armed and blk_flags["confined"]:
+            images = _confined_keys(eng, row_groups, cons, bounds, ints_active)
+            frozen = set(images)
         sweep()
         for k, phase in enumerate(phases):
             phase()
@@ -2806,6 +3315,7 @@ def _milp_iis_arrays(
         # more elements than the base set (relaxed integralities turn bounds
         # into elements). Confirming it anyway made dijle answer 8005 instead of
         # checkpoint 0's 6282 at 300 s, once this confirmation began to succeed.
+        eng.lex_cross = True  # the answer's proof gets the independent route too
         if (
             not complete
             and checkpoint is not None
@@ -2885,6 +3395,16 @@ def _milp_iis_arrays(
         n_exact_refuted=eng.n_exact_refuted,
         n_swept=n_swept,
         n_sweep_reverted=n_sweep_reverted,
+        n_block_proofs=eng.n_block_proofs,
+        n_block_points=eng.n_block_points,
+        n_block_unsupported=eng.n_block_unsupported,
+        n_lex_agree=eng.n_lex_agree,
+        n_lex_undecided=eng.n_lex_undecided,
+        n_lex_points=eng.n_lex_points,
+        n_lex_unadopted=eng.n_lex_unadopted,
+        n_orbit_dropped=n_orbit_dropped,
+        n_confined_kept=n_confined_kept,
+        n_confined_carried=n_confined_carried,
     )
 
 
