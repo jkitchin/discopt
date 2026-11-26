@@ -79,9 +79,11 @@ applications, and to alter it and redistribute it freely, subject to the followi
 ## SCIP (Apache License 2.0)
 
 `crates/discopt-core/src/lp/highs_cutgen/sym_orbital.rs` reimplements the orbital reduction
-method of SCIP's `src/scip/symmetry_orbital.c` (SCIP Optimization Suite 10.0.2,
-Copyright (c) 2002-2026 Zuse Institute Berlin (ZIB)). It is a derived work with changes,
-listed in the file's header; no SCIP source is shipped. SCIP carries no NOTICE file.
+method of SCIP's `src/scip/symmetry_orbital.c`, and
+`crates/discopt-core/src/lp/highs_cutgen/sym_orbitopal.rs` the dynamic orbitopal fixing of
+`src/scip/symmetry_orbitopal.c` (SCIP Optimization Suite 10.0.2, Copyright (c) 2002-2026
+Zuse Institute Berlin (ZIB)). They are derived works with changes, listed in each file's
+header; no SCIP source is shipped. SCIP carries no NOTICE file.
 
 ```
 

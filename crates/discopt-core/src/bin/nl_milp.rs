@@ -342,6 +342,7 @@ fn run() -> Result<(), String> {
         orbitopes: None,
         sym_dynamic: None,
         sym_orbital: None,
+        sym_orbitopal: None,
         extend_no_incumbent_s: None,
         gap_tol: args.gap_tol,
         // This CLI exposes only the relative tolerance, so there is no

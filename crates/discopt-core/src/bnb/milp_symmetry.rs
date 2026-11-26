@@ -141,6 +141,35 @@ pub fn sym_orbital_enabled() -> bool {
     on
 }
 
+/// `DISCOPT_MILP_ORBITOPAL` (default OFF): dynamic orbitopal fixing of the verified
+/// full integer orbitopes, with rows in the search's branching order
+/// (`lp::highs_cutgen::sym_orbitopal`). Combines with `DISCOPT_MILP_SYM_DYNAMIC` and
+/// `DISCOPT_MILP_SYM_ORBITAL`, which then get only the generators that move no
+/// orbitope entry; refuses loudly when combined with the static-order methods
+/// `DISCOPT_MILP_SYM_LEX` or `DISCOPT_MILP_ORBITOPE`.
+pub fn orbitopal_enabled() -> bool {
+    let on = match std::env::var("DISCOPT_MILP_ORBITOPAL") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_ORBITOPAL={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    };
+    if on {
+        assert!(
+            !sym_lex_enabled() && !orbitope_enabled(),
+            "DISCOPT_MILP_ORBITOPAL cannot be combined with DISCOPT_MILP_SYM_LEX or \
+             DISCOPT_MILP_ORBITOPE: dynamic orbitopal fixing orders the rows by \
+             branching, the static methods use one fixed order, and the two together \
+             can remove every solution of an orbit. Set only one."
+        );
+    }
+    on
+}
+
 /// One lexicographic-leader row `sum coef_j x_j >= 0` over structural columns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexRow {

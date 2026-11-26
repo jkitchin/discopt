@@ -767,6 +767,7 @@ pub(super) struct HighsEnv<'a, 'b> {
 struct SymShadow {
     lex: Option<std::sync::Arc<crate::lp::highs_cutgen::sym_dynamic::DynamicLex>>,
     orb: Option<std::sync::Arc<crate::lp::highs_cutgen::sym_orbital::OrbitalReduction>>,
+    otl: Option<std::sync::Arc<crate::lp::highs_cutgen::sym_orbitopal::DynamicOrbitopes>>,
     /// Every created node: its parent and the branching change that created it.
     tree: std::collections::HashMap<u64, (Option<u64>, Option<QDomainChange>)>,
     /// The structural box the search started from (set at the root), and the columns
@@ -2131,15 +2132,19 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             shadow: {
                 let lex = ctx.opts.sym_dynamic.clone();
                 let orb = ctx.opts.sym_orbital.clone();
-                ((lex.is_some() || orb.is_some()) && !super::in_sub_mip()).then(|| {
+                let otl = ctx.opts.sym_orbitopal.clone();
+                let any = lex.is_some() || orb.is_some() || otl.is_some();
+                (any && !super::in_sub_mip()).then(|| {
                     assert!(
                         lex.as_ref().is_none_or(|l| l.matches(ctx.ns, ctx.c_w))
-                            && orb.as_ref().is_none_or(|o| o.matches(ctx.ns, ctx.c_w)),
+                            && orb.as_ref().is_none_or(|o| o.matches(ctx.ns, ctx.c_w))
+                            && otl.as_ref().is_none_or(|o| o.matches(ctx.ns, ctx.c_w)),
                         "symmetries attached to a model they were not verified on"
                     );
                     SymShadow {
                         lex,
                         orb,
+                        otl,
                         tree: std::collections::HashMap::new(),
                         root_lo: Vec::new(),
                         root_hi: Vec::new(),
@@ -2153,8 +2158,8 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         })
     }
 
-    /// `DISCOPT_MILP_SYM_DYNAMIC` / `DISCOPT_MILP_SYM_ORBITAL`: dynamic lex
-    /// reduction and orbital reduction at `node`, in the order its path from the root
+    /// `DISCOPT_MILP_SYM_DYNAMIC` / `DISCOPT_MILP_SYM_ORBITAL` / `DISCOPT_MILP_ORBITOPAL`:
+    /// dynamic lex reduction, orbital reduction and orbitopal fixing at `node`, in the order its path from the root
     /// first branched on each column, then domain propagation, to a fixpoint (capped;
     /// stopping early only forgoes reductions). Only here, at a node's own
     /// evaluation: strong-branching probes and the global domain never see these
@@ -2212,10 +2217,24 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         if sh.orb.is_some() {
             incr(Ctr::MilpSymOrbNodes);
         }
+        if sh.otl.is_some() {
+            incr(Ctr::MilpOrbitopalNodes);
+        }
         let ns = self.ctx.ns;
         for _ in 0..5 {
             sh.out.clear();
             let mut k = 0;
+            if let Some(otl) = sh.otl.as_ref() {
+                let kt = otl.propagate(
+                    &sh.order,
+                    &dom.col_lower[..ns],
+                    &dom.col_upper[..ns],
+                    dom.feastol(),
+                    &mut sh.out,
+                );
+                incr_by(Ctr::MilpOrbitopalFixings, kt as u64);
+                k += kt;
+            }
             if let Some(orb) = sh.orb.as_ref() {
                 let ko = orb.propagate(
                     &sh.path,

@@ -67,6 +67,7 @@ pub mod sparse_vec;
 pub mod stdalgo;
 pub mod sym_dynamic;
 pub mod sym_orbital;
+pub mod sym_orbitopal;
 pub mod transformed_lp;
 pub mod vbound;
 

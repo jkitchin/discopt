@@ -1801,6 +1801,7 @@ mod tests {
             orbitopes: None,
             sym_dynamic: None,
             sym_orbital: None,
+            sym_orbitopal: None,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,

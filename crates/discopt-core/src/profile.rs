@@ -904,6 +904,10 @@ counters!(
     MilpSymOrbGenerators,
     MilpSymOrbNodes,
     MilpSymOrbFixings,
+    // `DISCOPT_MILP_ORBITOPAL`: nodes dynamic orbitopal fixing ran at, and the bound
+    // changes it made (orbitopes found are `MilpOrbitopes`).
+    MilpOrbitopalNodes,
+    MilpOrbitopalFixings,
     // #2224 (`DISCOPT_MILP_PREINC_SCORE`): branchings the HiGHS-design search took
     // with the raised pre-incumbent cutoff/inference score weight.
     PreIncScoreBranchings,

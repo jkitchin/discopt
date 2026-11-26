@@ -1,18 +1,23 @@
-"""Differential soundness test for ``DISCOPT_MILP_SYM_LEX`` (verified formulation
-symmetry + lexicographic-leader rows) and ``DISCOPT_MILP_CONFLICT`` (conflict analysis
-in the HiGHS-design search) on the Rust MILP engine.
+"""Differential soundness test for the symmetry and conflict flags of the Rust MILP
+engine.
 
-``DISCOPT_MILP_ORBITOPE`` (column-lex propagation of verified full integer orbitopes)
-is the third, and ``DISCOPT_MILP_SYM_DYNAMIC`` (dynamic lex reduction in the search's
-branching order) the fourth, and ``DISCOPT_MILP_SYM_ORBITAL`` (orbital branching and
-orbital fixing in the branching order) the fifth; the two dynamic ones exclude the two
-static ones. All are bound-changing (CLAUDE.md §5): every arm (off, sym, conflict,
-both, orbitope alone, the static three, dynamic alone, dynamic with conflicts, orbital
-alone and the dynamic stack) must
-reach the same verdict and optimum as HiGHS, the independent oracle, on symmetric
-families where the rows and the conflicts actually fire, feasible and infeasible.
-The test asserts that each mechanism fired at least once over the family (§6: prove
-the probe fired) and that every solve was compared.
+- ``DISCOPT_MILP_SYM_LEX``: verified formulation symmetry plus lexicographic-leader
+  rows.
+- ``DISCOPT_MILP_CONFLICT``: conflict analysis in the HiGHS-design search.
+- ``DISCOPT_MILP_ORBITOPE``: column-lex propagation of verified full integer
+  orbitopes.
+- ``DISCOPT_MILP_SYM_DYNAMIC``: dynamic lex reduction in the search's branching order.
+- ``DISCOPT_MILP_SYM_ORBITAL``: orbital branching and orbital fixing in the branching
+  order.
+- ``DISCOPT_MILP_ORBITOPAL``: dynamic orbitopal fixing.
+
+The three dynamic flags exclude the two static ones. All six are bound-changing
+(CLAUDE.md §5). Every arm must reach the same verdict and optimum as HiGHS, the
+independent oracle, on symmetric families where the reductions and the conflicts
+actually fire, feasible and infeasible. The arms are: off; each flag alone; the static
+combinations; dynamic with conflicts; dynamic plus orbital plus conflicts; and the full
+dynamic stack. The test asserts that each mechanism fired at least once over the
+family (§6: prove the probe fired) and that every solve was compared.
 """
 
 from __future__ import annotations
@@ -43,6 +48,13 @@ ARMS = {
         "DISCOPT_MILP_SYM_ORBITAL": "1",
         "DISCOPT_MILP_CONFLICT": "1",
     },
+    "orbitopal": {"DISCOPT_MILP_ORBITOPAL": "1"},
+    "dynstack": {
+        "DISCOPT_MILP_SYM_DYNAMIC": "1",
+        "DISCOPT_MILP_SYM_ORBITAL": "1",
+        "DISCOPT_MILP_ORBITOPAL": "1",
+        "DISCOPT_MILP_CONFLICT": "1",
+    },
 }
 FLAGS = (
     "DISCOPT_MILP_SYM_LEX",
@@ -50,6 +62,7 @@ FLAGS = (
     "DISCOPT_MILP_ORBITOPE",
     "DISCOPT_MILP_SYM_DYNAMIC",
     "DISCOPT_MILP_SYM_ORBITAL",
+    "DISCOPT_MILP_ORBITOPAL",
 )
 assert list(ARMS)[0] == "off"  # the flags-off optimum is read before the other arms
 
@@ -160,6 +173,7 @@ def test_sym_and_conflict_arms_match_the_oracle(monkeypatch):
         "orbitope_fixings": 0,
         "dyn_fixings": 0,
         "orbital_fixings": 0,
+        "orbitopal_fixings": 0,
     }
     for name, build, args in _cases():
         monkeypatch.delenv("DISCOPT_LP_ENGINE", raising=False)
@@ -185,6 +199,7 @@ def test_sym_and_conflict_arms_match_the_oracle(monkeypatch):
             fired["orbitope_fixings"] += c.get("MilpOrbitopeFixings", 0)
             fired["dyn_fixings"] += c.get("MilpSymDynFixings", 0)
             fired["orbital_fixings"] += c.get("MilpSymOrbFixings", 0)
+            fired["orbitopal_fixings"] += c.get("MilpOrbitopalFixings", 0)
             compared += 1
     assert compared == len(_cases()) * len(ARMS)
     assert fired["rows"] > 0, "no lex row was ever added: the sym arm compared nothing"
@@ -192,6 +207,7 @@ def test_sym_and_conflict_arms_match_the_oracle(monkeypatch):
     assert fired["orbitope_fixings"] > 0, "no orbitope fixing: the orbitope arm compared nothing"
     assert fired["dyn_fixings"] > 0, "no dynamic lex fixing: the dyn arms compared nothing"
     assert fired["orbital_fixings"] > 0, "no orbital fixing: the orbital arms compared nothing"
+    assert fired["orbitopal_fixings"] > 0, "no orbitopal fixing: those arms compared nothing"
 
 
 def test_flags_refuse_garbage(monkeypatch):
@@ -203,7 +219,9 @@ def test_flags_refuse_garbage(monkeypatch):
         monkeypatch.delenv(flag)
 
 
-@pytest.mark.parametrize("dynamic", ["DISCOPT_MILP_SYM_DYNAMIC", "DISCOPT_MILP_SYM_ORBITAL"])
+@pytest.mark.parametrize(
+    "dynamic", ["DISCOPT_MILP_SYM_DYNAMIC", "DISCOPT_MILP_SYM_ORBITAL", "DISCOPT_MILP_ORBITOPAL"]
+)
 @pytest.mark.parametrize("static", ["DISCOPT_MILP_SYM_LEX", "DISCOPT_MILP_ORBITOPE"])
 def test_dynamic_refuses_a_static_order(monkeypatch, static, dynamic):
     """Dynamic lex reduction and a static-order method together can remove every
