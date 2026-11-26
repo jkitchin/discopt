@@ -5657,6 +5657,16 @@ class SolveResult:
     last_iterate: Optional[dict[str, np.ndarray]] = None
     last_iterate_violation: Optional[float] = None
 
+    # #2366: on a ``solver="pounce"`` NLP solve that did not reach
+    # ``local_optimal``, the final iterate's columns that sit within 1e-6 (relative)
+    # of a bound while equality rows also involve them, grouped by variable and
+    # leading index -- a ``discopt._pinned_bounds.PinnedBoundReport``. Equalities
+    # that determine a column exactly at its bound leave the interior-point method
+    # no strict interior (a DAE state declared ``lb=0`` that stays 0 until an input
+    # switches on). A hint, not a proof; the solve warns with the same text.
+    # ``None`` when the check did not run or found nothing.
+    pinned_bounds: Optional[object] = None
+
     # LLM explanation (populated if llm=True)
     _explanation: Optional[str] = None
     _model: Optional["Model"] = None

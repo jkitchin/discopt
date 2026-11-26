@@ -28469,6 +28469,7 @@ def _solve_continuous(
     equilibrate_rows: bool = False,
     midpath_out: Optional[list] = None,
     withhold_diverging: bool = False,
+    pinned_out: Optional[list] = None,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B).
 
@@ -28490,6 +28491,10 @@ def _solve_continuous(
     ``withhold_diverging`` (``solver="pounce"`` only, #2053) reports a
     ``Diverging_Iterates`` stop as ``local_limit`` with the iterate in
     ``last_iterate`` and ``termination="diverging_iterates"``, never as ``x``.
+    ``pinned_out``, when a list is passed, receives a
+    :class:`discopt._pinned_bounds.PinnedBoundReport` (or ``None``) whenever the
+    NLP did not report a clean success: the final iterate's columns that sit at a
+    bound which equality rows also determine (#2366).
 
     ``warm_start`` is the dual half of ``Model.solve(warm_start=...)`` (#1247):
     ``{"x", "constraint_duals", "bound_duals_lower", "bound_duals_upper",
@@ -29030,6 +29035,34 @@ def _solve_continuous(
         _c_gap = None
         _error_reason = None
 
+    # #2366: an interior-point solve that did not converge cleanly may have been
+    # pressing columns against bounds that equality rows pin them to (no strict
+    # interior). Measured here, where the evaluator and the solved box exist; the
+    # caller decides whether its final status warrants reporting it.
+    if (
+        pinned_out is not None
+        and nlp_result.x is not None
+        and (
+            status != "optimal"
+            or nlp_result.raw_status == _IPOPT_SOLVED_TO_ACCEPTABLE
+            or bool(midpath_out and midpath_out[-1])
+        )
+    ):
+        from discopt._pinned_bounds import equality_columns, pinned_bound_report
+
+        _cl_p, _cu_p = _infer_constraint_bounds(model, evaluator)
+        pinned_out.append(
+            pinned_bound_report(
+                model,
+                np.asarray(nlp_result.x, dtype=np.float64),
+                lb,
+                ub,
+                equality_columns(evaluator, _cl_p, _cu_p),
+                bound_relax_factor=_as_float_or_none(opts.get("bound_relax_factor")),
+                constr_viol_tol=_as_float_or_none(opts.get("constr_viol_tol")),
+            )
+        )
+
     # #1315: name the provenance of the bound this path reports. Under
     # ``certify_convex`` a local minimum of a PROVED-convex model is the global
     # minimum, so the incumbent doubles as a valid lower bound -- the same premise
@@ -29075,6 +29108,14 @@ def _solve_continuous(
         last_iterate_violation=_last_iterate_violation,
         termination=_termination,
     )
+
+
+def _as_float_or_none(value: Any) -> Optional[float]:
+    """An option value as a float, or ``None`` when it is absent or not numeric."""
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 #: ``SolveResult.algorithm_route`` for each arm of ``solver="pounce"`` (#1533).
@@ -29513,6 +29554,7 @@ def _solve_pounce_route(
     # most one continuation from its own point when it stopped mid-path (#1768).
     raw_status: list = []
     midpath: list = []
+    pinned: list = []
     result = _solve_continuous(
         model,
         _remaining(),
@@ -29527,6 +29569,7 @@ def _solve_pounce_route(
         equilibrate_rows=True,
         midpath_out=midpath,
         withhold_diverging=True,
+        pinned_out=pinned,
     )
     result.wall_time = time.perf_counter() - t_start
     if result.status == "optimal" and midpath and midpath[0]:
@@ -29570,6 +29613,11 @@ def _solve_pounce_route(
             "POUNCE's NLP iterates diverged; that suggests, but does not prove, an "
             "objective unbounded below on the feasible set."
         )
+    # #2366: say why an unconverged solve may have degenerated, when its final
+    # iterate shows columns pinned at a bound by equality rows.
+    if result.status != "local_optimal" and pinned and pinned[0] is not None:
+        result.pinned_bounds = pinned[0]
+        warnings.warn(pinned[0].message(result.status), UserWarning, stacklevel=3)
     _strip_local_claims(result)
     result.convex_fast_path = False
     result.algorithm_route = POUNCE_ROUTE_NLP
