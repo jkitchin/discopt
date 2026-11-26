@@ -1612,6 +1612,34 @@ and is re-written by P4.1.**
   speed and node count (about 8x) are a separate follow-up. The differential test
   (`test_milp_sym_conflict.py`, makespan and colouring) gives OFF = ON = HiGHS optimum
   exactly. Owed: the §5 corpus panel (in-repo MILP corpus plus MIPLIB-38).
+  **§5 panel 2026-11-25** (commit `fe736687f`, 61 rows = MIPLIB-38 + M without the locally absent
+  `bound_implied`; deterministic, 2000-node cap, 1 rep; four runs against off whose OFF arms agree
+  exactly; node counts and bounds only; 1-min load 6.4-12.2 at the solves, no wall claims). All arms cert-clean (122 checks
+  each, 0 problems, no certification lost). Conflicts alone: 48 -> 49 certified (`enlight_hard`),
+  nodes on rows both certify -13.4 %. Against conflicts alone, the static symmetry stack
+  (lex rows + orbitopes) is harmful (+5.8 % nodes, `enlight8` 1 -> 432, a dual loss on
+  `neos-911970`, a worse incumbent on `neos-3118745-obra`); the dynamic stack (dynamic lex +
+  orbital reduction) is mildly positive (-1.2 % nodes, `p0201` 186 -> 92, `neos-911970` bound
+  closer to the optimum), and adding dynamic orbitopal fixing changes no outcome (it fires on
+  one row). Graduation decisions are the owner's; rows in `flag-retirement-audit.md`.
+  **`no-ip-65059` under the dynamic stack (2026-11-25, `fe736687f`).** Rust engine, 1 thread,
+  600 s, one job at a time. Each job started at a 1-min load below 14, but the load rose to
+  27-31 during the runs, so no wall times are claimed. The full dynamic stack
+  (`SYM_DYNAMIC` + `SYM_ORBITAL` + `ORBITOPAL` + `CONFLICT`) hit the time limit
+  **without certifying**, at 52,318 nodes:
+  - 210,882 conflicts, 11,626 proof conflicts, 336 global conflict fixings.
+  - Orbitopal fixing worked on 2 orbitopes. The profile dump, taken at 39 of the 70 search
+    runs, shows 44,256 fixings over 52,316 nodes.
+  - Dynamic lex and orbital reduction received no generators: every generator moves an
+    orbitope entry.
+
+  Without orbitopal (`SYM_DYNAMIC` + `SYM_ORBITAL` + `CONFLICT`), it also hit the time limit
+  without certifying, at 74,580 nodes:
+  - 17 generators; 16,788 dynamic-lex fixings and 57,986 orbital fixings.
+  - 181,711 conflicts, 20,371 proof conflicts, 232 global conflict fixings.
+
+  The static stack certified at 12,730 nodes. On this instance the dynamic stack does not
+  reproduce that result.
 - [x] **P4.8 — Dimension-reducing MILP presolve with postsolve. DEFERRED 2026-11-06 (owner).** *(≤ 3 iterations, last:
   worth ≤ 2 instances / 1.7× in HiGHS's own ablation, §1c)*. Scope: reuse P2.4's LP
   reductions + integer-aware rounding, `presolve/substitute.rs` where it applies. Flag
