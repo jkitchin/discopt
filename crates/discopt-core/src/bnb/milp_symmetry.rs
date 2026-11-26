@@ -56,8 +56,11 @@ pub const WEIGHT_CAP: f64 = 1e3;
 const INF: f64 = 1e20;
 
 /// `DISCOPT_MILP_SYM_LEX`: append verified symmetry's lexicographic-leader rows to
-/// the top-level MILP before the search. Default OFF until its §5 panel; garbage
-/// refused.
+/// the top-level MILP before the search. Default OFF; garbage refused.
+/// Kept as a documented opt-out (owner decision 2026-11-26), not the default: on the
+/// 2026-11-25 §5 panel the static bundle (`SYM_LEX` + `ORBITOPE`) was sound but
+/// harmful against `MILP_CONFLICT` alone (`docs/dev/flag-retirement-audit.md`). What
+/// would make it the default: a panel against today's defaults that passes bar 2.
 pub fn sym_lex_enabled() -> bool {
     match std::env::var("DISCOPT_MILP_SYM_LEX") {
         Err(_) => false,
@@ -71,7 +74,11 @@ pub fn sym_lex_enabled() -> bool {
 
 /// `DISCOPT_MILP_ORBITOPE`: propagate the column-lex order of full integer orbitopes
 /// built from verified automorphisms (see [`crate::lp::highs_cutgen::orbitope`]).
-/// Default OFF (bound-changing, §5 panel owed). Panics on an unrecognized value.
+/// Default OFF (bound-changing). Panics on an unrecognized value.
+/// Kept as a documented opt-out (owner decision 2026-11-26), not the default: on the
+/// 2026-11-25 §5 panel the static bundle (`SYM_LEX` + `ORBITOPE`) was sound but
+/// harmful against `MILP_CONFLICT` alone (`docs/dev/flag-retirement-audit.md`). What
+/// would make it the default: a panel against today's defaults that passes bar 2.
 pub fn orbitope_enabled() -> bool {
     match std::env::var("DISCOPT_MILP_ORBITOPE") {
         Err(_) => false,
