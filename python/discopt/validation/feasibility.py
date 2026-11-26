@@ -1857,8 +1857,19 @@ def _newton_repair(rows_ctx, x, r, viol, J, frozen, excess0):
         frozen = frozen | hit
         active = active | (viol > noise_n)
         excess = float(np.max(np.maximum(viol - noise_n, 0.0), initial=0.0))
-        # No row may end more violated than it began, beyond either noise floor.
-        no_row_worse = bool(np.all(viol <= np.maximum(viol0, np.maximum(noise0, noise_n))))
+        # No row may end more violated than it began, beyond either noise floor --
+        # except up to the iterate's own largest excess, which must still fall
+        # strictly below ``excess0``. With the integers frozen the equality rows can
+        # be inconsistent (no exact completion exists), and the least-squares step
+        # then has to leave the residual somewhere: on portfol_roundlot it took the
+        # lot rows from up to 1.165e-6 to ~1e-12 while the budget row went from
+        # 1.16504e-7 to 1.16550e-7, and the strict row-by-row rule threw the whole
+        # repair away, publishing the 1.165e-6 point. Letting a row grow only up to
+        # the new largest excess keeps what the rule is for -- no row ends above the
+        # frontier the repair claims to have lowered -- and the caller still
+        # re-verifies the point and re-evaluates its objective.
+        cap = np.maximum(viol0, np.maximum(noise0, noise_n))
+        no_row_worse = bool(np.all(viol <= np.maximum(cap, excess + noise_n)))
         if no_row_worse and excess < best_excess:
             best_x, best_excess = x.copy(), excess
         if excess <= 0.0:
