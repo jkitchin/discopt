@@ -19371,9 +19371,8 @@ def solve_model(
                     initial_point=initial_point,
                     deferred=_deferred,
                     prefer_pounce=nlp_solver == "pounce",
-                    # The caller's raw value, not the resolved one: ``None``
-                    # means "this route's established default", which for
-                    # this engine is no absolute criterion at all (#1315).
+                    # ``None`` resolves inside to the default the published
+                    # pair is judged by (#2357).
                     abs_gap_tolerance=abs_gap_tolerance,
                     incumbent_time_extension=incumbent_time_extension,
                     node_callback=node_callback,
@@ -40111,8 +40110,9 @@ def _solve_milp_simplex(
     tolerance at all, so ``Model.solve(abs_gap_tolerance=...)`` was a documented
     control that did nothing whenever a MILP reached this engine -- which the
     default route does, and the public ``nlp_solver="simplex"`` option always does.
-    ``None`` is passed through as ``None`` (no absolute criterion), which is this
-    engine's established default and keeps an omitted argument bound-neutral.
+    ``None`` resolves to :data:`_DEFAULT_ABS_GAP_TOL`, the tolerance the published
+    pair is judged by (#2357). It used to mean "no absolute criterion", which
+    let the engine stop on a gap ``Model.solve`` then refused.
 
     ``relu_cuts`` (#2157) is an ``AndersonCutSeparator.native_milp_spec`` dict:
     the engine then separates Anderson et al.'s ideal ReLU inequalities natively
@@ -40334,12 +40334,20 @@ def _solve_milp_simplex(
     # the #291 stall slice enforced by the driver only while it has no incumbent.
     _run1_time = _milp_budget
     _run1_stall: dict = {}
+    # #2357: the engine stops on the criterion ``Model.solve`` judges its pair by.
+    # ``_refuse_unclosed_published_pair`` applies ``_gap_criterion`` with the
+    # resolved absolute tolerance (1e-6 when omitted) and the unfloored relative
+    # test. Passing ``None`` through used to leave the driver on its floored test
+    # ``(ub - lb) / max(|ub|, 1)`` with no absolute criterion, so on an objective
+    # below 1 it closed at an absolute gap up to ``gap_tolerance`` that the caller
+    # then refused: neos17 (|ub| = 0.15) stopped at 7,711 nodes, absolute gap
+    # 9.8e-5, relative 6.5e-4, and was published "feasible" with its certificate
+    # dropped. The HiGHS route already resolves ``None`` the same way.
+    abs_gap_tolerance = _resolve_abs_gap_tolerance(abs_gap_tolerance)
     # R4 (retirement step 6, #1243): an absolute tolerance tighter than the relative
     # one asks for the Python tree's unfloored relative test,
     # ``max(|ub|, |lb|, 1e-10)``; the driver applies it (``rel_gap_max_abs``).
-    _rel_gap_max_abs = abs_gap_tolerance is not None and float(abs_gap_tolerance) < float(
-        gap_tolerance
-    )
+    _rel_gap_max_abs = float(abs_gap_tolerance) < float(gap_tolerance)
     # Python-MILP-tree retirement (formerly DISCOPT_MILP_NO_STALL_TREE, graduated and
     # then made unconditional when the tree was deleted): with no incumbent at the
     # #291 slice, run 1's deadline moves to the whole remaining budget. Under
@@ -40427,7 +40435,7 @@ def _solve_milp_simplex(
             float(lp_data.obj_const),
             _run1_nodes,
             float(gap_tolerance),
-            abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+            abs_gap_tol=float(abs_gap_tolerance),
             rel_gap_max_abs=_rel_gap_max_abs,
             initial_incumbent=_seed,
             time_limit_s=float(_run1_time),
@@ -40623,7 +40631,7 @@ def _solve_milp_simplex(
                     # spent its whole budget on a tree the caller's absolute
                     # criterion had already closed, and returned `feasible` with
                     # |obj-bound| inside the requested tolerance.
-                    abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+                    abs_gap_tol=float(abs_gap_tolerance),
                     rel_gap_max_abs=_rel_gap_max_abs,
                     initial_incumbent=_seed2,
                     time_limit_s=float(_reentry_remaining),
