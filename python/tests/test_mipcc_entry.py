@@ -126,6 +126,21 @@ def test_readme_example_gives_a_certified_iis_in_the_competition_format(tmp_path
     assert _check(mipcc.read_mps(inst), doc) == 2  # both kept rows certified
 
 
+def test_record_line_reports_irreducibility_and_uncertified_elements(tmp_path, monkeypatch, capsys):
+    """The bench record says whether the answer was proven irreducible and how
+    many kept elements were written with no certificate (pre-#2339 main gave
+    complete answers with, e.g., 14 of 20 uncertified on MIPcc27 osun)."""
+    inst = _readme_example(tmp_path)
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
+    monkeypatch.setenv("MIPCC_THREADS", "2")
+    assert mipcc.main([inst, str(tmp_path / "sol.json")]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("mipcc: {")]
+    assert len(lines) == 1
+    rec = json.loads(lines[0][len("mipcc: ") :])
+    assert rec["complete"] is True and rec["proven_irreducible"] is True
+    assert rec["size"] == 2 and rec["n_uncertified"] == 0
+
+
 def test_certificate_rule_matches_the_checker():
     data = dict(
         A=__import__("scipy.sparse").sparse.csr_matrix(np.array([[1.0, 1.0], [1.0, 1.0]])),

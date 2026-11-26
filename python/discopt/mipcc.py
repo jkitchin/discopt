@@ -222,6 +222,7 @@ def solution_json(data: dict, res=None) -> dict:
         if entry:
             out_cols[cn[j]] = entry
     solution_json.n_bad = n_bad  # type: ignore[attr-defined]
+    solution_json.n_good = len(good)  # type: ignore[attr-defined]
     return {"rows": out_rows, "columns": out_cols}
 
 
@@ -494,6 +495,10 @@ def _run(
                 closed=[res.n_exchanged, res.n_close_dropped],
                 proven=res.proven_irreducible,
                 rehold=res.n_rehold,
+                proven_irreducible=res.proven_irreducible,
+                # Kept elements written with no certificate (a complete answer
+                # with some is not shown irreducible to the checker).
+                n_uncertified=size - getattr(solution_json, "n_good", 0),
                 wall=round(time.perf_counter() - t0, 2),
             )
         ),
