@@ -146,6 +146,11 @@ pub fn aggregate_variables_until(
     (out, stats)
 }
 
+/// HiGHS's `small_matrix_value` default (`HighsOptions.h:787`; entries at or below
+/// it are dropped from the matrix, `HighsMatrixUtils.cpp:257`). No bound, fixing or
+/// elimination pivots on a coefficient this small (#2362 sweep).
+const SMALL_MATRIX_VALUE: f64 = 1e-9;
+
 /// Try to find and apply exactly one aggregation. Returns the new
 /// model and the record on success, or `None` if no candidate
 /// applied.
@@ -199,7 +204,10 @@ fn try_one_aggregation(
             (Some(a), Some(b)) if a != b => (a, b),
             _ => continue,
         };
-        if ca == 0.0 || cb == 0.0 {
+        // A noise coefficient is neither a pivot nor a source: `offset` divides by
+        // the pivot, and the source's implied bound below divides the row's
+        // round-off by the source coefficient (#2362 sweep).
+        if ca.abs() <= SMALL_MATRIX_VALUE || cb.abs() <= SMALL_MATRIX_VALUE {
             continue;
         }
 
@@ -519,6 +527,63 @@ mod tests {
             rhs,
             name: None,
         }
+    }
+
+    /// #2362 sweep. `0.1 + 0.2 + x + c y == 0.3`, `x` in `[0, 10]` only here, `y`
+    /// in `[-1, 1]` in the objective; `(x, y) = (0, 0)` satisfies the row to 6e-17.
+    /// Aggregating `x` onto `y` bounds `y` by `(r - [0, 10]) / c` with the round-off
+    /// `r = 0.3 - 0.30000000000000004`: for a noise `c` that is `y <= -5.6e-5`, which
+    /// cuts `y = 0`. A noise coefficient is never a pivot or a source; the control is
+    /// still aggregated.
+    #[test]
+    fn never_aggregates_through_a_noise_coefficient() {
+        let mut checked = 0;
+        for (cx, cy) in [(1.0, 1e-12), (1.0, -1e-10), (1e-12, 1.0), (1.0, 1e-3)] {
+            let mut arena = ExprArena::new();
+            let x = scalar_var(&mut arena, "x", 0);
+            let y = scalar_var(&mut arena, "y", 1);
+            let mut eq = affine_eq(&mut arena, cx, x, cy, y, 0.3);
+            let k1 = arena.add(ExprNode::Constant(0.1));
+            let k2 = arena.add(ExprNode::Constant(0.2));
+            let k = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: k1,
+                right: k2,
+            });
+            eq.body = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: k,
+                right: eq.body,
+            });
+            let model = ModelRepr {
+                arena,
+                objective: y,
+                objective_sense: ObjectiveSense::Minimize,
+                constraints: vec![eq],
+                variables: vec![vinfo("x", 0.0, 10.0), vinfo("y", -1.0, 1.0)],
+                n_vars: 2,
+            };
+            let (out, stats) = aggregate_variables(&model);
+            let noise = cx.abs() <= SMALL_MATRIX_VALUE || cy.abs() <= SMALL_MATRIX_VALUE;
+            assert_eq!(
+                stats.variables_aggregated,
+                usize::from(!noise),
+                "cx={cx} cy={cy}"
+            );
+            let yv = out
+                .variables
+                .iter()
+                .find(|v| v.name == "y")
+                .expect("y kept");
+            assert!(
+                yv.lb[0] <= 1e-9 && yv.ub[0] >= -1e-9,
+                "cx={cx} cy={cy}: y in [{}, {}] cuts y = 0",
+                yv.lb[0],
+                yv.ub[0]
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
     }
 
     #[test]

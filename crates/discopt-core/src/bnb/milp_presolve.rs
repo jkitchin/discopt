@@ -57,6 +57,12 @@ const INF: f64 = f64::INFINITY;
 /// absolute value is left alone.
 const NOISE_REL: f64 = 1e-9;
 
+/// HiGHS's `small_matrix_value` default (`HighsOptions.h:787`): HiGHS keeps a matrix
+/// entry only when `|a| > small_matrix_value` (`HighsMatrixUtils.cpp:257`), so none of its
+/// presolve rules ever sees one at most this. [`Work::is_noise`] applies it as an absolute
+/// floor under the relative `NOISE_REL` (#2362 sweep).
+const SMALL_MATRIX_VALUE: f64 = 1e-9;
+
 /// A MILP in row form.
 #[derive(Clone, Debug)]
 pub struct RowForm {
@@ -639,6 +645,9 @@ impl Work {
     /// where `cancel_entry` must keep them (an equality has no slack to relax), so the
     /// rules themselves refuse them. Refusing a reduction is always sound.
     fn is_noise(&self, r: usize, a: f64) -> bool {
+        if a.abs() <= SMALL_MATRIX_VALUE {
+            return true;
+        }
         let mx = self.rows[r].1.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         a.abs() <= NOISE_REL * mx
     }
@@ -797,7 +806,7 @@ impl Work {
             let (s, a) = (ri[p], rv[p]);
             // `is_noise(r, a)`, with the row maximum it would recompute (same values,
             // same order) taken from `row_max`.
-            if a.abs() <= NOISE_REL * row_max {
+            if a.abs() <= SMALL_MATRIX_VALUE || a.abs() <= NOISE_REL * row_max {
                 continue;
             }
             // Pivot: large enough against the row's or the column's largest entry.
@@ -992,8 +1001,11 @@ impl Work {
                     return true;
                 };
                 let a = qv[pq];
+                // Not through a noise coefficient (`is_noise`): `v / a` and `rhs / a` are
+                // then huge and pass the integrality test vacuously (#2362 sweep).
                 qi.len() >= 2
                     && a != 0.0
+                    && !self.is_noise(q, a)
                     && (!self.lo[q].is_finite() || integral(self.lo[q] / a))
                     && (!self.up[q].is_finite() || integral(self.up[q] / a))
                     && qi
@@ -1187,7 +1199,7 @@ impl Work {
                 continue;
             };
             let aq = self.rows[q].1[pq];
-            if aq.abs() <= NOISE_REL * agg.maxabs {
+            if aq.abs() <= SMALL_MATRIX_VALUE || aq.abs() <= NOISE_REL * agg.maxabs {
                 continue;
             }
             let (lo_s, hi_s) = if aq > 0.0 {
@@ -1310,7 +1322,11 @@ impl Work {
                 return false;
             };
             let a = qv[pq];
-            integral(self.up[q] / a)
+            // A noise coefficient (`is_noise`) makes `rhs / a` and every `v / a` huge, and
+            // every float above 2^53 is "integral": the row `1e-17 x_s + y = 1` would mark
+            // a continuous `x_s` integer and round its bounds (#2362 sweep).
+            !self.is_noise(q, a)
+                && integral(self.up[q] / a)
                 && qi
                     .iter()
                     .zip(qv)
@@ -2437,9 +2453,8 @@ impl Work {
     ///
     /// Returns whether any row was changed.
     fn sparsify(&mut self) -> bool {
-        // HiGHS defaults: `small_matrix_value` and `primal_feasibility_tolerance` (whose
-        // square root is the scale-clustering width `minNonzeroVal`).
-        const SMALL_MATRIX_VALUE: f64 = 1e-9;
+        // HiGHS defaults: `small_matrix_value` (the module `SMALL_MATRIX_VALUE`) and
+        // `primal_feasibility_tolerance` (whose square root is the scale-clustering width `minNonzeroVal`).
         const PRIMAL_FEASTOL: f64 = 1e-7;
         const MAX_SCALE: f64 = 1e3;
         let min_nonzero_val = PRIMAL_FEASTOL.sqrt();
@@ -2625,7 +2640,8 @@ impl Work {
                     continue;
                 }
                 match self.rows[q].0.len() {
-                    1 => {
+                    // A lone noise coefficient bounds nothing (as in `pass`): the row stays.
+                    1 if self.rows[q].1[0].abs() > NOISE_REL => {
                         let (j, a) = (self.rows[q].0[0], self.rows[q].1[0]);
                         let (lo, up) = (self.lo[q] / a, self.up[q] / a);
                         let (blo, bup) = if a > 0.0 { (lo, up) } else { (up, lo) };
@@ -3835,6 +3851,41 @@ mod tests {
     /// presolve marks `h` integral the all-integer reduced problem has the exact
     /// optimum of the original (computed with `h` continuous), and its postsolved
     /// optimum is feasible for the original.
+    #[test]
+    fn a_noise_coefficient_never_implies_integrality() {
+        // #2362 sweep. `x0 + x1 + a xs = 1` with integers x0, x1 and continuous
+        // xs in [0, 0.5]: for a noise `a`, `rhs / a` and `1 / a` are above 2^53 and pass
+        // the integrality test vacuously, so xs was marked integer and its bounds rounded
+        // to [0, 0], cutting off the optimum xs = 0.5 of `min -xs` (a false bound).
+        let mut checked = 0;
+        for a in [1e-17, -2.2e-16, 5.55e-17, 1e-12] {
+            for (lo, up) in [(1.0, 1.0), (-INF, 1.0), (1.0, INF)] {
+                let f = RowForm {
+                    n: 3,
+                    rows: vec![(vec![0, 1, 2], vec![1.0, 1.0, a])],
+                    lo: vec![lo],
+                    up: vec![up],
+                    c: vec![0.0, 0.0, -1.0],
+                    l: vec![0.0, 0.0, 0.0],
+                    u: vec![1.0, 1.0, 0.5],
+                    is_int: vec![true, true, false],
+                };
+                let p = presolve_opts(&f, 1e-9, 20, true, false);
+                assert!(!p.infeasible, "a={a} lo={lo} up={up}");
+                assert_eq!(
+                    p.stats.implied_int_primal + p.stats.implied_int_dual,
+                    0,
+                    "a={a} lo={lo} up={up}: marked through a noise coefficient"
+                );
+                if let Some(q) = p.keep_cols.iter().position(|&j| j == 2) {
+                    assert!(!p.form.is_int[q] && p.form.u[q] >= 0.5, "a={a}");
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 12);
+    }
+
     #[test]
     fn implied_integer_marking_preserves_the_optimum() {
         let mut r = Lcg(77);

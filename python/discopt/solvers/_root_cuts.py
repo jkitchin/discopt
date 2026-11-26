@@ -391,9 +391,16 @@ class _RootLP:
         for _ in range(20):
             changed = False
             for a, b in zip(rows_a, rows_b, strict=True):
-                nz = np.where(np.abs(a) > 1e-12)[0]
+                # Every nonzero counts in the activity (dropping ``1e-13 y`` with
+                # ``y`` in ``[-1e13, 0]`` ignores a contribution of 1); only the
+                # division is refused for a noise coefficient, whose divisor turns
+                # the residual's round-off into a bound (#2362 sweep; HiGHS's
+                # ``small_matrix_value``, ``HighsOptions.h:787``).
+                nz = np.flatnonzero(a)
                 for j in nz:
                     aj = a[j]
+                    if abs(aj) <= 1e-9:
+                        continue
                     rest = 0.0
                     ok = True
                     for k in nz:

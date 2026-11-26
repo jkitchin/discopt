@@ -86,6 +86,11 @@ pub struct FactorableElimStats {
     pub removed_constraint_indices: Vec<usize>,
 }
 
+/// HiGHS's `small_matrix_value` default (`HighsOptions.h:787`; entries at or below
+/// it are dropped from the matrix, `HighsMatrixUtils.cpp:257`). No bound, fixing or
+/// elimination pivots on a coefficient this small (#2362 sweep).
+const SMALL_MATRIX_VALUE: f64 = 1e-9;
+
 /// Run C2 factorable-expression variable elimination on `model`.
 ///
 /// Pure function: input is not modified. The caller decides whether
@@ -184,7 +189,9 @@ pub fn factorable_eliminate_until(
                     }
                 }
             }
-            if bad_leaf_term || leaf_count == 0 || coeff.abs() < 1e-15 {
+            // The range test below divides by `coeff`; a noise coefficient makes
+            // its round-off the verdict (#2362 sweep).
+            if bad_leaf_term || leaf_count == 0 || coeff.abs() <= SMALL_MATRIX_VALUE {
                 continue;
             }
 
@@ -325,6 +332,69 @@ mod tests {
             lb: vec![lb],
             ub: vec![ub],
         }
+    }
+
+    /// #2362 sweep. `c v - x y == 0` with `v` only here: the drop is valid iff the
+    /// derived range `x y / c` fits `v`'s box, a test whose round-off is divided by
+    /// `c`. A noise `c` is declined (HiGHS reads the row as `- x y == 0`, which does
+    /// not define `v` at all); a real `c` is still dropped.
+    #[test]
+    fn never_drops_through_a_noise_coefficient() {
+        let mut checked = 0;
+        for c in [1e-12, -1e-10, 1e-3] {
+            let mut arena = ExprArena::new();
+            let v = scalar_var(&mut arena, "v", 0);
+            let x = scalar_var(&mut arena, "x", 1);
+            let y = scalar_var(&mut arena, "y", 2);
+            let cn = arena.add(ExprNode::Constant(c));
+            let cv = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: cn,
+                right: v,
+            });
+            let xy = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: x,
+                right: y,
+            });
+            let neg_xy = arena.add(ExprNode::UnaryOp {
+                op: crate::expr::UnOp::Neg,
+                operand: xy,
+            });
+            let body = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: cv,
+                right: neg_xy,
+            });
+            let obj = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: x,
+                right: y,
+            });
+            let model = ModelRepr {
+                arena,
+                objective: obj,
+                objective_sense: ObjectiveSense::Minimize,
+                constraints: vec![ConstraintRepr {
+                    body,
+                    sense: ConstraintSense::Eq,
+                    rhs: 0.0,
+                    name: None,
+                }],
+                variables: vec![
+                    vinfo("v", -1e13, 1e13),
+                    vinfo("x", 0.0, 2.0),
+                    vinfo("y", 0.0, 3.0),
+                ],
+                n_vars: 3,
+            };
+            let (out, stats) = factorable_eliminate(&model);
+            let noise = c.abs() <= SMALL_MATRIX_VALUE;
+            assert_eq!(stats.constraints_removed, usize::from(!noise), "c={c}");
+            assert_eq!(out.constraints.len(), usize::from(noise), "c={c}");
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
     }
 
     #[test]

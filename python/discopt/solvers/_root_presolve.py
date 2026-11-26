@@ -476,6 +476,12 @@ def _collect_linear_rows(model: Model, n: int) -> list[_LinRow]:
     return rows
 
 
+# HiGHS's ``small_matrix_value`` (``HighsOptions.h:787``, applied at
+# ``HighsMatrixUtils.cpp:257``): no bound is derived by dividing by a coefficient at
+# or below it (#2362 sweep).
+_SMALL_MATRIX_VALUE = 1e-9
+
+
 def _propagate_linear_rows(
     rows: list[_LinRow],
     lb: np.ndarray,
@@ -496,12 +502,16 @@ def _propagate_linear_rows(
 
     Every derived bound is relaxed outward by ``1e-9·max(1, |v|)`` before it is
     used, and discrete bounds round with ``int_tol`` slack, so floating-point
-    error can only loosen, never cut.
+    error can only loosen, never cut -- provided the divisor is not noise: a
+    residual's round-off divided by ``|a| <= 1e-9`` is no longer small against
+    ``|v|`` (#2362 sweep), so no bound is derived through such a coefficient
+    (HiGHS's ``small_matrix_value``, ``HighsOptions.h:787``). Tiny terms still
+    count in the activity: dropping one would ignore what it contributes.
     """
     for _ in range(max_passes):
         any_change = False
         for row in rows:
-            items = [(j, a) for j, a in row.terms.items() if abs(a) > 1e-12]
+            items = [(j, a) for j, a in row.terms.items() if a != 0.0]
             if not items:
                 continue
             # Normalised forms ``a·x <= rhs``; an equality contributes both.
@@ -530,6 +540,8 @@ def _propagate_linear_rows(
                 for (j, a0), mj in zip(items, mins):
                     if n_inf == 1 and mj is not None:
                         continue  # the residual still contains the unbounded term
+                    if abs(a0) <= _SMALL_MATRIX_VALUE:
+                        continue  # never divide round-off by a noise coefficient
                     resid = fin_sum - (mj if mj is not None else 0.0)
                     a = sgn * a0
                     bound = (rhs - resid) / a

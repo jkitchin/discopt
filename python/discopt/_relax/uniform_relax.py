@@ -4241,10 +4241,17 @@ def _fix_single_var_equalities(
             terms, const = _linearize_affine_expr_sparse(con.body, model, n)
         except (ValueError, TypeError):
             continue
-        nz = [(j, c) for j, c in terms.items() if abs(c) > 1e-12]
+        # Exact zeros only: a dropped ``1e-13 y`` would make ``x + 1e-13 y == 1`` a
+        # pin of ``x`` although ``y`` in ``[-1e13, 0]`` moves it by 1. And the pin
+        # divides the row's residual, round-off included, by ``c``; a noise ``c``
+        # (HiGHS's ``small_matrix_value`` 1e-9, ``HighsOptions.h:787``) turns that
+        # round-off into the pinned value (#2362 sweep).
+        nz = [(j, c) for j, c in terms.items() if c != 0.0]
         if len(nz) != 1:
             continue
         j, c = nz[0]
+        if abs(c) <= 1e-9:
+            continue
         # The sparse core does not range-check its keys; the dense wrapper's array
         # store did, by raising an (uncaught) IndexError. Both are unreachable for a
         # box covering the model's own flat variables, but a pin we cannot index is

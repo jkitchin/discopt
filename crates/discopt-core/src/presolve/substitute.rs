@@ -361,7 +361,15 @@ pub fn substitute_variables(model: &ModelRepr) -> (ModelRepr, SubstitutionStats)
                 } else {
                     (root_q, b, root_p, a)
                 };
-                if pivot.abs() < MIN_PIVOT_ABS || pivot.abs() < PIVOT_REL * row_max {
+                // The kept column's coefficient must not be noise either: with
+                // `|other| <= MIN_PIVOT_ABS` (HiGHS's `small_matrix_value`,
+                // `HighsOptions.h:787`) the multiplier `m` is noise, and transferring
+                // the eliminated column's box onto `keep_root` below divides the
+                // offset's round-off by it (#2362 sweep). Keeping the row only weakens.
+                if pivot.abs() < MIN_PIVOT_ABS
+                    || pivot.abs() < PIVOT_REL * row_max
+                    || other.abs() <= MIN_PIVOT_ABS
+                {
                     stats.pivots_rejected += 1;
                     continue;
                 }
@@ -427,6 +435,11 @@ pub fn substitute_variables(model: &ModelRepr) -> (ModelRepr, SubstitutionStats)
         } else {
             if !c.is_finite() || !o.is_finite() || c == 0.0 {
                 return abort(model, stats, "non-finite affine definition");
+            }
+            // A chain of admissible multipliers can still compose to a noise
+            // coefficient; the box transfer below would divide `o`'s round-off by it.
+            if c.abs() <= MIN_PIVOT_ABS {
+                return abort(model, stats, "noise composite coefficient");
             }
             // Transfer x_e ∈ [l_e, u_e] onto the source exactly:
             //   x_root = (x_e − o) / c
@@ -1307,6 +1320,74 @@ mod tests {
         assert_eq!(st.variables_eliminated, 0);
         assert_eq!(st.pivots_rejected, 1);
         assert_eq!(red.variables.len(), 2);
+    }
+
+    /// #2362 sweep. `0.1 + 0.2 + y + c x = 0.3` with `y` in `[0, 10]`, `x` in
+    /// `[0, 10]`: `(x, y) = (0, 0)` satisfies it to 6e-17. Eliminating `y` with the
+    /// multiplier `m = -c` moves `y`'s box onto `x` through `(y - q) / m`, where
+    /// `q = 0.3 - 0.30000000000000004` is round-off: for a noise `c` that bounds `x`
+    /// 5.6e-5 inside its box. A real `c` (the control) is still eliminated.
+    #[test]
+    fn a_noise_multiplier_never_transfers_a_bound() {
+        let mut checked = 0;
+        for c in [1e-12, -1e-12, 1e-10, 1e-3] {
+            let mut arena = ExprArena::new();
+            let xv = scalar_var(&mut arena, "x", 0);
+            let yv = scalar_var(&mut arena, "y", 1);
+            let terms = lin(&mut arena, &[(1.0, yv), (c, xv)]);
+            let k1 = arena.add(ExprNode::Constant(0.1));
+            let k2 = arena.add(ExprNode::Constant(0.2));
+            let k = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: k1,
+                right: k2,
+            });
+            let row = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: k,
+                right: terms,
+            });
+            let obj = lin(&mut arena, &[(1.0, xv)]);
+            let variables = finalize(vec![
+                vinfo("x", 0.0, 10.0, VarType::Continuous),
+                vinfo("y", 0.0, 10.0, VarType::Continuous),
+            ]);
+            let m = ModelRepr {
+                arena,
+                objective: obj,
+                objective_sense: ObjectiveSense::Minimize,
+                constraints: vec![ConstraintRepr {
+                    body: row,
+                    sense: ConstraintSense::Eq,
+                    rhs: 0.3,
+                    name: None,
+                }],
+                variables,
+                n_vars: 2,
+            };
+            let (red, st) = substitute_variables(&m);
+            assert!(!st.infeasible_detected, "c={c}: (0, 0) is feasible");
+            if c.abs() <= MIN_PIVOT_ABS {
+                assert_eq!(st.variables_eliminated, 0, "c={c}");
+            } else {
+                assert_eq!(st.variables_eliminated, 1, "control c={c}");
+            }
+            // x = 0 must survive in whatever model comes back, to the 1e-9 of a
+            // feasibility tolerance (the control's transfer is off by 5.6e-14).
+            let x = red
+                .variables
+                .iter()
+                .find(|v| v.name == "x")
+                .expect("x kept");
+            assert!(
+                x.lb[0] <= 1e-9 && x.ub[0] >= -1e-9,
+                "c={c}: x in [{}, {}]",
+                x.lb[0],
+                x.ub[0]
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
     }
 
     #[test]
