@@ -11,6 +11,7 @@ independently with HiGHS on random infeasible subsystems; (2) each rule's
 refusals; (3) the engine wiring, including the ``DISCOPT_IIS_SWEEP=0`` opt-out.
 """
 
+import math
 import random
 
 import discopt.modeling as dm
@@ -359,3 +360,46 @@ def test_a_sweep_that_drops_a_certified_element_is_reverted(monkeypatch):
     assert res.constraints == [0, 39] and res.proven_irreducible
     assert ("constraint", 0) in res.certificates
     _cert_kept(res)
+
+
+@pytest.mark.parametrize("budget", [20.0, None])
+def test_the_final_sweep_stops_within_the_result_margin(monkeypatch, budget):
+    """The answer's sweep runs after the deadline has usually fired, and it is
+    pure Python per nonzero (5.5 s on a 1e6-row, 2e6-nonzero LP). It used to run
+    with no clock, past a portfolio member's deadline into the parent's kill,
+    which lost the member's confirmed answer. With a budget it now stops at the
+    deadline plus half the portfolio's result margin, inside the caller's budget;
+    with none, it is unclocked."""
+    import time
+
+    import discopt._iis_milp as mod
+
+    stops: list[float] = []
+    real = mod._structural_sweep
+
+    def spy(*args, **kwargs):
+        stops.append(kwargs["stop_at"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_structural_sweep", spy)
+    # x integer in [0, 3]; 2x = 1 is infeasible; the other rows are redundant.
+    A = sp.csr_matrix(np.array([[2.0, 0.0], [1.0, 0.0], [0.0, 1.0]]))
+    arrays = (
+        A,
+        np.array([1.0, -INF, -INF]),
+        np.array([1.0, 5.0, 5.0]),
+        {i: np.array([i]) for i in range(3)},
+        np.zeros(2),
+        np.array([3.0, 3.0]),
+        np.array([True, False]),
+    )
+    t0 = time.perf_counter()
+    res = mod.milp_iis_arrays(arrays, total_time_limit=budget, t_start=t0)
+    assert res.constraints == [0] and res.integrality == [0]
+    assert stops, "the engine never swept"
+    if budget is None:
+        assert stops[-1] == math.inf
+    else:
+        # The filter's deadline sits a reserve below t0 + budget (the polish
+        # gets the rest), and half a result margin past it is still inside.
+        assert t0 < stops[-1] < t0 + budget

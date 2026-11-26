@@ -229,3 +229,24 @@ def test_capped_confirmation_falls_through_to_the_existing_route(monkeypatch):
     assert res.n_lattice == 0 and res.parity_rows is None  # nothing decided by it
     assert res.complete and res.proven_irreducible
     assert (res.constraints, res.integrality) == (ref.constraints, ref.integrality)
+
+
+def test_table_cap_gives_no_conclusion_before_allocating(monkeypatch):
+    """``_int_solvable``'s dense column table is k * ncols cells, and building and
+    scanning it is not arithmetic, so the work cap never saw it: on a 1e6-row LP it
+    grew to 24 GB, unclocked, past every deadline. Past ``MAX_TABLE`` the test now
+    returns ``None`` (no conclusion, which is always sound) instead of allocating."""
+    import discopt._iis_lattice as lat
+
+    # Integer-only rows: the left null space is the identity (no elimination
+    # work), so the table is m x m while the arithmetic stays tiny.
+    m = 12
+    rows = [({i: 1}, 1) for i in range(m)] + [({0: 2}, 1)]  # z_0 = 1 and 2 z_0 = 1
+    held = set(range(m))
+    assert lattice_infeasible(rows, held) is True
+    k, ncols = len(rows), m
+    monkeypatch.setattr(lat, "MAX_TABLE", k * ncols, raising=False)
+    assert lattice_infeasible(rows, held) is True  # at the cap: still concludes
+    monkeypatch.setattr(lat, "MAX_TABLE", k * ncols - 1, raising=False)
+    assert lattice_infeasible(rows, held) is None
+    assert lattice_infeasible(rows, held, max_work=10**9) is None  # not the work cap

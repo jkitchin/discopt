@@ -973,39 +973,63 @@ def _check_certificates(
         (lbm if side == "lower" else ubm)[j] = True
     lbm &= eng.col_lb > -_INF
     ubm &= eng.col_ub < _INF
-    lo_f = eng.row_lo > -_INF
-    hi_f = eng.row_hi < _INF
+    # Each point is checked on the kept rows and the checked columns only, so a
+    # point costs O(nnz of the kept rows + checked columns), not O(nnz(A)): on a
+    # 1e6-row model a whole-model pass was 6.9 ms per point, past the deadline.
+    # Per-row activities are the same CSR dot products, so the result is
+    # bit-identical to the whole-model pass.
+    R = np.flatnonzero(row_kept)
+    A_R = eng.A[R]
+    pos = np.full(m, -1, dtype=np.int64)
+    pos[R] = np.arange(R.size)
+    lo_R, hi_R = eng.row_lo[R], eng.row_hi[R]
+    lo_fR, hi_fR = lo_R > -_INF, hi_R < _INF
+    J = np.flatnonzero(lbm | ubm | held)
+    lb_J, ub_J = eng.col_lb[J], eng.col_ub[J]
+    lbm_J, ubm_J, held_J = lbm[J], ubm[J], held[J]
+    jpos = np.full(n, -1, dtype=np.int64)
+    jpos[J] = np.arange(J.size)
+
+    def row_violation(Ar, lo, hi, x):
+        act = Ar @ x
+        rv = np.maximum(np.where(lo > -_INF, lo - act, 0.0), np.where(hi < _INF, act - hi, 0.0))
+        return np.maximum(rv, 0.0)
+
     out = {}
     for key, x in pending.items():
-        act = eng.A @ x
-        rv = np.maximum(
-            np.where(lo_f, eng.row_lo - act, 0.0), np.where(hi_f, act - eng.row_hi, 0.0)
-        )
+        act = A_R @ x
+        rv = np.maximum(np.where(lo_fR, lo_R - act, 0.0), np.where(hi_fR, act - hi_R, 0.0))
         rv = np.maximum(rv, 0.0)
-        lbv = np.where(lbm, eng.col_lb - x, 0.0)
-        ubv = np.where(ubm, x - eng.col_ub, 0.0)
-        iv = np.where(held, np.abs(x - np.round(x)), 0.0)
+        xJ = x[J]
+        lbv = np.where(lbm_J, lb_J - xJ, 0.0)
+        ubv = np.where(ubm_J, xJ - ub_J, 0.0)
+        iv = np.where(held_J, np.abs(xJ - np.round(xJ)), 0.0)
         kind = key[0]
-        rows_ok = row_kept
         if kind == "constraint":
-            own = eng.row_groups[key[1]]
-            rows_ok = row_kept.copy()
-            rows_ok[own] = False
-            e = float(np.max(rv[own], initial=0.0))
+            own = np.asarray(eng.row_groups[key[1]]).ravel()
+            p_own = pos[own]
+            p_own = p_own[p_own >= 0]
+            rv[p_own] = 0.0  # the other kept rows only
+            e = float(
+                np.max(row_violation(eng.A[own], eng.row_lo[own], eng.row_hi[own], x), initial=0.0)
+            )
         elif kind == "integrality":
             j = key[1]
-            iv[j] = 0.0  # its box still applies (held -> lbm/ubm), as when relaxed
+            if jpos[j] >= 0:
+                iv[jpos[j]] = 0.0  # its box still applies (held -> lbm/ubm), as when relaxed
             e = abs(float(x[j] - np.round(x[j])))
         else:
             j, side = key[1], key[2]
             if side == "lower":
-                lbv[j] = 0.0
+                if jpos[j] >= 0:
+                    lbv[jpos[j]] = 0.0
                 e = float(eng.col_lb[j] - x[j])
             else:
-                ubv[j] = 0.0
+                if jpos[j] >= 0:
+                    ubv[jpos[j]] = 0.0
                 e = float(x[j] - eng.col_ub[j])
         rest = max(
-            float(np.max(np.where(rows_ok, rv, 0.0), initial=0.0)),
+            float(np.max(rv, initial=0.0)),
             float(np.max(lbv, initial=0.0)),
             float(np.max(ubv, initial=0.0)),
             float(np.max(iv, initial=0.0)),
@@ -1759,6 +1783,11 @@ def _polish(
                 if verdict is True:
                     n_exchanged = len(ints - got[2])
                     cons, bounds, ints = got
+                    # The exchange ADDS bounds no probe has shown necessary, so
+                    # the filter's verdicts no longer cover the set (removals are
+                    # safe by monotonicity; additions are not). From here only a
+                    # checked certificate for every element proves it (below).
+                    proven = False
         except _OutOfTime:
             pass  # the exchange or its confirmation ran out of time: the answer stands
     certs = _check_certificates(pending, eng, cons, bounds, ints, cert_tol)
@@ -1956,7 +1985,10 @@ def _pb_rows(cols, vals, lo, hi) -> Optional[list[tuple[list[int], list[int], in
     for sign, side in ((1, lo), (-1, hi)):
         if (sign == 1 and side <= -_INF) or (sign == -1 and side >= _INF):
             continue
-        a = sign * np.round(vals).astype(np.int64)
+        # Python ints, not int64: a cast of |a| >= 2**63 saturates or wraps
+        # (1e19 became 2**63 - 1, a different row) with only a RuntimeWarning.
+        # ``int`` of an integral finite float is exact at any magnitude.
+        a = [sign * int(v) for v in np.round(vals).tolist()]
         k = sign * float(side)
         K = int(round(k)) if abs(k - round(k)) <= 1e-9 else int(math.ceil(k))
         w: list[int] = []
@@ -2120,15 +2152,22 @@ def _lift_implied_binaries(A, row_lo, row_hi, col_lb, col_ub, is_int):
     stage then gives a 308-row core where it declined before.
     """
     n = col_lb.size
-    cont = np.flatnonzero(~is_int)
+    # Necessary conditions, in array operations (the loop below re-checks them):
+    # a continuous column on [0, >= 1] with an entry, in no two-sided or free
+    # row. On a 1e6-row model the per-column loop alone cost 1.5 s in every
+    # portfolio member; it now visits only columns these leave.
+    At = A.tocsc()
+    two_sided = (np.asarray(row_lo) > -_INF) == (np.asarray(row_hi) < _INF)
+    in_two = np.zeros(n, dtype=bool)
+    in_two[A.indices[np.repeat(two_sided, np.diff(A.indptr))]] = True
+    cont = np.flatnonzero(
+        ~is_int & (col_lb == 0.0) & (col_ub >= 1.0) & (np.diff(At.indptr) > 0) & ~in_two
+    )
     if cont.size == 0:
         return set()
-    At = A.tocsc()
     out: set[int] = set()
     for c in cont:
         c = int(c)
-        if col_lb[c] != 0.0 or col_ub[c] < 1.0:
-            continue
         ok = At.indptr[c + 1] > At.indptr[c]
         for p in range(At.indptr[c], At.indptr[c + 1]):
             r = int(At.indices[p])
@@ -2166,6 +2205,21 @@ _SWEEP_REL = 1e-9
 
 #: The sweep checks the clock every this many rows or columns.
 _SWEEP_CLOCK_EVERY = 256
+
+#: The final sweep may run past the deadline by this fraction of the share a
+#: portfolio holds back from its members for returning a result
+#: (``min(_PORTFOLIO_MARGIN_S, _PORTFOLIO_MARGIN_FRACTION * total_time_limit)``);
+#: the rest is left for the certificate check and pickling the result.
+_FINAL_SWEEP_GRACE_FRACTION = 0.5
+
+
+def _final_sweep_stop(deadline: Optional[float], total_time_limit: Optional[float]) -> float:
+    """``perf_counter`` time at which the final sweep stops: ``inf`` with no
+    budget, else the deadline plus half the portfolio's result margin."""
+    if deadline is None:
+        return math.inf
+    margin = min(_PORTFOLIO_MARGIN_S, _PORTFOLIO_MARGIN_FRACTION * float(total_time_limit or 0.0))
+    return deadline + _FINAL_SWEEP_GRACE_FRACTION * margin
 
 
 def _structural_sweep(
@@ -3872,13 +3926,16 @@ def _milp_iis_arrays(
     # The answer itself, confirmed or the fallback checkpoint: a run stopped in
     # the integrality phase leaves columns no kept row touches (dijle: 1176
     # elements). Dropping them needs no solve and keeps every certificate.
-    # The deadline has usually fired by now, so this sweep runs with no clock:
-    # its work is finite and fixed by the data (one pass over the rows; a column
-    # is re-queued only when one of its rows is dropped, so at most n + nnz column
-    # visits), and it decides nothing by machine speed (#912). Measured on the
-    # 50 MIPcc27 smallset models: a whole-model sweep takes at most 0.09 s
-    # (neos-3135947-otra, 139k nonzeros).
-    sweep(stop_at=math.inf)
+    # The deadline has usually fired by now, so the sweep gets its own stop past
+    # it (_FINAL_SWEEP_GRACE_FRACTION). Its work is fixed by the data (one pass over
+    # the rows; at most n + nnz column visits): on the 50 MIPcc27 smallset models
+    # a whole-model sweep takes at most 0.09 s (neos-3135947-otra, 139k
+    # nonzeros), so there it always finishes and decides nothing by machine
+    # speed (#912). It is pure Python per nonzero, though: 5.5 s on a 1e6-row,
+    # 2e6-nonzero LP, where it ran unclocked past the deadline into the
+    # portfolio's kill and the member's confirmed answer was lost. Cut short,
+    # it keeps the removals made so far, each valid on its own.
+    sweep(stop_at=_final_sweep_stop(deadline, total_time_limit))
     # Bounds the final subsystem APPLIES (beyond held-integer boxes). With
     # include_bounds=False that is every finite bound, but none is an element.
     applied_bounds = sorted((j, s) for j, s in bounds if j not in ints_active)
