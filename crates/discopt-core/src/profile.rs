@@ -899,6 +899,11 @@ counters!(
     MilpSymDynGenerators,
     MilpSymDynFixings,
     MilpSymDynNodes,
+    // `DISCOPT_MILP_SYM_ORBITAL`: verified generators handed to orbital reduction,
+    // nodes it ran at, and the bound changes it made.
+    MilpSymOrbGenerators,
+    MilpSymOrbNodes,
+    MilpSymOrbFixings,
     // #2224 (`DISCOPT_MILP_PREINC_SCORE`): branchings the HiGHS-design search took
     // with the raised pre-incumbent cutoff/inference score weight.
     PreIncScoreBranchings,

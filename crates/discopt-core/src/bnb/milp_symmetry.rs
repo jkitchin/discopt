@@ -112,6 +112,35 @@ pub fn sym_dynamic_enabled() -> bool {
     on
 }
 
+/// `DISCOPT_MILP_SYM_ORBITAL` (default OFF): orbital reduction (orbital branching and
+/// orbital fixing) in the search's branching order, over the same verified
+/// automorphisms (`lp::highs_cutgen::sym_orbital`). Compatible with
+/// `DISCOPT_MILP_SYM_DYNAMIC` (both keep representatives in the branching order);
+/// refuses loudly when combined with the static-order methods `DISCOPT_MILP_SYM_LEX`
+/// or `DISCOPT_MILP_ORBITOPE`.
+pub fn sym_orbital_enabled() -> bool {
+    let on = match std::env::var("DISCOPT_MILP_SYM_ORBITAL") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_SYM_ORBITAL={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    };
+    if on {
+        assert!(
+            !sym_lex_enabled() && !orbitope_enabled(),
+            "DISCOPT_MILP_SYM_ORBITAL cannot be combined with DISCOPT_MILP_SYM_LEX or \
+             DISCOPT_MILP_ORBITOPE: orbital reduction keeps representatives in the \
+             branching order, the static methods in one fixed column order, and the two \
+             together can remove every solution of an orbit. Set only one."
+        );
+    }
+    on
+}
+
 /// One lexicographic-leader row `sum coef_j x_j >= 0` over structural columns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexRow {

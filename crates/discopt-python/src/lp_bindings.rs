@@ -2337,6 +2337,7 @@ pub(crate) fn milp_options(
         bound_hook_every: 1,
         orbitopes: None,
         sym_dynamic: None,
+        sym_orbital: None,
         extend_no_incumbent_s: None,
         gap_tol,
         // #1315: `None` -- what a caller who named no absolute tolerance sends --
@@ -2525,6 +2526,7 @@ fn run_milp_hooked<'py>(
         bound_hook_every: extra.bound_hook_every,
         orbitopes: None,
         sym_dynamic: None,
+        sym_orbital: None,
         ..opts
     };
     // Wrap an attached Python debugger (if any) as a core hook. It is created

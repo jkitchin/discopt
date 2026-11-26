@@ -158,6 +158,7 @@ fn opts(n_struct: usize, integer_cols: Vec<usize>, tl: f64) -> MilpOptions {
         bound_hook_every: 1,
         orbitopes: None,
         sym_dynamic: None,
+        sym_orbital: None,
         extend_no_incumbent_s: None,
         gap_tol: 1e-6,
         abs_gap_tol: None,
