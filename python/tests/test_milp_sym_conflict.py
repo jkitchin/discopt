@@ -162,3 +162,37 @@ def test_flags_refuse_garbage(monkeypatch):
         with pytest.raises(BaseException):
             _bin_packing([3, 4, 5, 6], 3, 10).solve(milp_backend="native", milp_cuts=False)
         monkeypatch.delenv(flag)
+
+
+@pytest.mark.correctness
+def test_conflict_cut_pool_fires_and_matches_the_oracle(monkeypatch):
+    """HiGHS's cut pool under ``DISCOPT_MILP_CONFLICT``: ``generateConflict`` cuts from
+    the LP dual proofs, and the root and node cuts (rewritten over the structurals),
+    propagated by the search's domains. Bound-changing (§5): every verdict and optimum
+    must match HiGHS, with cuts on and off, and both pools must fire (§6)."""
+    monkeypatch.setenv("DISCOPT_PROFILE", "1")
+    compared = 0
+    fired = {"conflict_cuts": 0, "pool_cuts": 0}
+    cases = [c for c in _cases() if c[0] in ("bp0-tight", "bp1-tight", "cmax-a", "col-a")]
+    assert len(cases) == 4
+    for name, build, args in cases:
+        monkeypatch.delenv("DISCOPT_LP_ENGINE", raising=False)
+        monkeypatch.delenv("DISCOPT_MILP_CONFLICT", raising=False)
+        ref = build(*args).solve(milp_backend="highs")
+        assert ref.status in ("optimal", "infeasible"), (name, ref.status)
+        for cuts in (False, True):
+            monkeypatch.setenv("DISCOPT_MILP_CONFLICT", "1")
+            monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
+            _rust.profile_reset_py()
+            r = build(*args).solve(milp_backend="native", milp_cuts=cuts, time_limit=60)
+            c = dict(_rust.profile_counters_py())
+            assert r.status == ref.status, (name, cuts, r.status, ref.status)
+            if ref.status == "optimal":
+                assert r.objective == pytest.approx(ref.objective, abs=1e-6), (name, cuts)
+                assert r.gap_certified, (name, cuts)
+            fired["conflict_cuts"] += c.get("HighsMipSearchConflictCuts", 0)
+            fired["pool_cuts"] += c.get("HighsMipSearchPropagatedPoolCuts", 0)
+            compared += 1
+    assert compared == 2 * len(cases)
+    assert fired["conflict_cuts"] > 0, "no generateConflict cut was added"
+    assert fired["pool_cuts"] > 0, "no pool cut was propagated"

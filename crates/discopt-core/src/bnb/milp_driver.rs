@@ -8755,6 +8755,8 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchConflicts, o.conflicts.0);
                     incr_by(Ctr::HighsMipSearchProofConflicts, o.conflicts.1);
                     incr_by(Ctr::HighsMipSearchGlobalConflictFixings, o.conflicts.2);
+                    incr_by(Ctr::HighsMipSearchConflictCuts, o.conflict_cuts.0);
+                    incr_by(Ctr::HighsMipSearchPropagatedPoolCuts, o.conflict_cuts.1);
                 }
             }
             outs
