@@ -25967,6 +25967,30 @@ def solve_model(
                 _sx_cmp,
             )
 
+        # #2352: the reported objective must describe the reported POINT. ``obj_val``
+        # is the tree's value for the NLP point it stored; the C-3 integer snap above
+        # replaces ``sol_flat`` and left that number in place (only an adopted polish
+        # rewrote it). Measured on main 944a50522: an integer model returned the
+        # verified point (8, 1) with ``objective`` 3.75e-9 BELOW ``f(8, 1)``,
+        # ``optimal`` and ``gap_certified``. NLP-BB carries the same rule. The value
+        # is the arbiter's model (the pre-lift model when the factorable lift ran),
+        # in the evaluator's minimise sense, so the one negation below applies.
+        # Unconditional, like NLP-BB's: a threshold would keep a smaller lie. The
+        # certificate is re-tested on the final pair (``_withhold_stale_certificate``).
+        try:
+            _obj_at_point = float(_arb.evaluator.evaluate_objective(_arb.view(sol_flat)))
+        except Exception as _oe:  # pragma: no cover - evaluator robustness
+            raise RuntimeError(
+                "spatial B&B could not evaluate the objective at the point it is "
+                f"about to report: {type(_oe).__name__}: {_oe}"
+            ) from _oe
+        if not np.isfinite(_obj_at_point):
+            raise RuntimeError(
+                f"spatial B&B: the objective at the reported point is {_obj_at_point}, "
+                "which is not a reportable value"
+            )
+        obj_val = _obj_at_point
+
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
 
