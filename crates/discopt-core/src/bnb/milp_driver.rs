@@ -5041,6 +5041,8 @@ pub fn solve_milp_node_hooked(
     // with presolve on, the search runs one level down and would silently ignore it.
     let seed_file_set =
         MILP_DEPTH.with(|d| d.get()) == 0 && std::env::var_os("DISCOPT_MILP_SEED_POINT").is_some();
+    // #2354: a verified repair of a reduced-search point the original rows rejected.
+    let mut repair_seed: Option<Vec<f64>> = None;
     if milp_presolve_enabled()
         && opts.presolve
         && opts.initial_incumbent.is_none()
@@ -5051,7 +5053,19 @@ pub fn solve_milp_node_hooked(
         && opts.bound_hook.is_none()
         && (MILP_DEPTH.with(|d| d.get()) == 0 || (in_sub_mip() && submip_presolve_enabled()))
     {
-        if let Some(mut res) = solve_presolved(&prep.csc, m, n, c, l, u, b, obj_const, opts, t0) {
+        if let Some(mut res) = solve_presolved(
+            &prep.csc,
+            m,
+            n,
+            c,
+            l,
+            u,
+            b,
+            obj_const,
+            opts,
+            t0,
+            &mut repair_seed,
+        ) {
             crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
             if unscalable {
                 // Counted for the top-level solve only (see below).
@@ -5066,6 +5080,11 @@ pub fn solve_milp_node_hooked(
     // Presolve may have run and declined (no reduction, a refused or unverified
     // reduced solve): the original search gets what is left of the budget, not all of it.
     let mut opts_run = clock_from(opts, t0);
+    if repair_seed.is_some() {
+        // Presolve ran only because no incumbent was seeded, so this replaces nothing.
+        // The driver re-validates a seed before using it.
+        opts_run.initial_incumbent = repair_seed;
+    }
     // #2223: the mask is an entry-stage decision on the caller's rows; nested
     // sub-MIPs (their rows differ) must never inherit it.
     opts_run.relaxable_rows = None;
@@ -5358,7 +5377,9 @@ fn clock_from(opts: &MilpOptions, t0: std::time::Instant) -> MilpOptions {
 /// answer back and re-verify it on the original rows. `None` means "solve the original
 /// instead": the slack structure is not clean, presolve reduced nothing, presolve
 /// claimed infeasibility (never trusted as a certificate here), or the postsolved
-/// point failed verification.
+/// point failed verification and its fixed-integer repair ([`repair_postsolved`]) did
+/// not settle it. When the repair verified but does not keep the reduced verdict, it
+/// is left in `seed` for the original solve to start from (#2354).
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 fn solve_presolved(
     csc: &SparseCols,
@@ -5371,8 +5392,9 @@ fn solve_presolved(
     obj_const: f64,
     opts: &MilpOptions,
     t0: std::time::Instant,
+    seed: &mut Option<Vec<f64>>,
 ) -> Option<MilpResult> {
-    use crate::bnb::milp_presolve::{presolve_until, row_form_feasible, RowForm};
+    use crate::bnb::milp_presolve::{presolve_until, RowForm};
     assert_implied_subset(opts);
     let ns = opts.n_struct.min(n);
     let fin = |v: f64| {
@@ -5677,15 +5699,13 @@ fn solve_presolved(
     let mut res = res2;
     if has_x {
         let x = p.postsolve(&res.x, ns);
-        if !row_form_feasible(&rf, &x, 1e-6) {
-            if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
-                eprintln!(
-                    "MILP presolve: postsolved point failed verification; solving the original"
-                );
+        let x = match settle_postsolved(csc, m, n, c, l, u, b, obj_const, &rf, x, &mut res, opts) {
+            Ok(x) => x,
+            Err(s) => {
+                *seed = s;
+                return None;
             }
-            crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
-            return None;
-        }
+        };
         // The reported objective is the reduced problem's; it must be the postsolved
         // point's on the ORIGINAL costs, or the solve would report one value for a
         // point worth another. Presolve keeps them equal by construction; a reduction
@@ -5716,6 +5736,215 @@ fn solve_presolved(
         res.x = vec![0.0; ns];
     }
     Some(res)
+}
+
+/// The tolerance [`settle_postsolved`] verifies a postsolved point at on the original
+/// rows (it predates #2354 as a literal; named so the repair LP can match it).
+const PRESOLVE_VERIFY_TOL: f64 = 1e-6;
+
+/// #2354: the verification step of [`solve_presolved`]. `x` is the postsolved
+/// incumbent of the reduced search `res` (structural columns of the original). `Ok`
+/// carries the point to return, which passed `row_form_feasible(rf, ., 1e-6)`, with
+/// `res.obj` set to its value when it is a repair. `Err` means "solve the original",
+/// with a verified repair to seed that solve when there is one.
+///
+/// A point that meets the reduced rows can miss the original ones. The measured cause
+/// is tolerance, not presolve: aggregation scales rows, so a residual inside a reduced
+/// row's relative tolerance (`= 78000`, activity 77999.99818) violates the original
+/// row it came from (`<= 0`, activity 1/550; an OA master of `portfol_roundlot`). The
+/// whole reduced search used to be discarded for it and the original solved cold.
+/// Instead the point is repaired as HiGHS does ([`repair_postsolved`]), and the
+/// repair passes the same, unchanged verification or is not used.
+#[allow(clippy::too_many_arguments)]
+fn settle_postsolved(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    rf: &crate::bnb::milp_presolve::RowForm,
+    x: Vec<f64>,
+    res: &mut MilpResult,
+    opts: &MilpOptions,
+) -> Result<Vec<f64>, Option<Vec<f64>>> {
+    use crate::bnb::milp_presolve::row_form_feasible;
+    if row_form_feasible(rf, &x, PRESOLVE_VERIFY_TOL) {
+        return Ok(x);
+    }
+    let log = std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok();
+    let Some((xr, vr)) = repair_postsolved(csc, m, n, c, l, u, b, obj_const, rf, &x, opts) else {
+        if log {
+            eprintln!(
+                "MILP presolve: postsolved point failed verification and its fixed-integer \
+                 repair did not verify; solving the original"
+            );
+        }
+        crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+        return Err(None);
+    };
+    // The repair is a feasible point of the original, so its value is at least the
+    // true optimum, which the reduced bound does not exceed. A value below the bound
+    // means the two disagree numerically, and neither is trusted.
+    let bound_ok = vr >= res.bound - 1e-9 * (1.0 + res.bound.abs());
+    // A certificate stays one only if the repair still closes the gap under the
+    // search's own stopping rule (`gap_closed`).
+    let gap = (vr - res.bound).max(0.0);
+    let denom = if opts.rel_gap_max_abs {
+        vr.abs().max(res.bound.abs()).max(1e-10)
+    } else {
+        vr.abs().max(1.0)
+    };
+    let closes = gap / denom <= opts.gap_tol || opts.abs_gap_tol.is_some_and(|t| gap <= t);
+    if !bound_ok || (res.status == MilpStatus::Optimal && !closes) {
+        if log {
+            eprintln!(
+                "MILP presolve: repaired point {vr} (reduced {}, bound {}) does not keep the \
+                 reduced verdict; solving the original{}",
+                res.obj,
+                res.bound,
+                if bound_ok { " seeded with it" } else { "" }
+            );
+        }
+        crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+        if !bound_ok {
+            return Err(None);
+        }
+        crate::profile::incr(crate::profile::Ctr::MilpPresolveRepairSeeded);
+        return Err(Some(xr));
+    }
+    if log {
+        eprintln!(
+            "MILP presolve: postsolved point failed verification; repaired by the \
+             fixed-integer LP (objective {vr}, reduced {})",
+            res.obj
+        );
+    }
+    crate::profile::incr(crate::profile::Ctr::MilpPresolveRepaired);
+    // `bound_ok` admits a repair up to 1e-9 relative below the bound (measured on the
+    // #2354 master: 6.6e-10). Lowering the bound to it is sound and keeps the
+    // certificate's `bound <= incumbent`.
+    res.bound = res.bound.min(vr);
+    res.obj = vr;
+    Ok(xr)
+}
+
+/// #2354: the fixed-integer repair of a postsolved point `x` (structural columns of
+/// the original) that failed `row_form_feasible` on `rf`. Port of the repair step in
+/// HiGHS's `HighsMipSolverData::transformNewIntegerFeasibleSolution`
+/// (`HighsMipSolverData.cpp:1096`; HiGHS is MIT-licensed, see `THIRD_PARTY_NOTICES.md`):
+/// every integer column of the original is fixed at `round(x_j)` (refused when that
+/// leaves its bounds), and the original LP, slacks included, is solved cold for the
+/// rest. HiGHS solves that LP at the MIP feasibility tolerance
+/// (`HighsMipSolverData.cpp:1156`); the in-house equivalent is a priced elastic
+/// column per row and sign, bounded by half the verification tolerance (see the body).
+/// The point must then pass the caller's unchanged verification,
+/// `row_form_feasible(rf, ., PRESOLVE_VERIFY_TOL)`, with integers written exactly.
+///
+/// Returns the repaired structural point and its objective `cᵀx + obj_const` on the
+/// original costs, or `None` when the LP is not `Optimal` or the point does not
+/// verify. The point is a candidate only: what it may certify is the caller's call.
+#[allow(clippy::too_many_arguments)]
+fn repair_postsolved(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    rf: &crate::bnb::milp_presolve::RowForm,
+    x: &[f64],
+    opts: &MilpOptions,
+) -> Option<(Vec<f64>, f64)> {
+    use crate::bnb::milp_presolve::row_form_feasible;
+    crate::profile::incr(crate::profile::Ctr::MilpPresolveRepairAttempts);
+    let refuse = |why: std::fmt::Arguments<'_>| {
+        if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+            eprintln!("MILP presolve: fixed-integer repair refused: {why}");
+        }
+        None
+    };
+    let ns = rf.n;
+    let (mut fl, mut fu) = (l.to_vec(), u.to_vec());
+    for j in 0..ns {
+        if rf.is_int[j] {
+            let r = x[j].round();
+            if r < l[j] || r > u[j] {
+                return refuse(format_args!(
+                    "column {j} rounds to {r} outside [{}, {}]",
+                    l[j], u[j]
+                ));
+            }
+            fl[j] = r;
+            fu[j] = r;
+        }
+    }
+    // HiGHS solves the repair LP at the MIP feasibility tolerance and keeps any primal
+    // feasible answer (`primal_feasibility_tolerance = mip_feasibility_tolerance`). The
+    // in-house engine's tolerance is not that knob -- it is one feasibility/optimality
+    // tolerance in scaled space, so raising it does not make the LP accept a point that
+    // misses a row by less than the verification allows. The equivalent here is
+    // explicit: each row gets an elastic column bounded by half the verification's
+    // tolerance (`row_form_feasible` allows `tol * (1 + |activity|)`, never less than
+    // `tol`), so every LP-feasible point is inside what the unchanged verification
+    // accepts, and the verification still decides. Measured on the #2354 master:
+    // lot-sizing rows fix the continuous columns at `n_k / lot_k`, the budget row then
+    // misses `= 1` by 2.3e-8, and the exact fixed LP is infeasible (HiGHS at 1e-7
+    // agrees; at 1e-6 it is feasible), so without the elastic columns the engine
+    // returns `Numerical` with the residual pushed onto a lot row (1.8e-3).
+    let elastic = 0.5 * PRESOLVE_VERIFY_TOL;
+    // The elastic columns are priced, so the LP uses only the violation it needs: free
+    // violation would buy objective (measured on the #2354 master: 5e-7 below the
+    // reduced bound, which the caller then rightly refuses). At this price a column
+    // pays for itself only through a row whose dual exceeds 1e4 times the largest cost.
+    let price = 1e4 * (1.0 + c[..n].iter().fold(0.0_f64, |a, v| a.max(v.abs())));
+    let (cp, ri, va) = csc.raw();
+    let (mut cp2, mut ri2, mut va2) = (cp.to_vec(), ri.to_vec(), va.to_vec());
+    for sign in [1.0, -1.0] {
+        for i in 0..m {
+            ri2.push(i);
+            va2.push(sign);
+            cp2.push(ri2.len());
+        }
+    }
+    let cols = SparseCols::from_csc(cp2, ri2, va2);
+    let mut c2 = c.to_vec();
+    c2.resize(n + 2 * m, price);
+    fl.resize(n + 2 * m, 0.0);
+    fu.resize(n + 2 * m, elastic);
+    // The engine's own cold entry (equilibration, the #1935 original-space audit and
+    // the #2212 logical-basis rescue), so `x` comes back in original coordinates.
+    let sol = crate::lp::simplex::solve_lp_cols_scaled(
+        cols,
+        m,
+        n + 2 * m,
+        &c2,
+        &fl,
+        &fu,
+        b,
+        &opts.simplex,
+    );
+    if sol.status != LpStatus::Optimal || sol.x.len() != n + 2 * m {
+        return refuse(format_args!("repair LP {:?}", sol.status));
+    }
+    let mut xr = sol.x[..ns].to_vec();
+    for j in 0..ns {
+        if rf.is_int[j] {
+            xr[j] = fl[j];
+        }
+    }
+    if !row_form_feasible(rf, &xr, PRESOLVE_VERIFY_TOL) {
+        return refuse(format_args!(
+            "repaired point (LP {:?}) misses the original rows",
+            sol.status
+        ));
+    }
+    let v = (0..ns).map(|j| c[j] * xr[j]).sum::<f64>() + obj_const;
+    v.is_finite().then_some((xr, v))
 }
 
 /// The box the #1296 gate measures an entry's reach over (#2107): the caller's
@@ -13476,6 +13705,292 @@ mod tests {
         }
     }
 
+    /// #2354 fixture, the measured signature in miniature: `x` integer, `w`, `y`
+    /// continuous (`y` costs 5), one slack. Row 0 `x + w + y = 78000.05`, row 1
+    /// `1000 w <= 0`. Aggregating `w` out of row 1 gives a row with right-hand side
+    /// 7.8e7, whose relative tolerance (78) admits `x = 78000, y = 0`; postsolved,
+    /// that point has `w = 0.05` and misses row 1 by 50. Returns the standard form
+    /// `(csc, m, n, c, l, u, b)` and its row form.
+    #[allow(clippy::type_complexity)]
+    fn repair_fixture(
+        y_ub: f64,
+    ) -> (
+        SparseCols,
+        usize,
+        usize,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        crate::bnb::milp_presolve::RowForm,
+    ) {
+        // Columns x, w, y, s1 (row 1's slack, s1 >= 0).
+        let csc = SparseCols::from_csc(
+            vec![0, 1, 3, 4, 5],
+            vec![0, 0, 1, 0, 1],
+            vec![1.0, 1.0, 1000.0, 1.0, 1.0],
+        );
+        let c = vec![1.0, 0.0, 5.0, 0.0];
+        let l = vec![0.0, -1e6, 0.0, 0.0];
+        let u = vec![2e5, 1e6, y_ub, INF];
+        let b = vec![78000.05, 0.0];
+        let rf = crate::bnb::milp_presolve::RowForm {
+            n: 3,
+            rows: vec![
+                (vec![0, 1, 2], vec![1.0, 1.0, 1.0]),
+                (vec![1], vec![1000.0]),
+            ],
+            lo: vec![78000.05, f64::NEG_INFINITY],
+            up: vec![78000.05, 0.0],
+            c: c[..3].to_vec(),
+            l: l[..3].to_vec(),
+            u: u[..3].to_vec(),
+            is_int: vec![true, false, false],
+        };
+        (csc, 2, 4, c, l, u, b, rf)
+    }
+
+    fn reduced_result(status: MilpStatus, obj: f64, bound: f64) -> MilpResult {
+        MilpResult {
+            status,
+            stop: MilpStop::None,
+            x: Vec::new(),
+            obj,
+            bound,
+            nodes: 7,
+            lp_iters: 11,
+            lazy_calls: 0,
+            lazy_requeues: 0,
+            node_calls: 0,
+            node_cuts_added: 0,
+            root_cut_rows: 0,
+            strong_probe_lps: 0,
+            bound_hook_calls: 0,
+            bound_hook_raised: 0,
+        }
+    }
+
+    /// The tolerance-accepted reduced point, postsolved.
+    const REPAIR_BAD_X: [f64; 3] = [78000.0, 0.05, 0.0];
+
+    /// #2354: a postsolved point that misses an original row is repaired (integers
+    /// fixed, the LP re-solved for the continuous columns) instead of discarding the
+    /// reduced search; the repair passes the unchanged verification, carries its own
+    /// objective, and keeps the reduced certificate because it closes the gap.
+    #[test]
+    fn presolve_repairs_a_postsolved_point_the_original_rows_reject() {
+        use crate::bnb::milp_presolve::row_form_feasible;
+        let (csc, m, n, c, l, u, b, rf) = repair_fixture(1.0);
+        assert!(
+            !row_form_feasible(&rf, &REPAIR_BAD_X, 1e-6),
+            "the fixture must fail (§6)"
+        );
+        // The true optimum: x = 78000, w = 0, y = 0.05, objective 78000.25.
+        let mut res = reduced_result(MilpStatus::Optimal, 78000.0, 78000.25 - 1e-7);
+        let opts = cover_opts(3);
+        let got = settle_postsolved(
+            &csc,
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &rf,
+            REPAIR_BAD_X.to_vec(),
+            &mut res,
+            &opts,
+        )
+        .expect("the fixed-integer repair verifies and closes the gap");
+        assert!(row_form_feasible(&rf, &got, 1e-6), "{got:?}");
+        assert_eq!(got[0], 78000.0, "the integer stays at its rounded value");
+        assert!(
+            (got[2] - 0.05).abs() <= 1e-9 && got[1].abs() <= 1e-9,
+            "{got:?}"
+        );
+        assert!(
+            (res.obj - 78000.25).abs() <= 1e-9,
+            "objective is the repair's: {}",
+            res.obj
+        );
+        assert_eq!(res.status, MilpStatus::Optimal);
+        assert_eq!(
+            (res.nodes, res.lp_iters),
+            (7, 11),
+            "the reduced search is kept"
+        );
+    }
+
+    /// #2354: a repair that does not close the reduced gap is no certificate; the
+    /// original is solved, seeded with the verified repair rather than cold. A
+    /// limit-stopped reduced search keeps its status and returns the repair.
+    #[test]
+    fn presolve_repair_that_misses_the_gap_seeds_the_original_solve() {
+        use crate::bnb::milp_presolve::row_form_feasible;
+        let (csc, m, n, c, l, u, b, rf) = repair_fixture(1.0);
+        let mut opts = cover_opts(3);
+        opts.gap_tol = 1e-9;
+        opts.abs_gap_tol = None;
+        let mut res = reduced_result(MilpStatus::Optimal, 78000.0, 78000.0);
+        let seed = settle_postsolved(
+            &csc,
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &rf,
+            REPAIR_BAD_X.to_vec(),
+            &mut res,
+            &opts,
+        )
+        .expect_err("an open gap is not a certificate");
+        let seed = seed.expect("the verified repair seeds the original solve");
+        assert!(row_form_feasible(&rf, &seed, 1e-6), "{seed:?}");
+        let mut res = reduced_result(MilpStatus::NodeLimit, 78000.0, 78000.0);
+        let got = settle_postsolved(
+            &csc,
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &rf,
+            REPAIR_BAD_X.to_vec(),
+            &mut res,
+            &opts,
+        )
+        .expect("a limit-stopped search returns its repaired incumbent");
+        assert!(row_form_feasible(&rf, &got, 1e-6));
+        assert_eq!(res.status, MilpStatus::NodeLimit);
+        assert!((res.obj - 78000.25).abs() <= 1e-9);
+    }
+
+    /// #2354: integers that admit no exact completion, only one within the
+    /// verification tolerance (the measured master in miniature: a lot row
+    /// `78000 w = x` and a budget row that the lot value misses by 2.3e-8). The exact
+    /// fixed LP is infeasible; the repair finds the tolerance completion, putting the
+    /// residual on the budget row rather than the lot row, and it verifies.
+    #[test]
+    fn presolve_repair_finds_a_completion_only_the_tolerance_admits() {
+        use crate::bnb::milp_presolve::row_form_feasible;
+        let budget = 848.0 / 78000.0 + 2.3e-8;
+        // Columns x (integer), w; rows: 78000 w - x = 0, w = budget. No slacks.
+        let csc = SparseCols::from_csc(vec![0, 1, 3], vec![0, 0, 1], vec![-1.0, 78000.0, 1.0]);
+        let (c, l, u, b) = (
+            vec![0.0, 1.0],
+            vec![0.0, 0.0],
+            vec![1e4, 1.0],
+            vec![0.0, budget],
+        );
+        let rf = crate::bnb::milp_presolve::RowForm {
+            n: 2,
+            rows: vec![(vec![0, 1], vec![-1.0, 78000.0]), (vec![1], vec![1.0])],
+            lo: vec![0.0, budget],
+            up: vec![0.0, budget],
+            c: c.clone(),
+            l: l.clone(),
+            u: u.clone(),
+            is_int: vec![true, false],
+        };
+        let bad = vec![848.0, budget];
+        assert!(
+            !row_form_feasible(&rf, &bad, PRESOLVE_VERIFY_TOL),
+            "fixture (§6)"
+        );
+        let exact = crate::lp::simplex::solve_lp_cols_scaled(
+            csc.clone(),
+            2,
+            2,
+            &c,
+            &[848.0, 0.0],
+            &[848.0, 1.0],
+            &b,
+            &cover_opts(2).simplex,
+        );
+        assert_ne!(
+            exact.status,
+            LpStatus::Optimal,
+            "the exact fixed LP has no point"
+        );
+        let (xr, vr) =
+            repair_postsolved(&csc, 2, 2, &c, &l, &u, &b, 0.0, &rf, &bad, &cover_opts(2))
+                .expect("a completion within the verification tolerance exists");
+        assert!(row_form_feasible(&rf, &xr, PRESOLVE_VERIFY_TOL), "{xr:?}");
+        assert_eq!(xr[0], 848.0);
+        assert!(
+            (xr[1] - 848.0 / 78000.0).abs() <= 1e-12,
+            "lot row kept exact: {xr:?}"
+        );
+        assert!((vr - xr[1]).abs() <= 1e-15);
+    }
+
+    /// #2354: the repair never weakens anything. No continuous room (`y` fixed at 0):
+    /// the repair LP is infeasible and the original is solved cold, unseeded. A repair
+    /// below the reduced bound means the two disagree, and neither is used. A point
+    /// that already verifies is returned untouched.
+    #[test]
+    fn presolve_repair_refuses_what_it_cannot_verify() {
+        let opts = cover_opts(3);
+        let (csc, m, n, c, l, u, b, rf) = repair_fixture(0.0);
+        let mut res = reduced_result(MilpStatus::Optimal, 78000.0, 78000.0);
+        let out = settle_postsolved(
+            &csc,
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &rf,
+            REPAIR_BAD_X.to_vec(),
+            &mut res,
+            &opts,
+        );
+        assert_eq!(out, Err(None), "no fixed-integer completion exists");
+        let (csc, m, n, c, l, u, b, rf) = repair_fixture(1.0);
+        let mut res = reduced_result(MilpStatus::NodeLimit, 78000.0, 78001.0);
+        let out = settle_postsolved(
+            &csc,
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &rf,
+            REPAIR_BAD_X.to_vec(),
+            &mut res,
+            &opts,
+        );
+        assert_eq!(out, Err(None), "a repair below the bound is not trusted");
+        let good = vec![78000.0, 0.0, 0.05];
+        let mut res = reduced_result(MilpStatus::Optimal, 78000.25, 78000.25);
+        let out = settle_postsolved(
+            &csc,
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &rf,
+            good.clone(),
+            &mut res,
+            &opts,
+        );
+        assert_eq!(out, Ok(good));
+        assert_eq!(res.obj, 78000.25);
+    }
+
     #[test]
     fn odd_cycle_cover_lp_bound_really_is_fractional() {
         // Anti-vacuity (CLAUDE.md §6): if the relaxation were already integral the
@@ -15644,7 +16159,8 @@ mod tests {
                 presolve_infeasible += 1;
             }
             let t0 = std::time::Instant::now();
-            let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, t0) else {
+            let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, t0, &mut None)
+            else {
                 fallbacks += 1;
                 continue;
             };
