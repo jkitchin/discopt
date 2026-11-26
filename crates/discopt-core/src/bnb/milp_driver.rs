@@ -5008,6 +5008,10 @@ pub fn solve_milp_node_hooked(
     // The caller's wall-time budgets run from here: entry preparation and MILP presolve
     // spend them too (`clock_from`).
     let t0 = std::time::Instant::now();
+    // Read the opt-in flags here, so a garbage value is refused on every model,
+    // including one that presolve or the root closes before any search reads them.
+    let _ = crate::bnb::milp_symmetry::sym_lex_enabled();
+    let _ = highs_env::conflict_enabled();
     if let Some(mask) = opts.relaxable_rows.as_ref() {
         // #2223: the mask trades incumbent feasibility on the marked rows for a
         // certificate; only a lazy separator that re-validates every accepted point
@@ -5069,7 +5073,7 @@ pub fn solve_milp_node_hooked(
     // Kept for the unbounded check below (the search consumes and extends the matrix).
     let top_level = MILP_DEPTH.with(|d| d.get()) == 0;
     let csc_orig = (top_level && !opts.integer_cols.is_empty()).then(|| prep.csc.clone());
-    let mut res = solve_milp_node_search(
+    let mut res = solve_milp_node_search_sym(
         prep.csc, m, n, c, l, u, b, obj_const, opts, hook, lazy, node,
     );
     if res.status == MilpStatus::Unbounded && !opts.integer_cols.is_empty() {
@@ -5091,6 +5095,79 @@ pub fn solve_milp_node_hooked(
         }
         withdraw_certificate(&mut res);
     }
+    res
+}
+
+/// [`solve_milp_node_search`] with `DISCOPT_MILP_SYM_LEX`: the verified formulation
+/// symmetry's lexicographic-leader rows ([`crate::bnb::milp_symmetry`]) appended to the
+/// model this search solves (the caller's, or the presolved one in
+/// [`solve_presolved`]), whose automorphisms they are verified on. Only where nothing
+/// outside the rows constrains the solve: no lazy, node or bound hook (rows the
+/// detection cannot see), no debugger, no seeded incumbent (not necessarily an
+/// orbit's lex-max) and not a heuristic sub-MIP. Presolve-implied integer columns are
+/// treated as continuous (they stay out of every lex prefix). The appended rows only
+/// add columns past `n` (their surplus slacks), so the result's structural part needs
+/// no mapping back.
+#[allow(clippy::too_many_arguments)]
+fn solve_milp_node_search_sym(
+    csc_w: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+    hook: Option<&dyn MilpDebugHook>,
+    lazy: Option<&dyn MilpLazyHook>,
+    node: Option<&dyn MilpNodeHook>,
+) -> MilpResult {
+    let on = crate::bnb::milp_symmetry::sym_lex_enabled()
+        && !in_sub_mip()
+        && !opts.integer_cols.is_empty()
+        && hook.is_none()
+        && lazy.is_none()
+        && node.is_none()
+        && opts.bound_hook.is_none()
+        && opts.initial_incumbent.is_none();
+    if !on {
+        return solve_milp_node_search(csc_w, m, n, c, l, u, b, obj_const, opts, hook, lazy, node);
+    }
+    let mut is_int = vec![false; n];
+    for &j in &opts.integer_cols {
+        is_int[j] = true;
+    }
+    for &j in &opts.implied_int_cols {
+        if j < n {
+            is_int[j] = false;
+        }
+    }
+    let f = crate::bnb::milp_symmetry::Form {
+        csc: &csc_w,
+        m,
+        n,
+        ns: opts.n_struct,
+        c,
+        l,
+        u,
+        b,
+        is_int: &is_int,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let s = crate::bnb::milp_symmetry::detect(&f, 1000, Some(deadline));
+    let aug = (!s.rows.is_empty()).then(|| crate::bnb::milp_symmetry::augment(&f, &s.rows));
+    let res = match aug {
+        Some((csc_a, m_a, n_a, c_a, l_a, u_a, b_a)) => solve_milp_node_search(
+            csc_a, m_a, n_a, &c_a, &l_a, &u_a, &b_a, obj_const, opts, hook, lazy, node,
+        ),
+        None => solve_milp_node_search(csc_w, m, n, c, l, u, b, obj_const, opts, hook, lazy, node),
+    };
+    // After the search: its `begin_solve` resets the counters.
+    use crate::profile::{incr_by, Ctr};
+    incr_by(Ctr::MilpSymLexGenerators, s.generators.len() as u64);
+    incr_by(Ctr::MilpSymLexTried, s.tried as u64);
+    incr_by(Ctr::MilpSymLexRows, s.rows.len() as u64);
     res
 }
 
@@ -5550,7 +5627,7 @@ fn solve_presolved(
         .initial_incumbent
         .as_ref()
         .map(|x| p.keep_cols.iter().map(|&j| x[j]).collect());
-    let res2 = solve_milp_node_search(
+    let res2 = solve_milp_node_search_sym(
         csc2,
         m2,
         n2,
@@ -8665,6 +8742,19 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsSearchCutRowsDeleted, o.cut_rows_deleted as u64);
                     incr_by(Ctr::HighsSearchCutEpochs, o.cut_epochs as u64);
                     incr_by(Ctr::HighsSearchPoolSeeded, o.seeded_pool as u64);
+                    incr_by(Ctr::HighsMipSearchEvaluations, o.eval.evaluations as u64);
+                    incr_by(Ctr::HighsMipSearchLpInfeasible, o.eval.lp_infeasible as u64);
+                    incr_by(
+                        Ctr::HighsMipSearchDomainInfeasible,
+                        o.eval.domain_infeasible as u64,
+                    );
+                    incr_by(
+                        Ctr::HighsMipSearchBoundExceeding,
+                        o.eval.bound_exceeding as u64,
+                    );
+                    incr_by(Ctr::HighsMipSearchConflicts, o.conflicts.0);
+                    incr_by(Ctr::HighsMipSearchProofConflicts, o.conflicts.1);
+                    incr_by(Ctr::HighsMipSearchGlobalConflictFixings, o.conflicts.2);
                 }
             }
             outs

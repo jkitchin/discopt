@@ -874,6 +874,23 @@ counters!(
     HighsMipSearchSepLifts,
     HighsMipSearchBasisFits,
     HighsMipSearchSubMipHits,
+    // Node evaluations of the HiGHS-design search by verdict (conflict-analysis entry
+    // experiment: how often an LP-infeasible or propagation-infeasible node occurs).
+    HighsMipSearchEvaluations,
+    HighsMipSearchLpInfeasible,
+    HighsMipSearchDomainInfeasible,
+    HighsMipSearchBoundExceeding,
+    // `DISCOPT_MILP_CONFLICT`: conflicts the search's conflict analysis added to its
+    // pool (propagation-infeasible nodes, and LP-infeasible nodes from the Farkas
+    // proof row), and the global bound changes the pool's propagation made.
+    HighsMipSearchConflicts,
+    HighsMipSearchProofConflicts,
+    HighsMipSearchGlobalConflictFixings,
+    // `DISCOPT_MILP_SYM_LEX`: verified formulation automorphisms, candidates
+    // checked, and the lexicographic-leader rows appended.
+    MilpSymLexGenerators,
+    MilpSymLexTried,
+    MilpSymLexRows,
     // #2224 (`DISCOPT_MILP_PREINC_SCORE`): branchings the HiGHS-design search took
     // with the raised pre-incumbent cutoff/inference score weight.
     PreIncScoreBranchings,
