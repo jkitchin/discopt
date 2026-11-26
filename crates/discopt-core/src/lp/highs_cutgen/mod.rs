@@ -59,12 +59,16 @@ pub mod domain;
 pub mod integers;
 pub mod modk;
 pub mod objective;
+pub mod orbitope;
 pub mod pool;
 pub mod probing;
 pub mod random;
 pub mod separators;
 pub mod sparse_vec;
 pub mod stdalgo;
+pub mod sym_dynamic;
+pub mod sym_orbital;
+pub mod sym_orbitopal;
 pub mod transformed_lp;
 pub mod vbound;
 

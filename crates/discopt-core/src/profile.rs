@@ -934,6 +934,23 @@ counters!(
     MilpSymLexGenerators,
     MilpSymLexTried,
     MilpSymLexRows,
+    // `DISCOPT_MILP_ORBITOPE`: verified full integer orbitopes, their columns, and
+    // the bound changes their column-lex propagation made.
+    MilpOrbitopes,
+    MilpOrbitopeColumns,
+    MilpOrbitopeFixings,
+    MilpSymDynGenerators,
+    MilpSymDynFixings,
+    MilpSymDynNodes,
+    // `DISCOPT_MILP_SYM_ORBITAL`: verified generators handed to orbital reduction,
+    // nodes it ran at, and the bound changes it made.
+    MilpSymOrbGenerators,
+    MilpSymOrbNodes,
+    MilpSymOrbFixings,
+    // `DISCOPT_MILP_ORBITOPAL`: nodes dynamic orbitopal fixing ran at, and the bound
+    // changes it made (orbitopes found are `MilpOrbitopes`).
+    MilpOrbitopalNodes,
+    MilpOrbitopalFixings,
     // #2224 (`DISCOPT_MILP_PREINC_SCORE`): branchings the HiGHS-design search took
     // with the raised pre-incumbent cutoff/inference score weight.
     PreIncScoreBranchings,

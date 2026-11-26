@@ -339,6 +339,10 @@ fn run() -> Result<(), String> {
         rel_gap_max_abs: false,
         bound_hook: None,
         bound_hook_every: 1,
+        orbitopes: None,
+        sym_dynamic: None,
+        sym_orbital: None,
+        sym_orbitopal: None,
         extend_no_incumbent_s: None,
         gap_tol: args.gap_tol,
         // This CLI exposes only the relative tolerance, so there is no

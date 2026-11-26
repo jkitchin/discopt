@@ -975,6 +975,31 @@ pub(super) struct HighsEnv<'a, 'b> {
     stall_nodes: usize,
     /// `DISCOPT_MILP_CONFLICT`.
     conf: Option<Conflicts>,
+    /// `DISCOPT_MILP_SYM_DYNAMIC` / `DISCOPT_MILP_SYM_ORBITAL` (top-level search
+    /// only).
+    shadow: Option<SymShadow>,
+}
+
+/// `DISCOPT_MILP_SYM_DYNAMIC` / `DISCOPT_MILP_SYM_ORBITAL`: the model's verified
+/// automorphisms and the shadow of the search tree they are applied over (see
+/// [`crate::lp::highs_cutgen::sym_dynamic`] and
+/// [`crate::lp::highs_cutgen::sym_orbital`]).
+struct SymShadow {
+    lex: Option<std::sync::Arc<crate::lp::highs_cutgen::sym_dynamic::DynamicLex>>,
+    orb: Option<std::sync::Arc<crate::lp::highs_cutgen::sym_orbital::OrbitalReduction>>,
+    otl: Option<std::sync::Arc<crate::lp::highs_cutgen::sym_orbitopal::DynamicOrbitopes>>,
+    /// Every created node: its parent and the branching change that created it.
+    tree: std::collections::HashMap<u64, (Option<u64>, Option<QDomainChange>)>,
+    /// The structural box the search started from (set at the root), and the columns
+    /// whose orbit it treats unequally (orbital reduction never uses their
+    /// generators).
+    root_lo: Vec<f64>,
+    root_hi: Vec<f64>,
+    broken: Vec<bool>,
+    /// The node's branchings, root to node: `(column, is_upper, value)`.
+    path: Vec<(usize, bool, f64)>,
+    order: Vec<usize>,
+    out: Vec<(usize, bool, f64)>,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -1502,6 +1527,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
         self.q.set_ident(self.last_slot, ident);
     }
     fn node_created(&mut self, ident: NodeIdent) {
+        if let Some(sh) = self.shadow.as_mut() {
+            sh.tree.insert(ident.id, (ident.parent, ident.branch));
+        }
         let Some(d) = self.dbg.as_mut() else { return };
         let depth = ident
             .parent
@@ -1763,6 +1791,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
         if let Some(d) = self.dbg.as_mut() {
             d.best = None;
         }
+        // Before the reference-point check: a symmetric copy of the point may be
+        // what this node keeps.
+        self.sym_dynamic(node);
         let ctx = make_ctx(self.ctx, &self.lp);
         let ns = self.ctx.ns;
         let ref_in = self.refp.as_ref().map(|rc| {
@@ -2438,7 +2469,153 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             progress: (0.0, 0, 0),
             stall_nodes: 0,
             conf: None,
+            // Only the search on the model they were verified on (never a sub-MIP's);
+            // `run` also drops it below the top level.
+            shadow: {
+                let lex = ctx.opts.sym_dynamic.clone();
+                let orb = ctx.opts.sym_orbital.clone();
+                let otl = ctx.opts.sym_orbitopal.clone();
+                let any = lex.is_some() || orb.is_some() || otl.is_some();
+                (any && !super::in_sub_mip()).then(|| {
+                    assert!(
+                        lex.as_ref().is_none_or(|l| l.matches(ctx.ns, ctx.c_w))
+                            && orb.as_ref().is_none_or(|o| o.matches(ctx.ns, ctx.c_w))
+                            && otl.as_ref().is_none_or(|o| o.matches(ctx.ns, ctx.c_w)),
+                        "symmetries attached to a model they were not verified on"
+                    );
+                    SymShadow {
+                        lex,
+                        orb,
+                        otl,
+                        tree: std::collections::HashMap::new(),
+                        root_lo: Vec::new(),
+                        root_hi: Vec::new(),
+                        broken: Vec::new(),
+                        path: Vec::new(),
+                        order: Vec::new(),
+                        out: Vec::new(),
+                    }
+                })
+            },
         })
+    }
+
+    /// `DISCOPT_MILP_SYM_DYNAMIC` / `DISCOPT_MILP_SYM_ORBITAL` / `DISCOPT_MILP_ORBITOPAL`:
+    /// dynamic lex reduction, orbital reduction and orbitopal fixing at `node`, in the order its path from the root
+    /// first branched on each column, then domain propagation, to a fixpoint (capped;
+    /// stopping early only forgoes reductions). Only here, at a node's own
+    /// evaluation: strong-branching probes and the global domain never see these
+    /// reductions, so the inferences they record stay valid.
+    fn sym_dynamic(&mut self, node: &NodeData) {
+        let Some(sh) = self.shadow.as_mut() else {
+            return;
+        };
+        let dom = &mut self.eval.dom;
+        if dom.infeasible() {
+            return;
+        }
+        sh.order.clear();
+        sh.path.clear();
+        let mut id = node.ident.id;
+        loop {
+            let &(parent, branch) = sh.tree.get(&id).unwrap_or_else(|| {
+                panic!("DISCOPT_MILP_SYM_DYNAMIC: node {id} is missing from the shadow tree")
+            });
+            if let Some(b) = branch {
+                let j = b.col as usize;
+                // The region the argument relies on: every branching on the path
+                // holds in this node's domain.
+                let held = if b.upper {
+                    dom.col_upper[j] <= b.val + 1e-9
+                } else {
+                    dom.col_lower[j] >= b.val - 1e-9
+                };
+                assert!(
+                    held,
+                    "DISCOPT_MILP_SYM_DYNAMIC: branching {b:?} of node {id} does not hold at \
+                     node {}",
+                    node.ident.id
+                );
+                sh.order.push(j);
+                sh.path.push((j, b.upper, b.val));
+            }
+            match parent {
+                Some(p) => id = p,
+                None => break,
+            }
+        }
+        sh.order.reverse();
+        sh.path.reverse();
+        // First occurrence of each column, in root-to-leaf order.
+        let mut seen = std::collections::HashSet::new();
+        sh.order.retain(|&j| seen.insert(j));
+        if sh.order.is_empty() {
+            return;
+        }
+        use crate::profile::{incr, incr_by, Ctr};
+        if sh.lex.is_some() {
+            incr(Ctr::MilpSymDynNodes);
+        }
+        if sh.orb.is_some() {
+            incr(Ctr::MilpSymOrbNodes);
+        }
+        if sh.otl.is_some() {
+            incr(Ctr::MilpOrbitopalNodes);
+        }
+        let ns = self.ctx.ns;
+        for _ in 0..5 {
+            sh.out.clear();
+            let mut k = 0;
+            if let Some(otl) = sh.otl.as_ref() {
+                let kt = otl.propagate(
+                    &sh.order,
+                    &dom.col_lower[..ns],
+                    &dom.col_upper[..ns],
+                    dom.feastol(),
+                    &mut sh.out,
+                );
+                incr_by(Ctr::MilpOrbitopalFixings, kt as u64);
+                k += kt;
+            }
+            if let Some(orb) = sh.orb.as_ref() {
+                let ko = orb.propagate(
+                    &sh.path,
+                    &sh.root_lo,
+                    &sh.root_hi,
+                    &sh.broken,
+                    &dom.col_lower[..ns],
+                    &dom.col_upper[..ns],
+                    dom.feastol(),
+                    &mut sh.out,
+                );
+                incr_by(Ctr::MilpSymOrbFixings, ko as u64);
+                k += ko;
+            }
+            if let Some(lex) = sh.lex.as_ref() {
+                // Over the bounds before the orbital changes: each propagator's
+                // consequences hold for the same box, and the next round sees both.
+                let kl = lex.propagate(
+                    &sh.order,
+                    &dom.col_lower[..ns],
+                    &dom.col_upper[..ns],
+                    dom.feastol(),
+                    &mut sh.out,
+                );
+                incr_by(Ctr::MilpSymDynFixings, kl as u64);
+                k += kl;
+            }
+            if k == 0 {
+                break;
+            }
+            dom.apply_symmetry_tightenings(&sh.out);
+            if dom.infeasible() {
+                break;
+            }
+            dom.propagate();
+            if dom.infeasible() {
+                break;
+            }
+        }
     }
 
     /// Turn on conflict analysis: register the pool on the local domain and take the
@@ -2811,6 +2988,7 @@ pub(super) fn run<'a>(
     if !top_level {
         // `DISCOPT_MILP_PREINC_SCORE` acts on the top-level search only.
         env.preinc_score = false;
+        env.shadow = None;
         env.pc.set_feasibility_weight(HIGHS_FEASIBILITY_WEIGHT);
     }
     if let Some(rc) = env.refp.as_mut() {
@@ -2893,6 +3071,17 @@ pub(super) fn run<'a>(
                 branch: None,
             },
         );
+        // The shadow tree's root box is the global box after probing: generators
+        // that do not map it onto itself are marked broken.
+        if let Some(sh) = env.shadow.as_mut() {
+            sh.tree.insert(root_id, (None, None));
+            let ns = ctx.ns;
+            sh.root_lo = env.eval.dom.col_lower[..ns].to_vec();
+            sh.root_hi = env.eval.dom.col_upper[..ns].to_vec();
+            if let Some(orb) = sh.orb.as_ref() {
+                sh.broken = orb.broken(&sh.root_lo, &sh.root_hi);
+            }
+        }
     }
     let mut search = Search {
         count_tree_weight: true,
