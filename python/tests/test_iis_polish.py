@@ -391,3 +391,76 @@ def test_post_pass_integrality_step_tries_the_integrality_alone():
     assert E._filter_integrality(eng2.probe, eng2, 0, {0, 1}, b, i, pend)
     assert i == {0} and b == set() and set(pend) == {("integrality", 0)}
     assert 0.2 - 1e-9 <= pend[("integrality", 0)][0] <= 0.8 + 1e-9
+
+
+# --- the closing pass (DISCOPT_IIS_CLOSE) ---------------------------------------
+#
+# 2x - 2y = 1 with x, y integer and both fixed at 0. {row, int x, int y} is
+# infeasible and irreducible by deletion, but the checker relaxes an integrality
+# with the column's box kept, and the box alone ([0, 0] twice) leaves the row
+# infeasible: neither integrality can have a certificate. The certifiable IIS
+# is {row, x <= 0, y >= 0}.
+
+
+def _parity():
+    return _arrays([[2, -2]], [1], [1], 2, [0, 0], [0, 0], [True, True])
+
+
+def _parity_answer() -> MilpIIS:
+    return MilpIIS(constraints=[0], bounds=[], integrality=[0, 1])
+
+
+def _polish_parity(arr):
+    return _polish(
+        arr,
+        _parity_answer(),
+        cert_tol=1e-6,
+        time_limit=10.0,
+        engine="highs",
+        deadline=time.perf_counter() + 60.0,
+    )
+
+
+def test_without_the_closing_pass_the_held_integralities_stay_uncertified(monkeypatch):
+    monkeypatch.delenv("DISCOPT_IIS_CLOSE", raising=False)
+    arr = _parity()
+    out = _polish_parity(arr)
+    assert sorted(out.integrality) == [0, 1] and out.n_exchanged == 0
+    assert not any(k[0] == "integrality" for k in out.certificates)
+    assert _checked(arr, out) < _n_elements(out)
+
+
+def test_closing_pass_exchanges_integrality_for_bounds_and_drops_the_slack_ones(monkeypatch):
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "1")
+    arr = _parity()
+    out = _polish_parity(arr)
+    assert out.integrality == [] and sorted(out.constraints) == [0]
+    assert sorted(out.bounds) == [(0, "upper"), (1, "lower")]
+    assert out.n_exchanged == 2 and out.n_close_dropped == 2
+    assert _checked(arr, out) == _n_elements(out) == 3
+    assert out.proven_irreducible
+
+
+def test_closing_pass_keeps_the_answer_when_confirmation_fails(monkeypatch):
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "1")
+    calls = []
+
+    def refuse(self, *a, **k):
+        calls.append(a)
+        return None
+
+    monkeypatch.setattr(E._Engine, "confirm_infeasible", refuse)
+    out = _polish_parity(_parity())
+    assert calls, "the exchanged set was never offered for confirmation"
+    assert sorted(out.integrality) == [0, 1] and out.bounds == []
+    assert out.n_exchanged == 0 and out.n_close_dropped == 0
+
+
+def test_closing_pass_leaves_a_certified_answer_alone(monkeypatch):
+    """x integer in [0, 1] with 2x = 1: the integrality has a witness (x = 1/2
+    inside the box), so nothing is exchanged."""
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "1")
+    arr = _arrays([[2]], [1], [1], 1, [0], [1], [True])
+    res = milp_iis_arrays(arr, total_time_limit=30.0)
+    assert res.integrality == [0] and res.n_exchanged == 0 and res.n_close_dropped == 0
+    assert _checked(arr, res) == _n_elements(res)

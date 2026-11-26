@@ -173,6 +173,10 @@ class MilpIIS:
     n_forced_certified: int = 0
     n_add_one_tried: int = 0
     n_add_one_moves: int = 0
+    # The closing pass (``DISCOPT_IIS_CLOSE``): held integralities exchanged for
+    # their bounds, and uncertified rows / bounds a removal probe dropped.
+    n_exchanged: int = 0
+    n_close_dropped: int = 0
     n_relaxed: int = 0  # integralities the anytime relaxation (_relax_integrality) traded away
     # Portfolio runs only: one entry per member, in portfolio order, with keys
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
@@ -327,7 +331,9 @@ class _Engine:
             arrs = self._arrays(
                 set(self.row_groups), every, set(int(j) for j in np.flatnonzero(self.is_int))
             )
-            verdict, _ = bm.decide(*arrs, stop=stop_at)
+            # The caller's deadline, else its per-probe limit (as in _blocks_decide).
+            stop = time.perf_counter() + float(self.probe_tl) if stop_at is None else stop_at
+            verdict, _ = bm.decide(*arrs, stop=stop)
         except Unsupported:
             return False
         if verdict is True:
@@ -1330,6 +1336,68 @@ def _relax_integrality(
     return c0, b, i
 
 
+def _close_enabled() -> bool:
+    """``DISCOPT_IIS_CLOSE`` (default OFF; row in
+    ``docs/dev/flag-retirement-audit.md``): the closing pass of :func:`_polish`.
+
+    The competition checker certifies a held integrality only by a point that
+    violates it *inside the column's box* (a relaxed integrality keeps its
+    bounds). A held integrality whose relaxation with the box kept leaves the
+    set infeasible therefore has no certificate, and the answer is not an IIS
+    under that rule however the filter decided it. The pass (1) exchanges every
+    such integrality for the column's finite bounds
+    (:func:`_exchange_integrality`), which can make the answer *larger* by
+    count and certifiable, and (2) removal-tests each row or bound that the
+    forced-violation repair could not certify, dropping it when the set stays
+    infeasible. The changed set replaces the answer only when
+    :meth:`_Engine.confirm_infeasible` confirms it."""
+    return os.environ.get("DISCOPT_IIS_CLOSE", "0") == "1"
+
+
+def _exchange_integrality(
+    eng: _Engine,
+    cons: set[int],
+    bounds: set,
+    ints: set[int],
+    keep: set[int],
+    stop_at: float,
+    max_rounds: int = _RELAX_MAX_ROUNDS,
+) -> Optional[tuple[set[int], set, set[int]]]:
+    """Relax the held integralities outside ``keep`` (those holding a
+    certificate) while keeping their finite bounds as explicit elements, by the
+    counterexample-guided refinement of :func:`_relax_integrality`: a feasible
+    point restores the columns it puts off-integer. Unlike that function the
+    size may grow (one integrality becomes up to two bounds): every column left
+    relaxed had no certificate under the checker's rule, because relaxing it
+    alone, box kept, is a relaxation of the set proven infeasible here.
+
+    Returns the new set (the caller confirms it) or None when nothing can be
+    exchanged. ``stop_at`` raises :class:`_OutOfTime`."""
+    lb, ub = eng.col_lb, eng.col_ub
+
+    def box(js: set[int]) -> set:
+        return {(j, "lower") for j in js if lb[j] > -_INF} | {
+            (j, "upper") for j in js if ub[j] < _INF
+        }
+
+    cur = set(ints) - keep
+    for _ in range(max_rounds):
+        if not cur:
+            return None
+        if time.perf_counter() >= stop_at:
+            raise _OutOfTime
+        v, x = eng.probe(cons, bounds | box(cur), ints - cur)
+        if v is True:
+            return set(cons), set(bounds) | box(cur), set(ints) - cur
+        if v is None or x is None:
+            return None
+        back = {j for j in cur if abs(float(x[j]) - round(float(x[j]))) > _RELAX_TOL}
+        if not back:
+            return None
+        cur -= back
+    return None
+
+
 def _polish(
     arrays: tuple,
     res: MilpIIS,
@@ -1368,7 +1436,7 @@ def _polish(
         and bool(res.integrality)
     )
     repair = os.environ.get("DISCOPT_IIS_CERT_REPAIR", "1") != "0"
-    if not add_one and not relax and not repair:
+    if not add_one and not relax and not repair and not _close_enabled():
         return res
     t0 = time.perf_counter()
     if deadline is not None and deadline - t0 < 4 * _MIN_SOLVE_S:
@@ -1438,12 +1506,38 @@ def _polish(
                     moves = 1
         except _OutOfTime:
             pass  # the sweep or its confirmation ran out of time: the answer stands
+    close = _close_enabled() and deadline is not None
+    n_exchanged = n_close_dropped = 0
+    if close and ints:
+        assert deadline is not None
+        share = min(_RELAX_FRACTION * max(deadline - t0, 0.0), _RELAX_CAP_S)
+        t_x = time.perf_counter()
+        keep = {
+            k[1]
+            for k in _check_certificates(pending, eng, cons, bounds, ints, s_tol, _STRONG_OWN)
+            if k[0] == "integrality"
+        }
+        try:
+            got = _exchange_integrality(eng, cons, bounds, ints, keep, t_x + share)
+            if got is not None:
+                t_c = time.perf_counter()
+                verdict = eng.confirm_infeasible(
+                    *got,
+                    stop_at=min(deadline, t_c + share),
+                    presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
+                )
+                if verdict is True:
+                    n_exchanged = len(ints - got[2])
+                    cons, bounds, ints = got
+        except _OutOfTime:
+            pass  # the exchange or its confirmation ran out of time: the answer stands
     certs = _check_certificates(pending, eng, cons, bounds, ints, cert_tol)
     n_forced = n_forced_ok = 0
     if repair:
         strong = _check_certificates(certs, eng, cons, bounds, ints, s_tol, _STRONG_OWN)
+        before = (set(cons), set(bounds), set(ints))
         try:
-            for key in _element_keys(cons, bounds, ints):
+            for key in _element_keys(*before):
                 if key in strong:
                     continue
                 n_forced += 1
@@ -1462,8 +1556,40 @@ def _polish(
                     if key in strong:
                         n_forced_ok += 1
                         break
+                if close and key not in strong and key[0] != "integrality":
+                    # No certificate at any margin: the element may be redundant.
+                    # Its removal test decides; the drop is confirmed below.
+                    c2, b2 = set(cons), set(bounds)
+                    if key[0] == "constraint":
+                        c2.discard(key[1])
+                    else:
+                        b2.discard((key[1], key[2]))
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        raise _OutOfTime
+                    if eng.probe(c2, b2, ints)[0] is True:
+                        cons, bounds = c2, b2
+                        n_close_dropped += 1
         except _OutOfTime:
             pass  # the certificates found so far stand
+        if n_close_dropped:
+            verdict = None
+            if deadline is None or time.perf_counter() < deadline:
+                verdict = eng.confirm_infeasible(
+                    cons,
+                    bounds,
+                    ints,
+                    stop_at=deadline,
+                    presolve=("off",) if eng.proven_on(cons, bounds, ints) else ("choose", "off"),
+                )
+            if verdict is not True:
+                cons, bounds, ints = before  # unconfirmed drops: the set stands
+                n_close_dropped = 0
+            # A witness found against either set is re-checked on the final one.
+            certs = _check_certificates(certs, eng, cons, bounds, ints, cert_tol)
+    if close and len(certs) == len(_element_keys(cons, bounds, ints)):
+        # A checked witness for every element is the proof of irreducibility
+        # under the checker's rule, whatever the filter left undecided.
+        proven = True
     return replace(
         res,
         constraints=sorted(cons),
@@ -1477,6 +1603,8 @@ def _polish(
         n_add_one_tried=tried,
         n_add_one_moves=moves,
         n_relaxed=n_relaxed,
+        n_exchanged=n_exchanged,
+        n_close_dropped=n_close_dropped,
     )
 
 
@@ -3757,6 +3885,15 @@ def _portfolio_iis(
             f"within total_time_limit ({why})"
         )
     pool = [(i, r) for i, r in done if r.complete] or done
-    _, best = min(pool, key=lambda ir: (_iis_size(ir[1]), ir[0]))
+    if _close_enabled():
+        # Under the closing pass an answer with a checked witness for every
+        # element outranks a smaller one without: the latter is not an IIS
+        # under the checker's rule (see :func:`_close_enabled`).
+        _, best = min(
+            pool,
+            key=lambda ir: (len(ir[1].certificates) != _iis_size(ir[1]), _iis_size(ir[1]), ir[0]),
+        )
+    else:
+        _, best = min(pool, key=lambda ir: (_iis_size(ir[1]), ir[0]))
     best.members = members
     return best

@@ -18,6 +18,7 @@ comparisons and fails when it made none.
 from __future__ import annotations
 
 import itertools
+import time
 
 import numpy as np
 import pytest
@@ -117,6 +118,11 @@ def probe_arrays(model, rows_off=(), ints_off=(), bounds_off=()):
     return rlo, rhi, lb, ub, ii
 
 
+def _stop() -> float:
+    """A deadline far above any probe here (a backstop, not a quality bar)."""
+    return time.perf_counter() + 60.0
+
+
 def engine_for(model, engine):
     A, rlo, rhi, lb, ub, ii = model
     groups = {i: np.array([i], dtype=np.int64) for i in range(rlo.size)}
@@ -171,7 +177,7 @@ def test_models_outside_the_rule_are_refused(engine_name):
 def test_full_model_verdict_and_arming(engine_name, n_blocks, infeasible):
     model, layout = cover_model(n_blocks)
     bm = ib.BlockMaster(*model, engine_name)
-    verdict, x = bm.decide(*model[1:])
+    verdict, x = bm.decide(*model[1:], stop=_stop())
     assert verdict is infeasible
     assert brute_force_infeasible(n_blocks, model[1], model[2], layout) is infeasible
     if not infeasible:
@@ -190,7 +196,7 @@ def test_verdicts_match_brute_force_on_row_subsystems(engine_name):
         k = int(rng.integers(1, 30)) if trial % 2 else int(rng.integers(1, 6))
         off = rng.choice(m, size=k, replace=False)
         arrs = probe_arrays(model, rows_off=off)
-        verdict, x = bm.decide(*arrs)
+        verdict, x = bm.decide(*arrs, stop=_stop())
         truth = brute_force_infeasible(3, arrs[0], arrs[1], layout)
         assert verdict is truth, (trial, sorted(off.tolist()))
         if verdict is False:
@@ -223,7 +229,7 @@ def test_verdicts_match_the_ordinary_probe_with_relaxed_columns(engine_name):
         ints = set(range(n)) - ints_off
         bnds = {(j, s) for j in range(n) for s in ("lower", "upper") if j not in bounds_off}
         try:
-            verdict, x = bm.decide(*arrs)
+            verdict, x = bm.decide(*arrs, stop=_stop())
         except ib.Unsupported:
             unsupported += 1
             continue
@@ -242,12 +248,14 @@ def test_implied_integer_rule_is_behind_its_switch(engine_name):
     arrs = probe_arrays(model, ints_off=[d0])
     # max_verbatim=0: the enumeration alone, no block carried as its own rows
     with pytest.raises(ib.Unsupported):
-        ib.BlockMaster(*model, engine_name, max_verbatim=0).decide(*arrs)
+        ib.BlockMaster(*model, engine_name, max_verbatim=0).decide(*arrs, stop=_stop())
     bm = ib.BlockMaster(*model, engine_name, implied_int=True, max_verbatim=0)
-    assert bm.decide(*arrs)[0] is True  # d has coefficient 1 in every row: implied integer
+    assert (
+        bm.decide(*arrs, stop=_stop())[0] is True
+    )  # d has coefficient 1 in every row: implied integer
     # c has coefficients of magnitude 2: not implied, refused even with the rule on
     with pytest.raises(ib.Unsupported):
-        bm.decide(*probe_arrays(model, ints_off=[c0]))
+        bm.decide(*probe_arrays(model, ints_off=[c0]), stop=_stop())
 
 
 def test_symmetry_is_verified_on_the_probed_subsystem(engine_name):
@@ -270,8 +278,6 @@ def test_symmetry_is_verified_on_the_probed_subsystem(engine_name):
 
 
 def test_ordering_rows_agree_with_the_master(engine_name):
-    import time
-
     model, layout = cover_model(3)
     bm = ib.BlockMaster(*model, engine_name)
     rng = np.random.default_rng(2)
@@ -281,7 +287,7 @@ def test_ordering_rows_agree_with_the_master(engine_name):
         if trial % 3 == 1:  # whole orbits, so the ordering rows stay in play
             off = [r % 25 + 25 * b for r in off for b in range(3) if r < 75]
         arrs = probe_arrays(model, rows_off=off)
-        verdict, _ = bm.decide(*arrs)
+        verdict, _ = bm.decide(*arrs, stop=_stop())
         lv, lx, k = ib.lex_decide(bm, *arrs, stop=time.perf_counter() + 60.0)
         if k == 0:
             assert lv is None
@@ -307,7 +313,7 @@ def test_flags_default_off_leave_the_engine_untouched(engine_name, monkeypatch):
     for f in FLAGS:
         monkeypatch.delenv(f, raising=False)
     assert not any(im._block_flags().values())
-    model, _ = cover_model(3)
+    model, _ = cover_model(2)
     res = im.milp_iis_arrays(_arrays_arg(model), iis_engine=engine_name, total_time_limit=120.0)
     assert res.n_block_proofs == res.n_block_points == res.n_orbit_dropped == 0
     assert _independent_confirm(model, res, engine_name) is True
@@ -339,20 +345,19 @@ def test_full_stack_answer_is_confirmed_independently(engine_name, monkeypatch, 
     assert len(ok) == len(res.certificates) > 0
 
 
-def test_each_flag_alone_gives_a_confirmed_answer(engine_name, monkeypatch):
-    model, _ = cover_model(3)
-    sizes = {}
-    for extra in (None,) + FLAGS[1:]:
-        for f in FLAGS:
-            monkeypatch.setenv(f, "0")
-        monkeypatch.setenv(FLAGS[0], "1")
-        if extra:
-            monkeypatch.setenv(extra, "1")
-        res = im.milp_iis_arrays(_arrays_arg(model), iis_engine=engine_name, total_time_limit=120.0)
-        assert res.n_block_proofs > 0, extra
-        assert _independent_confirm(model, res, engine_name) is True, extra
-        sizes[extra] = len(res.constraints) + len(res.bounds) + len(res.integrality)
-    assert len(sizes) == 5
+@pytest.mark.parametrize("extra", (None,) + FLAGS[1:])
+def test_each_flag_alone_gives_a_confirmed_answer(engine_name, monkeypatch, extra):
+    """The two-block fixture: the same code path as three blocks at a fraction of
+    the time (five three-block runs took 154 s on CI)."""
+    model, _ = cover_model(2)
+    for f in FLAGS:
+        monkeypatch.setenv(f, "0")
+    monkeypatch.setenv(FLAGS[0], "1")
+    if extra:
+        monkeypatch.setenv(extra, "1")
+    res = im.milp_iis_arrays(_arrays_arg(model), iis_engine=engine_name, total_time_limit=120.0)
+    assert res.n_block_proofs > 0
+    assert _independent_confirm(model, res, engine_name) is True
 
 
 def test_feasible_model_is_not_armed_and_still_refused(engine_name, monkeypatch):
@@ -385,9 +390,11 @@ def test_a_refused_block_enters_the_master_as_its_own_rows(engine_name):
         rows_off = set(rng.choice(m, size=int(rng.integers(0, 6)), replace=False).tolist())
         arrs = probe_arrays(model, rows_off, ints_off)
         with pytest.raises(ib.Unsupported):
-            ib.BlockMaster(*model, engine_name, implied_int=True, max_verbatim=0).decide(*arrs)
+            ib.BlockMaster(*model, engine_name, implied_int=True, max_verbatim=0).decide(
+                *arrs, stop=_stop()
+            )
         bm = ib.BlockMaster(*model, engine_name, implied_int=True)
-        verdict, x = bm.decide(*arrs)
+        verdict, x = bm.decide(*arrs, stop=_stop())
         assert bm.n_verbatim == 1
         bnds = {(j, sd) for j in range(n) for sd in ("lower", "upper")}
         want, _ = ref.probe(set(range(m)) - rows_off, bnds, set(range(n)) - ints_off)
@@ -403,7 +410,7 @@ def test_a_refused_block_enters_the_master_as_its_own_rows(engine_name):
     # more relaxed blocks than the cap: no verdict from the oracle
     arrs = probe_arrays(model, ints_off=[c[0] for c in core])
     with pytest.raises(ib.Unsupported):
-        ib.BlockMaster(*model, engine_name, implied_int=True).decide(*arrs)
+        ib.BlockMaster(*model, engine_name, implied_int=True).decide(*arrs, stop=_stop())
 
 
 def hole_model(n_holes: int, n_pigeons: int):
@@ -438,10 +445,10 @@ def test_core_columns_may_lie_in_linking_rows(engine_name):
         "satellites": 0,
         "canonical_blocks": 4,
     }
-    assert bm.decide(*model[1:])[0] is True
+    assert bm.decide(*model[1:], stop=_stop())[0] is True
     assert bm.classes(*model[1:]) == [[0, 1, 2, 3]]
     ok = hole_model(4, 4)
-    verdict, x = ib.BlockMaster(*ok, engine_name).decide(*ok[1:])
+    verdict, x = ib.BlockMaster(*ok, engine_name).decide(*ok[1:], stop=_stop())
     assert verdict is False and x is not None
     # row subsystems, relaxed columns and dropped bounds against the ordinary probe
     ref = engine_for(model, engine_name)
@@ -454,7 +461,7 @@ def test_core_columns_may_lie_in_linking_rows(engine_name):
         bounds_off = {j for j in ints_off if rng.random() < 0.3}
         arrs = probe_arrays(model, rows_off, ints_off, bounds_off)
         try:
-            verdict, x = bm.decide(*arrs)
+            verdict, x = bm.decide(*arrs, stop=_stop())
         except ib.Unsupported:
             unsupported += 1
             continue

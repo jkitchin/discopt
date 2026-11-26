@@ -470,13 +470,14 @@ class BlockMaster:
     # --------------------------------------------------------------------- decide
 
     def decide(
-        self, rlo, rhi, lb, ub, integ, stop: Optional[float] = None
+        self, rlo, rhi, lb, ub, integ, stop: float
     ) -> tuple[Optional[bool], Optional[np.ndarray]]:
         """``(True, None)`` infeasible, ``(False, x)`` feasible at the verified
         point ``x``, ``(None, None)`` undecided. Raises :class:`Unsupported`.
 
         The arguments are one probe's arrays: row and column bounds with the
-        inactive ones at infinity, and the held-integer mask."""
+        inactive ones at infinity, and the held-integer mask. ``stop`` is the
+        caller's deadline (a ``time.perf_counter`` value); there is no default."""
         t0 = time.perf_counter()
         self.n_calls += 1
         try:
@@ -667,7 +668,7 @@ class BlockMaster:
             np.where(cub >= _INF, inf, cub),
             allint,
         )
-        budget = time.perf_counter() + 60.0 if stop is None else stop
+        budget = stop  # the caller's deadline; no budget of its own (#912)
         if budget - time.perf_counter() < 0.05:
             return None, None
         st = be.run("choose", budget)
