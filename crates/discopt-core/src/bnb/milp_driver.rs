@@ -2155,6 +2155,8 @@ fn node_local_gmi_bound(
                     y: &lp.y,
                     basic_vars: &lp.basis.basic_vars,
                     deadline: ctx.deadline,
+                    open_nodes: None,
+                    col_dual: None,
                 },
                 &crate::lp::highs_cutgen::bridge::NodeSepa {
                     node_l: &lp.l[..ctx.ns],
@@ -7540,6 +7542,8 @@ fn solve_milp_node_search(
                         y: &root.dual,
                         basic_vars: &root.basis.basic_vars,
                         deadline,
+                        open_nodes: None,
+                        col_dual: None,
                     });
                     crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, rc.generated as u64);
                     let remaining = opts.root_cuts - total_cuts;
@@ -8225,7 +8229,14 @@ fn solve_milp_node_search(
     // variable bounds (shared, read only) and the model's density limits.
     let highs_node_vb: Option<crate::lp::highs_cutgen::vbound::VarBoundStore> =
         match highs_sep.as_mut() {
-            Some(hs) if crate::lp::highs_cutgen::bridge::node_sepa_enabled() => hs.take_vbounds(),
+            // Under `DISCOPT_HIGHS_SEARCH_SEPA` the search's node separation runs on
+            // the subsystem itself, which keeps its variable bounds.
+            Some(hs)
+                if crate::lp::highs_cutgen::bridge::node_sepa_enabled()
+                    && !highs_env::search_sepa_enabled() =>
+            {
+                hs.take_vbounds()
+            }
             _ => None,
         };
     let highs_node: Option<HighsNodeCtx<'_>> = (highs_sep.is_some()
@@ -8963,6 +8974,9 @@ fn solve_milp_node_search(
                     seed_pool,
                     milp_depth == 0,
                     cliques,
+                    highs_sep
+                        .as_mut()
+                        .filter(|_| highs_env::search_sepa_enabled()),
                 );
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};
@@ -15561,6 +15575,87 @@ mod tests {
         );
     }
 
+    /// The search starts its separators fresh, as HiGHS's does: `HighsMipWorker`
+    /// separates the tree's nodes with its own `HighsSeparation`, so tableau
+    /// `numCalls`/`numTries` restart at 0 and the path separator's generator at
+    /// `random_seed`, while the root's rounds ran on `evaluateRootNode`'s local one.
+    /// Before the fix the search (`DISCOPT_HIGHS_SEARCH_SEPA`) kept the root's
+    /// counts; on bell5 (presolve off) HiGHS's dump shows the reset at its first
+    /// search round (tableau numTries 439 -> 0), and replaying the dump without it
+    /// diverged every later path-separator draw.
+    #[test]
+    fn highs_search_starts_with_fresh_separators() {
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+        use super::highs_branch::e2e::{E2eResult, E2E};
+        let fresh =
+            crate::lp::highs_cutgen::bridge::RootSeparation::new(1, 1, 1, false).separator_state();
+        let mut seed = 31u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let mut checked = 0usize;
+        for _ in 0..40 {
+            let ns = rnd(10, 16) as usize;
+            let m = rnd(6, 10) as usize;
+            let l = vec![0.0; ns];
+            let u: Vec<f64> = (0..ns).map(|_| rnd(1, 8) as f64).collect();
+            let c: Vec<f64> = (0..ns).map(|_| -(rnd(1, 9) as f64) - 0.5).collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            for i in 0..m {
+                for col in cols.iter_mut() {
+                    if rnd(0, 2) != 0 {
+                        col.push((i, rnd(1, 7) as f64));
+                    }
+                }
+                b.push(rnd(5, 30) as f64 + 0.5);
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let o = opts(ns, (0..ns).collect());
+            E2E.with(|e| {
+                *e.borrow_mut() = Some(E2eResult {
+                    cfg_hsep: true,
+                    ..Default::default()
+                })
+            });
+            let _ = solve_milp_node_search(csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, None, None, None);
+            let h = E2E.with(|e| e.borrow_mut().take().unwrap());
+            if !h.ran {
+                continue;
+            }
+            assert_eq!(
+                h.hsep_state,
+                Some(fresh),
+                "the search kept the root's separator state"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 5,
+            "probe fired too little: {checked} searches checked"
+        );
+    }
+
     /// The HiGHS-design search's dual bound counts the queue's suboptimal nodes.
     ///
     /// A node whose bound is above the optimality limit (the incumbent less the gap
@@ -20394,6 +20489,8 @@ mod sepa_cutoff_box_tests {
             y: &t.sol.dual,
             basic_vars: &t.sol.basis.basic_vars,
             deadline: None,
+            open_nodes: None,
+            col_dual: None,
         }
     }
 
@@ -20554,6 +20651,8 @@ mod sepa_clique_tests {
             y: &sol.dual,
             basic_vars: &sol.basis.basic_vars,
             deadline: None,
+            open_nodes: None,
+            col_dual: None,
         });
         // Every binary point satisfying the rows: 0 and the unit vectors.
         let keep: [[f64; NS]; 4] = [

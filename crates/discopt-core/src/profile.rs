@@ -929,6 +929,10 @@ counters!(
     HighsMipSearchProofHits,
     HighsMipSearchDomConflictCalls,
     HighsMipSearchDomConflictHits,
+    // `DISCOPT_HIGHS_SEARCH_SEPA`: `separationRound`s the search ran on the root's
+    // separation subsystem, and the cut rows they added to the search LP.
+    HighsMipSearchSepaRounds,
+    HighsMipSearchSepaRows,
     // `DISCOPT_MILP_SYM_LEX`: verified formulation automorphisms, candidates
     // checked, and the lexicographic-leader rows appended.
     MilpSymLexGenerators,
