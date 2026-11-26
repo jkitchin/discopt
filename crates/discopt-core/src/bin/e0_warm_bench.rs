@@ -172,6 +172,8 @@ fn main() -> ExitCode {
         subtol_ladder: SimplexOptions::default().subtol_ladder,
         cold_dual_start: false,
         warm_flip_boxed: false,
+        dual_phase1: false,
+        dual_iter_limit_exit: false,
     };
 
     let mut l = lp_data.l.clone();

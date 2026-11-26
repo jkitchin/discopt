@@ -419,6 +419,18 @@ pub fn milp_lp_members(s: &mut SimplexOptions) {
     s.dual_perturb_first = member_env("DISCOPT_LP_DUAL_PERTURB_FIRST").unwrap_or(on);
     s.subtol_ladder = member_env("DISCOPT_LP_SUBTOL_LADDER").unwrap_or(on);
     s.warm_flip_boxed = member_env("DISCOPT_LP_WARM_FLIP_BOXED").unwrap_or(on);
+    s.dual_phase1 = member_env("DISCOPT_LP_DUAL_PHASE1").unwrap_or(on);
+    s.dual_iter_limit_exit = member_env("DISCOPT_LP_DUAL_ITER_LIMIT_EXIT").unwrap_or(on);
+}
+
+/// Default for [`SimplexOptions::dual_phase1`] outside the MILP engine.
+pub(super) fn dual_phase1_default() -> bool {
+    member_env("DISCOPT_LP_DUAL_PHASE1").unwrap_or_else(crate::highs_config::lp_default)
+}
+
+/// Default for [`SimplexOptions::dual_iter_limit_exit`] outside the MILP engine.
+pub(super) fn dual_iter_limit_exit_default() -> bool {
+    member_env("DISCOPT_LP_DUAL_ITER_LIMIT_EXIT").unwrap_or_else(crate::highs_config::lp_default)
 }
 
 pub(super) fn warm_flip_boxed_default() -> bool {
@@ -1735,6 +1747,275 @@ fn perturb_cleanup_primal(
     sol
 }
 
+/// HiGHS's default `dual_feasibility_tolerance`: the scale of its cost shifts and
+/// of the test that skips dual phase 1 (`HEkkDual::solve`'s `force_phase2`).
+const HIGHS_DUAL_FEASIBILITY_TOLERANCE: f64 = 1e-7;
+
+/// The largest dual infeasibility of `raw`'s start on costs `c` that no boxed
+/// flip removes, and whether a nonbasic FREE column carries one. Reduced costs
+/// `d` are over all columns (0 for basic ones).
+fn unrepaired_dual_infeasibility(
+    raw: &PreparedDual<'_>,
+    d: &[f64],
+    l: &[f64],
+    u: &[f64],
+    opts: &SimplexOptions,
+) -> (f64, bool) {
+    let tol = opts.tol;
+    let (mut worst, mut free_inf) = (0.0f64, false);
+    for j in 0..raw.n {
+        if raw.stat[j] == BASIC || u[j] - l[j] <= tol {
+            continue;
+        }
+        let (lo_inf, hi_inf) = (l[j] <= -INF, u[j] >= INF);
+        let inf = if lo_inf && hi_inf {
+            if d[j].abs() > tol {
+                free_inf = true;
+            }
+            d[j].abs()
+        } else if opts.warm_flip_boxed && !lo_inf && !hi_inf {
+            0.0 // `verify_dual_start` flips it
+        } else if raw.stat[j] == AT_UPPER {
+            d[j]
+        } else {
+            -d[j]
+        };
+        if inf > tol {
+            worst = worst.max(inf);
+        }
+    }
+    (worst, free_inf)
+}
+
+/// HiGHS's dual phase-1 bounds (`HEkk::initialiseBound`, `solve_phase` 1): free
+/// `[-1000, 1000]`, upper-only `[-1, 0]`, lower-only `[0, 1]`, boxed and fixed
+/// `[0, 0]`. With `b = 0` the LP is the dual phase-1 problem: its optimum is 0
+/// exactly when its basis is dual feasible for the true bounds.
+fn dual_phase1_bounds(l: &[f64], u: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    l.iter()
+        .zip(u)
+        .map(|(&lo, &hi)| match (lo <= -INF, hi >= INF) {
+            (true, true) => (-1000.0, 1000.0),
+            (true, false) => (-1.0, 0.0),
+            (false, true) => (0.0, 1.0),
+            (false, false) => (0.0, 0.0),
+        })
+        .unzip()
+}
+
+/// A warm start the dual refuses as dual infeasible, solved the way HiGHS's dual
+/// simplex solves one (`HEkkDual::solve`, `highs/simplex/HEkkDual.cpp`), instead of
+/// by the primal warm solve the caller falls back to (`None`).
+///
+/// HiGHS computes the start's duals on the true costs; if the largest dual
+/// infeasibility `δ` has `δ² < dual_feasibility_tolerance` it forces phase 2 and
+/// removes them by flipping boxed columns and shifting the costs of the rest
+/// (`force_phase2`, `correctDualInfeasibilities`); otherwise it runs dual phase 1
+/// (`solvePhase1`): the dual simplex on the LP with the artificial bounds of
+/// [`dual_phase1_bounds`], whose zero optimum is a dual-feasible basis for the true
+/// LP, and then phase 2 from it, shifting whatever infeasibility is left. The
+/// shifts are removed at the end and the primal simplex cleans up
+/// (`kSolvePhaseOptimalCleanup`), as for a cost perturbation.
+///
+/// Why: the caller's primal warm solve starts from a basis the node's branching
+/// made primal infeasible, so it runs primal phase 1 from it. Measured on neos17
+/// with `DISCOPT_HIGHS_SEARCH_SEPA=1` (5,000 nodes, deterministic): 12.7 M phase-1
+/// pivots, 100 node LPs ended `IterLimit` at the 100,000-pivot default, and the
+/// run hit its 900 s limit at 2,659 nodes.
+///
+/// Sound by construction: every answer is an ordinary solve of the TRUE LP (the
+/// phase-2 dual from a start `prepare` verified dual feasible, or the shifted
+/// solve's clean-up on the true costs, or a Farkas ray re-verified on the true
+/// data), and the caller verifies it as any other. A path that fails returns
+/// `None` and the caller's old route runs.
+#[allow(clippy::too_many_arguments)]
+fn dual_infeasible_start(
+    raw: &PreparedDual<'_>,
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> Option<LpSolve> {
+    crate::profile::incr(crate::profile::Ctr::DualInfStart);
+    let d = raw.reduced_costs(c)?;
+    let (worst, free_inf) = unrepaired_dual_infeasibility(raw, &d, l, u, opts);
+    if free_inf {
+        crate::profile::incr(crate::profile::Ctr::DualInfStartFree);
+    }
+    if !free_inf && worst * worst < HIGHS_DUAL_FEASIBILITY_TOLERANCE {
+        return shifted_cost_solve(raw, &d, sp, m, n, c, l, u, b, opts, 0);
+    }
+
+    // Dual phase 1.
+    crate::profile::incr(crate::profile::Ctr::DualInfStartPhase1);
+    let (l1, u1) = dual_phase1_bounds(l, u);
+    let b1 = vec![0.0; m];
+    let mut o1 = opts.clone();
+    o1.warm_flip_boxed = true; // every phase-1 column is boxed: flips repair all
+    o1.subtol_repair = false;
+    o1.dual_phase1 = false;
+    let p1 = raw.repriced(c, &l1, &u1, &o1)?;
+    let start1 = p1.prepared_basis();
+    let s1 = warm_dual_armed(&p1, sp, m, n, c, &l1, &u1, &b1, &start1, &o1);
+    if s1.status != LpStatus::Optimal || s1.basis.col_status.len() != n {
+        return None;
+    }
+    // Back to the true bounds (`initialiseBound` phase 2 +
+    // `initialiseNonbasicValueAndMove`): a one-sided column sits at its finite
+    // bound, a free one at the engines' free encoding.
+    let mut basis = s1.basis;
+    for j in 0..n {
+        if basis.col_status[j] == BASIC {
+            continue;
+        }
+        basis.col_status[j] = match (l[j] <= -INF, u[j] >= INF) {
+            (true, true) => AT_LOWER,
+            (true, false) => AT_UPPER,
+            (false, true) => AT_LOWER,
+            (false, false) => basis.col_status[j],
+        };
+    }
+    let lp = LpView {
+        a: &[],
+        m,
+        n,
+        c,
+        l,
+        u,
+    };
+    match PreparedDual::prepare_classified(&lp, &basis, opts, sp) {
+        Prep::Ready(p) => {
+            crate::profile::incr(crate::profile::Ctr::DualInfStartPhase1Ok);
+            let mut sol = warm_dual_armed(&p, sp, m, n, c, l, u, b, &basis, opts);
+            sol.iters = sol.iters.saturating_add(s1.iters);
+            Some(sol)
+        }
+        // Phase 1's optimum left infeasibilities: phase 2 shifts them
+        // (`correctDualInfeasibilities` on the first rebuild), unless one is on a
+        // free column (no shift exists) -- then the LP may be dual infeasible.
+        Prep::DualInfeasible(p2) => {
+            let d2 = p2.reduced_costs(c)?;
+            let (_, free2) = unrepaired_dual_infeasibility(&p2, &d2, l, u, opts);
+            if free2 {
+                return None;
+            }
+            shifted_cost_solve(&p2, &d2, sp, m, n, c, l, u, b, opts, s1.iters)
+        }
+        Prep::Refused => None,
+    }
+}
+
+/// Phase 2 of [`dual_infeasible_start`] on shifted costs, then the clean-up on
+/// the true costs. `d` are `raw`'s reduced costs on `c`. Each column with an
+/// unrepaired dual infeasibility gets the cost shift that leaves its reduced
+/// cost `(1 + r)·1e-7` on the feasible side (`correctDualInfeasibilities`,
+/// `r ∈ [0, 1)`); the dual then solves the shifted LP from `raw`'s basis, and its
+/// optimum is re-priced on `c` in the loop (`with_clean_costs`) or cleaned up by
+/// the primal simplex from that basis, exactly as after a cost perturbation.
+/// `prior` pivots (phase 1's) are added to the result's count.
+#[allow(clippy::too_many_arguments)]
+fn shifted_cost_solve(
+    raw: &PreparedDual<'_>,
+    d: &[f64],
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+    prior: usize,
+) -> Option<LpSolve> {
+    crate::profile::incr(crate::profile::Ctr::DualInfStartShift);
+    let tol = opts.tol;
+    let mut cs = c.to_vec();
+    for j in 0..n {
+        if raw.stat[j] == BASIC || u[j] - l[j] <= tol {
+            continue;
+        }
+        let (lo_inf, hi_inf) = (l[j] <= -INF, u[j] >= INF);
+        if lo_inf && hi_inf {
+            if d[j].abs() > tol {
+                return None; // a free column cannot be shifted feasible
+            }
+            continue;
+        }
+        if opts.warm_flip_boxed && !lo_inf && !hi_inf {
+            continue; // `verify_dual_start` flips it
+        }
+        let shift = (1.0 + (jitter(j) - 0.5)) * HIGHS_DUAL_FEASIBILITY_TOLERANCE;
+        if raw.stat[j] == AT_UPPER && d[j] > tol {
+            cs[j] += -shift - d[j];
+        } else if raw.stat[j] != AT_UPPER && d[j] < -tol {
+            cs[j] += shift - d[j];
+        }
+    }
+    let ps = raw.repriced(&cs, l, u, opts)?;
+    let ps = if opts.dual_perturb_first {
+        ps.with_clean_costs(c)
+    } else {
+        ps
+    };
+    let mut sol = ps.reoptimize(l, u, b, opts);
+    let pivots = sol.iters.saturating_add(prior);
+    match sol.status {
+        // Feasibility does not depend on the costs; the ray is re-verified on the
+        // true data (and again by the caller before any fathom).
+        LpStatus::Infeasible => {
+            if sol.dual.len() == m
+                && super::primal::farkas_ray_certifies_cols(&sol.dual, sp, n, m, b, l, u)
+            {
+                crate::profile::incr(crate::profile::Ctr::DualInfStartShiftOk);
+                sol.obj = c.iter().zip(&sol.x).map(|(cj, xj)| cj * xj).sum();
+                sol.iters = pivots;
+                return Some(sol);
+            }
+            None
+        }
+        LpStatus::Optimal if ps.cleaned() => {
+            crate::profile::incr(crate::profile::Ctr::DualInfStartShiftOk);
+            sol.iters = pivots;
+            Some(sol)
+        }
+        LpStatus::Optimal => {
+            let clean = super::primal::solve_lp_cols_warm_only(
+                sp.clone(),
+                m,
+                n,
+                c,
+                l,
+                u,
+                b,
+                &sol.basis,
+                opts,
+            )
+            .filter(|s| s.status == LpStatus::Optimal)
+            .or_else(|| {
+                PreparedDual::prepare_cols(sp, m, n, c, l, u, &sol.basis, opts)
+                    .map(|p| p.reoptimize(l, u, b, opts))
+                    .filter(|s| s.status == LpStatus::Optimal)
+            })?;
+            crate::profile::incr(crate::profile::Ctr::DualInfStartShiftOk);
+            let mut clean = clean;
+            clean.iters = clean.iters.saturating_add(pivots);
+            Some(clean)
+        }
+        // The budget is spent (`dual_iter_limit_exit`): HiGHS stops here too. The
+        // row duals are the SHIFTED costs', so none is exported.
+        LpStatus::IterLimit if opts.dual_iter_limit_exit => {
+            sol.dual = Vec::new();
+            sol.iters = pivots;
+            Some(sol)
+        }
+        _ => None,
+    }
+}
+
 /// The perturbed cost vector behind [`cost_perturbed_warm_solve`].
 ///
 /// `c_j ± eps·r_j·(1+|c_j|)` on nonbasic columns only, `+` at a lower bound and
@@ -1795,14 +2076,34 @@ fn solve_csc_core(
     opts: &SimplexOptions,
 ) -> LpSolve {
     match start {
-        Some(basis) => match PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts) {
-            Some(p) => warm_dual_armed(&p, sp, m, n, c, l, u, b, basis, opts),
+        Some(basis) => match PreparedDual::prepare_classified(
+            &LpView {
+                a: &[],
+                m,
+                n,
+                c,
+                l,
+                u,
+            },
+            basis,
+            opts,
+            sp,
+        ) {
+            Prep::Ready(p) => warm_dual_armed(&p, sp, m, n, c, l, u, b, basis, opts),
+            Prep::DualInfeasible(raw) if opts.dual_phase1 => {
+                dual_infeasible_start(&raw, sp, m, n, c, l, u, b, opts).unwrap_or_else(|| {
+                    crate::profile::incr(crate::profile::Ctr::DualInfStartLegacy);
+                    solve_lp_cols_warm(sp.clone(), m, n, c, l, u, b, basis, opts)
+                })
+            }
             // Warm basis rejected by the dual (wrong size / singular /
             // dual-infeasible). cert:T1.4: try a *primal* warm re-solve from the
             // same basis first — a coefficient-patched child is usually still
             // primal-feasible, so phase 2 finishes in a few pivots — and only fall
             // to the full cold two-phase solve if that basis is unusable too.
-            None => solve_lp_cols_warm(sp.clone(), m, n, c, l, u, b, basis, opts),
+            Prep::DualInfeasible(_) | Prep::Refused => {
+                solve_lp_cols_warm(sp.clone(), m, n, c, l, u, b, basis, opts)
+            }
         },
         None => solve_lp_cols(sp.clone(), m, n, c, l, u, b, opts),
     }
@@ -1838,12 +2139,22 @@ pub fn solve_lp_warm_scaled_csc(
     opts: &SimplexOptions,
     sp: &SparseCols,
 ) -> LpSolve {
-    match PreparedDual::prepare(lp, start, opts, sp) {
-        Some(p) => warm_dual_armed(&p, sp, lp.m, lp.n, lp.c, lp.l, lp.u, b, start, opts),
+    let legacy = || {
         // cert:T1.4: try a primal warm re-solve from the inherited basis before the
         // full cold solve (same rationale as the CSC path above). Safe: falls to
         // cold two-phase whenever the warm basis is unusable.
-        None => solve_lp_cols_warm(sp.clone(), lp.m, lp.n, lp.c, lp.l, lp.u, b, start, opts),
+        solve_lp_cols_warm(sp.clone(), lp.m, lp.n, lp.c, lp.l, lp.u, b, start, opts)
+    };
+    match PreparedDual::prepare_classified(lp, start, opts, sp) {
+        Prep::Ready(p) => warm_dual_armed(&p, sp, lp.m, lp.n, lp.c, lp.l, lp.u, b, start, opts),
+        Prep::DualInfeasible(raw) if opts.dual_phase1 => dual_infeasible_start(
+            &raw, sp, lp.m, lp.n, lp.c, lp.l, lp.u, b, opts,
+        )
+        .unwrap_or_else(|| {
+            crate::profile::incr(crate::profile::Ctr::DualInfStartLegacy);
+            legacy()
+        }),
+        Prep::DualInfeasible(_) | Prep::Refused => legacy(),
     }
 }
 
@@ -1883,7 +2194,15 @@ pub(crate) fn nonbasic_at_infinite_bound(
 /// The dual-feasibility precondition [`PreparedDual::prepare`] verifies on a
 /// factorized start basis: with `y = B⁻ᵀc_B`, every nonbasic reduced cost has the
 /// sign its bound requires (boxed columns flipped to the other bound when
-/// `opts.warm_flip_boxed`). `false` = refuse the start (counter incremented).
+/// `opts.warm_flip_boxed`). Anything but `Ok` refuses the start (counter
+/// incremented).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartCheck {
+    Ok,
+    Singular,
+    DualInfeasible,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn verify_dual_start(
     lu: &mut FeralLU,
@@ -1895,13 +2214,13 @@ fn verify_dual_start(
     stat: &mut [i8],
     n: usize,
     opts: &SimplexOptions,
-) -> bool {
+) -> StartCheck {
     let tol = opts.tol;
 
     let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
     if lu.btran(&mut y).is_err() {
         crate::profile::incr(crate::profile::Ctr::DualPrepRejectSingular);
-        return false;
+        return StartCheck::Singular;
     }
     let mut flips = 0u64;
     for j in 0..n {
@@ -1932,7 +2251,7 @@ fn verify_dual_start(
                 continue;
             }
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectDualInf);
-            return false; // dual-infeasible warm start → cold fallback
+            return StartCheck::DualInfeasible; // → `dual_infeasible_start` or the primal
         }
     }
     if flips > 0 {
@@ -1940,7 +2259,18 @@ fn verify_dual_start(
         crate::profile::incr(crate::profile::Ctr::DualPrepFlipAccepts);
     }
 
-    true
+    StartCheck::Ok
+}
+
+/// [`PreparedDual::prepare_classified`]'s verdict on a warm start.
+pub(super) enum Prep<'a> {
+    /// Dual feasible (after any boxed flips): run the dual from it.
+    Ready(PreparedDual<'a>),
+    /// Factorized, but dual infeasible on a column no flip repairs. Holds the
+    /// start's own statuses; NOT a valid dual start.
+    DualInfeasible(PreparedDual<'a>),
+    /// Malformed, singular, or a nonbasic column at an infinite bound.
+    Refused,
 }
 
 /// A basis factorization prepared once for repeated dual re-optimizations that
@@ -2016,7 +2346,7 @@ impl<'a> PreparedDual<'a> {
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectInfBound);
             return None;
         }
-        if !verify_dual_start(
+        if verify_dual_start(
             &mut lu,
             self.sp,
             c,
@@ -2026,7 +2356,8 @@ impl<'a> PreparedDual<'a> {
             &mut stat,
             self.n,
             opts,
-        ) {
+        ) != StartCheck::Ok
+        {
             return None;
         }
         crate::profile::incr(crate::profile::Ctr::DualPrepRepriced);
@@ -2042,6 +2373,25 @@ impl<'a> PreparedDual<'a> {
             clean_c: None,
             cleaned: std::cell::Cell::new(false),
         })
+    }
+
+    /// Reduced costs `c_j - yᵀA_j` (`y = B⁻ᵀc_B`) of every column on costs `c`
+    /// from this factorization; 0 for basic columns. `None` if the solve fails.
+    fn reduced_costs(&self, c: &[f64]) -> Option<Vec<f64>> {
+        let mut lu = self.lu.clone();
+        let mut y: Vec<f64> = self.basis.iter().map(|&j| c[j]).collect();
+        lu.btran(&mut y).ok()?;
+        Some(
+            (0..self.n)
+                .map(|j| {
+                    if self.stat[j] == BASIC {
+                        0.0
+                    } else {
+                        c[j] - self.sp.dot(j, &y)
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// The prepared basis (basic columns and nonbasic statuses, after any flips).
@@ -2068,18 +2418,33 @@ impl<'a> PreparedDual<'a> {
         opts: &SimplexOptions,
         sp: &'a SparseCols,
     ) -> Option<Self> {
+        match Self::prepare_classified(lp, start, opts, sp) {
+            Prep::Ready(p) => Some(p),
+            Prep::DualInfeasible(_) | Prep::Refused => None,
+        }
+    }
+
+    /// [`Self::prepare`], keeping a start refused ONLY for dual infeasibility as
+    /// [`Prep::DualInfeasible`]: its factorization and its statuses as given (no
+    /// flips), for [`dual_infeasible_start`]. Not a usable dual start.
+    pub(super) fn prepare_classified(
+        lp: &LpView<'a>,
+        start: &Basis,
+        opts: &SimplexOptions,
+        sp: &'a SparseCols,
+    ) -> Prep<'a> {
         let _t_prep = crate::profile::Timer::new(crate::profile::Phase::DualPrepare);
         let (m, n, l, u, c) = (lp.m, lp.n, lp.l, lp.u, lp.c);
         if start.basic_vars.len() != m {
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
-            return None;
+            return Prep::Refused;
         }
         let tol = opts.tol;
         let basis = start.basic_vars.clone();
         let mut stat = start.col_status.clone();
         if stat.len() != n {
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
-            return None;
+            return Prep::Refused;
         }
         // #2212: `basic_vars` and `col_status` must describe ONE basis: every listed
         // column in range, listed once, and marked BASIC, and nothing else marked
@@ -2092,14 +2457,14 @@ impl<'a> PreparedDual<'a> {
             if j >= n || slot_of[j] >= 0 || stat[j] != BASIC {
                 crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
                 crate::profile::incr(crate::profile::Ctr::DualPrepRejectInconsistent);
-                return None;
+                return Prep::Refused;
             }
             slot_of[j] = slot as i64;
         }
         if stat.iter().filter(|&&s| s == BASIC).count() != m {
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectInconsistent);
-            return None;
+            return Prep::Refused;
         }
         // #1510: a nonbasic column must sit at a FINITE bound (or be free). One
         // parked on an infinite side has no vertex value: the engine reads it at
@@ -2112,7 +2477,7 @@ impl<'a> PreparedDual<'a> {
             if dual_trace_enabled() {
                 eprintln!("DUALPREP reject: column {j} nonbasic at an infinite bound");
             }
-            return None;
+            return Prep::Refused;
         }
 
         let mut lu = node_feral_lu();
@@ -2120,7 +2485,7 @@ impl<'a> PreparedDual<'a> {
         // dense m×m basis (discopt#268 / feral#87). Bit-identical to `col()`.
         if lu.factorize_basis(m, sp, &basis).is_err() {
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectSingular);
-            return None; // singular warm basis → fall back to cold
+            return Prep::Refused; // singular warm basis → fall back to cold
         }
 
         // Verify the starting basis is actually dual-feasible — the precondition
@@ -2129,12 +2494,28 @@ impl<'a> PreparedDual<'a> {
         // d_j ≥ −tol, a nonbasic-at-upper needs d_j ≤ tol, and a nonbasic *free*
         // variable (both bounds infinite) needs |d_j| ≤ tol. A dual-infeasible
         // start would silently converge to a wrong Optimal/Infeasible.
-        if !verify_dual_start(&mut lu, sp, c, l, u, &basis, &mut stat, n, opts) {
-            return None;
+        let given = stat.clone();
+        match verify_dual_start(&mut lu, sp, c, l, u, &basis, &mut stat, n, opts) {
+            StartCheck::Ok => {}
+            StartCheck::Singular => return Prep::Refused,
+            StartCheck::DualInfeasible => {
+                return Prep::DualInfeasible(PreparedDual {
+                    m,
+                    n,
+                    c,
+                    sp,
+                    lu,
+                    basis,
+                    slot_of,
+                    stat: given,
+                    clean_c: None,
+                    cleaned: std::cell::Cell::new(false),
+                });
+            }
         }
 
         crate::profile::incr(crate::profile::Ctr::DualPrepAccept);
-        Some(PreparedDual {
+        Prep::Ready(PreparedDual {
             m,
             n,
             c,
@@ -3241,6 +3622,19 @@ impl<'a> PreparedDual<'a> {
             crate::profile::incr(crate::profile::Ctr::DualStallTrips);
         }
         crate::profile::incr(crate::profile::Ctr::DualExitPivotCap);
+        // `dual_iter_limit_exit`: the run spent the solve's whole budget, so it ends
+        // `IterLimit` as HiGHS's dual does (`HEkk::bailout` → `kIterationLimit`, no
+        // re-solve). The cold fallback would spend up to `max_iter` more pivots on
+        // the same LP and, on a node LP under the node iteration limit, end
+        // `IterLimit` too. The basis is dual feasible, so the exported `y` is the
+        // loop's best dual floor (a candidate the caller verifies, as for the
+        // deadline exit above); `x` is not a primal point and no consumer may use it.
+        if opts.dual_iter_limit_exit && stall_cap >= opts.max_iter {
+            crate::profile::incr(crate::profile::Ctr::DualIterLimitExit);
+            return Some(banked_deadline_solve(
+                &mut lu, &basis, &slot_of, &stat, &xb, c, l, u, n, m, stall_cap,
+            ));
+        }
         None // stall cap / iteration cap → cold fallback
     }
 }
@@ -3812,6 +4206,8 @@ mod tests {
             dual_noise_rows: true,
             dual_perturb_first: true,
             subtol_ladder: true,
+            dual_phase1: true,
+            dual_iter_limit_exit: true,
             ..SimplexOptions::default()
         }
     }
@@ -3823,6 +4219,8 @@ mod tests {
             dual_noise_rows: false,
             dual_perturb_first: false,
             subtol_ladder: false,
+            dual_phase1: false,
+            dual_iter_limit_exit: false,
             ..SimplexOptions::default()
         }
     }
@@ -3986,6 +4384,142 @@ mod tests {
         assert!(PreparedDual::prepare_cols(&sp, 1, 3, &c, &l, &u_open, &start, &on).is_none());
         checked += 1;
         assert_eq!(checked, 10, "flip-repair probe did not run every assertion");
+    }
+
+    /// `dual_phase1`: a warm start the dual refuses as dual infeasible on a
+    /// ONE-SIDED column (no flip repairs it) is solved by dual phase 1 + phase 2,
+    /// as HiGHS's `HEkkDual::solve` does, instead of by the primal warm solve
+    /// (which runs primal phase 1 from the primal-infeasible start). LP:
+    /// `min x1 - x2` s.t. `x1 + x2 - s1 = 2`, `x2 + s2 = 5`, all `>= 0`; optimum
+    /// `x2 = 5`, `-5`. Start: slack basis, `s1 = -2` (primal infeasible) and
+    /// `d_x2 = -1` at its lower bound with `u = +inf` (dual infeasible).
+    #[test]
+    fn dual_phase1_solves_a_dual_infeasible_one_sided_start() {
+        let sp = SparseCols::from_dense(&[1.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0, 1.0], 2, 4);
+        let (c, l, u, b) = (
+            vec![1.0, -1.0, 0.0, 0.0],
+            vec![0.0; 4],
+            vec![INF; 4],
+            vec![2.0, 5.0],
+        );
+        let start = Basis {
+            col_status: vec![AT_LOWER, AT_LOWER, BASIC, BASIC],
+            basic_vars: vec![2, 3],
+        };
+        let mut checked = 0usize;
+        let _guard = crate::profile::test_guard();
+        let run = |dual_phase1: bool| {
+            crate::profile::reset();
+            crate::profile::set_enabled(true);
+            let o = SimplexOptions {
+                dual_phase1,
+                ..config_lp_opts()
+            };
+            let sol = solve_lp_warm_csc(sp.clone(), 2, 4, &c, &l, &u, &b, Some(&start), &o);
+            let p1 = crate::profile::counter(crate::profile::Ctr::Phase1Pivots);
+            let ok = crate::profile::counter(crate::profile::Ctr::DualInfStartPhase1Ok);
+            let legacy = crate::profile::counter(crate::profile::Ctr::DualInfStartLegacy);
+            let entered = crate::profile::counter(crate::profile::Ctr::DualInfStart);
+            crate::profile::set_enabled(false);
+            (sol, p1, ok, legacy, entered)
+        };
+        let (on, p1_on, ok_on, legacy_on, _) = run(true);
+        let (off, _, ok_off, _, entered_off) = run(false);
+        assert_eq!(on.status, LpStatus::Optimal);
+        assert_eq!(off.status, LpStatus::Optimal);
+        assert!((on.obj + 5.0).abs() < 1e-9, "on obj {}", on.obj);
+        assert!((off.obj - on.obj).abs() < 1e-9);
+        checked += 4;
+        assert_eq!(ok_on, 1, "dual phase 1 must reach a dual-feasible basis");
+        assert_eq!(legacy_on, 0);
+        assert_eq!(p1_on, 0, "no primal phase-1 pivot with dual_phase1");
+        checked += 3;
+        assert_eq!(ok_off, 0);
+        assert_eq!(entered_off, 0, "off: the legacy primal warm route only");
+        checked += 2;
+        assert_eq!(checked, 9, "dual phase-1 probe did not run every assertion");
+    }
+
+    /// `dual_phase1`'s shift path (`force_phase2`): a start whose only dual
+    /// infeasibility is tiny (`δ² < 1e-7`) on a one-sided column is solved on
+    /// shifted costs and cleaned up on the true ones, reaching the cold optimum.
+    #[test]
+    fn dual_phase1_shifts_a_tiny_dual_infeasibility() {
+        let sp = SparseCols::from_dense(&[1.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0, 1.0], 2, 4);
+        let (c, l, u, b) = (
+            vec![1.0, -1e-5, 0.0, 0.0],
+            vec![0.0; 4],
+            vec![INF; 4],
+            vec![2.0, 5.0],
+        );
+        let start = Basis {
+            col_status: vec![AT_LOWER, AT_LOWER, BASIC, BASIC],
+            basic_vars: vec![2, 3],
+        };
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+        let o = config_lp_opts();
+        let warm = solve_lp_warm_csc(sp.clone(), 2, 4, &c, &l, &u, &b, Some(&start), &o);
+        let shift = crate::profile::counter(crate::profile::Ctr::DualInfStartShift);
+        let shift_ok = crate::profile::counter(crate::profile::Ctr::DualInfStartShiftOk);
+        crate::profile::set_enabled(false);
+        let cold = solve_lp_warm_csc(sp.clone(), 2, 4, &c, &l, &u, &b, None, &legacy_lp_opts());
+        assert_eq!(warm.status, LpStatus::Optimal);
+        assert_eq!(cold.status, LpStatus::Optimal);
+        assert!(
+            (warm.obj - cold.obj).abs() < 1e-9,
+            "{} vs {}",
+            warm.obj,
+            cold.obj
+        );
+        assert_eq!((shift, shift_ok), (1, 1));
+    }
+
+    /// `dual_iter_limit_exit`: a warm dual that spends its whole pivot budget ends
+    /// `IterLimit` (HiGHS `HEkk::bailout` → `kIterationLimit`) instead of handing
+    /// the LP to a cold re-solve. `min Σx` s.t. `x_i - s_i = 1` (i = 1..3) from the
+    /// slack basis needs 3 dual pivots; the budget is 1.
+    #[test]
+    fn dual_iter_limit_exit_ends_iter_limit_without_a_cold_resolve() {
+        let mut a = vec![0.0; 3 * 6];
+        for i in 0..3 {
+            a[i * 6 + i] = 1.0;
+            a[i * 6 + 3 + i] = -1.0;
+        }
+        let sp = SparseCols::from_dense(&a, 3, 6);
+        let (c, l, u, b) = (
+            vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            vec![0.0; 6],
+            vec![INF; 6],
+            vec![1.0; 3],
+        );
+        let start = Basis {
+            col_status: vec![AT_LOWER, AT_LOWER, AT_LOWER, BASIC, BASIC, BASIC],
+            basic_vars: vec![3, 4, 5],
+        };
+        let _guard = crate::profile::test_guard();
+        let run = |exit: bool| {
+            crate::profile::reset();
+            crate::profile::set_enabled(true);
+            let o = SimplexOptions {
+                dual_iter_limit_exit: exit,
+                dual_perturb_first: false,
+                dual_cost_perturb: 0.0,
+                max_iter: 1,
+                ..config_lp_opts()
+            };
+            let sol = solve_lp_warm_csc(sp.clone(), 3, 6, &c, &l, &u, &b, Some(&start), &o);
+            let exits = crate::profile::counter(crate::profile::Ctr::DualIterLimitExit);
+            crate::profile::set_enabled(false);
+            (sol, exits)
+        };
+        let (on, exits_on) = run(true);
+        let (_, exits_off) = run(false);
+        assert_eq!(on.status, LpStatus::IterLimit);
+        assert_eq!(exits_on, 1);
+        assert!(on.iters <= 1, "no pivots beyond the budget: {}", on.iters);
+        assert_eq!(exits_off, 0);
     }
 
     /// The κ₁ recovery must be *off* when unset, must accept an explicit sweep
