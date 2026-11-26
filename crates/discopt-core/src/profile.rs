@@ -256,6 +256,27 @@ counters!(
     HighsSepaCliqueCuts,
     HighsSepaCliques,
     HighsSepaCliqueMerged,
+    // `DISCOPT_MILP_CLIQUE_DOMAIN`: `addImplications` calls from a search domain's
+    // `changeBound` (a binary fixed), and the bound changes they made.
+    MilpCliqueDomainCalls,
+    MilpCliqueDomainFixings,
+    // Probing at search start (`DISCOPT_MILP_CLIQUE_DOMAIN`): columns probed, global
+    // reductions, clique entries added.
+    MilpProbeProbed,
+    MilpProbeReductions,
+    MilpProbeEntries,
+    // Cliques and entries of the table handed to the search, before / after probing.
+    MilpCliqueTableCliques0,
+    MilpCliqueTableEntries0,
+    MilpCliqueTableCliques1,
+    MilpCliqueTableEntries1,
+    // Bound changes applyImplications made in the search.
+    MilpImplApplyFixings,
+    // Columns presolve probing (`HPresolve::runProbing`) and node separation's
+    // `separateImpliedBounds` probed; implied-bound cuts the latter added.
+    MilpProbePresolve,
+    MilpProbeNode,
+    MilpImpliedBoundCuts,
     // #2225: path separator paths abandoned by the substitution progress guard.
     HighsSepaPathSubstCap,
     // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global
@@ -518,6 +539,13 @@ counters!(
     MilpPresolveRowsRemoved,
     MilpPresolveInfeasibleFallback,
     MilpPresolveVerifyFallback,
+    // #2354: postsolved points that failed verification and went to the fixed-integer
+    // repair LP (HiGHS `transformNewIntegerFeasibleSolution`), the repairs that
+    // verified and were returned, and the ones that verified but did not close the
+    // reduced search's gap (the original is then solved seeded with the repair).
+    MilpPresolveRepairAttempts,
+    MilpPresolveRepaired,
+    MilpPresolveRepairSeeded,
     // Unbounded relaxations re-checked by a zero-objective feasibility solve, and the
     // verdicts that check overturned (`settle_unbounded`).
     MilpUnboundedSettle,
@@ -886,6 +914,21 @@ counters!(
     HighsMipSearchConflicts,
     HighsMipSearchProofConflicts,
     HighsMipSearchGlobalConflictFixings,
+    // `DISCOPT_MILP_CONFLICT`: cuts `generateConflict` added to the search's cut
+    // pool from LP dual proofs, and pool cuts (root and node cuts) the search's
+    // domains propagate.
+    HighsMipSearchConflictCuts,
+    HighsMipSearchPropagatedPoolCuts,
+    // Conflict-path fidelity (c513 differential vs HiGHS `HighsDomain::conflictAnalysis`):
+    // LP-infeasible nodes reaching the dual-proof step, those without a verified ray,
+    // those whose ray gave no proof row, and analyses that added at least one conflict;
+    // propagation-infeasible analyses and those that added one.
+    HighsMipSearchProofCalls,
+    HighsMipSearchProofNoRay,
+    HighsMipSearchProofNoRow,
+    HighsMipSearchProofHits,
+    HighsMipSearchDomConflictCalls,
+    HighsMipSearchDomConflictHits,
     // `DISCOPT_MILP_SYM_LEX`: verified formulation automorphisms, candidates
     // checked, and the lexicographic-leader rows appended.
     MilpSymLexGenerators,

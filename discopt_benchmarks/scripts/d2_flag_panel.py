@@ -34,6 +34,20 @@ BAR 2, net-positive:
        (the P4.4 lesson);
   (2e) median primal gap over the open population not higher ON (reported, and a bar).
 Graduate only if BAR 1 and all of BAR 2 pass.
+
+PERMUTATION REPS (``--permute``; 2026-11-26, #2350). A deterministic solve has no rep-to-rep
+spread, so ``--reps`` repeats one coin flip. For an instance whose node count is decided by
+its row/column ORDER (measured: ``bell5`` takes 1,365 to 16,553 nodes OFF across six
+orderings), the order is the randomness, so the permutations are the reps: rep 0 solves the
+original file and rep ``r >= 1`` solves a copy with rows and columns permuted by seed ``r``
+(``permuted_copy``), the SAME copy in both arms. The bars are unchanged; they read the reps as
+always (1b: certified in every OFF rep and no ON rep; 2e: the per-row median over reps).
+Which rows get permutation reps is fixed before the run: every row 1b flags in EITHER
+direction (lost or gained in every rep) on the single-rep panel, plus EVERY row of its 2e
+population (the open rows), so no row is picked by how it moved.
+``--rescore BASE --merge PERM[,PERM2...]`` replaces BASE's rows for the names in the PERM files
+and re-evaluates. As first applied (#2350) every row of the 2e population gets the reps, so 2e
+is scored on per-row medians over 7 orderings, with no row selection.
 """
 
 from __future__ import annotations
@@ -62,6 +76,73 @@ ON_VALUE = "1"
 OFF_VALUE: str | None = None
 _CTR = re.compile(r"$^")
 _CTR_NAME = re.compile(r"$^")
+
+
+def permuted_copy(path: str, seed: int, out_dir: Path) -> str:
+    """Write ``path`` with its rows and columns permuted by ``seed`` (``seed == 0``: ``path``).
+
+    The model is read and written by HiGHS (``highspy``): bounds, costs, integrality, sense,
+    offset and names move with their row/column, so the copy is the same problem in a
+    different order. The copy is re-read and its shape asserted, so a writer that dropped
+    anything fails here rather than in a solve."""
+    if seed == 0:
+        return path
+    import numpy as np
+    import scipy.sparse as sp
+    from discopt._optional_highs import require_highspy
+
+    highspy = require_highspy("d2_flag_panel --permute")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{Path(path).name.split('.')[0]}_p{seed}.mps"
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    if h.readModel(path) != highspy.HighsStatus.kOk:
+        raise RuntimeError(f"highspy could not read {path}")
+    lp = h.getLp()
+    m, n = lp.num_row_, lp.num_col_
+    a_mat = sp.csc_matrix(
+        (lp.a_matrix_.value_, lp.a_matrix_.index_, lp.a_matrix_.start_), shape=(m, n)
+    )
+    rng = np.random.default_rng(seed)
+    rp, cp = rng.permutation(m), rng.permutation(n)
+    b = a_mat[rp][:, cp].tocsc()
+    b.sort_indices()
+    new = highspy.HighsLp()
+    new.num_col_, new.num_row_ = n, m
+    new.sense_, new.offset_ = lp.sense_, lp.offset_
+    new.col_cost_ = np.asarray(lp.col_cost_)[cp]
+    new.col_lower_ = np.asarray(lp.col_lower_)[cp]
+    new.col_upper_ = np.asarray(lp.col_upper_)[cp]
+    new.row_lower_ = np.asarray(lp.row_lower_)[rp]
+    new.row_upper_ = np.asarray(lp.row_upper_)[rp]
+    if len(lp.integrality_):
+        new.integrality_ = [lp.integrality_[j] for j in cp]
+    if len(lp.col_names_) == n:
+        new.col_names_ = [lp.col_names_[j] for j in cp]
+    if len(lp.row_names_) == m:
+        new.row_names_ = [lp.row_names_[i] for i in rp]
+    new.a_matrix_.format_ = highspy.MatrixFormat.kColwise
+    new.a_matrix_.num_col_, new.a_matrix_.num_row_ = n, m
+    new.a_matrix_.start_, new.a_matrix_.index_ = b.indptr, b.indices
+    new.a_matrix_.value_ = b.data
+    h2 = highspy.Highs()
+    h2.setOptionValue("output_flag", False)
+    if h2.passModel(new) != highspy.HighsStatus.kOk or h2.writeModel(str(out)) not in (
+        highspy.HighsStatus.kOk,
+        highspy.HighsStatus.kWarning,
+    ):
+        raise RuntimeError(f"highspy could not write the seed-{seed} copy of {path}")
+    h3 = highspy.Highs()
+    h3.setOptionValue("output_flag", False)
+    h3.readModel(str(out))
+    back = h3.getLp()
+    got = (back.num_row_, back.num_col_, len(back.a_matrix_.value_))
+    want = (m, n, a_mat.nnz)
+    if got != want:
+        raise RuntimeError(f"{out}: re-read shape {got} != {want}")
+    if len(lp.integrality_) and sum(map(int, back.integrality_)) != sum(map(int, lp.integrality_)):
+        raise RuntimeError(f"{out}: integrality count changed on re-read")
+    return str(out)
 
 
 def solve(path: str, on: bool, a) -> dict:
@@ -121,6 +202,7 @@ def evaluate(rows: list[dict]) -> dict:
     nrep = {nm: len(rs) for nm, rs in by.items()}
     bimodal = sorted(nm for nm in by if 0 < cert[nm]["off"] < nrep[nm] or nm in KNOWN_BIMODAL)
     lost_all = sorted(nm for nm in by if cert[nm]["off"] == nrep[nm] and cert[nm]["on"] == 0)
+    gained_all = sorted(nm for nm in by if cert[nm]["on"] == nrep[nm] and cert[nm]["off"] == 0)
     wobble = sorted(
         nm for nm in by if cert[nm]["off"] == nrep[nm] and 0 < cert[nm]["on"] < nrep[nm]
     )
@@ -167,6 +249,7 @@ def evaluate(rows: list[dict]) -> dict:
         "bar1_pass": not problems,
         "bar1b_cert_lost_every_rep": lost_all,
         "bar1b_pass": not lost_all,
+        "bar1b_cert_gained_every_rep": gained_all,  # reported; picks --permute rows
         "cert_wobble": {nm: cert[nm] for nm in wobble},
         "bimodal_off": {nm: cert[nm] for nm in bimodal},
         "solved_including_bimodal": solved_all,
@@ -215,6 +298,16 @@ def main(argv=None) -> int:
         help="re-evaluate the rows of an existing panel file (.json or .json.gz) and exit",
     )
     ap.add_argument(
+        "--permute",
+        action="store_true",
+        help="rep r >= 1 solves a row/column permutation of the file with seed r (both arms)",
+    )
+    ap.add_argument(
+        "--merge",
+        default="",
+        help="with --rescore: replace the rescored rows for the names in these files (comma list)",
+    )
+    ap.add_argument(
         "--resume",
         action="store_true",
         help="keep the (instance index, rep) rows already in --out and run the rest",
@@ -229,10 +322,18 @@ def main(argv=None) -> int:
                 data = json.loads(fh.read())
         else:
             data = json.loads(src.read_text())
-        new = evaluate(data["rows"])
+        rows = data["rows"]
+        if a.merge:
+            extra = [r for f in a.merge.split(",") for r in json.loads(Path(f).read_text())["rows"]]
+            names = {r["name"] for r in extra}
+            rows = [r for r in rows if r["name"] not in names] + extra
+            print("merged permutation reps for", sorted(names), flush=True)
+        new = evaluate(rows)
         old = data.get("verdict") or {}
-        keys = ("graduate", "bar1b_cert_lost_every_rep", "bimodal_off", "cert_wobble",
-                "solved", "solved_including_bimodal", "bar2")  # fmt: skip
+        keys = ("graduate", "bar1_pass", "bar1b_cert_lost_every_rep",
+                "bar1b_cert_gained_every_rep", "bimodal_off", "cert_wobble", "solved",
+                "solved_including_bimodal", "nodes_both_certified", "dual_losses",
+                "median_primal_gap", "bar2")  # fmt: skip
         print(json.dumps({"file": str(src), "stored_graduate": old.get("graduate"),
                           **{k: new[k] for k in keys}}, indent=1))  # fmt: skip
         return 0
@@ -256,7 +357,10 @@ def main(argv=None) -> int:
     def one(job):
         k, mem, rep = job
         order = (False, True) if (k + rep) % 2 == 0 else (True, False)
-        got = {("on" if on else "off"): solve(str(REPO / mem["path"]), on, a) for on in order}
+        path = str(REPO / mem["path"])
+        if a.permute:
+            path = permuted_copy(path, rep, Path(a.out).parent / "perm_copies")
+        got = {("on" if on else "off"): solve(path, on, a) for on in order}
         return k, mem, rep, got
 
     jobs = [(k, mem, rep) for rep in range(a.reps) for k, mem in enumerate(pop)]

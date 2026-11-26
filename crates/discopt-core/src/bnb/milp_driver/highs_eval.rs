@@ -48,7 +48,7 @@ pub(super) struct HighsEval {
     /// The local domain (its global baseline is the working LP's propagated box).
     pub dom: Domain,
     /// Row -> singleton slack `(column, coefficient)` of the working LP.
-    slacks: Vec<Option<(usize, f64)>>,
+    pub(crate) slacks: Vec<Option<(usize, f64)>>,
     /// The LP's current basis (HiGHS's LP keeps its basis across evaluations); `None`
     /// solves as the root.
     pub basis: Option<Basis>,

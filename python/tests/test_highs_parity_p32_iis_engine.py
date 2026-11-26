@@ -65,15 +65,17 @@ def test_rust_engine_returns_the_baseline_iis(panel, sha):
     assert got["proven_irreducible"] and got["complete"]
 
 
-def _worker_subprocess(sha: str, flag: str):
+def _worker_subprocess(sha: str, flag: str, extra_env: dict | None = None):
     """The panel worker in a fresh process (the Rust flag is read once per process)."""
     import subprocess
 
     script = _ROOT / "discopt_benchmarks" / "scripts" / "iis_parity_panel.py"
     env = dict(os.environ)
     env.pop("DISCOPT_FARKAS_EXACT_OPEN", None)
+    env.pop("DISCOPT_MILP_CONFLICT", None)
     if flag:
         env["DISCOPT_FARKAS_EXACT_OPEN"] = flag
+    env.update(extra_env or {})
     p = subprocess.run(
         [sys.executable, str(script), "_worker", str(_DIR / f"{sha}.mps"), "30", "rust"],
         env=env, capture_output=True, text=True, timeout=240,
@@ -95,10 +97,32 @@ def test_exact_farkas_returns_the_baseline_iis(sha):
 @pytest.mark.parametrize("sha", sorted(EXACT_FARKAS_FIXTURES))
 def test_opt_out_reproduces_the_gap_and_reports_it(sha):
     """``DISCOPT_FARKAS_EXACT_OPEN=0``: the probe stays undecided, the set is a strict
-    superset of the baseline IIS, still proven infeasible, and NOT claimed irreducible."""
-    got = _worker_subprocess(sha, "0")
+    superset of the baseline IIS, still proven infeasible, and NOT claimed irreducible.
+
+    Measured with ``DISCOPT_MILP_CONFLICT=0``, the search the gap was recorded on:
+    since #2350 conflict analysis is on by default, and on ``1ec8e0a9f8f1c72c`` its
+    cuts decide the probe the Farkas opt-out leaves open (see the test below)."""
+    got = _worker_subprocess(sha, "0", {"DISCOPT_MILP_CONFLICT": "0"})
     want = _sig(_EXPECTED[sha])
     for k in want:
         assert {json.dumps(e) for e in want[k]} <= {json.dumps(e) for e in got[k]}
     assert _sig(got) != want
     assert got["proven_irreducible"] is False
+
+
+#: Fixtures whose undecided probe under ``DISCOPT_FARKAS_EXACT_OPEN=0`` the default
+#: MILP conflict analysis (#2350) decides. Measured 2026-11-26: ``1ec8e0a9f8f1c72c``
+#: returns the baseline 3/3/1 IIS, proven irreducible; ``97083706a8966d15`` still
+#: returns the 4/2/1 superset with conflicts on or off.
+CONFLICT_DECIDES = ("1ec8e0a9f8f1c72c",)
+
+
+@pytest.mark.parametrize("sha", CONFLICT_DECIDES)
+def test_conflict_analysis_closes_the_farkas_opt_out_gap(sha):
+    """With ``DISCOPT_FARKAS_EXACT_OPEN=0`` and the default search, the deletion probe
+    that the exact Farkas check would decide is decided by the MILP's conflict cuts:
+    the baseline IIS, proven irreducible. Turning conflicts off gives the gap back."""
+    assert sha in EXACT_FARKAS_FIXTURES
+    got = _worker_subprocess(sha, "0")
+    assert _sig(got) == _sig(_EXPECTED[sha])
+    assert got["proven_irreducible"] and got["complete"]
