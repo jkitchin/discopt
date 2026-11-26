@@ -440,3 +440,35 @@ def test_oa_rounding_skips_a_bound_too_large_to_round_exactly():
     # A small bound still rounds exactly.
     row, rhs = _round_single_integer_cut(np.array([-1.0]), -2.0000004, integ)
     assert (row.tolist(), rhs) == ([-1.0], -3.0)
+
+
+# #2352: ``result.objective`` is a claim that the returned ``x`` attains it (#1331).
+# The spatial B&B exit integer-snaps the tree incumbent (C-3) and used to keep the
+# NLP's value for the unsnapped point: on seed 2 below it returned (8, 1) with
+# ``objective`` 3.75e-9 below f(8, 1), optimal and certified (seeds 2 and 4 of 8).
+# The same consistency is asserted on the integer-bilinear lift by #2350's
+# ``test_lift_reports_the_objective_its_point_attains``.
+def _spatial_family(seed):
+    rng = np.random.default_rng(seed)
+    m = dm.Model()
+    x = m.integer("x", lb=1, ub=int(rng.integers(4, 9)))
+    y = m.integer("y", lb=1, ub=int(rng.integers(4, 9)))
+    a, b, c = (float(v) for v in rng.uniform(0.5, 2.0, 3))
+    m.subject_to(x * y >= float(rng.uniform(3, 10)))
+    m.subject_to(a * x + b * y <= float(rng.uniform(8, 14)))
+    m.minimize(x * y * c - 1 / x + dm.exp(0.1 * y) - dm.log(x + y))
+    return m
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_spatial_bb_reports_the_objective_its_point_attains(seed):
+    m = _spatial_family(seed)
+    r = m.solve(time_limit=30)
+    # The probe reached the route under test.
+    assert r.algorithm_route.startswith("spatial-bb"), r.algorithm_route
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.algorithm_route)
+    flat = [float(np.ravel(r.x[v.name])[0]) for v in m._variables]
+    v = verify_point(m, flat, with_objective=True)
+    assert v.ok, v.reason
+    assert r.objective == v.objective, (r.objective, v.objective)
+    assert r.bound <= r.objective + 1e-6
