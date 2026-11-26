@@ -256,6 +256,27 @@ counters!(
     HighsSepaCliqueCuts,
     HighsSepaCliques,
     HighsSepaCliqueMerged,
+    // `DISCOPT_MILP_CLIQUE_DOMAIN`: `addImplications` calls from a search domain's
+    // `changeBound` (a binary fixed), and the bound changes they made.
+    MilpCliqueDomainCalls,
+    MilpCliqueDomainFixings,
+    // Probing at search start (`DISCOPT_MILP_CLIQUE_DOMAIN`): columns probed, global
+    // reductions, clique entries added.
+    MilpProbeProbed,
+    MilpProbeReductions,
+    MilpProbeEntries,
+    // Cliques and entries of the table handed to the search, before / after probing.
+    MilpCliqueTableCliques0,
+    MilpCliqueTableEntries0,
+    MilpCliqueTableCliques1,
+    MilpCliqueTableEntries1,
+    // Bound changes applyImplications made in the search.
+    MilpImplApplyFixings,
+    // Columns presolve probing (`HPresolve::runProbing`) and node separation's
+    // `separateImpliedBounds` probed; implied-bound cuts the latter added.
+    MilpProbePresolve,
+    MilpProbeNode,
+    MilpImpliedBoundCuts,
     // #2225: path separator paths abandoned by the substitution progress guard.
     HighsSepaPathSubstCap,
     // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global

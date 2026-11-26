@@ -696,6 +696,17 @@ impl RootSeparation {
         }
     }
 
+    /// The root's clique table (`mipdata_->cliquetable` after the root's
+    /// `extractCliques` + `runCliqueMerging` and clique separation), for the search's
+    /// domains (`DISCOPT_MILP_CLIQUE_DOMAIN`). `None` when clique separation is off or
+    /// never ran, or the table's box went infeasible.
+    pub fn clique_table(&self) -> Option<CliqueTable> {
+        self.cliques
+            .as_ref()
+            .filter(|(_, b)| !b.infeasible)
+            .map(|(t, _)| t.clone())
+    }
+
     /// The live cuts of the root's global pool as `coeffs·x >= rhs` over the structural
     /// columns (HiGHS's pool holds them as `a·x <= b`), for a later search's pool: HiGHS
     /// keeps every separated cut there, not only the ones its LP took.

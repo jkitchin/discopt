@@ -418,15 +418,49 @@ pub(super) fn search_cut_lp_enabled() -> bool {
 /// the verified Farkas ray of an infeasible node LP) into a conflict pool that both
 /// the local domain and a global domain propagate (`HighsMipSolverData::
 /// conflictPool`), aged before each round. A conflict propagated to an empty global
-/// domain proves the search complete. Default OFF until its CLAUDE.md §5 panel
-/// (row in `docs/dev/flag-retirement-audit.md`); read per search, garbage refused.
+/// domain proves the search complete. Default ON since 2026-11-26 (#2350): graduated
+/// jointly with `DISCOPT_MILP_CLIQUE_DOMAIN` (the pair is the HiGHS default) on a
+/// CLAUDE.md §5 panel scored with permutation reps (row in
+/// `docs/dev/flag-retirement-audit.md`); `=0` restores the search without conflict
+/// analysis or the cut pool. Read per search, garbage refused.
 pub(super) fn conflict_enabled() -> bool {
     match std::env::var("DISCOPT_MILP_CONFLICT") {
-        Err(_) => false,
+        Err(_) => true,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
             other => panic!("DISCOPT_MILP_CONFLICT={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// `DISCOPT_MILP_CLIQUE_DOMAIN`: the root's clique table (`mipdata_->cliquetable`,
+/// the ported `extractCliques` + `runCliqueMerging` of the root separation), filled by
+/// HiGHS's presolve probing schedule (`HPresolve::runProbing`: every binary, scored and
+/// budgeted as in HiGHS) and by probing the root LP's fractional binaries
+/// (`separateImpliedBounds`' probing loop), both in `lp/highs_cutgen/probing.rs`, then
+/// attached with the probing implications to the search's local and global domains.
+/// Fixing a binary then fixes the other literals of its cliques (`HighsDomain::
+/// changeBound`'s `cliquetable.addImplications`) and re-applies what its probe implied
+/// (`implications.applyImplications`), with `Reason::cliqueTable` reasons conflict
+/// analysis explains. With `DISCOPT_MILP_CONFLICT` (which supplies the global domain)
+/// node separation also runs `separateImpliedBounds`: probe the node LP's unprobed
+/// fractional binaries and add the violated implied-bound cuts. Bound-changing.
+/// Default ON since 2026-11-26 (#2350), graduated jointly with `DISCOPT_MILP_CONFLICT`
+/// on a §5 panel scored with permutation reps (row in
+/// `docs/dev/flag-retirement-audit.md`: cert-clean, nodes -20 % to -22 %, no dual loss,
+/// median primal gap lower at both caps); `=0` restores the search without the table
+/// hook or probing. The per-round root probing is still approximated by one pass at
+/// search start (the root separation has no `Domain`). Read per search, garbage refused.
+pub(super) fn clique_domain_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_CLIQUE_DOMAIN") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_CLIQUE_DOMAIN={other:?} is not recognized (expected 1 or 0)")
+            }
         },
     }
 }
@@ -923,6 +957,9 @@ pub(super) struct HighsEnv<'a, 'b> {
     /// The last evaluation stored duals of the current LP (`last_dual`).
     dual_fresh: bool,
     in_lp: std::collections::HashSet<Vec<(u32, i64)>>,
+    /// LP cut rows selected from the conflict `cutpool` (signature -> pool index):
+    /// HiGHS `lpCutRemoved` when the row leaves the LP, so the cut ages again.
+    pool_lp: std::collections::HashMap<Vec<(u32, i64)>, i32>,
     pub cut_rows_added: usize,
     pub cut_rows_deleted: usize,
     /// Root cuts the pool started with (step 2.1).
@@ -1052,7 +1089,11 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     }
 
     /// Append `cuts` (over the current columns) to the search's LP as persistent rows.
-    fn append_cut_rows(&mut self, cuts: &[GomoryCut]) {
+    ///
+    /// `idx[k]` is `cuts[k]`'s conflict-`cutpool` index when it was selected from it;
+    /// a selected cut that does not enter (no room, already a row) is released at once.
+    fn append_cut_rows(&mut self, cuts: &[GomoryCut], idx: &[Option<i32>]) {
+        debug_assert_eq!(cuts.len(), idx.len());
         if cuts.is_empty() {
             return;
         }
@@ -1061,16 +1102,29 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         let lp = self.lp.get_or_insert_with(|| SearchLp::from_base(base));
         let room = search_cut_cap(base.m_w).saturating_sub(lp.rows.len());
         let mut add: Vec<GomoryCut> = Vec::new();
-        for cut in cuts {
+        let mut released: Vec<i32> = Vec::new();
+        for (cut, &k) in cuts.iter().zip(idx) {
             if add.len() >= room {
-                break;
+                released.extend(k);
+                continue;
             }
             let c = lp.to_base(cut, n0);
             if let Some(rc) = self.refp.as_mut() {
                 rc.cut("lp-row", self.nodes, &c, &rc.x.clone());
             }
-            if self.in_lp.insert(cut_signature(&c)) {
+            let sig = cut_signature(&c);
+            if self.in_lp.insert(sig.clone()) {
+                if let Some(k) = k {
+                    self.pool_lp.insert(sig, k);
+                }
                 add.push(c);
+            } else {
+                released.extend(k);
+            }
+        }
+        if let Some(cf) = self.conf.as_mut() {
+            for k in released {
+                cf.cutpool.lp_cut_removed(k);
             }
         }
         if add.is_empty() {
@@ -1185,7 +1239,11 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             return;
         }
         for r in &gone {
-            self.in_lp.remove(&cut_signature(&r.cut));
+            let sig = cut_signature(&r.cut);
+            self.in_lp.remove(&sig);
+            if let (Some(k), Some(cf)) = (self.pool_lp.remove(&sig), self.conf.as_mut()) {
+                cf.cutpool.lp_cut_removed(k);
+            }
         }
         let d = delete_cut_rows(&lp.csc, lp.m, lp.n, &lp.b, &mut gone, &mut kept);
         let col_map = d.col_map.clone();
@@ -1974,6 +2032,42 @@ impl SearchEnv for HighsEnv<'_, '_> {
         {
             return false;
         }
+        // `separationRound` starts with `implications.separateImpliedBounds` on the
+        // global domain: probe the LP's unprobed fractional binaries, then the
+        // implied-bound cuts the LP point violates, into the cut pool.
+        let mut implied: Vec<GomoryCut> = Vec::new();
+        if clique_domain_enabled() {
+            if let Some(cf) = self.conf.as_mut() {
+                let feastol = self.eval.dom.feastol();
+                let fr: Vec<usize> = (0..ctx.ns)
+                    .filter(|&j| ctx.is_int[j] && frac(x[j]) > feastol)
+                    .collect();
+                let (st, cuts) = crate::lp::highs_cutgen::probing::separate_implied_bounds(
+                    &mut cf.gdom,
+                    &mut self.eval.dom,
+                    &x,
+                    &fr,
+                );
+                // Probing committed its reductions to the global baseline: the next
+                // `sync_global` copies the global bounds into the local baseline.
+                cf.synced = usize::MAX;
+                crate::profile::incr_by(crate::profile::Ctr::MilpProbeNode, st.probed as u64);
+                crate::profile::incr_by(
+                    crate::profile::Ctr::MilpImpliedBoundCuts,
+                    cuts.len() as u64,
+                );
+                for (inds, vals, rhs, _) in cuts {
+                    // `vals . x <= rhs` as `coeffs . x >= rhs`.
+                    let mut coeffs = vec![0.0; self.ctx.n_w];
+                    coeffs[inds[0]] -= vals[0];
+                    coeffs[inds[1]] -= vals[1];
+                    implied.push(GomoryCut { coeffs, rhs: -rhs });
+                }
+            }
+            if self.conf.as_ref().is_some_and(|cf| cf.gdom.infeasible()) {
+                return false;
+            }
+        }
         let mut pick: Vec<(f64, usize)> = Vec::new();
         for (k, cut) in self.pool.iter().enumerate() {
             if self.cut_lp && self.in_lp.contains(&cut_signature(cut)) {
@@ -1993,7 +2087,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
         }
         pick.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         pick.truncate(NODE_GMI_POOL_PER_NODE);
-        let rows: Vec<GomoryCut> = pick
+        let mut rows: Vec<GomoryCut> = pick
             .iter()
             .map(|&(_, k)| {
                 let mut coeffs = self.pool[k].coeffs.clone();
@@ -2004,6 +2098,42 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 }
             })
             .collect();
+        for cut in &implied {
+            let mut coeffs = cut.coeffs.clone();
+            coeffs.resize(ctx.n_w, 0.0);
+            rows.push(GomoryCut {
+                coeffs,
+                rhs: cut.rhs,
+            });
+        }
+        // `separationRound` ends with `cutpool.separate`: the conflict cuts this LP
+        // point violates, scored and filtered for parallelism; a cut it passes over
+        // ages, and is deleted past the age limit.
+        let mut from_pool: Vec<(i32, GomoryCut)> = Vec::new();
+        if let Some(cf) = self.conf.as_mut() {
+            let ns = ctx.ns;
+            let mut cutset = Vec::new();
+            let mut obs =
+                DomainObservers(vec![(&mut cf.gdom, cf.cpi), (&mut self.eval.dom, cf.cpi)]);
+            let sel =
+                cf.cutpool
+                    .separate(&mut obs, &x[..ns], &fl[..ns], &fu[..ns], 1e-6, &mut cutset);
+            for c in sel {
+                // `vals . x <= rhs` as `coeffs . x >= rhs` over the working columns.
+                let mut coeffs = vec![0.0; ctx.n_w];
+                for (&j, &v) in c.inds.iter().zip(&c.vals) {
+                    coeffs[j as usize] = -v;
+                }
+                from_pool.push((
+                    c.index,
+                    GomoryCut {
+                        coeffs,
+                        rhs: -c.rhs,
+                    },
+                ));
+            }
+        }
+        rows.extend(from_pool.iter().map(|(_, c)| c.clone()));
         self.sep_calls += 1;
         let ref_cur = self.refp.as_ref().map(|rc| rc.current(self.lp.as_ref()));
         if let (Some(rc), Some(xc)) = (self.refp.as_mut(), ref_cur.as_ref()) {
@@ -2045,8 +2175,14 @@ impl SearchEnv for HighsEnv<'_, '_> {
             self.eval.pending_lift = Some(g + ctx.obj_const);
         }
         if !self.cut_lp {
-            for cut in lg.new_cuts {
+            for cut in implied.into_iter().chain(lg.new_cuts) {
                 self.pool_add(cut);
+            }
+            // The selected pool cuts served this node's lift only: out of the LP.
+            if let Some(cf) = self.conf.as_mut() {
+                for (k, _) in &from_pool {
+                    cf.cutpool.lp_cut_removed(*k);
+                }
             }
             return false;
         }
@@ -2063,14 +2199,29 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 rc.cut("node-new-base", self.nodes, c, &xb);
             }
         }
-        let mut add: Vec<GomoryCut> = pick.iter().map(|&(_, k)| self.pool[k].clone()).collect();
-        for cut in new_base {
+        let mut add: Vec<(GomoryCut, Option<i32>)> = pick
+            .iter()
+            .map(|&(_, k)| (self.pool[k].clone(), None))
+            .collect();
+        add.extend(from_pool.into_iter().map(|(k, c)| (c, Some(k))));
+        for cut in implied.into_iter().chain(new_base) {
             self.pool_add(cut.clone());
-            add.push(cut);
+            add.push((cut, None));
         }
-        add.truncate(SEARCH_CUTS_PER_NODE);
+        if add.len() > SEARCH_CUTS_PER_NODE {
+            let over: Vec<i32> = add
+                .drain(SEARCH_CUTS_PER_NODE..)
+                .filter_map(|(_, k)| k)
+                .collect();
+            if let Some(cf) = self.conf.as_mut() {
+                for k in over {
+                    cf.cutpool.lp_cut_removed(k);
+                }
+            }
+        }
+        let (add, idx): (Vec<GomoryCut>, Vec<Option<i32>>) = add.into_iter().unzip();
         let rows0 = self.cut_rows_added;
-        self.append_cut_rows(&add);
+        self.append_cut_rows(&add, &idx);
         if self.cut_rows_added > rows0 {
             // `separationRound`: cuts went into the LP, so its resolve ages with
             // deletion (`HighsSeparation.cpp:122-124`).
@@ -2278,6 +2429,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             dual_fresh: false,
             lp: None,
             in_lp: std::collections::HashSet::new(),
+            pool_lp: std::collections::HashMap::new(),
             cut_rows_added: 0,
             cut_rows_deleted: 0,
             seeded_pool: 0,
@@ -2364,7 +2516,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     /// tightened on the global domain (`tightenCoefficients`) and added to the cut
     /// pool, which both domains propagate (`HighsCutGeneration.cpp:1208-1299`). The
     /// cut is valid wherever the proof is: it is a valid inequality of the proof row
-    /// over the global box. It also joins node separation's pool.
+    /// over the global box.
     fn generate_conflict(&mut self, inds: &[usize], vals: &[f64], rhs: f64) {
         let ns = self.ctx.ns;
         let is_int = self.ctx.is_int_full;
@@ -2421,15 +2573,10 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             return;
         }
         cf.conflict_cuts += 1;
-        // Node separation's pool holds `coeffs . x >= rhs` over the working columns.
-        let mut coeffs = vec![0.0f64; self.ctx.n_w];
-        for (&c, &v) in cinds.iter().zip(&cvals) {
-            coeffs[c as usize] = -v;
-        }
-        let gc = GomoryCut { coeffs, rhs: -crhs };
-        if self.pool_sigs.insert(cut_signature(&gc)) {
-            self.pool.push(gc);
-        }
+        // Node separation reaches the cut through `cutpool.separate` (HiGHS
+        // `separationRound`), which ages it out once it stops being violated. It used
+        // to be copied into the never-pruned `pool` as well, whose per-node scan grew
+        // with the run (market split, 80k nodes: 5.2x the wall without conflicts).
     }
 
     /// HiGHS `conflictPool.performAging()` (before each dive).
@@ -2650,6 +2797,7 @@ pub(super) fn run<'a>(
     dbg: Option<Debugger<'a>>,
     seed_pool: Vec<GomoryCut>,
     top_level: bool,
+    cliques: Option<(crate::lp::highs_cutgen::clique::CliqueTable, Vec<f64>)>,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -2675,6 +2823,50 @@ pub(super) fn run<'a>(
         }
         rc.bound("root", 0, root_bound, f64::INFINITY, "");
     }
+    // `DISCOPT_MILP_CLIQUE_DOMAIN`: `mipdata_->cliquetable` and `mipdata_->implications`
+    // on the local domain before the global one is cloned from it
+    // (`enable_conflicts`), so both domains run `addImplications` and
+    // `applyImplications`. The table is the root separation's; probing extends it
+    // first (`separateImpliedBounds`' probing loop over the root LP's fractional
+    // binaries), on the domain at its global baseline.
+    let mut probe_infeasible = false;
+    if let Some((t, x)) = cliques {
+        assert_eq!(
+            t.num_cols(),
+            ctx.ns,
+            "the clique table must index the search's structural columns"
+        );
+        assert!(
+            env.eval.dom.domain_change_stack().is_empty(),
+            "probing needs the search's domain at its global baseline"
+        );
+        let feastol = env.eval.dom.feastol();
+        // `separateImpliedBounds` probes the binaries the LP solution leaves
+        // fractional; here, those of the final root LP.
+        let cands: Vec<usize> = (0..ctx.ns.min(x.len()))
+            .filter(|&j| ctx.is_int[j] && (x[j] - x[j].round()).abs() > feastol)
+            .collect();
+        // HiGHS probes every binary in presolve first (`HPresolve::runProbing`), at
+        // its default `random_seed = 0`.
+        let pp = crate::lp::highs_cutgen::probing::PresolveProbing {
+            submip: lim.submip,
+            random_seed: 0,
+            nrows: ctx.n_orig_rows.min(ctx.m_w),
+        };
+        let st = crate::lp::highs_cutgen::probing::probe_and_attach(
+            &mut env.eval.dom,
+            t,
+            &cands,
+            Some(pp),
+        );
+        {
+            use crate::profile::{incr_by, Ctr};
+            incr_by(Ctr::MilpProbeProbed, st.probed as u64);
+            incr_by(Ctr::MilpProbeReductions, st.reductions as u64);
+            incr_by(Ctr::MilpProbeEntries, st.new_entries.max(0) as u64);
+        }
+        probe_infeasible = env.eval.dom.infeasible();
+    }
     if conflict_enabled() {
         env.enable_conflicts();
     }
@@ -2687,17 +2879,21 @@ pub(super) fn run<'a>(
         // `IncumbentFound` when it improves on the last one the driver reported.
         env.accept(x, v);
     }
-    let (slot, _) = env
-        .q
-        .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
-    env.q.set_ident(
-        slot,
-        NodeIdent {
-            id: root_id,
-            parent: None,
-            branch: None,
-        },
-    );
+    // Probing proved the global box holds no (improving) point: the queue starts
+    // empty, as when conflict propagation empties the global domain.
+    if !probe_infeasible {
+        let (slot, _) = env
+            .q
+            .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
+        env.q.set_ident(
+            slot,
+            NodeIdent {
+                id: root_id,
+                parent: None,
+                branch: None,
+            },
+        );
+    }
     let mut search = Search {
         count_tree_weight: true,
         next_id: root_id + 1,

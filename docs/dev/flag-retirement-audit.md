@@ -178,7 +178,11 @@ in the audit.
 
 **Terminology (PR #2196 review).** A "dual loss" (`d2_flag_panel.py`) is an instance neither arm certified whose ON median final gap at the time limit is worse than OFF's by more than OFF's own run-to-run spread: a performance measure. Bound validity is bar 1 (no bound past the oracle), checked separately.
 
-<!-- live-solver-math-gates: 70 -->
+<!-- live-solver-math-gates: 69 -->
+
+_71 -> 69 (2026-11-26, #2350): `MILP_CONFLICT` and `MILP_CLIQUE_DOMAIN` graduated jointly to default ON on a §5 panel scored with permutation reps (section "Joint graduation panel, 2026-11-26"); `=0` opts out of each._
+
+_70 -> 71 (2026-11-26, #2350): `MILP_CLIQUE_DOMAIN` added default OFF; its §5 panels are on its row. A joint graduation with `MILP_CONFLICT` is blocked by bar 1b on `bell5`._
 
 _68 -> 70 (2026-11-25): `MILP_SYM_LEX` and `MILP_CONFLICT` added default OFF; their §5 corpus panel is owed (rows under "Rows added 2026-11-25")._
 
@@ -968,4 +972,90 @@ Two things are worth carrying forward:
 | flag | what | evidence | state |
 |---|---|---|---|
 | `DISCOPT_MILP_SYM_LEX` (Rust, `bnb/milp_symmetry.rs` `sym_lex_enabled`, `detect`, `augment`; `bnb/milp_driver.rs` `solve_milp_node_search_sym`) | Formulation symmetry of the model being searched (the caller's, or the presolved one), from colour refinement and individualisation. Every candidate is verified exactly as an automorphism. Each verified generator adds one static lexicographic-leader row with integer mixed-radix weights (below `WEIGHT_CAP` = 1e3, one common column order asserted in code). Skipped with hooks, a debugger, a seeded incumbent and in sub-MIPs. Bound-changing (removes points, never an orbit). | no-ip-65059 (MIPLIB, infeasible), Rust engine, 1 thread: with `DISCOPT_MILP_CONFLICT` too it is **certified infeasible in 271 s, 12,730 nodes**, 34 rows. Without either mechanism it hit the 300 s time limit twice (51.7k and 31.1k nodes; measured on a build where the sym flag added no rows, so in effect both off). HiGHS on the augmented model: infeasible in 1,559 nodes. `test_milp_sym_conflict.py`: 4 arms against HiGHS on bin packing (feasible and infeasible), general-integer assignment, makespan and colouring. Status, optimum and certificate agree with HiGHS and the flags-off arm on every case, and rows and conflicts fired. | **Default OFF, §5 corpus panel owed** (in-repo MILP corpus plus MIPLIB-38, ON vs OFF, with `DISCOPT_MILP_CONFLICT`). Graduate on a cert-clean, not-harmful panel; retire with the implementation if it is harmful. |
-| `DISCOPT_MILP_CONFLICT` (Rust, `bnb/milp_driver/highs_env.rs` `conflict_enabled`, `Conflicts`, `analyse_conflict`, `analyse_infeasible_lp`, `farkas_proof_row`) | Conflict analysis in the HiGHS-design search. Propagation conflicts come from infeasible local domains. LP dual-proof conflicts come from the verified Farkas ray, with the rhs widened by the row tolerances. Both go to a conflict pool that the global domain propagates, and the resulting global fixings are synced into the search's baseline. Since the cut-pool PR it also carries HiGHS's `mipdata_->cutpool` (`Conflicts::cutpool`): `generateConflict` cuts from each LP dual proof (`generate_conflict`, `CutGenCore::generate_conflict_core`, then `postprocess_cut` and `tighten_coefficients_with` on the global domain), and every root and node separation cut rewritten over the structurals (`StructRows::to_struct`: slacks substituted through their rows, rhs widened by the row tolerances), propagated by both the local and the global domain and aged with the conflicts. The pool lives in one run and is never exported. | Same panel as the row above. no-ip-65059 with conflicts alone: time limit at 300 s (41.8k nodes, 90k conflicts, 294 global fixings). With the lex rows it certifies. Cut pool, measured 2026-11-25 (deterministic, 2,000 nodes, 1 thread, in-repo MILP corpus plus MIPLIB-38, 61 instances): flag ON vs OFF bar 1 clean (no false status or bound, 122 checks); against the pre-cut-pool ON arm on 57 shared instances, certified 46 -> 45 (bell5 hits the node cap: 1,403 -> 7,614 nodes uncapped; attributed by a diagnostic build to propagating the root seed cuts in the top-level search, 1,154 nodes without it, a trajectory effect: the optimum is found at node 2,807 instead of 606; the seeding itself is faithful to HiGHS, which solves bell5 in 525 nodes at a 1e-6 gap against our 1,405 flag OFF), nodes over both-certified 6,287 -> 6,079. c513 (MIPcc27 IIS subproblem, infeasible): not finished in 120 s -> certified infeasible in 76 s, 128.7k nodes (HiGHS: 2.9 s, 7,484 nodes). `generate_conflict_cut_is_valid_for_the_proof_over_the_global_box` (Rust, 241 cuts, 41k point checks) and `test_conflict_cut_pool_fires_and_matches_the_oracle`. | **Default OFF, §5 corpus panel owed** (bundled with `DISCOPT_MILP_SYM_LEX`, the owner's "everything on together" directive). |
+| `DISCOPT_MILP_CONFLICT` (Rust, `bnb/milp_driver/highs_env.rs` `conflict_enabled`, `Conflicts`, `analyse_conflict`, `analyse_infeasible_lp`, `farkas_proof_row`) | Conflict analysis in the HiGHS-design search. Propagation conflicts come from infeasible local domains. LP dual-proof conflicts come from the verified Farkas ray, with the rhs widened by the row tolerances. Both go to a conflict pool that the global domain propagates, and the resulting global fixings are synced into the search's baseline. Since the cut-pool PR it also carries HiGHS's `mipdata_->cutpool` (`Conflicts::cutpool`): `generateConflict` cuts from each LP dual proof (`generate_conflict`, `CutGenCore::generate_conflict_core`, then `postprocess_cut` and `tighten_coefficients_with` on the global domain), and every root and node separation cut rewritten over the structurals (`StructRows::to_struct`: slacks substituted through their rows, rhs widened by the row tolerances), propagated by both the local and the global domain and aged with the conflicts. The pool lives in one run and is never exported. | Same panel as the row above. no-ip-65059 with conflicts alone: time limit at 300 s (41.8k nodes, 90k conflicts, 294 global fixings). With the lex rows it certifies. Cut pool, measured 2026-11-25 (deterministic, 2,000 nodes, 1 thread, in-repo MILP corpus plus MIPLIB-38, 61 instances): flag ON vs OFF bar 1 clean (no false status or bound, 122 checks); against the pre-cut-pool ON arm on 57 shared instances, certified 46 -> 45 (bell5 hits the node cap: 1,403 -> 7,614 nodes uncapped; attributed by a diagnostic build to propagating the root seed cuts in the top-level search, 1,154 nodes without it, a trajectory effect: the optimum is found at node 2,807 instead of 606; the seeding itself is faithful to HiGHS, which solves bell5 in 525 nodes at a 1e-6 gap against our 1,405 flag OFF), nodes over both-certified 6,287 -> 6,079. c513 (MIPcc27 IIS subproblem, infeasible): not finished in 120 s -> certified infeasible in 76 s, 128.7k nodes (HiGHS: 2.9 s, 7,484 nodes). `generate_conflict_cut_is_valid_for_the_proof_over_the_global_box` (Rust, 241 cuts, 41k point checks) and `test_conflict_cut_pool_fires_and_matches_the_oracle`. Joint §5 panel with `DISCOPT_MILP_CLIQUE_DOMAIN` (2026-11-26, #2350): section "Joint graduation panel, 2026-11-26" below. | **Default ON since 2026-11-26 (#2350), graduated jointly with `DISCOPT_MILP_CLIQUE_DOMAIN`** (the pair is HiGHS's default) on a panel scored with permutation reps: cert-clean, bar 2 passes at both caps. `=0` opts out (search without conflict analysis or the cut pool). Its pairing with `DISCOPT_MILP_SYM_LEX` (still default OFF, panel owed) belongs to that flag's panel. |
+| `DISCOPT_MILP_CLIQUE_DOMAIN` (Rust, `bnb/milp_driver/highs_env.rs` `clique_domain_enabled`, `separate`; `lp/highs_cutgen/probing.rs` `probe_and_attach`, `presolve_probing`, `separate_implied_bounds`, `Implications`; `lp/highs_cutgen/domain.rs` `fixing_implications`) | HiGHS's `HighsDomain::changeBound` hook in the Rust MILP search: fixing a binary fixes the other literals of its cliques (`cliquetable.addImplications`) and re-applies what probing that literal implied (`implications.applyImplications`), with `Reason::cliqueTable` reasons for conflict analysis. The table is the root separation's (`extractCliques` + `runCliqueMerging`), filled by HiGHS's presolve probing schedule (`HPresolve::runProbing`: every binary scored by `computeProbingScore`, `probingContingent`/`splayContingent` budgets and early aborts as in HiGHS, then `cleanupFixed` + `runCliqueMerging`) and by probing the final root LP's fractional binaries. With `DISCOPT_MILP_CONFLICT` (the global domain) node separation runs `HighsImplications::separateImpliedBounds`: probe the node LP's unprobed fractional binaries (`nextCleanupCall` merging, neighbourhood-query restore) and add the violated 2-variable implied-bound cuts. Not ported: `dualFixProbing`, presolve substitutions/lifting/row deletions, VLB/VUB; the per-round root `separateImpliedBounds` is one pass at search start (the root separation has no `Domain`). Bound-changing. | Soundness: `probing_never_cuts_a_feasible_point` (Rust, 377 random instances alternating presolve probing on/off, every feasible point enumerated, none cut; 583 fixings strictly tighter than row propagation) and `implied_bound_cuts_never_cut_a_feasible_point` (1,509 instances, 141 cuts, 13,043 cut-vs-feasible-point checks, none violated). `test_milp_clique_domain.py`: 3 arms against HiGHS on colouring and packing/knapsack, plus `test_c513_tables_and_node_probing` (table grows 8 -> >= 380 cliques, node probing and implied-bound cuts fire, no incumbent on the infeasible program). c513 (MIPcc27 IIS subproblem): the earlier hook-only port fired 395k times but had an 8-clique table (HiGHS's extraction finds 0; its 404 cliques / 808 entries come from presolve probing all 144 binaries), so it was a missing schedule, not a wiring defect. With the schedule the table is 407 / 814, and with `DISCOPT_MILP_CONFLICT` c513 takes 42,941 (off) -> **27,824 nodes** (HiGHS: 7,249). Panel 2026-11-26 (commit `46277da26` plus this change, MIPLIB-38 + M, 61 instances, deterministic, 2,000 nodes, 120 s, 1 rep, 1 thread), two populations, both **bar 1 clean** (122 checks, 0 problems, no certification lost). Flag alone: solved 48 = 48, nodes over 45 both-certified 7,706 -> 7,726 (+0.3 %), 1 dual loss (`enlight_hard`, cap 1), median primal gap 0.00361 -> 0.00378 (`neos17`, `neos-2624317-amur` worse; `neos-911970`, `23588` better). Both arms with `DISCOPT_MILP_CONFLICT`: solved 48 = 48, nodes 6,229 -> 5,694 (-8.6 %), 0 dual losses, median primal gap 0.00646 -> 0.00395 (`neos-911970`, `23588`, `bell5` better on dual and primal, none worse). Bar 2 fails the -15 % node threshold in both. Superseded for the default by the joint panel below. | **Default ON since 2026-11-26 (#2350), graduated jointly with `DISCOPT_MILP_CONFLICT`** (both bars pass at both caps; the pair is HiGHS 1.16's default). The single-rep panels above stand; their bar 1b block on `bell5` was an ordering effect, resolved by permutation reps (below). `=0` opts out (search without the clique hook or probing). Remaining fidelity gap: the per-round root `separateImpliedBounds` is one pass at search start until the root separation has a `Domain` (follow-up PR). |
+
+#### Joint graduation panel, 2026-11-26 (`MILP_CONFLICT` + `MILP_CLIQUE_DOMAIN`, #2350)
+
+Both flags ON vs both unset (then the default, OFF), commit `e988254cb`, MIPLIB-38 + M (61
+instances), deterministic, 120 s backstop, 1 thread, `discopt_benchmarks/scripts/d2_flag_panel.py`.
+Bars unchanged; bar 2 is "not harmful" (2b, the retired -15 % threshold, passes anyway).
+
+**Rule, fixed before re-scoring (2026-11-26).** A deterministic solve has no rep-to-rep
+spread, and `bell5`'s node count is decided by its row/column order (OFF: 1,365 to 16,553
+nodes over six orderings), so **permutation reps are the reps** (`d2_flag_panel.py
+--permute`): rep 0 is the original file, rep *r* = 1..6 a row+column permutation with seed
+*r*, the same copy in both arms. Applied to every row bar 1b flags in either direction on the
+single-rep panel **and every row of the 2e population** (the 13 open rows), at both caps, so
+no row is picked by how it moved; 2e is the median over rows of each row's median over its 7
+reps. The result is final either way.
+
+Single rep (before the rule): bar 1 clean at both caps; 1b failed on `bell5` (OFF certified
+at 1,365 nodes, ON needs 7,613 uncapped). 2,000 nodes: 2e passed. 5,000 nodes: 2e failed
+(4e-11 -> 5.8e-5, driven by one `neos-911970` incumbent).
+
+With permutation reps (13 rows x 7 reps x 2 arms per cap):
+
+| cap | bar 1 | 1b lost / gained | 2a solved (stable rows) | nodes over both-certified | dual losses | median primal gap OFF -> ON |
+|---|---|---|---|---|---|---|
+| 2,000 | clean | none / none | 47 = 47 | 6,341 -> 4,944 (-22 %) | 0 | 0.00199 -> 0.000145 |
+| 5,000 | clean (278 checks) | none / none | 54 = 54 | 8,719 -> 6,987 (-20 %) | 0 | 2.5e-5 -> 4.0e-7 |
+
+Per-ordering nodes, OFF / ON (`*` certified; r0 is the original order):
+
+| row, cap | r0 | r1 | r2 | r3 | r4 | r5 | r6 |
+|---|---|---|---|---|---|---|---|
+| `bell5`, 2k | 1,365* / 1,999 | 1,999 / 1,999 | 1,999 / 1,999 | 1,999 / 1,999 | 1,999 / 1,835* | 1,999 / 1,999 | 1,307* / 1,870* |
+| `bell5`, 5k | 1,365* / 4,999 | 3,266* / 2,920* | 3,506* / 3,790* | 4,999 / 4,748* | 2,856* / 1,835* | 4,999 / 4,999 | 1,307* / 1,870* |
+| `enlight_hard`, 2k | 1,999 / 750* | 1,999 / 1,999 | 1,999 / 1,999 | 1,999 / 1,999 | 1,999 / 1,999 | 1,999 / 1,999 | 732* / 641* |
+| `enlight_hard`, 5k | 2,476* / 750* | 4,999 / 4,999 | 4,999 / 2,811* | 4,999 / 2,536* | 4,999 / 4,999 | 4,999 / 4,999 | 732* / 641* |
+| `23588`, 2k | 1,999 / 1,999 | 1,999 / 1,999 | 1,999 / 1,999 | 1,999 / 1,704* | 1,931* / 1,483* | 1,999 / 1,820* | 1,999 / 1,999 |
+| `23588`, 5k | 2,886* / 3,205* | 2,519* / 2,974* | 3,030* / 2,676* | 2,126* / 1,704* | 1,931* / 1,483* | 2,378* / 1,820* | 2,261* / 2,043* |
+
+`bell5` is certified in 2/7 (2k) and 5/7 (5k) orderings in BOTH arms. Uncapped, on six
+orderings plus the HiGHS-presolved model, its node sums are 69,085 OFF, 45,211 conflict
+analysis alone, 32,619 both. Medians that moved the wrong way but stay within OFF's own
+spread (no dual loss): `neos-911970` at 5k (primal 0.0013 -> 0.0126, dual gap 0.0023 ->
+0.0090) and `bell5` primal at 2k (4e-5 -> 1.5e-4); `neos17` and `23588` improve. The 53
+`highs_parity/iis` infeasible fixtures agree (presolve settles them, the flags never fire).
+
+**Re-panel after the CI fixes (commits `1de50f4c9`/`efbe4c60a`, same population and rule).**
+2,000 nodes: every bar passes; solved 47 = 47; nodes over both-certified 6,341 -> 4,551;
+median primal gap 0.00199 -> 0.00060. 5,000 nodes: every bar except 2d passes; solved 54 = 54;
+nodes 8,719 -> 7,122; median primal gap 2.5e-5 -> 1.2e-11; bar 1 clean, 0 dual losses.
+2d failed on a single incumbent: `neos-2624317-amur` had one in 3/7 orderings OFF and 2/7 ON.
+(In ordering r4, the earlier ON arm at `e988254cb` found 18.26 at exactly node 5,000; the new one found none.)
+**Accepted as noise (owner decision, 2026-11-26)**, with these 21-ordering counts:
+- `amur` incumbents: OFF 12/21, ON 11/21 (neither arm certifies any);
+- `bell5` certified: OFF 9/21, ON 11/21.
+
+A one-ordering difference at a node cap on an instance that neither arm certifies lies within the spread that the ordering alone produces.
+
+**Wall panel (`0a34ec19b`, 6 instances x caps 10k/50k/200k x 2 reps, 1 thread).** This panel checks whether
+the per-node cost ratio grows with depth. It does not:
+- `bell5` per-node ON/OFF is 0.47 / 0.61 / 0.75;
+- `market_split` is 1.57 / 1.84 / 1.12 (both arms hit the cap);
+- `mik-250-20-75-5` is 0.77 / 1.08 / 1.35, and ON certifies in fewer nodes (10,982 vs 13,851);
+- `c513` is 1.13 / 1.03 / 1.03, and ON proves it infeasible at 30,374 nodes while OFF hits 200k.
+
+`neos17` reports `feasible` in both arms. ON stops at 7,711 nodes on a floored gap that `Model.solve` refuses.
+That is pre-existing and not caused by these flags: the native engine had no absolute gap tolerance (#2357).
+With `abs_gap_tolerance=1e-6`, ON certifies at 4,230 nodes in 23 s.
+
+**OA route (convex MINLP; no in-repo corpus instance reaches the flags any other way).**
+- (a) *Master replay*: 149 OA masters captured from 8 corpus instances, 3 interleaved reps per arm.
+  - Without #2354: bar 1 clean (298 checks, 0 bound crossings), certified 136 vs 135, nodes 432,711 vs 560,212.
+    Wall ON 14.8 +- 1.8 s vs OFF 12.4 +- 0.4 s, and the difference is master 33 (4.9 s vs 0.9 s).
+    That master's postsolved point fails the original rows and is cold re-solved (#2354).
+  - With #2354 (#2355): ON 10.2 +- 0.4 s vs OFF 11.9 +- 0.1 s; node geo-mean ratio 0.975; still 0 crossings.
+- (b) *Explicit OA solves* (`solver="mip-nlp", mip_nlp_method="oa"`) of the same 8 instances, 2 reps.
+  - Status, objective and certification are identical in both arms on all 8.
+  - Wall ratios are 0.95-1.10, except **`portfol_roundlot`, the known outlier**: +61% without #2354 and +35% with it (11.8 s vs 8.7 s).
+    95 % of that wall is in the MILP masters (11.3 s vs 8.2 s), and ON runs 41 masters against OFF's 39.
+    The per-master trees vary in both directions.
+    ON takes more nodes on masters 33 (74.7k vs 41.5k), 15 (90k vs 63k) and 31 (49k vs 42k), and fewer on 11 (60k vs 174k), 29 and 9.
+    The per-node rate is similar (master 33: 23 vs 20 us/node).
+  - ON's `portfol` incumbent failed `examine()`'s unscaled 1e-6 check. That was the incumbent repair declining on inconsistent fixed-integer equalities, fixed by #2356 (PR #2358).
+- Graduated on bar 2 as "no broad regression beyond the spread" (owner decision, 2026-11-26).
+c513 (infeasible): ON certifies in 27,824 nodes / 28 s; OFF hits a 200k-node limit.
+
