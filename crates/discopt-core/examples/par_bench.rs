@@ -121,6 +121,7 @@ fn opts(inst: &Instance) -> MilpOptions {
         bound_hook: None,
         bound_hook_every: 1,
         orbitopes: None,
+        sym_dynamic: None,
         extend_no_incumbent_s: None,
         gap_tol: 1e-6,
         abs_gap_tol: None,

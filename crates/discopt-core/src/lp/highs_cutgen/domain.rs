@@ -1724,6 +1724,36 @@ impl Domain {
         }
     }
 
+    /// The feasibility tolerance bounds are compared with.
+    pub fn feastol(&self) -> f64 {
+        self.feastol
+    }
+
+    /// Apply symmetry-handling tightenings `(column, is_lower, value)` with
+    /// `Reason::Unspecified`, a non-resolvable leaf of conflict analysis
+    /// (`DISCOPT_MILP_SYM_DYNAMIC`; see [`super::sym_dynamic`]). Stops at an
+    /// infeasibility.
+    pub fn apply_symmetry_tightenings(&mut self, out: &[(usize, bool, f64)]) {
+        for &(column, is_lower, boundval) in out {
+            if self.infeasible {
+                return;
+            }
+            let boundtype = if is_lower {
+                BoundType::Lower
+            } else {
+                BoundType::Upper
+            };
+            self.change_bound(
+                DomainChange {
+                    boundval,
+                    column,
+                    boundtype,
+                },
+                Reason::Unspecified,
+            );
+        }
+    }
+
     /// Whether the domain is infeasible.
     pub fn infeasible(&self) -> bool {
         self.infeasible

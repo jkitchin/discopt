@@ -83,6 +83,35 @@ pub fn orbitope_enabled() -> bool {
     }
 }
 
+/// `DISCOPT_MILP_SYM_DYNAMIC`: dynamic lexicographic reduction in the search's
+/// branching order over verified automorphisms (see
+/// [`crate::lp::highs_cutgen::sym_dynamic`]). Default OFF (bound-changing, §5 panel
+/// owed). Panics on an unrecognized value, and when combined with
+/// `DISCOPT_MILP_SYM_LEX` or `DISCOPT_MILP_ORBITOPE`: those keep the lex maximum in
+/// one static column order, and keeping lex maxima in two different orders can remove
+/// every representative of an orbit. Neither is silently preferred.
+pub fn sym_dynamic_enabled() -> bool {
+    let on = match std::env::var("DISCOPT_MILP_SYM_DYNAMIC") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_SYM_DYNAMIC={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    };
+    if on {
+        assert!(
+            !sym_lex_enabled() && !orbitope_enabled(),
+            "DISCOPT_MILP_SYM_DYNAMIC cannot be combined with DISCOPT_MILP_SYM_LEX or \
+             DISCOPT_MILP_ORBITOPE: they keep lex maxima in different column orders, \
+             which together can remove every solution of an orbit. Set only one."
+        );
+    }
+    on
+}
+
 /// One lexicographic-leader row `sum coef_j x_j >= 0` over structural columns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexRow {

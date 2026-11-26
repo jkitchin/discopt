@@ -3,8 +3,10 @@ symmetry + lexicographic-leader rows) and ``DISCOPT_MILP_CONFLICT`` (conflict an
 in the HiGHS-design search) on the Rust MILP engine.
 
 ``DISCOPT_MILP_ORBITOPE`` (column-lex propagation of verified full integer orbitopes)
-is the third. All are bound-changing (CLAUDE.md §5): every arm (off, sym, conflict,
-both, orbitope alone, and all three) must
+is the third, and ``DISCOPT_MILP_SYM_DYNAMIC`` (dynamic lex reduction in the search's
+branching order) the fourth; it excludes the two static ones. All are bound-changing
+(CLAUDE.md §5): every arm (off, sym, conflict, both, orbitope alone, the static three,
+dynamic alone and dynamic with conflicts) must
 reach the same verdict and optimum as HiGHS, the independent oracle, on symmetric
 families where the rows and the conflicts actually fire, feasible and infeasible.
 The test asserts that each mechanism fired at least once over the family (§6: prove
@@ -31,8 +33,15 @@ ARMS = {
         "DISCOPT_MILP_CONFLICT": "1",
         "DISCOPT_MILP_ORBITOPE": "1",
     },
+    "dyn": {"DISCOPT_MILP_SYM_DYNAMIC": "1"},
+    "dynconf": {"DISCOPT_MILP_SYM_DYNAMIC": "1", "DISCOPT_MILP_CONFLICT": "1"},
 }
-FLAGS = ("DISCOPT_MILP_SYM_LEX", "DISCOPT_MILP_CONFLICT", "DISCOPT_MILP_ORBITOPE")
+FLAGS = (
+    "DISCOPT_MILP_SYM_LEX",
+    "DISCOPT_MILP_CONFLICT",
+    "DISCOPT_MILP_ORBITOPE",
+    "DISCOPT_MILP_SYM_DYNAMIC",
+)
 assert list(ARMS)[0] == "off"  # the flags-off optimum is read before the other arms
 
 
@@ -136,7 +145,7 @@ def _solve(build, args, env, monkeypatch):
 def test_sym_and_conflict_arms_match_the_oracle(monkeypatch):
     monkeypatch.setenv("DISCOPT_PROFILE", "1")
     compared = 0
-    fired = {"rows": 0, "conflicts": 0, "orbitope_fixings": 0}
+    fired = {"rows": 0, "conflicts": 0, "orbitope_fixings": 0, "dyn_fixings": 0}
     for name, build, args in _cases():
         monkeypatch.delenv("DISCOPT_LP_ENGINE", raising=False)
         ref = build(*args).solve(milp_backend="highs")
@@ -159,11 +168,13 @@ def test_sym_and_conflict_arms_match_the_oracle(monkeypatch):
                 "HighsMipSearchProofConflicts", 0
             )
             fired["orbitope_fixings"] += c.get("MilpOrbitopeFixings", 0)
+            fired["dyn_fixings"] += c.get("MilpSymDynFixings", 0)
             compared += 1
     assert compared == len(_cases()) * len(ARMS)
     assert fired["rows"] > 0, "no lex row was ever added: the sym arm compared nothing"
     assert fired["conflicts"] > 0, "no conflict was ever learned: the conflict arm compared nothing"
     assert fired["orbitope_fixings"] > 0, "no orbitope fixing: the orbitope arm compared nothing"
+    assert fired["dyn_fixings"] > 0, "no dynamic lex fixing: the dyn arms compared nothing"
 
 
 def test_flags_refuse_garbage(monkeypatch):
@@ -173,3 +184,14 @@ def test_flags_refuse_garbage(monkeypatch):
         with pytest.raises(BaseException):
             _bin_packing([3, 4, 5, 6], 3, 10).solve(milp_backend="native", milp_cuts=False)
         monkeypatch.delenv(flag)
+
+
+@pytest.mark.parametrize("static", ["DISCOPT_MILP_SYM_LEX", "DISCOPT_MILP_ORBITOPE"])
+def test_dynamic_refuses_a_static_order(monkeypatch, static):
+    """Dynamic lex reduction and a static-order method together can remove every
+    solution of an orbit: the solve refuses loudly instead of picking one."""
+    monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
+    monkeypatch.setenv("DISCOPT_MILP_SYM_DYNAMIC", "1")
+    monkeypatch.setenv(static, "1")
+    with pytest.raises(BaseException, match="cannot be combined"):
+        _bin_packing([3, 4, 5, 6], 3, 10).solve(milp_backend="native", milp_cuts=False)

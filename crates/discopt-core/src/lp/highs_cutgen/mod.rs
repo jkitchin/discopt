@@ -65,6 +65,7 @@ pub mod random;
 pub mod separators;
 pub mod sparse_vec;
 pub mod stdalgo;
+pub mod sym_dynamic;
 pub mod transformed_lp;
 pub mod vbound;
 

@@ -896,6 +896,9 @@ counters!(
     MilpOrbitopes,
     MilpOrbitopeColumns,
     MilpOrbitopeFixings,
+    MilpSymDynGenerators,
+    MilpSymDynFixings,
+    MilpSymDynNodes,
     // #2224 (`DISCOPT_MILP_PREINC_SCORE`): branchings the HiGHS-design search took
     // with the raised pre-incumbent cutoff/inference score weight.
     PreIncScoreBranchings,
