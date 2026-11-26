@@ -29,6 +29,13 @@ from discopt.dae.collocation import (
 )
 from discopt.dae.finite_difference import FDBuilder
 from discopt.dae.fit import Trajectory, TrajectoryFit, fit_trajectories
+from discopt.dae.mesh import (
+    BoundExcursion,
+    MeshAdequacyWarning,
+    MeshErrorEstimate,
+    MeshRefinement,
+    refine_mesh,
+)
 from discopt.dae.mol import BoundaryCondition, FieldVar, MOLBuilder, SpatialSet
 from discopt.dae.polynomials import (
     collocation_matrix,
@@ -39,12 +46,16 @@ from discopt.dae.polynomials import (
 
 __all__ = [
     "AlgebraicVar",
+    "BoundExcursion",
     "BoundaryCondition",
     "ContinuousSet",
     "ControlVar",
     "DAEBuilder",
     "FDBuilder",
     "FieldVar",
+    "MeshAdequacyWarning",
+    "MeshErrorEstimate",
+    "MeshRefinement",
     "MOLBuilder",
     "SpatialSet",
     "StateVar",
@@ -52,6 +63,7 @@ __all__ = [
     "TrajectoryFit",
     "align_time_grid",
     "fit_trajectories",
+    "refine_mesh",
     "collocation_matrix",
     "collocation_matrix_2nd",
     "legendre_roots",

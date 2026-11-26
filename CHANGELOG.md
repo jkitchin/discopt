@@ -21,6 +21,22 @@ The release procedure that produces these entries is documented in
   2785 and from 3768 to 2197 elements, both passing the competition checker.
   `MilpIIS.n_swept` counts the dropped elements; `DISCOPT_IIS_SWEEP=0` turns the sweep
   off.
+- **Collocation mesh error estimates and refinement (#2365).**
+  `DAEBuilder.error_estimate(result)` (also on a collocation `MOLBuilder`) evaluates the
+  defect `x_p' - f(t, x_p, z_p, u)` of each state's collocation polynomial between the
+  nodes, using the solved value of every variable the RHS reads, and reports the
+  per-element, per-state estimate `h_i * max |defect|`, the worst element, and every
+  point where the polynomial leaves the state bounds while the nodes stay inside. A
+  `MeshAdequacyWarning` fires when an element is out of tolerance.
+  `MeshErrorEstimate.refined_boundaries()` splits the flagged elements and keeps every
+  existing boundary; `discopt.dae.refine_mesh(build, mesh, ...)` loops build, solve,
+  estimate, refine, warm-starting each round from the previous polynomials
+  (`warm_start_from`). On the issue's pulsed CO-oxidation fit (32 uniform elements,
+  coverage bound -1e-8: `local_optimal` at objective 2,444,086 with 6 of 10 rates at a
+  bound), `refine_mesh` reaches an adequate 49-element mesh in 4 rounds, at objective
+  223.58 with no rate at a bound. Against a 779-element reference solve, the estimate was
+  at or above the true error on every element of the 32- and 39-element meshes, by 10 to
+  70x on this stiff system, so it can flag elements that are already within tolerance.
 
 ### Changed
 
