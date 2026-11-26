@@ -378,6 +378,22 @@ KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
         "min(CHECKER_SOLVE_CAP_S, hard_stop - (time.perf_counter() - t0) - 5.0)",
         "contract",
     ),
+    # The parallel post-pass (``_polish_parallel``) holds back a small margin of
+    # what is left for process start-up and returning results, like the
+    # portfolio's own margin. A post-pass that misses the deadline is killed and
+    # discarded whole, so the clock decides whether a post-pass result exists,
+    # not which elements it keeps (``_add_one`` is bounded by a probe count).
+    (
+        "_iis_milp.py",
+        "_PORTFOLIO_MARGIN_FRACTION * max(deadline - time.perf_counter(), 0.0)",
+        "contract",
+    ),
+    (
+        "_iis_milp.py",
+        "min(_PORTFOLIO_MARGIN_S, _PORTFOLIO_MARGIN_FRACTION"
+        " * max(deadline - time.perf_counter(), 0.0))",
+        "contract",
+    ),
     # Caps one piece LP of the integer-ratio dive by what is left of the dive's
     # own deadline. That deadline is already ``_role2``-suppressed at its origin
     # (``mccormick_lp``, recorded in KNOWN), so under the flag it is ``None`` and
@@ -551,7 +567,15 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     # before it; they change no element, only what is shown for one.)
     (
         "_iis_milp.py",
-        "deadline=None if total_time_limit is None else t_start + float(total_time_limit),",
+        "deadline = None if total_time_limit is None else t_start + float(total_time_limit)",
+        "contract",
+    ),
+    # A post-pass run in a portfolio child process (``_polish_parallel``): the
+    # parent's deadline translated onto the child's own clock. Same deadline as
+    # the entry above; nothing is carved.
+    (
+        "_iis_milp.py",
+        "deadline=time.perf_counter() + max(0.0, deadline_wall - time.time()),",
         "contract",
     ),
     # The exact-reduction second route (``_Engine._reduced``) runs inside a
