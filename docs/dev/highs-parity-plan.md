@@ -1612,6 +1612,16 @@ and is re-written by P4.1.**
   speed and node count (about 8x) are a separate follow-up. The differential test
   (`test_milp_sym_conflict.py`, makespan and colouring) gives OFF = ON = HiGHS optimum
   exactly. Owed: the §5 corpus panel (in-repo MILP corpus plus MIPLIB-38).
+  **§5 panel 2026-11-25** (commit `fe736687f`, 61 rows = MIPLIB-38 + M without the locally absent
+  `bound_implied`; deterministic, 2000-node cap, 1 rep; four runs against off whose OFF arms agree
+  exactly; node counts and bounds only; 1-min load 6.4-12.2 at the solves, no wall claims). All arms cert-clean (122 checks
+  each, 0 problems, no certification lost). Conflicts alone: 48 -> 49 certified (`enlight_hard`),
+  nodes on rows both certify -13.4 %. Against conflicts alone, the static symmetry stack
+  (lex rows + orbitopes) is harmful (+5.8 % nodes, `enlight8` 1 -> 432, a dual loss on
+  `neos-911970`, a worse incumbent on `neos-3118745-obra`); the dynamic stack (dynamic lex +
+  orbital reduction) is mildly positive (-1.2 % nodes, `p0201` 186 -> 92, `neos-911970` bound
+  closer to the optimum), and adding dynamic orbitopal fixing changes no outcome (it fires on
+  one row). Graduation decisions are the owner's; rows in `flag-retirement-audit.md`.
 - [x] **P4.8 — Dimension-reducing MILP presolve with postsolve. DEFERRED 2026-11-06 (owner).** *(≤ 3 iterations, last:
   worth ≤ 2 instances / 1.7× in HiGHS's own ablation, §1c)*. Scope: reuse P2.4's LP
   reductions + integer-aware rounding, `presolve/substitute.rs` where it applies. Flag
