@@ -687,21 +687,24 @@ def _exact_hessian_evaluator(model: Model, ev: Any) -> Any:
     is_gn = bool(attr() if callable(attr) else attr)
     if not is_gn:
         return ev
+    # Through the one evaluator funnel (#1063), with the flag cleared for the
+    # build: both backends read it at construction, and it is part of the
+    # evaluator-cache fingerprint, so this returns the exact-Hessian evaluator
+    # cached under the flag-off key, never the Gauss-Newton one.
+    from discopt._tape_nlp_evaluator import make_evaluator
+
     saved = getattr(model, "_gauss_newton_hessian", False)
     model._gauss_newton_hessian = False
     try:
-        from discopt._tape_nlp_evaluator import tape_backend_requested, try_build
-
-        exact: Any = try_build(model) if tape_backend_requested() else None
-        if exact is None:
-            from discopt._optional_jax import require_jax
-
-            require_jax("discopt.estimate.fisher(hessian='observed') on this model")
-            from discopt._relax.nlp_evaluator import NLPEvaluator
-
-            exact = NLPEvaluator(model, gauss_newton=False)
+        exact = make_evaluator(model)
     finally:
         model._gauss_newton_hessian = saved
+    attr = getattr(exact, "is_gauss_newton", False)
+    if bool(attr() if callable(attr) else attr):
+        raise AssertionError(
+            "make_evaluator returned a Gauss-Newton evaluator with the flag cleared; "
+            "the observed information would be the expected one"
+        )
     return exact
 
 
