@@ -518,6 +518,13 @@ counters!(
     MilpPresolveRowsRemoved,
     MilpPresolveInfeasibleFallback,
     MilpPresolveVerifyFallback,
+    // #2354: postsolved points that failed verification and went to the fixed-integer
+    // repair LP (HiGHS `transformNewIntegerFeasibleSolution`), the repairs that
+    // verified and were returned, and the ones that verified but did not close the
+    // reduced search's gap (the original is then solved seeded with the repair).
+    MilpPresolveRepairAttempts,
+    MilpPresolveRepaired,
+    MilpPresolveRepairSeeded,
     // Unbounded relaxations re-checked by a zero-objective feasibility solve, and the
     // verdicts that check overturned (`settle_unbounded`).
     MilpUnboundedSettle,
