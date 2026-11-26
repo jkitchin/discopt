@@ -277,6 +277,23 @@ counters!(
     MilpProbePresolve,
     MilpProbeNode,
     MilpImpliedBoundCuts,
+    // `DISCOPT_HIGHS_SEPA_ROOT_PROBE`: probing at the root's separation rounds. The
+    // presolve-probing pass (first probed round): binaries probed, global reductions,
+    // clique entries, global bounds added to the root pool. The per-round
+    // `separateImpliedBounds` pass: fractional binaries probed, global reductions,
+    // clique entries, global bounds and implied-bound cuts added to the pool. Root
+    // domains probing proved infeasible. Top-level solve only; heuristic sub-MIPs
+    // run the pass uncounted.
+    MilpRootProbePresolve,
+    MilpRootProbePresolveReductions,
+    MilpRootProbePresolveEntries,
+    MilpRootProbePresolveBoundCuts,
+    MilpRootProbeProbed,
+    MilpRootProbeReductions,
+    MilpRootProbeEntries,
+    MilpRootProbeBoundCuts,
+    MilpRootProbeImpliedCuts,
+    MilpRootProbeInfeasible,
     // #2225: path separator paths abandoned by the substitution progress guard.
     HighsSepaPathSubstCap,
     // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global
