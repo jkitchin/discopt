@@ -1805,14 +1805,6 @@ def _polish(
     )
 
 
-#: Polishing the portfolio's other complete answers (:func:`_polish_alternatives`):
-#: each gets ``_ALT_FRACTION`` of the time left, at most ``_ALT_CAP_S`` (sized for
-#: the 3600 s competition budget: one alternative's whole post-pass measured
-#: 30-130 s on the smallset).
-_ALT_FRACTION = 0.5
-_ALT_CAP_S = 300.0
-
-
 def _polish_alternatives(
     arrays: tuple,
     res: MilpIIS,
@@ -1847,10 +1839,12 @@ def _polish_alternatives(
         now = time.perf_counter()
         if deadline - now < 4 * _MIN_SOLVE_S:
             break
-        share = min(_ALT_FRACTION * max(deadline - now, 0.0), _ALT_CAP_S)
-        stop = min(deadline, now + share)
+        # Each post-pass gets the overall deadline: its stages carry their own
+        # fraction-and-ceiling shares. A sub-deadline starved them: at half the time
+        # left, hexgrid's 308-element answer got ~8 s of add-one and stayed at 171
+        # (with the overall deadline, 159).
         got = _polish(
-            arrays, alt, cert_tol=cert_tol, time_limit=time_limit, engine=engine, deadline=stop
+            arrays, alt, cert_tol=cert_tol, time_limit=time_limit, engine=engine, deadline=deadline
         )
         if _iis_size(got) < _iis_size(best):
             best = got
