@@ -21,6 +21,7 @@
 //! because HiGHS never reads past `rowlen`.
 
 use super::cdouble::CDouble;
+use super::domain::OpenNodeCounts;
 use super::integers::{frexp_exp, integral_scale, is_integral, nearest_integer};
 use super::random::{hash_pair_i32, HighsRandom};
 use super::stdalgo::{
@@ -423,7 +424,10 @@ impl CutGenCore {
 
     // ------------------------------------------------------------------ cover
 
-    fn determine_cover(&mut self) -> bool {
+    /// `determineCover(lpSol)`: `nodes` is `None` for `lpSol = true` (an LP point's
+    /// cover) and the node queue's open-node counts for `lpSol = false` (a conflict
+    /// proof's cover, `generateConflict`).
+    fn determine_cover(&mut self, nodes: Option<&dyn OpenNodeCounts>) -> bool {
         let feastol = self.p.feastol;
         if self.rhs <= 10.0 * feastol {
             return false;
@@ -433,7 +437,7 @@ impl CutGenCore {
             if self.isintegral[j] == 0 {
                 continue;
             }
-            if self.solval[j] <= feastol {
+            if nodes.is_none() && self.solval[j] <= feastol {
                 continue;
             }
             self.cover.push(j);
@@ -443,36 +447,68 @@ impl CutGenCore {
         self.coverweight = CDouble::new(0.0);
 
         let (solval, upper, vals, inds) = (&self.solval, &self.upper, &self.vals, &self.inds);
-        let mut coversize = partition(&mut self.cover, |&j: &usize| {
-            solval[j] >= upper[j] - feastol
-        });
-        for i in 0..coversize {
-            let j = self.cover[i];
-            self.coverweight += vals[j] * upper[j];
+        let mut coversize = 0;
+        if let Some(nq) = nodes {
+            let compl = &self.complementation;
+            let count = |i: usize| -> i64 {
+                let col = inds[i] as usize;
+                if compl.get(i).copied().unwrap_or(0) != 0 {
+                    nq.num_nodes_down(col)
+                } else {
+                    nq.num_nodes_up(col)
+                }
+            };
+            pdqsort(
+                &mut self.cover[..max_cover_size],
+                |&i: &usize, &j: &usize| {
+                    if solval[i] > feastol && solval[j] <= feastol {
+                        return true;
+                    }
+                    if solval[i] <= feastol && solval[j] > feastol {
+                        return false;
+                    }
+                    let (na, nb) = (count(i), count(j));
+                    if na > nb {
+                        return true;
+                    }
+                    if na < nb {
+                        return false;
+                    }
+                    hash_pair_i32(inds[i], r) > hash_pair_i32(inds[j], r)
+                },
+            );
+        } else {
+            coversize = partition(&mut self.cover, |&j: &usize| {
+                solval[j] >= upper[j] - feastol
+            });
+            for i in 0..coversize {
+                let j = self.cover[i];
+                self.coverweight += vals[j] * upper[j];
+            }
+            pdqsort(
+                &mut self.cover[coversize..max_cover_size],
+                |&i: &usize, &j: &usize| {
+                    if upper[i] < 1.5 && upper[j] > 1.5 {
+                        return true;
+                    }
+                    if upper[i] > 1.5 && upper[j] < 1.5 {
+                        return false;
+                    }
+                    let contribution_a = solval[i] * vals[i];
+                    let contribution_b = solval[j] * vals[j];
+                    if contribution_a > contribution_b + feastol {
+                        return true;
+                    }
+                    if contribution_a < contribution_b - feastol {
+                        return false;
+                    }
+                    if (vals[i] - vals[j]).abs() <= feastol {
+                        return hash_pair_i32(inds[i], r) > hash_pair_i32(inds[j], r);
+                    }
+                    vals[i] > vals[j]
+                },
+            );
         }
-        pdqsort(
-            &mut self.cover[coversize..max_cover_size],
-            |&i: &usize, &j: &usize| {
-                if upper[i] < 1.5 && upper[j] > 1.5 {
-                    return true;
-                }
-                if upper[i] > 1.5 && upper[j] < 1.5 {
-                    return false;
-                }
-                let contribution_a = solval[i] * vals[i];
-                let contribution_b = solval[j] * vals[j];
-                if contribution_a > contribution_b + feastol {
-                    return true;
-                }
-                if contribution_a < contribution_b - feastol {
-                    return false;
-                }
-                if (vals[i] - vals[j]).abs() <= feastol {
-                    return hash_pair_i32(inds[i], r) > hash_pair_i32(inds[j], r);
-                }
-                vals[i] > vals[j]
-            },
-        );
 
         let minlambda = (10.0 * feastol).max(feastol * self.rhs.to_f64().abs());
         while coversize != max_cover_size {
@@ -1138,6 +1174,7 @@ impl CutGenCore {
         min_efficacy: f64,
         only_initial_cmir_scale: bool,
         allow_reject_cut: bool,
+        nodes: Option<&dyn OpenNodeCounts>,
     ) -> bool {
         if has_unbounded_ints {
             self.path = CutPath::CmirUnboundedInt;
@@ -1153,7 +1190,7 @@ impl CutGenCore {
         let mut save_integral_support = false;
         let mut save_integral_coefficients = false;
         let mut lifted_path = CutPath::None;
-        if self.determine_cover() {
+        if self.determine_cover(nodes) {
             if !has_continuous && !has_general_ints {
                 success = self.separate_lifted_knapsack_cover();
                 lifted_path = CutPath::KnapsackCover;
@@ -1251,6 +1288,7 @@ impl CutGenCore {
             10.0 * self.p.feastol,
             only_initial_cmir_scale,
             true,
+            None,
         ) {
             return None;
         }
@@ -1263,6 +1301,115 @@ impl CutGenCore {
                 let r = self.rowlen;
                 self.inds[i] = self.inds[r];
                 self.vals[i] = self.vals[r];
+            }
+        }
+        self.inds.truncate(self.rowlen);
+        self.vals.truncate(self.rowlen);
+        Some(CoreCut {
+            inds: self.inds.clone(),
+            vals: self.vals.clone(),
+            rhs: self.rhs,
+            integral_support: self.integral_support,
+            integral_coefficients: self.integral_coefficients,
+        })
+    }
+
+    /// The part of `HighsCutGeneration::generateConflict` (`HighsCutGeneration.cpp:
+    /// 1208-1280`) before `postprocessCut`: the dual proof `vals . x[inds] <= rhs`
+    /// complemented against the GLOBAL bounds (`glb`, `gub`), the local bounds
+    /// (`llb`, `lub`) as the point the cover is built around, then
+    /// `preprocessBaseInequality` and `tryGenerateCut(..., feastol, false, false,
+    /// false)`, with the complementation removed again. `nodes` are the open-node
+    /// counts `determineCover(lpSol = false)` orders the cover by. `None` where HiGHS
+    /// returns `false`. Every input slice is indexed by position in `inds`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_conflict_core(
+        &mut self,
+        inds: &[i32],
+        vals: &[f64],
+        rhs: f64,
+        glb: &[f64],
+        gub: &[f64],
+        llb: &[f64],
+        lub: &[f64],
+        col_integral: &[bool],
+        nodes: &dyn OpenNodeCounts,
+    ) -> Option<CoreCut> {
+        self.path = CutPath::None;
+        self.rowlen = inds.len();
+        self.inds = inds.to_vec();
+        self.vals = vals.to_vec();
+        self.rhs = CDouble::new(rhs);
+        self.complementation = vec![0; self.rowlen];
+        self.isintegral.clear();
+        self.upper = vec![0.0; self.rowlen];
+        self.solval = vec![0.0; self.rowlen];
+        // Global bounds by column, for removing the complementation after the
+        // in-place reordering of `preprocessBaseInequality`.
+        let mut gbounds: std::collections::HashMap<i32, (f64, f64)> =
+            std::collections::HashMap::with_capacity(self.rowlen);
+        let mut activity = 0.0f64;
+        for i in 0..self.rowlen {
+            let (gl, gu) = (glb[i], gub[i]);
+            gbounds.insert(inds[i], (gl, gu));
+            self.upper[i] = gu - gl;
+            let mut sv = if self.vals[i] < 0.0 {
+                gu.min(lub[i])
+            } else {
+                gl.max(llb[i])
+            };
+            if self.vals[i] < 0.0 && gu != K_HIGHS_INF {
+                self.rhs -= gu * self.vals[i];
+                self.vals[i] = -self.vals[i];
+                self.complementation[i] = 1;
+                sv = gu - sv;
+            } else {
+                self.rhs -= gl * self.vals[i];
+                self.complementation[i] = 0;
+                sv -= gl;
+            }
+            self.solval[i] = sv;
+            activity += sv * self.vals[i];
+        }
+        let r = self.rhs.to_f64();
+        if activity > r {
+            let sol_scale = r / activity;
+            for v in self.solval.iter_mut() {
+                *v *= sol_scale;
+            }
+        }
+        let mut has_unbounded_ints = false;
+        let mut has_general_ints = false;
+        let mut has_continuous = false;
+        if !self.preprocess_base_inequality(
+            col_integral,
+            &mut has_unbounded_ints,
+            &mut has_general_ints,
+            &mut has_continuous,
+        ) {
+            return None;
+        }
+        let feastol = self.p.feastol;
+        if !self.try_generate_cut(
+            has_unbounded_ints,
+            has_general_ints,
+            has_continuous,
+            feastol,
+            false,
+            false,
+            Some(nodes),
+        ) {
+            return None;
+        }
+        if !self.complementation.is_empty() {
+            for i in 0..self.rowlen {
+                let (gl, gu) = gbounds[&self.inds[i]];
+                if self.complementation[i] != 0 {
+                    self.rhs -= gu * self.vals[i];
+                    self.vals[i] = -self.vals[i];
+                } else {
+                    self.rhs += gl * self.vals[i];
+                }
             }
         }
         self.inds.truncate(self.rowlen);
@@ -1412,6 +1559,129 @@ impl CutGenCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Counts;
+    impl OpenNodeCounts for Counts {
+        fn num_nodes_up(&self, col: usize) -> i64 {
+            (col % 3) as i64
+        }
+        fn num_nodes_down(&self, col: usize) -> i64 {
+            (col % 2) as i64
+        }
+    }
+
+    /// `generate_conflict_core` + `postprocess_cut` (HiGHS `generateConflict`) on random
+    /// proof rows `a . x <= b` over a mixed box: the cut must hold at every grid point of
+    /// the global box that satisfies the proof (integers exhaustively, continuous on a
+    /// fine grid), whatever the local box the node had.
+    #[test]
+    fn generate_conflict_cut_is_valid_for_the_proof_over_the_global_box() {
+        let mut rng = HighsRandom::new(7);
+        let (mut cuts, mut checks) = (0usize, 0usize);
+        for _case in 0..400 {
+            let n = 2 + (rng.integer_below(4) as usize);
+            let mut inds = Vec::new();
+            let mut vals = Vec::new();
+            let (mut glb, mut gub, mut llb, mut lub, mut isi) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for j in 0..n {
+                inds.push(j as i32);
+                let v = (rng.integer_below(13) as f64 - 6.0) * 0.5
+                    + 0.25 * (rng.integer_below(2) as f64);
+                vals.push(if v == 0.0 { 1.0 } else { v });
+                let int = rng.integer_below(4) != 0;
+                isi.push(int);
+                let lo = rng.integer_below(2) as f64 - 1.0;
+                let hi = lo + 1.0 + rng.integer_below(3) as f64;
+                glb.push(lo);
+                gub.push(hi);
+                // A local box inside the global one.
+                let l2 = if int {
+                    lo + rng.integer_below((hi - lo) as i32 + 1) as f64
+                } else {
+                    lo
+                };
+                let l2 = l2.min(hi);
+                llb.push(l2);
+                lub.push(hi.max(l2));
+            }
+            // A proof the local box violates: min activity over the local box exceeds rhs.
+            let minact: f64 = (0..n)
+                .map(|j| vals[j] * if vals[j] > 0.0 { llb[j] } else { lub[j] })
+                .sum();
+            let rhs = minact - 0.5 - 0.25 * rng.integer_below(3) as f64;
+            let p = CutGenParams {
+                feastol: 1e-6,
+                epsilon: 1e-9,
+                num_cols: n,
+            };
+            let mut gen = CutGenCore::seeded(p, 0, 0, 0);
+            let Some(core) = gen
+                .generate_conflict_core(&inds, &vals, rhs, &glb, &gub, &llb, &lub, &isi, &Counts)
+            else {
+                continue;
+            };
+            let lbf = |c: i32| glb[c as usize];
+            let ubf = |c: i32| gub[c as usize];
+            let isf = |c: i32| isi[c as usize];
+            let Some(cut) = gen.postprocess_cut(core, &lbf, &ubf, &isf) else {
+                continue;
+            };
+            cuts += 1;
+            let crhs = cut.rhs.to_f64();
+            // Enumerate the global box.
+            let steps: Vec<Vec<f64>> = (0..n)
+                .map(|j| {
+                    let k = if isi[j] {
+                        (gub[j] - glb[j]) as usize
+                    } else {
+                        8 * (gub[j] - glb[j]) as usize
+                    };
+                    (0..=k)
+                        .map(|t| glb[j] + (gub[j] - glb[j]) * t as f64 / k as f64)
+                        .collect()
+                })
+                .collect();
+            let mut idx = vec![0usize; n];
+            loop {
+                let x: Vec<f64> = (0..n).map(|j| steps[j][idx[j]]).collect();
+                let pa: f64 = (0..n).map(|j| vals[j] * x[j]).sum();
+                if pa <= rhs + 1e-9 {
+                    let ca: f64 = cut
+                        .inds
+                        .iter()
+                        .zip(&cut.vals)
+                        .map(|(&c, &v)| v * x[c as usize])
+                        .sum();
+                    checks += 1;
+                    assert!(
+                        ca <= crhs + 1e-6 * (1.0 + crhs.abs()),
+                        "cut {:?} {:?} <= {crhs} cuts off {x:?} (proof {vals:?} <= {rhs}, \
+                         box {glb:?}..{gub:?}, int {isi:?})",
+                        cut.inds,
+                        cut.vals
+                    );
+                }
+                let mut j = 0;
+                while j < n {
+                    idx[j] += 1;
+                    if idx[j] < steps[j].len() {
+                        break;
+                    }
+                    idx[j] = 0;
+                    j += 1;
+                }
+                if j == n {
+                    break;
+                }
+            }
+        }
+        eprintln!("generate_conflict: {cuts} cuts, {checks} point checks");
+        assert!(
+            cuts > 20 && checks > 200,
+            "probe did not fire: {cuts} cuts, {checks} checks"
+        );
+    }
 
     /// #2232: `fast_floor` must equal `f64::floor` in value everywhere, including where the
     /// `as i64` cast saturates (|x| >= 2^63) or maps NaN to 0. Before the fix,

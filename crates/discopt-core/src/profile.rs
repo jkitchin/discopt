@@ -886,6 +886,11 @@ counters!(
     HighsMipSearchConflicts,
     HighsMipSearchProofConflicts,
     HighsMipSearchGlobalConflictFixings,
+    // `DISCOPT_MILP_CONFLICT`: cuts `generateConflict` added to the search's cut
+    // pool from LP dual proofs, and pool cuts (root and node cuts) the search's
+    // domains propagate.
+    HighsMipSearchConflictCuts,
+    HighsMipSearchPropagatedPoolCuts,
     // `DISCOPT_MILP_SYM_LEX`: verified formulation automorphisms, candidates
     // checked, and the lexicographic-leader rows appended.
     MilpSymLexGenerators,
