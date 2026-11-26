@@ -416,6 +416,7 @@ def _run(
             iis_engine=engine,
             portfolio=DEFAULT_PORTFOLIO,
             workers=max(1, min(threads, len(DEFAULT_PORTFOLIO))),
+            threads=threads,
             total_time_limit=max(engine_budget - elapsed, 0.5),
             t_start=time.perf_counter(),
             grace=PORTFOLIO_WAITS[PORTFOLIO_WAIT][0],
