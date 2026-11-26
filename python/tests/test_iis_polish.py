@@ -743,3 +743,77 @@ def test_the_smallest_answer_after_the_post_pass_wins(monkeypatch):
     monkeypatch.delenv("DISCOPT_IIS_POLISH_ALTERNATIVES")
     out1 = E._polish_alternatives(_PAIRS, res, first, deadline=None, **kw)
     assert out1.constraints == [0, 1, 4]
+
+
+def _counting_moves(monkeypatch, rehold_to=None):
+    """Fake re-hold (moves to ``rehold_to`` when given) and add-one (never moves);
+    returns the list of sets add-one ran from."""
+    for v in ("DISCOPT_IIS_REHOLD", "DISCOPT_IIS_ADD_ONE"):
+        monkeypatch.delenv(v, raising=False)
+    starts = []
+
+    def fake_rehold(eng, cons, bounds, ints, stop_at, known=None):
+        if rehold_to is None:
+            return None, {}, True
+        return (set(rehold_to), set(), set()), {}, True
+
+    def fake_add_one(eng, cons, bounds, ints, stop_at):
+        starts.append(frozenset(cons))
+        return None, {}, True, 1
+
+    monkeypatch.setattr(E, "_rehold", fake_rehold)
+    monkeypatch.setattr(E, "_add_one", fake_add_one)
+    return starts
+
+
+def _alt_polish(res, **kw):
+    return _polish(
+        _PAIRS,
+        res,
+        cert_tol=1e-6,
+        time_limit=10.0,
+        engine="highs",
+        deadline=time.perf_counter() + 60.0,
+        **kw,
+    )
+
+
+def test_an_alternative_the_rehold_move_cannot_change_stops_unless_smaller(monkeypatch):
+    """An alternative's post-pass pays only when it ends smaller than the
+    incumbent. One the re-hold move leaves unchanged and that is not already
+    smaller stops before the add-one move (measured, hexgrid: three such
+    alternatives spent ~70 s each and ended unchanged). Before the change the
+    add-one move ran from every alternative."""
+    starts = _counting_moves(monkeypatch)
+    res = _answer({1, 2, 3, 4})
+    out = _alt_polish(res, beat=3)
+    assert out is res and starts == []
+    # Already smaller than the incumbent: it continues.
+    _alt_polish(res, beat=5)
+    assert starts == [frozenset({1, 2, 3, 4})]
+    # No incumbent (the first post-pass): it continues.
+    _alt_polish(res)
+    assert len(starts) == 2
+
+
+def test_an_alternative_the_rehold_move_changed_continues(monkeypatch):
+    """hexgrid's winner: 308 -> 171 by the re-hold move, not smaller than the
+    incumbent's 169, then 159 by the add-one move from 308."""
+    starts = _counting_moves(monkeypatch, rehold_to={0, 1, 4})
+    _alt_polish(_answer({0, 1, 2, 3}), beat=2)
+    assert starts == [frozenset({0, 1, 4}), frozenset({0, 1, 2, 3})]
+
+
+def test_the_add_one_move_does_not_repeat_a_sweep_from_the_same_set(monkeypatch):
+    """Two answers the re-hold move takes to the same set would sweep it twice
+    (a sweep that finds no move costs its whole share, ~28 s on bf1355-075).
+    Before the change the sweep ran from every start."""
+    starts = _counting_moves(monkeypatch, rehold_to={0, 1, 4})
+    swept: set = set()
+    _alt_polish(_answer({0, 1, 2, 3}), swept=swept)
+    _alt_polish(_answer({0, 1, 2, 3, 4}), swept=swept)
+    assert starts == [
+        frozenset({0, 1, 4}),
+        frozenset({0, 1, 2, 3}),
+        frozenset({0, 1, 2, 3, 4}),
+    ]

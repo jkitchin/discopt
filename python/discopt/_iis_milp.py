@@ -1551,6 +1551,8 @@ def _polish(
     time_limit: float,
     engine: str,
     deadline: Optional[float],
+    beat: Optional[int] = None,
+    swept: Optional[set] = None,
 ) -> MilpIIS:
     """Post-pass on the answer: on an anytime (incomplete) answer the
     integrality relaxation (:func:`_relax_integrality`, at most
@@ -1566,6 +1568,13 @@ def _polish(
     re-hold move replaced the answer, the add-one move runs from both the new
     and the replaced answer and the smaller result is kept (both moves are
     greedy, so the path matters).
+
+    ``beat`` and ``swept`` are for a post-pass on an alternative answer
+    (:func:`_polish_alternatives`), which only pays when it ends smaller than
+    ``beat``: when the re-hold move leaves the answer unchanged and it is not
+    already smaller than ``beat``, the pass stops there and returns ``res``; and
+    the add-one move does not run from a set in ``swept`` (the sets it already
+    ran from, which it updates), since the sweep from a set is repeated work.
 
     Soundness: a set the re-hold or add-one move changed replaces the answer only when
     :meth:`_Engine.confirm_infeasible` confirms it under both presolve
@@ -1663,6 +1672,18 @@ def _polish(
                     proven = proven and decided
         except _OutOfTime:
             pass  # the pass or its confirmation ran out of time: the answer stands
+    if (
+        beat is not None
+        and rehold
+        and before_rehold is None
+        and len(cons) + len(bounds) + len(ints) >= beat
+    ):
+        # An alternative the re-hold move cannot change and that is not already
+        # smaller than the incumbent: stop. Measured on MIPcc27 smallset, every
+        # alternative that ended smaller than the incumbent had either been
+        # changed by the re-hold move or was already smaller (see
+        # _polish_alternatives).
+        return res
     if add_one:
         assert deadline is not None
         # Both moves are greedy, so the path matters: when the re-hold move
@@ -1676,6 +1697,12 @@ def _polish(
         ends = []
         for c0, b0, i0, pr0, nr0 in starts:
             end = (c0, b0, i0, pr0, nr0, 0)
+            if swept is not None:
+                key = (frozenset(c0), frozenset(b0), frozenset(i0))
+                if key in swept:
+                    ends.append(end)
+                    continue
+                swept.add(key)
             t0 = time.perf_counter()
             share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
             try:
@@ -1814,6 +1841,7 @@ def _polish_alternatives(
     time_limit: float,
     engine: str,
     deadline: Optional[float],
+    swept: Optional[set] = None,
 ) -> MilpIIS:
     """After the post-pass on the portfolio's smallest answer (``out`` is
     ``_polish(res)``), run it on each other distinct complete member answer
@@ -1821,6 +1849,16 @@ def _polish_alternatives(
     smallest result. The smallest answer before the post-pass is not the
     smallest after it. Measured on MIPcc27 stein45inf, member answers -> post-
     pass: ICB 225 -> 212, ICB-n 229 -> 216, ICB-r 237 -> 205 (reference 213).
+
+    An alternative's post-pass only pays when it ends smaller than the best so
+    far, so it gets ``beat`` (it stops after the re-hold move when that move did
+    not change an answer that is not already smaller) and the shared ``swept``
+    (the add-one move does not repeat a sweep from the same set). Measured per
+    stage, MIPcc27 smallset: on domset-hexgrid_03_052 the three alternatives the
+    re-hold move could not change (232, 233, 240 against 169) spent ~70 s each
+    and ended unchanged; the one it changed (308 -> 171) ended at 159 through the
+    add-one move from 308. On stein45inf the winner (237 -> 205) was already
+    smaller after the re-hold move.
 
     Soundness: every candidate is a member's answer, confirmed by that member,
     changed only by :func:`_polish`, which adopts a change only when
@@ -1844,7 +1882,14 @@ def _polish_alternatives(
         # left, hexgrid's 308-element answer got ~8 s of add-one and stayed at 171
         # (with the overall deadline, 159).
         got = _polish(
-            arrays, alt, cert_tol=cert_tol, time_limit=time_limit, engine=engine, deadline=deadline
+            arrays,
+            alt,
+            cert_tol=cert_tol,
+            time_limit=time_limit,
+            engine=engine,
+            deadline=deadline,
+            beat=_iis_size(best),
+            swept=swept,
         )
         if _iis_size(got) < _iis_size(best):
             best = got
@@ -2707,8 +2752,15 @@ def milp_iis_arrays(
     if not include_bounds:
         return res  # the post-pass needs every applied bound listed (see _polish)
     deadline = None if total_time_limit is None else t_start + float(total_time_limit)
+    swept: set = set()  # the sets the add-one move ran from, across the post-passes
     out = _polish(
-        arrays, res, cert_tol=cert_tol, time_limit=time_limit, engine=iis_engine, deadline=deadline
+        arrays,
+        res,
+        cert_tol=cert_tol,
+        time_limit=time_limit,
+        engine=iis_engine,
+        deadline=deadline,
+        swept=swept,
     )
     return _polish_alternatives(
         arrays,
@@ -2718,6 +2770,7 @@ def milp_iis_arrays(
         time_limit=time_limit,
         engine=iis_engine,
         deadline=deadline,
+        swept=swept,
     )
 
 
