@@ -624,6 +624,9 @@ counters!(
     //     solve not `Optimal`), which fall through to the unperturbed path.
     DualCostPerturbAttempts,
     DualCostPerturbAccepted,
+    // A perturbed attempt's primal clean-up that the warm primal could not finish:
+    // rejected instead of re-solved cold (`perturb_cleanup_primal`).
+    DualCostPerturbCleanupRefused,
     DualCostPerturbRejected,
     // Perturbed attempts whose certified Farkas ray settled the true LP infeasible.
     DualCostPerturbInfeasible,

@@ -1663,17 +1663,10 @@ fn cost_perturbed_warm_solve(
         Some(s) => s,
         None => match PreparedDual::prepare_cols(sp, m, n, c, l, u, &pert.basis, &attempt) {
             Some(p) => p.reoptimize(l, u, b, &attempt),
-            None => super::primal::solve_lp_cols_warm(
-                sp.clone(),
-                m,
-                n,
-                c,
-                l,
-                u,
-                b,
-                &pert.basis,
-                &attempt,
-            ),
+            None => match perturb_cleanup_primal(sp, m, n, c, l, u, b, &pert.basis, &attempt) {
+                Some(s) => s,
+                None => return reject(),
+            },
         },
     };
     if dual_trace_enabled() {
@@ -1692,6 +1685,54 @@ fn cost_perturbed_warm_solve(
     let mut clean = clean;
     clean.iters = clean.iters.saturating_add(pert.iters);
     Some(clean)
+}
+
+/// The primal clean-up of [`cost_perturbed_warm_solve`] when the perturbed
+/// optimum's basis is not dual feasible on the true costs: a **warm** primal
+/// phase 2 from that basis, and nothing else.
+///
+/// The perturbed optimum is primal feasible, so the warm primal is the cheap
+/// re-price the clean-up exists for. When it fails, the attempt is rejected and the
+/// caller runs the unperturbed dual from its own (accepted) start, with the full
+/// iteration budget. It used to call `solve_lp_cols_warm`, whose failure handling
+/// (the dense-LU retry and the cold two-phase fallback) belongs to a top-level
+/// solve, not to a speculative half-budget attempt. Measured 2026-11-26 on neos17
+/// with `DISCOPT_HIGHS_SEARCH_SEPA=1` (2,000 nodes, deterministic): 104 clean-ups
+/// took this route; 26 warm phase-2 runs ended `Numerical` at the bounds audit
+/// (drift after a near-singular pivot); each one then ran a cold two-phase solve,
+/// 17 of them to the 50,000-pivot attempt cap. That is about 0.93 M of the run's
+/// 1.24 M phase-1 pivots; those 17 attempts were then rejected and discarded.
+///
+/// A cold re-solve that did reach a verified `Optimal` used to be *accepted*. Now
+/// the caller's unperturbed dual answers instead, with an equally verified optimum
+/// that can be a different vertex, so where the refusal fires the search tree can
+/// change. Measured at the 2026-11-26 main defaults (61 MILP rows, 2,000 nodes,
+/// deterministic), it fired on 4 rows: 3 were bit-identical, and neos-911970 took a
+/// different tree.
+///
+/// A clean-up that the warm primal finishes `Optimal` is unchanged, so the solve is
+/// unchanged too: same point, basis, duals and pivots. HiGHS likewise cleans up the
+/// dual infeasibilities left by removing the cost perturbation with primal simplex
+/// from the current basis (`HEkkDual::solve`, `kSolvePhaseOptimalCleanup`,
+/// `highs/simplex/HEkkDual.cpp`), not with a cold restart.
+#[allow(clippy::too_many_arguments)]
+fn perturb_cleanup_primal(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    basis: &Basis,
+    attempt: &SimplexOptions,
+) -> Option<LpSolve> {
+    let sol = super::primal::solve_lp_cols_warm_only(sp.clone(), m, n, c, l, u, b, basis, attempt);
+    if !sol.as_ref().is_some_and(|s| s.status == LpStatus::Optimal) {
+        crate::profile::incr(crate::profile::Ctr::DualCostPerturbCleanupRefused);
+        return None;
+    }
+    sol
 }
 
 /// The perturbed cost vector behind [`cost_perturbed_warm_solve`].
@@ -3784,6 +3825,98 @@ mod tests {
             subtol_ladder: false,
             ..SimplexOptions::default()
         }
+    }
+
+    /// `perturb_cleanup_primal` is warm-only. From a primal-infeasible basis it
+    /// refuses with no cold re-solve, where `solve_lp_cols_warm` (the route it
+    /// replaced) goes cold and spends phase-1 pivots. From a primal-feasible basis
+    /// it returns exactly what the old route returned. LP:
+    /// `min -x1 - 0.5 x2 s.t. x1 - x2 + s = b`, `0 <= x1 <= 4`, `0 <= x2 <= 10`, `s >= 0`
+    /// (optimum `x = (4, 10)`, objective -9). The slack basis
+    /// with both x at lower is dual infeasible for `c` (that is why the clean-up is
+    /// primal). It is primal infeasible at `b = -1.5` and feasible at `b = 1.5`.
+    #[test]
+    fn perturb_cleanup_primal_never_goes_cold() {
+        let sp = SparseCols::from_dense(&[1.0, -1.0, 1.0], 1, 3);
+        let (c, l, u) = (
+            vec![-1.0, -0.5, 0.0],
+            vec![0.0, 0.0, 0.0],
+            vec![4.0, 10.0, INF],
+        );
+        let start = Basis {
+            col_status: vec![AT_LOWER, AT_LOWER, BASIC],
+            basic_vars: vec![2],
+        };
+        let _guard = crate::profile::test_guard();
+        let mut checked = 0usize;
+
+        // Primal-infeasible start (s = -1.5): refused, no phase-1 pivot.
+        let b = vec![-1.5];
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+        assert!(perturb_cleanup_primal(&sp, 1, 3, &c, &l, &u, &b, &start, &opts()).is_none());
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::Phase1Pivots),
+            0
+        );
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::Phase2Pivots),
+            0
+        );
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::DualCostPerturbCleanupRefused),
+            1
+        );
+        checked += 4;
+        // The route it replaced re-solves the same start cold, to the optimum
+        // x = (4, 10) (the cold path's own work, which the clean-up now leaves to
+        // the caller's unperturbed solve).
+        let old = super::super::primal::solve_lp_cols_warm(
+            sp.clone(),
+            1,
+            3,
+            &c,
+            &l,
+            &u,
+            &b,
+            &start,
+            &opts(),
+        );
+        assert_eq!(old.status, LpStatus::Optimal);
+        assert!(
+            (old.obj - (-4.0 - 0.5 * 10.0)).abs() < 1e-9,
+            "obj {}",
+            old.obj
+        );
+        checked += 2;
+
+        // Primal-feasible start: identical to the old route.
+        let b = vec![1.5];
+        let new = perturb_cleanup_primal(&sp, 1, 3, &c, &l, &u, &b, &start, &opts())
+            .expect("a feasible start is cleaned up warm");
+        let old = super::super::primal::solve_lp_cols_warm(
+            sp.clone(),
+            1,
+            3,
+            &c,
+            &l,
+            &u,
+            &b,
+            &start,
+            &opts(),
+        );
+        assert_eq!(new.status, LpStatus::Optimal);
+        assert_eq!(new.x, old.x);
+        assert_eq!(new.iters, old.iters);
+        assert_eq!(new.basis.col_status, old.basis.col_status);
+        assert!(
+            (new.obj - (-4.0 - 0.5 * 10.0)).abs() < 1e-9,
+            "obj {}",
+            new.obj
+        );
+        checked += 5;
+        crate::profile::set_enabled(false);
+        assert_eq!(checked, 11);
     }
 
     /// #1935 `warm_flip_boxed`: a warm start whose only dual infeasibilities sit on
