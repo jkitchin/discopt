@@ -241,3 +241,25 @@ def test_an_oversized_row_is_left_out_and_the_others_still_give_a_core(monkeypat
     names = {m._constraints[i].name for i in res.constraints}
     assert len(names) == 2 and "knap" not in names
     assert res.complete
+
+
+def test_pb_rows_keeps_coefficients_beyond_int64_exact():
+    """|a| >= 2**63 used to go through ``astype(np.int64)``, which saturates
+    (1e19 -> 2**63 - 1) or wraps with only a RuntimeWarning: a different row.
+    The weights are now exact Python ints at any magnitude."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # the old cast warned "invalid value"
+        rows = _pb_rows(np.array([0, 1]), np.array([1e19, -3e19]), 1.0, 1e20)
+    assert rows == [([10**19, 3 * 10**19], [1, -2], 1 + 3 * 10**19)]
+    # The encoding of the exact row is still right: x0 = 1, x1 = 0 satisfies
+    # 1e19 x0 - 3e19 x1 >= 1; x1 = 1 cannot.
+    (w, lits, K) = rows[0]
+    clauses: list = []
+    nv = _encode_geq(w, lits, K, 3, 3, clauses)
+    for x0, x1, want in ((1, 0, True), (0, 0, False), (1, 1, False), (0, 1, False)):
+        s = PySatSolver(nv)
+        for c in clauses:
+            s.add_clause(c)
+        assert s.solve([3, 1 if x0 else -1, 2 if x1 else -2]) == want, (x0, x1)

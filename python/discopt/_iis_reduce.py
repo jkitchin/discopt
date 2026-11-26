@@ -24,10 +24,17 @@ the input:
      (down), where that one row caps u by a function of x that stays inside
      u's bounds over x's box (and is integral when u is held).
 
-All arithmetic is :class:`fractions.Fraction` over the exact values of the
-input floats. The exported model scales each row by the lcm of its
-denominators (integers are exact as floats) and rounds bounds and row sides
-OUTWARD, a relaxation: its infeasibility still implies the exact model's.
+All arithmetic is :class:`fractions.Fraction`. Each input float is read as
+the simplest rational that rounds to it (:func:`_rational`): ``0.3`` is
+``3/10``, the decimal the data was written in, not the binary value
+``5404319552844595/2**54`` nearest to it. Over the binary values decimal data
+is wrong, not just large: ``0.3 a + 0.7 c = 1`` with ``a = c = 1`` misses by
+``2**-54``, and the reduction used to "prove" that feasible row infeasible
+(and, scaled by the lcm of power-of-two denominators, every decimal row
+exceeded :data:`_MAX_MAGNITUDE`, so the export route never ran on decimal
+data). The exported model scales each row by the lcm of its denominators
+(integers are exact as floats) and rounds bounds and row sides OUTWARD, a
+relaxation: its infeasibility still implies the reduced model's.
 Only infeasibility is ever concluded from the reduced model; a feasible
 reduced model concludes nothing (the caller falls back to its other routes).
 """
@@ -36,6 +43,7 @@ from __future__ import annotations
 
 import math
 from fractions import Fraction as F
+from functools import lru_cache
 from typing import Optional
 
 import numpy as np
@@ -47,11 +55,38 @@ class Infeasible(Exception):
     pass
 
 
+#: Largest denominator :func:`_rational` tries before keeping a float's binary
+#: value. A decimal with k places has denominator 10**k; 10**9 covers every
+#: decimal datum MIPcc27's models carry.
+_MAX_DENOMINATOR = 10**9
+
+
+@lru_cache(maxsize=1 << 16)
+def _rational(v: float) -> F:
+    """The simplest rational that rounds to ``v``: the first of
+    ``F(v).limit_denominator(10**k)``, k = 0..9, whose float is ``v`` exactly,
+    else ``F(v)`` itself (the binary value; always exact). Every candidate is
+    checked to round-trip, so the result is a number the input float
+    represents; for a decimal with at most ~8 significant digits it is that
+    decimal, since any other fraction of denominator below 10**k is farther from
+    it than half an ulp. Cached: a model repeats few distinct values."""
+    if v.is_integer():
+        return F(int(v))
+    exact = F(v)
+    d = 1
+    while d <= _MAX_DENOMINATOR:
+        q = exact.limit_denominator(d)
+        if float(q) == v:
+            return q
+        d *= 10
+    return exact
+
+
 def _f(v) -> Optional[F]:
     v = float(v)
     if not math.isfinite(v) or abs(v) >= 1e20:
         return None
-    return F(v)
+    return _rational(v)
 
 
 class Model:
@@ -65,7 +100,7 @@ class Model:
             if lo is None and hi is None:
                 continue
             s, e = A.indptr[r], A.indptr[r + 1]
-            row = {int(j): F(float(a)) for j, a in zip(A.indices[s:e], A.data[s:e]) if a != 0}
+            row = {int(j): _rational(a) for j, a in zip(A.indices[s:e], A.data[s:e].tolist()) if a}
             self.rows[r], self.rlo[r], self.rhi[r] = row, lo, hi
         self.cols: dict[int, set[int]] = {}
         for r, row in self.rows.items():

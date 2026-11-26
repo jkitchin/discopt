@@ -861,3 +861,60 @@ def test_post_passed_answers_rank_a_fully_certified_one_first_under_the_closing_
     assert E._post_key(big) < E._post_key(small)
     monkeypatch.setenv("DISCOPT_IIS_CLOSE", "0")
     assert E._post_key(small) < E._post_key(big)
+
+
+def _redundant_elements(arr, res: MilpIIS) -> list:
+    """Elements whose removal leaves ``res``'s set infeasible (an independent
+    removal probe per element): non-empty means the set is not irreducible."""
+    eng = _engine(arr)
+    out = []
+    for key in E._element_keys(res.constraints, res.bounds, res.integrality):
+        c, b, i = set(res.constraints), set(res.bounds), set(res.integrality)
+        if key[0] == "constraint":
+            c.discard(key[1])
+        elif key[0] == "bound":
+            b.discard((key[1], key[2]))
+        else:
+            i.discard(key[1])
+        if eng.probe(c, b, i)[0] is True:
+            out.append(key)
+    return out
+
+
+def test_exchange_does_not_carry_a_proven_flag_onto_the_bounds_it_adds(monkeypatch):
+    """x integer in [0, 1] with x >= 1.5, handed in as a complete answer proven
+    irreducible whose integrality has no in-box witness. The exchange replaces
+    it by both box bounds, and x >= 0 is redundant: no probe tested the bounds
+    it added. With the certificate repair off (or cut short by the clock) the
+    lower bound stays, so the answer must not claim irreducibility. It used to:
+    ``proven`` was the filter's flag, carried across a set the filter never
+    saw. With the repair on the redundant bound is dropped and every element is
+    certified, which is a proof by itself."""
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "1")
+    arr = _arrays([[1]], [1.5], [INF], 1, [0], [1], [True])
+
+    def answer():
+        return MilpIIS(constraints=[0], bounds=[], integrality=[0], proven_irreducible=True)
+
+    def run():
+        return _polish(
+            arr,
+            answer(),
+            cert_tol=1e-6,
+            time_limit=10.0,
+            engine="highs",
+            deadline=time.perf_counter() + 60.0,
+        )
+
+    monkeypatch.setenv("DISCOPT_IIS_CERT_REPAIR", "0")
+    out = run()
+    assert out.n_exchanged == 1 and out.integrality == []
+    assert sorted(out.bounds) == [(0, "lower"), (0, "upper")]
+    assert _redundant_elements(arr, out) == [("bound", 0, "lower")]
+    assert not out.proven_irreducible
+    monkeypatch.delenv("DISCOPT_IIS_CERT_REPAIR")
+    out = run()
+    assert out.n_exchanged == 1 and out.n_close_dropped == 1
+    assert out.bounds == [(0, "upper")] and _redundant_elements(arr, out) == []
+    assert _checked(arr, out) == _n_elements(out) == 2
+    assert out.proven_irreducible

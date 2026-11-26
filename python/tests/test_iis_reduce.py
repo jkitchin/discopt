@@ -12,6 +12,7 @@ The rules can only ever be trusted if they are sound, so the first test is a
 differential one against HiGHS on random models, with infeasible ones in the mix.
 """
 
+import itertools
 import random
 from fractions import Fraction
 
@@ -226,3 +227,83 @@ def test_a_refuted_presolve_on_claim_is_not_recorded_as_proven(monkeypatch):
     res, x = eng.probe({0}, set(), {0, 1})  # x0 + x1 >= 1: feasible in truth
     assert res is False and x is not None
     assert not eng.proven_on({0}, set(), {0, 1})
+
+
+def _decimal_knapsack(rhs, card):
+    """0.3 a + 0.5 b + 0.7 c + 0.05 d = rhs and a + b + c + d = card over
+    integers in [0, 3], plus four rows the reduction drops (e_k <= 2 on e_k in
+    [0, 1]) so the export route runs: propagation alone decides neither case."""
+    A = np.zeros((6, 8))
+    A[0, :4] = [0.3, 0.5, 0.7, 0.05]
+    A[1, :4] = 1.0
+    for k in range(4):
+        A[2 + k, 4 + k] = 1.0
+    rlo = np.array([rhs, card] + [-np.inf] * 4)
+    rhi = np.array([rhs, card] + [2.0] * 4)
+    ub = np.array([3.0] * 4 + [1.0] * 4)
+    return sp.csr_matrix(A), rlo, rhi, np.zeros(8), ub, np.array([True] * 4 + [False] * 4)
+
+
+def test_decimal_row_reaches_the_reduced_solve_and_concludes_correctly():
+    """The row [0.3, 0.5, 0.7, 0.05] used to be scaled by the lcm of its binary
+    denominators (2**56), about 2e16 per coefficient, past _MAX_MAGNITUDE: the
+    route drew no conclusion on any decimal row. Read as decimals it scales by
+    20 to [6, 10, 14, 1]. Activity 1.0 with 3 items is infeasible; with 2 items
+    (0.3 + 0.7) it is feasible and must never be concluded infeasible."""
+    w = [6, 10, 14, 1]  # the oracle, by enumeration in units of 0.05
+
+    def attainable(card):
+        return any(
+            sum(c * k for c, k in zip(w, x)) == 20 and sum(x) == card
+            for x in itertools.product(range(4), repeat=4)
+        )
+
+    assert not attainable(3) and attainable(2)
+    model = Model(*_decimal_knapsack(1.0, 3))
+    assert model.reduce() == "fixpoint"
+    Ar = model.export()[0]
+    assert Ar.shape[0] == 2 and sorted(set(Ar.data.tolist())) == [1.0, 6.0, 10.0, 14.0]
+    for engine in ("highs", "rust"):
+        assert reduced_infeasible(*_decimal_knapsack(1.0, 3), None, engine=engine) is True
+        assert reduced_infeasible(*_decimal_knapsack(1.0, 2), None, engine=engine) is None
+    assert _highs(*_decimal_knapsack(1.0, 3), "off") == "kInfeasible"
+    assert _highs(*_decimal_knapsack(1.0, 2), "off") == "kOptimal"
+
+
+def test_a_feasible_decimal_row_is_not_proven_infeasible_by_binary_rounding():
+    """0.3 a + 0.7 c = 1 holds at a = c = 1 (HiGHS agrees). Over the floats'
+    binary values the activity is 1 - 2**-54, and the exact reduction used to
+    return True -- an infeasibility "proof" of a feasible set."""
+    A = sp.csr_matrix(np.array([[0.3, 0.7]]))
+    args = (A, np.array([1.0]), np.array([1.0]), np.zeros(2), np.ones(2), np.array([True, True]))
+    assert _highs(*args, "off") == "kOptimal"
+    assert reduced_infeasible(*args, None) is None
+
+
+def test_decimal_models_never_concluded_infeasible_when_feasible():
+    """Differential: random decimal-coefficient models; every True must be an
+    infeasible model under both HiGHS presolve settings."""
+    rng = random.Random(5)
+    coefs = [-0.7, -0.35, -0.2, 0.05, 0.1, 0.3, 0.5, 0.7, 1.25]
+    n_true = n_checked = 0
+    for _ in range(200):
+        m, n = rng.randint(1, 4), rng.randint(1, 4)
+        A = np.zeros((m, n))
+        for r in range(m):
+            for j in rng.sample(range(n), rng.randint(1, n)):
+                A[r, j] = rng.choice(coefs)
+        side = [round(rng.uniform(-1.5, 1.5), 2) for _ in range(m)]
+        kinds = [rng.choice(["eq", "lo", "hi"]) for _ in range(m)]
+        rlo = np.array([s if k in ("eq", "lo") else -np.inf for s, k in zip(side, kinds)])
+        rhi = np.array([s if k in ("eq", "hi") else np.inf for s, k in zip(side, kinds)])
+        lb, ub = np.zeros(n), np.array([rng.choice([1.0, 2.0, 3.0]) for _ in range(n)])
+        held = np.array([rng.random() < 0.8 for _ in range(n)])
+        args = (sp.csr_matrix(A), rlo, rhi, lb, ub, held)
+        on, off = _highs(*args, "on"), _highs(*args, "off")
+        if on not in ("kOptimal", "kInfeasible") or off != on:
+            continue
+        n_checked += 1
+        if reduced_infeasible(*args, None, engine="highs") is True:
+            n_true += 1
+            assert on == "kInfeasible", args
+    assert n_checked >= 150 and n_true >= 20, (n_checked, n_true)

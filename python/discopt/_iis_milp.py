@@ -1759,6 +1759,11 @@ def _polish(
                 if verdict is True:
                     n_exchanged = len(ints - got[2])
                     cons, bounds, ints = got
+                    # The exchange ADDS bounds no probe has shown necessary, so
+                    # the filter's verdicts no longer cover the set (removals are
+                    # safe by monotonicity; additions are not). From here only a
+                    # checked certificate for every element proves it (below).
+                    proven = False
         except _OutOfTime:
             pass  # the exchange or its confirmation ran out of time: the answer stands
     certs = _check_certificates(pending, eng, cons, bounds, ints, cert_tol)
@@ -1956,7 +1961,10 @@ def _pb_rows(cols, vals, lo, hi) -> Optional[list[tuple[list[int], list[int], in
     for sign, side in ((1, lo), (-1, hi)):
         if (sign == 1 and side <= -_INF) or (sign == -1 and side >= _INF):
             continue
-        a = sign * np.round(vals).astype(np.int64)
+        # Python ints, not int64: a cast of |a| >= 2**63 saturates or wraps
+        # (1e19 became 2**63 - 1, a different row) with only a RuntimeWarning.
+        # ``int`` of an integral finite float is exact at any magnitude.
+        a = [sign * int(v) for v in np.round(vals).tolist()]
         k = sign * float(side)
         K = int(round(k)) if abs(k - round(k)) <= 1e-9 else int(math.ceil(k))
         w: list[int] = []
