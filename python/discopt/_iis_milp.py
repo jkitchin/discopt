@@ -218,6 +218,13 @@ class MilpIIS:
     # Portfolio runs only: the other members' distinct complete answers, smallest
     # first, for the post-pass to polish too (:func:`_polish_alternatives`).
     alternatives: Optional[list] = None
+    # Other subsystems the run confirmed infeasible (both presolve configurations),
+    # ranked by :func:`_post_key`, distinct from the answer and from each other: the
+    # portfolio winner before its post-pass, every other member's answer (complete
+    # or not) before and after its post-pass. Set by :func:`milp_iis_arrays`; the
+    # MIPcc27 entry falls back on them when the official checker's looser judgement
+    # (absolute 1e-5) would reject the answer (``discopt.mipcc``, #2225).
+    fallbacks: Optional[list] = None
 
 
 class _Engine:
@@ -1872,13 +1879,14 @@ def _polish_alternatives(
     :meth:`_Engine.confirm_infeasible` confirms it. Ties keep ``out``.
     ``DISCOPT_IIS_POLISH_ALTERNATIVES=0`` is the opt-out for A/B measurement."""
     alts = res.alternatives or []
+    pool: list = [out, res, *alts, *(res.fallbacks or [])]
     if (
         not alts
         or deadline is None
         or not out.complete
         or os.environ.get("DISCOPT_IIS_POLISH_ALTERNATIVES", "1") == "0"
     ):
-        return replace(out, alternatives=None) if out.alternatives else out
+        return _with_fallbacks(replace(out, alternatives=None), pool)
     best = out
     for alt in alts:
         now = time.perf_counter()
@@ -1898,9 +1906,10 @@ def _polish_alternatives(
             beat=_iis_size(best),
             swept=swept,
         )
+        pool.append(got)
         if _post_key(got) < _post_key(best):
             best = got
-    return replace(best, members=res.members, alternatives=None)
+    return _with_fallbacks(replace(best, members=res.members, alternatives=None), pool)
 
 
 def _post_key(res: MilpIIS) -> tuple:
@@ -4093,7 +4102,8 @@ def _polish_answers_parallel(
     for g in got[1:]:
         if g is not None and _post_key(g) < _post_key(best):
             best = g
-    return replace(best, members=res.members, alternatives=None)
+    best = replace(best, members=res.members, alternatives=None)
+    return _with_fallbacks(best, [*got, res, *alts, *(res.fallbacks or [])])
 
 
 def _polish_parallel(
@@ -4148,7 +4158,7 @@ def _polish_parallel(
                     assert proc.stdin is not None
                     job = dict(
                         arrays=arrays,
-                        polish=replace(answers[k], alternatives=None, members=None),
+                        polish=replace(answers[k], alternatives=None, members=None, fallbacks=None),
                         kwargs=dict(kwargs, beat=betas[k]),
                         order=None,
                         deadline_wall=wall_deadline - margin,
@@ -4442,7 +4452,29 @@ def _rank_answers(done: list[tuple[int, MilpIIS]]) -> MilpIIS:
         if r.complete and _answer_key(r) not in seen:
             seen.add(_answer_key(r))
             best.alternatives.append(r)
+    # Every other distinct member answer, incomplete ones too (each is confirmed
+    # infeasible by its member): candidates for milp_iis_arrays' ``fallbacks``.
+    best.fallbacks = [r for _, r in done if _answer_key(r) not in seen]
     return best
+
+
+def _with_fallbacks(best: MilpIIS, pool: list) -> MilpIIS:
+    """``best`` carrying, as ``fallbacks``, the distinct confirmed answers of
+    ``pool`` other than ``best`` itself, ranked by :func:`_post_key` (ties: pool
+    order). Each fallback is stripped of its own members / alternatives /
+    fallbacks."""
+    seen = {_answer_key(best)}
+    out = []
+    for r in pool:
+        if r is None:
+            continue
+        k = _answer_key(r)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(replace(r, members=None, alternatives=None, fallbacks=None))
+    out.sort(key=_post_key)  # stable: ties keep pool order
+    return replace(best, fallbacks=out)
 
 
 def _answer_key(res: MilpIIS) -> tuple:

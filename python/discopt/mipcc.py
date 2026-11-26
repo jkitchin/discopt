@@ -302,101 +302,333 @@ def main(argv: Optional[list[str]] = None, t_launch: Optional[float] = None) -> 
         finished.set()
 
 
-def checker_rejects(data: dict, res, time_limit: float) -> bool:
-    """Whether the official checker would find the kept subsystem feasible:
-    one HiGHS solve with presolve on and both feasibility tolerances at
-    :data:`CHECK_TOL`, as the checker runs it, and -- on a point -- the checker's
-    1e-5 rule on every kept row, bound and integrality.
+# The official checker's retry tolerance (``RETRY_SOLVER_TOLERANCE`` in its
+# ``backend/base.py``): a "feasible" point that misses CHECK_TOL on the original
+# rows earns one more solve at this tolerance.
+_CHECK_RETRY_TOL = 1e-9
 
-    The engine proves its answer infeasible twice (presolve-on HiGHS at HiGHS's
-    tighter default tolerances, and an independent route), so a ``True`` here
-    means a set infeasible in truth that the checker's looser judgement would
-    still reject (#2145 review: the borderline zone). Undecided within
-    ``time_limit``, or a point that fails the 1e-5 rule (the checker then
-    retries tighter): ``False`` -- the doubly proven answer stands."""
+
+def _masks(data: dict, sub) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``(rows, lbk, ubk, held)`` boolean masks of the kept subsystem ``sub``
+    (anything with ``constraints`` / ``bounds`` / ``integrality``). A held
+    column's bounds always apply, as in the checker (they are not listed for it)."""
+    m, n = data["row_lo"].size, data["col_lb"].size
+    rows = np.zeros(m, dtype=bool)
+    rows[list(sub.constraints)] = True
+    held = np.zeros(n, dtype=bool)
+    held[list(sub.integrality)] = True
+    lbk = held.copy()
+    ubk = held.copy()
+    for j, side in sub.bounds:
+        (lbk if side == "lower" else ubk)[j] = True
+    return rows, lbk, ubk, held
+
+
+def _violations(data: dict, x: np.ndarray) -> tuple[np.ndarray, ...]:
+    """``x``'s violation of every element of the model -- rows, lower bounds,
+    upper bounds, integralities -- 0 where satisfied or vacuous."""
+    act = data["A"] @ x
+    rlo, rhi = data["row_lo"], data["row_hi"]
+    clb, cub = data["col_lb"], data["col_ub"]
+    row_v = np.maximum(np.where(rlo > -_INF, rlo - act, 0.0), np.where(rhi < _INF, act - rhi, 0.0))
+    lb_v = np.where(clb > -_INF, clb - x, 0.0)
+    ub_v = np.where(cub < _INF, x - cub, 0.0)
+    int_v = np.where(data["is_int"], np.abs(x - np.round(x)), 0.0)
+    return row_v, lb_v, ub_v, int_v
+
+
+def _max_kept_violation(data: dict, masks: tuple, x: np.ndarray) -> float:
+    """The checker's rule on a point: the largest violation of a kept element."""
+    rows, lbk, ubk, held = masks
+    row_v, lb_v, ub_v, int_v = _violations(data, x)
+    return max(
+        float(np.max(row_v[rows], initial=0.0)),
+        float(np.max(lb_v[lbk], initial=0.0)),
+        float(np.max(ub_v[ubk], initial=0.0)),
+        float(np.max(int_v[held], initial=0.0)),
+    )
+
+
+def checker_verdict(data: dict, sub, time_limit: float) -> tuple[str, Optional[np.ndarray]]:
+    """The official checker's verdict on the kept subsystem ``sub``, predicted by
+    making the checker's own solve (``mipcc_iis_checker``, HiGHS backend,
+    ``BaseBackend.solve_subsystem``): a fresh ``HighsLp`` with every column, the
+    kept rows, bounds and integralities, default options except both feasibility
+    tolerances at :data:`CHECK_TOL`. ``kInfeasible`` is ``"infeasible"``; a
+    feasible primal solution that satisfies every kept element within CHECK_TOL
+    (absolute) is ``"feasible"``; one that misses earns one more solve at
+    :data:`_CHECK_RETRY_TOL`, and a miss there too is ``"unknown"``; anything else
+    -- a solve error (chinneck misc06inf: HiGHS's "untransformed violations" ends
+    the run in ``kError``), a time limit, no primal solution -- is ``"unknown"``.
+    The checker scores ``"unknown"`` as a failure, exactly as it does
+    ``"feasible"``: only ``"infeasible"`` passes.
+
+    Returns ``(verdict, point)``, the point being the last primal solution HiGHS
+    reported (feasible or not; ``None`` when it reported none): the direction
+    :func:`_repair` adds elements back along. ``time_limit`` caps the whole
+    verdict (both solves), with a wall-clock guard, as HiGHS was measured
+    overrunning its own limit."""
     from discopt._optional_highs import require_highspy
 
     highspy = require_highspy(
         "discopt.mipcc (the HiGHS re-solve that mirrors the official checker)"
     )
-    if time_limit <= 0.5:
-        return False
-    m, n = data["row_lo"].size, data["col_lb"].size
-    rows = np.zeros(m, dtype=bool)
-    rows[list(res.constraints)] = True
-    held = np.zeros(n, dtype=bool)
-    held[list(res.integrality)] = True
-    lbk = held.copy()
-    ubk = held.copy()
-    for j, side in res.bounds:
-        (lbk if side == "lower" else ubk)[j] = True
+    masks = _masks(data, sub)
+    rows, lbk, ubk, held = masks
+    n = data["col_lb"].size
     inf = highspy.kHighsInf
     lb = np.where(lbk & (data["col_lb"] > -_INF), data["col_lb"], -inf)
     ub = np.where(ubk & (data["col_ub"] < _INF), data["col_ub"], inf)
-    h = highspy.Highs()
-    h.silent()
-    h.setOptionValue("presolve", "on")
-    h.setOptionValue("mip_feasibility_tolerance", CHECK_TOL)
-    h.setOptionValue("primal_feasibility_tolerance", CHECK_TOL)
-    h.setOptionValue("time_limit", float(time_limit))
-    # As the checker does before ``readModel``: a matrix entry of 1e15 or more is
-    # read, not refused (control30-5-10-4).
-    h.setOptionValue("large_matrix_value", float("inf"))
-    # Wall-clock guard: HiGHS was measured overrunning its time_limit 7-10x on
-    # presolve-free solves; stop it at the limit (plus a little) whatever it does.
-    stop = time.perf_counter() + float(time_limit) + 1.0
-
-    def _guard(event) -> None:
-        event.interrupt(time.perf_counter() > stop)
-
-    # #2221: wrapped so an exception in the guard is re-raised after ``run`` (highspy
-    # >= 1.16 swallows it).
-    guard = wrap_callback(h, _guard)
-    h.cbMipInterrupt.subscribe(guard)
-    h.cbSimplexInterrupt.subscribe(guard)
-    h.cbIpmInterrupt.subscribe(guard)
-    h.addVars(n, lb, ub)
+    rlo = data["row_lo"][rows]
+    rhi = data["row_hi"][rows]
+    csc = data["A"][np.flatnonzero(rows)].tocsc()
     vt = highspy.HighsVarType
-    h.changeColsIntegrality(
-        n,
-        np.arange(n, dtype=np.int32),
-        np.array([vt.kInteger if k else vt.kContinuous for k in held]),
-    )
-    A = data["A"].tocsr()
-    for r in np.flatnonzero(rows):
-        s, e = A.indptr[r], A.indptr[r + 1]
-        lo, hi = data["row_lo"][r], data["row_hi"][r]
-        added = h.addRow(
-            lo if lo > -_INF else -inf,
-            hi if hi < _INF else inf,
-            e - s,
-            A.indices[s:e].astype(np.int32),
-            A.data[s:e],
-        )
-        if added == highspy.HighsStatus.kError:
-            # A dropped row would loosen the subsystem and could reject a sound
-            # answer; refuse instead (main() keeps the answer already on disk).
-            raise RuntimeError(f"HiGHS refused kept row {r} on the checker-settings solve")
-    run = run_checked(h)
-    if run not in (highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning):
-        raise RuntimeError(f"HiGHS failed on the checker-settings solve: {run}")
-    if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+    stop = time.perf_counter() + float(time_limit)
+    point: Optional[np.ndarray] = None
+    for tol in (CHECK_TOL, _CHECK_RETRY_TOL):
+        left = stop - time.perf_counter()
+        if left <= 0.05:
+            return "unknown", point
+        lp = highspy.HighsLp()
+        lp.num_col_ = n
+        lp.num_row_ = int(rows.sum())
+        lp.col_cost_ = np.zeros(n, dtype=np.float64)
+        lp.col_lower_ = lb
+        lp.col_upper_ = ub
+        lp.integrality_ = [vt.kInteger if k else vt.kContinuous for k in held]
+        lp.row_lower_ = np.where(rlo > -_INF, rlo, -inf)
+        lp.row_upper_ = np.where(rhi < _INF, rhi, inf)
+        mat = highspy.HighsSparseMatrix()
+        mat.format_ = highspy.MatrixFormat.kColwise
+        mat.start_ = csc.indptr.tolist()
+        mat.index_ = csc.indices.tolist()
+        mat.value_ = csc.data.tolist()
+        lp.a_matrix_ = mat
+        h = highspy.Highs()
+        h.silent()
+        h.setOptionValue("primal_feasibility_tolerance", tol)
+        h.setOptionValue("mip_feasibility_tolerance", tol)
+        h.setOptionValue("time_limit", float(left))
+        # Wall-clock guard: HiGHS was measured overrunning its time_limit 7-10x on
+        # presolve-free solves; stop it at the limit (plus a little) whatever it does.
+        guard_at = time.perf_counter() + float(left) + 1.0
+
+        def _guard(event, guard_at=guard_at) -> None:
+            event.interrupt(time.perf_counter() > guard_at)
+
+        # #2221: wrapped so an exception in the guard is re-raised after ``run``.
+        guard = wrap_callback(h, _guard)
+        h.cbMipInterrupt.subscribe(guard)
+        h.cbSimplexInterrupt.subscribe(guard)
+        h.cbIpmInterrupt.subscribe(guard)
+        if h.passModel(lp) == highspy.HighsStatus.kError:
+            return "unknown", point  # the checker could not solve it either
+        # The run status is not consulted, as the checker does not consult it: a
+        # solve error leaves a model status that is neither infeasible nor a point.
+        run_checked(h)
+        if h.getModelStatus() == highspy.HighsModelStatus.kInfeasible:
+            return "infeasible", point
+        sol = h.getSolution()
+        if sol.value_valid:
+            point = np.asarray(sol.col_value, dtype=np.float64)
+        if h.getInfo().primal_solution_status != highspy.SolutionStatus.kSolutionStatusFeasible:
+            return "unknown", point
+        if point is not None and _max_kept_violation(data, masks, point) <= CHECK_TOL:
+            return "feasible", point
+    return "unknown", point
+
+
+def checker_rejects(data: dict, res, time_limit: float) -> bool:
+    """Whether the official checker is predicted to fail the kept subsystem:
+    :func:`checker_verdict` is anything but ``"infeasible"`` (an error or an
+    undecided solve is a predicted failure, as the checker scores it). With no
+    time to make the solve (``time_limit <= 0.5``) nothing is predicted and
+    ``False`` is returned: the doubly proven answer stands."""
+    if time_limit <= 0.5:
         return False
-    x = np.asarray(h.getSolution().col_value, dtype=np.float64)
-    act = A @ x
-    rlo, rhi = data["row_lo"], data["row_hi"]
-    viol = max(
-        float(np.max(np.where(rows & (rlo > -_INF), rlo - act, 0.0), initial=0.0)),
-        float(np.max(np.where(rows & (rhi < _INF), act - rhi, 0.0), initial=0.0)),
-        float(
-            np.max(np.where(lbk & (data["col_lb"] > -_INF), data["col_lb"] - x, 0.0), initial=0.0)
-        ),
-        float(
-            np.max(np.where(ubk & (data["col_ub"] < _INF), x - data["col_ub"], 0.0), initial=0.0)
-        ),
-        float(np.max(np.where(held, np.abs(x - np.round(x)), 0.0), initial=0.0)),
+    return checker_verdict(data, res, time_limit)[0] != "infeasible"
+
+
+def _all_keys(data: dict) -> list[tuple]:
+    """Every element of the model: rows, finite bounds, integralities."""
+    m, n = data["row_lo"].size, data["col_lb"].size
+    keys: list[tuple] = [("constraint", i) for i in range(m)]
+    for j in range(n):
+        if data["col_lb"][j] > -_INF:
+            keys.append(("bound", j, "lower"))
+        if data["col_ub"][j] < _INF:
+            keys.append(("bound", j, "upper"))
+    keys.extend(("integrality", int(j)) for j in np.flatnonzero(data["is_int"]))
+    return keys
+
+
+def _keys_of(data: dict, sub) -> set:
+    """``sub``'s elements as keys, each held column's finite bounds listed
+    explicitly. They apply whatever the list says, so the checker sees the same
+    subsystem; listed, they stay when a deletion step drops the integrality, as
+    relaxing an integrality keeps the bounds under the checker's rule."""
+    keys: set[tuple] = {("constraint", int(i)) for i in sub.constraints}
+    keys |= {("bound", int(j), side) for j, side in sub.bounds}
+    for j in sub.integrality:
+        keys.add(("integrality", int(j)))
+        if data["col_lb"][j] > -_INF:
+            keys.add(("bound", int(j), "lower"))
+        if data["col_ub"][j] < _INF:
+            keys.add(("bound", int(j), "upper"))
+    return keys
+
+
+class _Sub:
+    """A kept subsystem as :func:`checker_verdict` and :func:`solution_json` read it."""
+
+    def __init__(self, keys, certificates: dict):
+        self.constraints = sorted(k[1] for k in keys if k[0] == "constraint")
+        self.bounds = sorted((k[1], k[2]) for k in keys if k[0] == "bound")
+        self.integrality = sorted(k[1] for k in keys if k[0] == "integrality")
+        self.certificates = certificates
+
+
+def _violated_keys(data: dict, keys: set, x: np.ndarray) -> list[tuple]:
+    """The elements of the model NOT in ``keys`` that ``x`` violates by more than
+    CHECK_TOL, most violated first."""
+    row_v, lb_v, ub_v, int_v = _violations(data, x)
+    out: list[tuple[float, tuple]] = []
+    for i in np.flatnonzero(row_v > CHECK_TOL):
+        out.append((float(row_v[i]), ("constraint", int(i))))
+    for j in np.flatnonzero(lb_v > CHECK_TOL):
+        out.append((float(lb_v[j]), ("bound", int(j), "lower")))
+    for j in np.flatnonzero(ub_v > CHECK_TOL):
+        out.append((float(ub_v[j]), ("bound", int(j), "upper")))
+    for j in np.flatnonzero(int_v > CHECK_TOL):
+        out.append((float(int_v[j]), ("integrality", int(j))))
+    out = [vk for vk in out if vk[1] not in keys]
+    out.sort(key=lambda vk: -vk[0])
+    return [k for _, k in out]
+
+
+def _size(data: dict, sub) -> int:
+    """Kept elements as the checker counts them: a held column's bounds are not
+    elements (:func:`_keys_of` lists them; the engine's answers may not)."""
+    held = set(sub.integrality)
+    return (
+        len(sub.constraints) + sum(1 for j, _ in sub.bounds if j not in held) + len(sub.integrality)
     )
-    return viol <= CHECK_TOL
+
+
+class _NoTime(Exception):
+    """The deadline of :func:`_repair` passed."""
+
+
+def _repair(data: dict, base, x: Optional[np.ndarray], deadline: float, log: dict):
+    """A subsystem the checker's solve finds infeasible, grown from ``base`` (a
+    confirmed subsystem it does not) by adding elements back, then shrunk by a
+    deletion filter that judges with :func:`checker_verdict`; ``None`` if none is
+    found before ``deadline`` (``time.perf_counter()``).
+
+    Growing: while the checker's solve returns a point, every element of the whole
+    model that the point violates by more than CHECK_TOL is added (the elements
+    whose removal let the 1e-5 gap open). Each round adds at least one -- a point
+    violating nothing would make the whole model feasible to the checker, against
+    the competition's premise -- so the loop ends. With no point (a solve error
+    that left none) the rest of the model is added in doubling chunks.
+    Shrinking: the added elements, then the base elements whose certificate no
+    longer holds in the grown set (one that still holds shows its element is
+    needed: dropping it leaves a point the checker accepts), are dropped in
+    chunks, halved on failure. Every adopted step keeps a set the checker's solve
+    found infeasible, so stopping at the deadline is safe."""
+
+    def verdict(keys):
+        left = deadline - time.perf_counter()
+        if left <= 0.5:
+            raise _NoTime
+        log["solves"] = log.get("solves", 0) + 1
+        return checker_verdict(data, _Sub(keys, {}), min(CHECKER_SOLVE_CAP_S, left))
+
+    base_keys = _keys_of(data, base)
+    keys = set(base_keys)
+    added: list[tuple] = []
+    try:
+        while True:
+            more = _violated_keys(data, keys, x) if x is not None else []
+            if not more:
+                rest = [k for k in _all_keys(data) if k not in keys]
+                if not rest:
+                    return None  # grown to the whole model: the caller's last resort
+                more = rest[: max(1, len(added))]
+            keys |= set(more)
+            added.extend(more)
+            v, x = verdict(keys)
+            if v == "infeasible":
+                break
+    except _NoTime:
+        log["grow_cut"] = True
+        return None
+    log["added"] = len(added)
+    certs = {k: np.asarray(c, dtype=np.float64) for k, c in base.certificates.items()}
+    rows, lbk, ubk, held = _masks(data, _Sub(keys, {}))
+    needed = {k for k, c in certs.items() if certificate_ok(data, rows, lbk, ubk, held, k, c)}
+    # Latest added first (the most violated were added first: likeliest needed).
+    groups = [added[::-1], sorted(base_keys - needed, key=str)]
+    found: dict = {}
+    try:
+        for group in groups:
+            stack = [group]
+            while stack:
+                # A held column's bounds apply whatever the list says: not elements.
+                g = [
+                    k
+                    for k in stack.pop()
+                    if k in keys and not (k[0] == "bound" and ("integrality", k[1]) in keys)
+                ]
+                if not g:
+                    continue
+                trial = keys - set(g)
+                v, xp = verdict(trial)
+                if v == "infeasible":
+                    keys = trial
+                    log["dropped"] = log.get("dropped", 0) + len(g)
+                elif len(g) > 1:
+                    half = len(g) // 2
+                    stack.append(g[half:])
+                    stack.append(g[:half])
+                elif v == "feasible" and xp is not None:
+                    found[g[0]] = xp  # a certificate candidate; solution_json checks it
+    except _NoTime:
+        log["filter_cut"] = True
+    certs.update(found)
+    return _Sub(keys, {k: c for k, c in certs.items() if k in keys})
+
+
+def _checked_answer(data: dict, res, deadline: float, log: dict, on_reject=None):
+    """The answer to write: the first of ``res`` and its confirmed ``fallbacks``
+    (ranked) that :func:`checker_verdict` finds infeasible, else a :func:`_repair`
+    of ``res``, else ``None`` (the whole model). Every candidate is infeasible by
+    the engine's two proofs; this only predicts the checker's looser judgement.
+    With no time to check ``res`` at all it is returned unchecked: nothing was
+    predicted. ``on_reject()`` is called once ``res`` is predicted to fail (the
+    entry then puts the whole model on disk while the search goes on)."""
+    cands = [res, *(getattr(res, "fallbacks", None) or [])]
+    point = None
+    for k, cand in enumerate(cands):
+        left = deadline - time.perf_counter()
+        if left <= 0.5:
+            if k == 0:
+                log["unchecked"] = True
+                return res
+            break
+        v, x = checker_verdict(data, cand, min(CHECKER_SOLVE_CAP_S, left))
+        log.setdefault("verdicts", []).append(v)
+        if v == "infeasible":
+            log["chosen"] = "answer" if k == 0 else f"fallback {k}"
+            return cand
+        if k == 0:
+            point = x
+            if on_reject is not None:
+                on_reject()
+    rep = _repair(data, res, point, deadline, log)
+    if rep is not None:
+        log["chosen"] = "repair"
+    return rep
 
 
 def _run(
@@ -456,11 +688,22 @@ def _run(
     doc = solution_json(data, res)
     write_atomic(solution, doc)
     on_disk["answer"] = "the confirmed subsystem"
-    left = min(CHECKER_SOLVE_CAP_S, hard_stop - (time.perf_counter() - t0) - 5.0)
+    # The checker-settings verdict and, when it predicts a failure, the search
+    # for a subsystem it passes (#2225 held-out run): everything until 5 s before
+    # the hard stop.
+    deadline = t0 + hard_stop - 5.0
     from discopt._optional_highs import MissingHighsError
 
+    log: dict = {}
+
+    def rejected() -> None:
+        # The doubly proven answer is predicted to fail: until something better is
+        # found, the whole model (valid by the competition's premise) is on disk.
+        write_atomic(solution, {})
+        on_disk["answer"] = "the full model"
+
     try:
-        rejected = checker_rejects(data, res, left)
+        chosen = _checked_answer(data, res, deadline, log, on_reject=rejected)
     except MissingHighsError:
         # The checker-settings re-solve imitates the competition's HiGHS-based
         # checker, so it needs HiGHS (the reader does not, since P6). Without it the
@@ -470,35 +713,45 @@ def _run(
             "skipped; the doubly proven subsystem stands",
             flush=True,
         )
-        rejected = False
-    if rejected:
-        # Infeasible in truth (two proofs), feasible within the checker's 1e-5:
-        # submitting it would fail the run. The whole model replaces it.
-        write_atomic(solution, {})
-        on_disk["answer"] = "the full model"
+        chosen = res
+    if chosen is None:
+        # Infeasible in truth (two proofs), but the checker's solve on every
+        # candidate errs, is undecided or finds a point within its 1e-5: submitting
+        # any of them would fail the run. The whole model (already written) stands.
         print(
-            "mipcc: the checker's own settings find the subsystem feasible within "
-            f"{CHECK_TOL}; answer is the full model",
+            "mipcc: the checker's own settings do not find any confirmed subsystem "
+            f"infeasible (tolerance {CHECK_TOL}; {json.dumps(log)}); answer is the full model",
             flush=True,
         )
         return 0
-    size = len(res.constraints) + len(res.bounds) + len(res.integrality)
+    if chosen is not res:
+        doc = solution_json(data, chosen)
+        write_atomic(solution, doc)
+        on_disk["answer"] = "a subsystem the checker's settings find infeasible"
+        print(
+            "mipcc: the checker's own settings reject the answer; "
+            f"{log.get('chosen')} written instead ({json.dumps(log)})",
+            flush=True,
+        )
+        res = chosen
+    size = _size(data, res)
     print(
         "mipcc: "
         + json.dumps(
             dict(
                 size=size,
-                complete=res.complete,
+                complete=getattr(res, "complete", None),
                 certificates=len(res.certificates),
                 certificates_dropped=getattr(solution_json, "n_bad", 0),
-                order=res.order,
+                order=getattr(res, "order", None),
                 engine=engine,
-                forced=[res.n_forced, res.n_forced_certified],
-                add_one=[res.n_add_one_tried, res.n_add_one_moves],
-                relaxed=res.n_relaxed,
-                closed=[res.n_exchanged, res.n_close_dropped],
-                proven=res.proven_irreducible,
-                rehold=res.n_rehold,
+                forced=[getattr(res, "n_forced", 0), getattr(res, "n_forced_certified", 0)],
+                add_one=[getattr(res, "n_add_one_tried", 0), getattr(res, "n_add_one_moves", 0)],
+                relaxed=getattr(res, "n_relaxed", 0),
+                closed=[getattr(res, "n_exchanged", 0), getattr(res, "n_close_dropped", 0)],
+                proven=getattr(res, "proven_irreducible", None),
+                rehold=getattr(res, "n_rehold", 0),
+                checker=log,
                 # Kept elements written with no certificate (a complete answer
                 # with some is not shown irreducible to the checker).
                 n_uncertified=size - getattr(solution_json, "n_good", 0),

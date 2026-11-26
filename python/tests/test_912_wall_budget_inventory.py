@@ -368,16 +368,6 @@ KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
         "min(tl, deadline - time.perf_counter())",
         "contract",
     ),
-    # The MIPcc27 entry's checker-settings re-solve (``mipcc.checker_rejects``)
-    # verifies an answer that is ALREADY written; its cap only bounds how long
-    # that verification may run before the process must exit. Undecided keeps
-    # the answer, so the clock never changes which elements are reported -- it
-    # can only fail to catch a borderline set (the competition's own limit).
-    (
-        "mipcc.py",
-        "min(CHECKER_SOLVE_CAP_S, hard_stop - (time.perf_counter() - t0) - 5.0)",
-        "contract",
-    ),
     # The parallel post-pass (``_polish_parallel``) holds back a small margin of
     # what is left for process start-up and returning results, like the
     # portfolio's own margin. A post-pass that misses the deadline is killed and
@@ -588,12 +578,28 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "stop = time.perf_counter() + float(self.probe_tl) if stop_at is None else stop_at",
         "contract",
     ),
-    # The wall-clock interrupt guard on that checker-settings re-solve: it
-    # enforces the solve's own time_limit (HiGHS overruns it 7-10x on some
-    # solves) and decides nothing else.
+    # The MIPcc27 entry's checker-settings solve (``mipcc.checker_verdict``,
+    # #2225): one ``time_limit`` shared by its two tolerance passes (1e-5, then
+    # 1e-9, as the checker), each guarded by a wall-clock interrupt 1 s past
+    # what is left (HiGHS overruns its own limit 7-10x on some solves). The
+    # caller derives ``time_limit`` from the process hard stop
+    # (``mipcc._checked_answer`` / ``_repair``: ``deadline = t0 + hard_stop - 5``,
+    # each solve capped at CHECKER_SOLVE_CAP_S). This clock DOES decide which
+    # elements are reported, and that is the competition's contract, not a
+    # work gate: the answer is already on disk before the first solve; a solve
+    # that runs out is "unknown", which the official checker (same solve, same
+    # limit family) would also fail, so the entry moves to the next confirmed
+    # fallback, the add-back repair, or the whole model -- each written only once
+    # the checker's own settings find it infeasible. Measured on the #2225
+    # held-out run and the gate8 panel: every checker solve <= 10.7 s.
     (
         "mipcc.py",
-        "stop = time.perf_counter() + float(time_limit) + 1.0",
+        "stop = time.perf_counter() + float(time_limit)",
+        "contract",
+    ),
+    (
+        "mipcc.py",
+        "guard_at = time.perf_counter() + float(left) + 1.0",
         "contract",
     ),
     (
