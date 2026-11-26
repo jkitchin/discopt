@@ -29111,11 +29111,10 @@ def _solve_continuous(
 
 
 def _as_float_or_none(value: Any) -> Optional[float]:
-    """An option value as a float, or ``None`` when it is absent or not numeric."""
-    try:
-        return None if value is None else float(value)
-    except (TypeError, ValueError):
-        return None
+    """An option value as a float, or ``None`` when it is absent. A non-numeric
+    value raises: a malformed option is the caller's error, not something to
+    paper over in a message."""
+    return None if value is None else float(value)
 
 
 #: ``SolveResult.algorithm_route`` for each arm of ``solver="pounce"`` (#1533).
