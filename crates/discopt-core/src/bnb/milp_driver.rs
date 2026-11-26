@@ -8716,6 +8716,14 @@ fn solve_milp_node_search(
                 } else {
                     Vec::new()
                 };
+                let cliques = if highs_env::clique_domain_enabled() {
+                    highs_sep
+                        .as_ref()
+                        .and_then(|h| h.clique_table())
+                        .map(|t| (t, r0.solution[..ns.min(r0.solution.len())].to_vec()))
+                } else {
+                    None
+                };
                 highs_outcome = highs_env::run(
                     &ctx,
                     &lim,
@@ -8725,6 +8733,7 @@ fn solve_milp_node_search(
                     dbg,
                     seed_pool,
                     milp_depth == 0,
+                    cliques,
                 );
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};

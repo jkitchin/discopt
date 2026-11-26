@@ -431,6 +431,33 @@ pub(super) fn conflict_enabled() -> bool {
     }
 }
 
+/// `DISCOPT_MILP_CLIQUE_DOMAIN`: the root's clique table (`mipdata_->cliquetable`,
+/// the ported `extractCliques` + `runCliqueMerging` of the root separation), extended
+/// at search start by probing the root LP's fractional binaries on the global domain
+/// (`separateImpliedBounds`' probing loop, `HighsImplications::runProbing`, in
+/// `lp/highs_cutgen/probing.rs`), and attached with the probing implications to the
+/// search's local and global domains. Fixing a binary then fixes the other literals of
+/// its cliques (`HighsDomain::changeBound`'s `cliquetable.addImplications`) and
+/// re-applies what its probe implied (`implications.applyImplications`), with
+/// `Reason::cliqueTable` reasons conflict analysis explains. Bound-changing (it
+/// tightens node boxes, and probing tightens the global box). Default OFF: its §5
+/// panel (2026-11-25, row in `docs/dev/flag-retirement-audit.md`) was cert-clean and
+/// neutral, but c513 took 42,941 -> 54,975 nodes and the probing runs once rather than
+/// every separation round as in HiGHS. Porting the per-round probing would change
+/// that. Read per search, garbage refused.
+pub(super) fn clique_domain_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_CLIQUE_DOMAIN") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_CLIQUE_DOMAIN={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
 /// The search's conflict state (`DISCOPT_MILP_CONFLICT`).
 ///
 /// Scope: one [`run`] on one model. A conflict or a global fixing is derived from that
@@ -2650,6 +2677,7 @@ pub(super) fn run<'a>(
     dbg: Option<Debugger<'a>>,
     seed_pool: Vec<GomoryCut>,
     top_level: bool,
+    cliques: Option<(crate::lp::highs_cutgen::clique::CliqueTable, Vec<f64>)>,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -2675,6 +2703,38 @@ pub(super) fn run<'a>(
         }
         rc.bound("root", 0, root_bound, f64::INFINITY, "");
     }
+    // `DISCOPT_MILP_CLIQUE_DOMAIN`: `mipdata_->cliquetable` and `mipdata_->implications`
+    // on the local domain before the global one is cloned from it
+    // (`enable_conflicts`), so both domains run `addImplications` and
+    // `applyImplications`. The table is the root separation's; probing extends it
+    // first (`separateImpliedBounds`' probing loop over the root LP's fractional
+    // binaries), on the domain at its global baseline.
+    let mut probe_infeasible = false;
+    if let Some((t, x)) = cliques {
+        assert_eq!(
+            t.num_cols(),
+            ctx.ns,
+            "the clique table must index the search's structural columns"
+        );
+        assert!(
+            env.eval.dom.domain_change_stack().is_empty(),
+            "probing needs the search's domain at its global baseline"
+        );
+        let feastol = env.eval.dom.feastol();
+        // `separateImpliedBounds` probes the binaries the LP solution leaves
+        // fractional; here, those of the final root LP.
+        let cands: Vec<usize> = (0..ctx.ns.min(x.len()))
+            .filter(|&j| ctx.is_int[j] && (x[j] - x[j].round()).abs() > feastol)
+            .collect();
+        let st = crate::lp::highs_cutgen::probing::probe_and_attach(&mut env.eval.dom, t, &cands);
+        {
+            use crate::profile::{incr_by, Ctr};
+            incr_by(Ctr::MilpProbeProbed, st.probed as u64);
+            incr_by(Ctr::MilpProbeReductions, st.reductions as u64);
+            incr_by(Ctr::MilpProbeEntries, st.new_entries.max(0) as u64);
+        }
+        probe_infeasible = env.eval.dom.infeasible();
+    }
     if conflict_enabled() {
         env.enable_conflicts();
     }
@@ -2687,17 +2747,21 @@ pub(super) fn run<'a>(
         // `IncumbentFound` when it improves on the last one the driver reported.
         env.accept(x, v);
     }
-    let (slot, _) = env
-        .q
-        .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
-    env.q.set_ident(
-        slot,
-        NodeIdent {
-            id: root_id,
-            parent: None,
-            branch: None,
-        },
-    );
+    // Probing proved the global box holds no (improving) point: the queue starts
+    // empty, as when conflict propagation empties the global domain.
+    if !probe_infeasible {
+        let (slot, _) = env
+            .q
+            .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
+        env.q.set_ident(
+            slot,
+            NodeIdent {
+                id: root_id,
+                parent: None,
+                branch: None,
+            },
+        );
+    }
     let mut search = Search {
         count_tree_weight: true,
         next_id: root_id + 1,

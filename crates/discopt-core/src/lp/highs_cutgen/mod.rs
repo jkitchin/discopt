@@ -60,6 +60,7 @@ pub mod integers;
 pub mod modk;
 pub mod objective;
 pub mod pool;
+pub mod probing;
 pub mod random;
 pub mod separators;
 pub mod sparse_vec;

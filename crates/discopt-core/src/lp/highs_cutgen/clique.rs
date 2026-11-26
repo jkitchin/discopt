@@ -460,6 +460,11 @@ impl CliqueTable {
 
     // ---- small accessors (header inlines) ----
 
+    /// Columns the table indexes (`HighsCliqueTable(ncols)`).
+    pub fn num_cols(&self) -> usize {
+        self.colsubstituted.len()
+    }
+
     /// `setPresolveFlag`.
     pub fn set_presolve_flag(&mut self, in_presolve: bool) {
         self.in_presolve = in_presolve;
