@@ -22,6 +22,22 @@ import discopt.modeling as dm
 import pytest
 from discopt.solver import solve_model
 
+#: The work budget for the end-to-end solves below (#1062 de-flake). These tests
+#: assert on *how many* sub-NLPs ran, so the count must be a function of the model,
+#: not of machine speed. Under ``deterministic=False`` it is not: the root
+#: disjunct-configuration grant is split by ``DISCOPT_GDP_CONFIG_DEFER`` and its root
+#: share capped by the solve's elapsed time (``DISCOPT_GDP_CONFIG_ROOT_SKI``), so a
+#: fast start leaves the constructor a few milliseconds and one sub-NLP. Measured
+#: back to back on one machine at ``time_limit=30.0``: the mixed fixture reported
+#: ``subnlp_calls/feasible`` 14/13 then 4/3, the uneven one 3/3 then 3/2 -- and CI
+#: saw 1/1 and 0 feasible. ``deterministic=True`` turns both wall-clock shares off,
+#: so the constructor runs until it exhausts its plans (66/65 and 68/68 on every
+#: run, using ~0.8 s of a 15 s grant), and ``max_nodes`` bounds the tree. The
+#: ``time_limit`` is only a backstop far above the measured time; the
+#: ``status == "optimal"`` assertion checks that it never bound, since a run it cuts
+#: short is not reproducible.
+_WORK_BUDGET = dict(deterministic=True, max_nodes=1000, time_limit=300.0)
+
 
 def _uneven_disjunction_model():
     """Two disjunctions of different sizes — the #823 constructor's own fixture.
@@ -43,9 +59,10 @@ def _uneven_disjunction_model():
 @pytest.mark.smoke
 def test_nlp_bb_reports_the_subnlp_work_it_actually_did():
     """The NLP-BB SolveResult must carry the sub-NLP counters, not silent zeros."""
-    res = solve_model(_uneven_disjunction_model(), nlp_bb=True, time_limit=30.0)
+    res = solve_model(_uneven_disjunction_model(), nlp_bb=True, **_WORK_BUDGET)
 
     assert res.nlp_bb is True, "test must exercise the NLP-BB path to be meaningful"
+    assert res.status == "optimal", f"the work budget did not terminate the solve: {res.status}"
     assert res.objective is not None, "expected an incumbent from the disjunct constructor"
 
     # Before the #1062 fix all three were structurally 0 on this path.
