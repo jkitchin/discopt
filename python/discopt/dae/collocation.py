@@ -184,7 +184,15 @@ class DAEBuilder:
         n_components : int
             Number of components (for vector-valued states, e.g. spatial grid).
         bounds : tuple of float
-            ``(lb, ub)`` bounds on the state.
+            ``(lb, ub)`` bounds on the state. A bound that the dynamics hold the
+            state *exactly* on (a coverage declared ``lb=0`` that starts at 0 and
+            stays 0 until an input switches on) leaves an interior-point solver
+            no strictly feasible region there, and the fit can stall at
+            ``local_limit`` (#2366). Declare such a bound slightly outside the
+            reachable values instead, e.g. ``lb=-1e-8`` on the state's scale; a
+            mesh whose stage values undershoot it needs refining where the input
+            switches on. ``solver="pounce"`` names the pinned columns in a
+            warning and ``result.pinned_bounds`` when it does not converge.
         initial : float or np.ndarray, optional
             Initial condition at ``t0``. If given, the state is fixed at this
             value at the first time point.

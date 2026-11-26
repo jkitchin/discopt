@@ -190,7 +190,15 @@ class MOLBuilder:
         name : str
             Field name.
         bounds : tuple of float
-            ``(lb, ub)`` bounds.
+            ``(lb, ub)`` bounds on the field. A bound that the dynamics hold the
+            state *exactly* on (a coverage declared ``lb=0`` that starts at 0 and
+            stays 0 until an input switches on) leaves an interior-point solver
+            no strictly feasible region there, and the fit can stall at
+            ``local_limit`` (#2366). Declare such a bound slightly outside the
+            reachable values instead, e.g. ``lb=-1e-8`` on the field's scale; a
+            mesh whose stage values undershoot it needs refining where the input
+            switches on. ``solver="pounce"`` names the pinned columns in a
+            warning and ``result.pinned_bounds`` when it does not converge.
         initial : callable, np.ndarray, float, or None
             Initial condition. Callable receives spatial coordinate z.
         bc_left : BoundaryCondition, optional
