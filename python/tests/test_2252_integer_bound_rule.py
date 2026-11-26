@@ -440,3 +440,59 @@ def test_oa_rounding_skips_a_bound_too_large_to_round_exactly():
     # A small bound still rounds exactly.
     row, rhs = _round_single_integer_cut(np.array([-1.0]), -2.0000004, integ)
     assert (row.tolist(), rhs) == ([-1.0], -3.0)
+
+
+# ``result.objective`` is a claim that the returned ``x`` attains it (#1331), so on
+# the integer-bilinear lift it is the UN-LIFTED model's objective at that point,
+# exactly, on every model the lift is adopted on -- not the lifted MILP's linear
+# expansion over bits and product columns, which each sit inside a 1e-6 row
+# tolerance (``lift_unverified`` reported 1.4999999986 at x = 2, f = 1.5).
+def _lift_family(seed):
+    rng = np.random.default_rng(seed)
+    m = dm.Model()
+    x = m.integer("x", lb=1, ub=int(rng.integers(4, 9)))
+    y = m.integer("y", lb=1, ub=int(rng.integers(4, 9)))
+    a, b, c = (float(v) for v in rng.uniform(0.5, 2.0, 3))
+    m.subject_to(x * y >= float(rng.uniform(3, 10)))
+    m.subject_to(a * x + b * y <= float(rng.uniform(8, 14)))
+    if seed % 2:
+        m.minimize(x * y * c - a / x + b * y * y - x)
+    else:
+        m.minimize(c * x * x - b / y + x * y)
+    return m
+
+
+def _lift_objective_cases():
+    out = [(f"family{s}", lambda s=s: _lift_family(s)) for s in range(8)]
+    case = next(c for c in _ROW_CASES if c[0] == "lift_unverified")
+    out.append(("lift_unverified", lambda: _row_model(case[1], case[2])[0]))
+    return out
+
+
+@pytest.mark.parametrize("race", ["1", "0"], ids=["race", "legacy"])
+@pytest.mark.parametrize(
+    "build", [c[1] for c in _lift_objective_cases()], ids=[c[0] for c in _lift_objective_cases()]
+)
+def test_lift_reports_the_objective_its_point_attains(build, race, monkeypatch):
+    import discopt.solver as S
+
+    monkeypatch.setenv("DISCOPT_IPX_RACE", race)
+    adopted = []
+    orig = S._ipx_lift_point_refusal
+
+    def spy(src, res):
+        why = orig(src, res)
+        adopted.append(why is None and getattr(res, "x", None) is not None)
+        return why
+
+    monkeypatch.setattr(S, "_ipx_lift_point_refusal", spy)
+    m = build()
+    r = m.solve(time_limit=30)
+    # The probe fired: the lift ran and its point was the one judged.
+    assert any(adopted), (adopted, r.algorithm_route)
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.algorithm_route)
+    flat = [float(np.ravel(r.x[v.name])[0]) for v in m._variables]
+    v = verify_point(m, flat, with_objective=True)
+    assert v.ok, v.reason
+    assert r.objective == v.objective, (r.objective, v.objective)
+    assert r.bound <= r.objective + 1e-6
