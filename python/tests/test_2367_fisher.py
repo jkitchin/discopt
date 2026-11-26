@@ -222,19 +222,26 @@ def test_observed_nonlinear_state_analytic():
 
 
 def test_observed_ignores_gauss_newton_evaluator():
-    """A model solved with gauss_newton=True must still get the exact observed curvature."""
+    """A model solved with gauss_newton=True must still get the exact observed curvature.
+
+    The residual r_i = (5 - k² x_i)/σ is written directly in θ (no state
+    equalities), so ∇²r ≠ 0 and the Gauss-Newton Hessian differs from the exact
+    one: substituting the GN evaluator would drop the -2x(5 - k²x) term and
+    fail this test. (With state equalities the curvature enters through the
+    constraint multipliers and GN on the objective is already exact, which made
+    an earlier version of this test vacuous.)
+    """
     xs = np.array([1.0, 2.0, 3.0])
     m = dm.Model("gn_flag")
     k = m.continuous("k", lb=0.1, ub=10)
-    z = m.continuous("z", shape=(3,), lb=-100, ub=100)
-    for i, x in enumerate(xs):
-        m.subject_to(z[i] == k * k * float(x))
-    m.minimize(dm.sum([((5.0 - z[i]) / 0.1) ** 2 for i in range(3)]))
+    resp = [k * k * float(x) for x in xs]
+    m.minimize(dm.sum([((5.0 - r) / 0.1) ** 2 for r in resp]))
     m._gauss_newton_hessian = True
-    x_flat = np.concatenate([[1.3], 1.69 * xs])
-    ob = fisher(x_flat, k, z, sigma=0.1, model=m, hessian="observed")
+    ob = fisher({"k": 1.3}, k, resp, sigma=0.1, model=m, hessian="observed")
     ref = np.sum((2.6 * xs) ** 2 - 2 * xs * (5.0 - 1.69 * xs)) / 0.01
-    np.testing.assert_allclose(ob.fim, [[ref]], rtol=1e-12)
+    gn_only = np.sum((2.6 * xs) ** 2) / 0.01
+    assert abs(ref - gn_only) > 1e-3 * abs(ref)  # the two Hessians really differ here
+    np.testing.assert_allclose(ob.fim, [[ref]], rtol=1e-10)
     assert m._gauss_newton_hessian is True
 
 

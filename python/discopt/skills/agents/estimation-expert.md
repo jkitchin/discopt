@@ -62,7 +62,7 @@ and a sparse LU of the state block (no JAX, no dense `(m, n)` matrix; 229,380 eq
 `reduced_gradient` is the bound multiplier of an active parameter bound.
 
 ### Key files
-- `python/discopt/estimate.py` — `estimate_parameters` (residual construction lines 321–338 iterate every element of array-valued observations), `fisher` (the FIM, sensitivities and bound-aware covariance; accepts `n_reps` per response).
+- `python/discopt/estimate.py` — `estimate_parameters` (residual construction lines 340–358 iterate every element of array-valued observations), `fisher` (the FIM, sensitivities and bound-aware covariance; accepts `n_reps` per response).
 - `profile.py` in the [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
   (`pip install discopt-doe`) — profile likelihood builds on `estimate_parameters`
   via `fixed_parameters`. Not in this repo; DOE was extracted in #389.
