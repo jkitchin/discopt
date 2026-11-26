@@ -208,6 +208,9 @@ class MilpIIS:
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
     # and a timed-out member's own TimeoutError message.
     members: Optional[list] = None
+    # Portfolio runs only: the other members' distinct complete answers, smallest
+    # first, for the post-pass to polish too (:func:`_polish_alternatives`).
+    alternatives: Optional[list] = None
 
 
 class _Engine:
@@ -1559,7 +1562,10 @@ def _polish(
     the add-one move (:func:`_add_one`; likewise, capped at
     ``_ADD_ONE_FRACTION`` of the time then left, at most ``_ADD_ONE_CAP_S``); then a
     forced-violation certificate for every kept element that still has none
-    (:meth:`_Engine.forced_point`, margins :data:`_FORCED_MARGINS`).
+    (:meth:`_Engine.forced_point`, margins :data:`_FORCED_MARGINS`). When the
+    re-hold move replaced the answer, the add-one move runs from both the new
+    and the replaced answer and the smaller result is kept (both moves are
+    greedy, so the path matters).
 
     Soundness: a set the re-hold or add-one move changed replaces the answer only when
     :meth:`_Engine.confirm_infeasible` confirms it under both presolve
@@ -1635,6 +1641,7 @@ def _polish(
                     cons, bounds, ints = got
         except _OutOfTime:
             pass  # the relaxation or its confirmation ran out of time: the answer stands
+    before_rehold: Optional[tuple] = None  # the answer a re-hold move replaced
     if rehold:
         assert deadline is not None
         share = min(_REHOLD_FRACTION * max(deadline - t0, 0.0), _REHOLD_CAP_S)
@@ -1650,6 +1657,7 @@ def _polish(
                 )
                 if verdict is True:
                     n_rehold = len(cons) + len(bounds) + len(ints) - sum(len(g) for g in got)
+                    before_rehold = (cons, bounds, ints, proven)
                     cons, bounds, ints = got
                     pending.update(pend)
                     proven = proven and decided
@@ -1657,24 +1665,39 @@ def _polish(
             pass  # the pass or its confirmation ran out of time: the answer stands
     if add_one:
         assert deadline is not None
-        t0 = time.perf_counter()
-        share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
-        try:
-            got, pend, decided, tried = _add_one(eng, cons, bounds, ints, t0 + share)
-            if got is not None:
-                t_c = time.perf_counter()
-                verdict = eng.confirm_infeasible(
-                    *got,
-                    stop_at=min(deadline, t_c + share),
-                    presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
-                )
-                if verdict is True:
-                    cons, bounds, ints = got
-                    pending.update(pend)
-                    proven = proven and decided
-                    moves = 1
-        except _OutOfTime:
-            pass  # the sweep or its confirmation ran out of time: the answer stands
+        # Both moves are greedy, so the path matters: when the re-hold move
+        # replaced the answer, the add-one move also runs from the answer it
+        # replaced, and the smaller result is kept. Measured (MIPcc27 smallset
+        # domset-hexgrid_03_052, from a 308-element member answer): re-hold then
+        # add-one 171, add-one alone 159.
+        starts = [(cons, bounds, ints, proven, n_rehold)]
+        if before_rehold is not None:
+            starts.append((*before_rehold, 0))
+        ends = []
+        for c0, b0, i0, pr0, nr0 in starts:
+            end = (c0, b0, i0, pr0, nr0, 0)
+            t0 = time.perf_counter()
+            share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
+            try:
+                got, pend, decided, n_tried = _add_one(eng, c0, b0, i0, t0 + share)
+                tried += n_tried
+                if got is not None:
+                    t_c = time.perf_counter()
+                    verdict = eng.confirm_infeasible(
+                        *got,
+                        stop_at=min(deadline, t_c + share),
+                        presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
+                    )
+                    if verdict is True:
+                        pending.update(pend)  # stale ones fail the final arithmetic check
+                        end = (*got, pr0 and decided, nr0, 1)
+            except _OutOfTime:
+                pass  # the sweep or its confirmation ran out of time: its start stands
+            ends.append(end)
+        # Ties keep the first (the re-hold path), so the move is never undone for nothing.
+        cons, bounds, ints, proven, n_rehold, moves = min(
+            ends, key=lambda e: len(e[0]) + len(e[1]) + len(e[2])
+        )
     # Complete answers only: an anytime answer makes no minimality claim, and its
     # remaining time is better spent on certificates (measured on
     # neos-3426989-dives, 7127 elements at the limit: 0 certificates with the
@@ -1780,6 +1803,58 @@ def _polish(
         n_close_dropped=n_close_dropped,
         n_rehold=n_rehold,
     )
+
+
+#: Polishing the portfolio's other complete answers (:func:`_polish_alternatives`):
+#: each gets ``_ALT_FRACTION`` of the time left, at most ``_ALT_CAP_S`` (sized for
+#: the 3600 s competition budget: one alternative's whole post-pass measured
+#: 30-130 s on the smallset).
+_ALT_FRACTION = 0.5
+_ALT_CAP_S = 300.0
+
+
+def _polish_alternatives(
+    arrays: tuple,
+    res: MilpIIS,
+    out: MilpIIS,
+    *,
+    cert_tol: float,
+    time_limit: float,
+    engine: str,
+    deadline: Optional[float],
+) -> MilpIIS:
+    """After the post-pass on the portfolio's smallest answer (``out`` is
+    ``_polish(res)``), run it on each other distinct complete member answer
+    (``res.alternatives``, smallest first) while time is left, and return the
+    smallest result. The smallest answer before the post-pass is not the
+    smallest after it. Measured on MIPcc27 stein45inf, member answers -> post-
+    pass: ICB 225 -> 212, ICB-n 229 -> 216, ICB-r 237 -> 205 (reference 213).
+
+    Soundness: every candidate is a member's answer, confirmed by that member,
+    changed only by :func:`_polish`, which adopts a change only when
+    :meth:`_Engine.confirm_infeasible` confirms it. Ties keep ``out``.
+    ``DISCOPT_IIS_POLISH_ALTERNATIVES=0`` is the opt-out for A/B measurement."""
+    alts = res.alternatives or []
+    if (
+        not alts
+        or deadline is None
+        or not out.complete
+        or os.environ.get("DISCOPT_IIS_POLISH_ALTERNATIVES", "1") == "0"
+    ):
+        return replace(out, alternatives=None) if out.alternatives else out
+    best = out
+    for alt in alts:
+        now = time.perf_counter()
+        if deadline - now < 4 * _MIN_SOLVE_S:
+            break
+        share = min(_ALT_FRACTION * max(deadline - now, 0.0), _ALT_CAP_S)
+        stop = min(deadline, now + share)
+        got = _polish(
+            arrays, alt, cert_tol=cert_tol, time_limit=time_limit, engine=engine, deadline=stop
+        )
+        if _iis_size(got) < _iis_size(best):
+            best = got
+    return replace(best, members=res.members, alternatives=None)
 
 
 #: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof and
@@ -2637,13 +2712,18 @@ def milp_iis_arrays(
         )
     if not include_bounds:
         return res  # the post-pass needs every applied bound listed (see _polish)
-    return _polish(
+    deadline = None if total_time_limit is None else t_start + float(total_time_limit)
+    out = _polish(
+        arrays, res, cert_tol=cert_tol, time_limit=time_limit, engine=iis_engine, deadline=deadline
+    )
+    return _polish_alternatives(
         arrays,
         res,
+        out,
         cert_tol=cert_tol,
         time_limit=time_limit,
         engine=iis_engine,
-        deadline=None if total_time_limit is None else t_start + float(total_time_limit),
+        deadline=deadline,
     )
 
 
@@ -4102,16 +4182,42 @@ def _portfolio_iis(
             "compute_iis: no portfolio member confirmed a subsystem infeasible "
             f"within total_time_limit ({why})"
         )
+    best = _rank_answers(done)
+    best.members = members
+    return best
+
+
+def _rank_answers(done: list[tuple[int, MilpIIS]]) -> MilpIIS:
+    """The smallest complete member answer (any answer if none is complete;
+    ties: portfolio order), carrying the other distinct complete answers,
+    smallest first, as ``alternatives``."""
     pool = [(i, r) for i, r in done if r.complete] or done
     if _close_enabled():
         # Under the closing pass an answer with a checked witness for every
         # element outranks a smaller one without: the latter is not an IIS
         # under the checker's rule (see :func:`_close_enabled`).
-        _, best = min(
-            pool,
-            key=lambda ir: (len(ir[1].certificates) != _iis_size(ir[1]), _iis_size(ir[1]), ir[0]),
-        )
+        ranked = [
+            r
+            for _, r in sorted(
+                pool,
+                key=lambda ir: (
+                    len(ir[1].certificates) != _iis_size(ir[1]),
+                    _iis_size(ir[1]),
+                    ir[0],
+                ),
+            )
+        ]
     else:
-        _, best = min(pool, key=lambda ir: (_iis_size(ir[1]), ir[0]))
-    best.members = members
+        ranked = [r for _, r in sorted(pool, key=lambda ir: (_iis_size(ir[1]), ir[0]))]
+    best = ranked[0]
+    seen = {_answer_key(best)}
+    best.alternatives = []
+    for r in ranked[1:]:
+        if r.complete and _answer_key(r) not in seen:
+            seen.add(_answer_key(r))
+            best.alternatives.append(r)
     return best
+
+
+def _answer_key(res: MilpIIS) -> tuple:
+    return (frozenset(res.constraints), frozenset(res.bounds), frozenset(res.integrality))

@@ -7,6 +7,7 @@ competition checker's rule with its safety margin), not with the engine's own
 """
 
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -623,3 +624,122 @@ def test_rehold_frees_an_integrality_its_box_alone_keeps_infeasible():
         complete=True,
     )
     assert _checked(arr, res) == _n_elements(res) == 2
+
+
+# Two disjoint infeasible pairs: x >= 2 / x <= 1 (rows 0, 1) and y >= 2 / y <= 1
+# (rows 2, 3); row 4 (x + y <= 30) is never needed.
+_PAIRS = _arrays(
+    [[1, 0], [1, 0], [0, 1], [0, 1], [1, 1]],
+    [2, -INF, 2, -INF, -INF],
+    [INF, 1, INF, 1, 30],
+    2,
+    [0, 0],
+    [10, 10],
+    [False, False],
+)
+
+
+def _answer(cons):
+    return MilpIIS(constraints=sorted(cons), bounds=[], integrality=[], certificates={})
+
+
+def test_add_one_also_runs_from_the_answer_the_rehold_move_replaced(monkeypatch):
+    """Re-hold and add-one are greedy, so the path matters: from the answer
+    {0,1,2,3} the re-hold move goes to {2,3,4}, where add-one finds nothing, but
+    add-one from {0,1,2,3} reaches {0,1}. The post-pass keeps the smaller.
+    (Measured: domset-hexgrid_03_052 re-hold then add-one 171, add-one alone 159.)
+    Before the change the answer was {2,3,4}."""
+    for v in ("DISCOPT_IIS_REHOLD", "DISCOPT_IIS_ADD_ONE"):
+        monkeypatch.delenv(v, raising=False)
+    starts = []
+
+    def fake_rehold(eng, cons, bounds, ints, stop_at, known=None):
+        return ({2, 3, 4}, set(), set()), {}, True
+
+    def fake_add_one(eng, cons, bounds, ints, stop_at):
+        starts.append(frozenset(cons))
+        if set(cons) == {0, 1, 2, 3}:
+            return ({0, 1}, set(), set()), {}, True, 1
+        return None, {}, True, 1
+
+    monkeypatch.setattr(E, "_rehold", fake_rehold)
+    monkeypatch.setattr(E, "_add_one", fake_add_one)
+    out = _polish(
+        _PAIRS,
+        _answer({0, 1, 2, 3}),
+        cert_tol=1e-6,
+        time_limit=10.0,
+        engine="highs",
+        deadline=time.perf_counter() + 60.0,
+    )
+    assert starts == [frozenset({2, 3, 4}), frozenset({0, 1, 2, 3})]
+    assert out.constraints == [0, 1] and out.n_rehold == 0 and out.n_add_one_moves == 1
+    assert out.n_add_one_tried == 2
+    assert _checked(_PAIRS, out) == 2  # the repair certifies the winner
+
+
+def test_add_one_from_both_starts_keeps_the_rehold_path_on_a_tie(monkeypatch):
+    for v in ("DISCOPT_IIS_REHOLD", "DISCOPT_IIS_ADD_ONE"):
+        monkeypatch.delenv(v, raising=False)
+
+    def fake_rehold(eng, cons, bounds, ints, stop_at, known=None):
+        return ({2, 3, 4}, set(), set()), {}, True
+
+    def fake_add_one(eng, cons, bounds, ints, stop_at):
+        if set(cons) == {0, 1, 2, 3}:  # a 3-element answer from the replaced one
+            return ({0, 1, 4}, set(), set()), {}, True, 1
+        return None, {}, True, 1
+
+    monkeypatch.setattr(E, "_rehold", fake_rehold)
+    monkeypatch.setattr(E, "_add_one", fake_add_one)
+    out = _polish(
+        _PAIRS,
+        _answer({0, 1, 2, 3}),
+        cert_tol=1e-6,
+        time_limit=10.0,
+        engine="highs",
+        deadline=time.perf_counter() + 60.0,
+    )
+    assert out.constraints == [2, 3, 4] and out.n_rehold == 1 and out.n_add_one_moves == 0
+
+
+def test_rank_answers_keeps_distinct_complete_alternatives_smallest_first():
+    a = _answer({0, 1})
+    b = _answer({0, 1, 4})
+    b2 = _answer({0, 1, 4})
+    c = _answer({1, 2, 3, 4})
+    anytime = replace(_answer({2, 3}), complete=False)
+    best = E._rank_answers([(0, c), (1, b), (2, anytime), (3, b2), (4, a)])
+    assert best is a
+    assert [r.constraints for r in best.alternatives] == [[0, 1, 4], [1, 2, 3, 4]]
+
+
+def test_the_smallest_answer_after_the_post_pass_wins(monkeypatch):
+    """The portfolio's smallest answer is not always the smallest after the
+    post-pass (stein45inf: 225 -> 212 but 237 -> 205), so the other complete
+    answers are polished too and the smallest result is kept. Before the change
+    only the smallest member answer was polished."""
+    after = {(0, 1, 4): [0, 1, 4], (1, 2, 3, 4): [2, 3]}
+    polished = []
+
+    def fake_polish(arrays, res, **kw):
+        polished.append(tuple(res.constraints))
+        return replace(res, constraints=after[tuple(res.constraints)])
+
+    monkeypatch.setattr(E, "_polish", fake_polish)
+    monkeypatch.delenv("DISCOPT_IIS_POLISH_ALTERNATIVES", raising=False)
+    res = _answer({0, 1, 4})
+    res.members = [{"order": "ICB"}]
+    res.alternatives = [_answer({1, 2, 3, 4})]
+    kw = dict(cert_tol=1e-6, time_limit=10.0, engine="highs")
+    first = E._polish(_PAIRS, res, **kw)
+    out = E._polish_alternatives(_PAIRS, res, first, deadline=time.perf_counter() + 60.0, **kw)
+    assert out.constraints == [2, 3] and out.members == [{"order": "ICB"}]
+    assert out.alternatives is None and polished == [(0, 1, 4), (1, 2, 3, 4)]
+    # Opt-out, and no budget: the first answer stands.
+    monkeypatch.setenv("DISCOPT_IIS_POLISH_ALTERNATIVES", "0")
+    out0 = E._polish_alternatives(_PAIRS, res, first, deadline=time.perf_counter() + 60.0, **kw)
+    assert out0.constraints == [0, 1, 4] and out0.alternatives is None
+    monkeypatch.delenv("DISCOPT_IIS_POLISH_ALTERNATIVES")
+    out1 = E._polish_alternatives(_PAIRS, res, first, deadline=None, **kw)
+    assert out1.constraints == [0, 1, 4]
