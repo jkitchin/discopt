@@ -132,8 +132,6 @@ PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]], float]] =
 #: Ceiling, in seconds, of the fast wait's floor (see :data:`PORTFOLIO_WAITS`).
 _GRACE_FLOOR_CAP_S = 300.0
 
-#: Marker for this branch's measurements (CLAUDE.md §8). Remove before merging.
-_BRANCH_MARKER_REMAINING_GAPS = True
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).

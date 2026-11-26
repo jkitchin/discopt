@@ -44,6 +44,8 @@ this order inside `_Engine.confirm_infeasible`:
 | Change | Measured effect (MIPcc27 smallset, official checker PASSED) |
 |---|---|
 | Entry program (`discopt.mipcc`) | 50 instances at 600 s: 49 pass the checker (no-ip-65059: even the checker cannot prove its full model in 1000 s), 42 complete, 36 at or below Gurobi's size, 39 fully certified |
+| Post-passes on every complete member answer, re-hold, add-one from both starts (`iis/remaining-gaps`) | 50 instances at 600 s, 6 threads: 50/50 checker PASSED, 48 proven minimal; vs the best main size on record 9 smaller, 0 larger (stein45inf 229 -> 225, jjliu_clique 279 -> 255, normalized-sumineqArity4houseP016 276 -> 225, neos-942886 45 -> 37, jnh10 83 -> 79, bell3binf, bell5inf, normalized-3_4_13, neos859080); vs Gurobi 49 at or below, 1 above (stein45inf 225 vs 213) |
+| Block master (#2348) | no-ip-65059, which neither HiGHS nor the checker could prove in 1000 s: 513 kept (297 rows, 72 bounds, 144 integralities; Gurobi 4604), checker PASSED, minimal, 513/513 certificates; reproduced on the `iis/remaining-gaps` branch at 600 s with the same counts |
 | Checkpoint 0 gets its own budget (not the 30 s probe cap) | dives and neos-1461051: no answer -> a checker-passing answer |
 | Rolling checkpoints inside phases | anytime answers follow the row/bound phases (dives 9500 -> 8706 at 600 s) |
 | An unfinished run answers with its smallest confirmed set | fixed dijle answering 8005 instead of 6282 |
@@ -88,8 +90,8 @@ concludes on a feasible set.
 
 ## Out of reach for now
 
-* no-ip-65059: neither HiGHS nor the official checker proves the full model infeasible
-  (1000 s); Gurobi's reference carries no certificates either.
+* stein45inf to Gurobi's size: 225 vs 213, minimal and fully certified, so a smaller IIS needs a
+  different starting point, not more reduction.
 * neos-1461051: the reduction does not apply; presolve-free confirmation of its sets takes
   more than the budget; Gurobi's reference is not a proven IIS.
 * dingo / dives to Gurobi's size: needs cheaper removal probes (HiGHS exposes no proof
