@@ -621,20 +621,59 @@ fn farkas_proof_row(
     if let Some(sc) = ctx.scaling {
         sc.unscale_dual(&mut y);
     }
-    let (l, u) = (ctx.l_w, ctx.u_w);
-    let eps = row_tolerances(ctx.csc_rc, m, n, ctx.b_w, l, u);
-    let mut w = vec![0.0f64; n];
-    for (j, wj) in w.iter_mut().enumerate() {
-        let (rows, vals) = ctx.csc_rc.col(j);
-        *wj = rows
-            .iter()
+    proof_row_from_dual(ctx.csc_rc, m, n, ns, ctx.b_w, ctx.l_w, ctx.u_w, y)
+}
+
+/// The body of [`farkas_proof_row`] once the ray `y` is in original units, over the
+/// unscaled working matrix `csc` (`m` rows, `n` columns, the first `ns` structural)
+/// with rhs `b` and the global box `l`/`u`.
+#[allow(clippy::too_many_arguments)]
+fn proof_row_from_dual(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    ns: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    mut y: Vec<f64>,
+) -> Option<(Vec<usize>, Vec<f64>, f64)> {
+    let eps = row_tolerances(csc, m, n, b, l, u);
+    let col_w = |j: usize, y: &[f64]| -> f64 {
+        let (rows, vals) = csc.col(j);
+        rows.iter()
             .zip(vals)
             .filter(|(i, _)| **i < m)
             .map(|(&i, &a)| a * y[i])
-            .sum();
+            .sum()
+    };
+    // HiGHS `storeDualInfProof` aggregates only the rows whose ray weight points at a
+    // finite side (`if (lp.row_upper_[iRow] == kHighsInf) continue;` and the lower
+    // mirror): a row whose weight would need its infinite side is left out of the
+    // aggregation instead of failing the proof. Any subset of the rows, each with a
+    // weight of the sign its finite side allows, aggregates to a valid inequality, so
+    // dropping a row is sound (the proof can only get weaker, and conflict analysis
+    // then simply finds nothing). In this working form a row's sides are its singleton
+    // slack's bounds: the weight `w_s = sigma * y_i` needs `u_s` when positive and `l_s`
+    // when negative. A slack shared by several rows is not dropped (`None` below).
+    for j in ns..n {
+        let (rows, vals) = csc.col(j);
+        let mut it = rows.iter().zip(vals).filter(|(i, a)| **i < m && **a != 0.0);
+        let (Some((&i, &sigma)), None) = (it.next(), it.next()) else {
+            continue;
+        };
+        let wj = sigma * y[i];
+        if wj == 0.0 {
+            continue;
+        }
+        let side = if wj > 0.0 { u[j] } else { l[j] };
+        if side.abs() >= INF {
+            y[i] = 0.0;
+        }
     }
-    let yb: f64 = (0..m).map(|i| y[i] * ctx.b_w[i]).sum();
-    let mut scale = 1.0 + (0..m).map(|i| (y[i] * ctx.b_w[i]).abs()).sum::<f64>();
+    let w: Vec<f64> = (0..n).map(|j| col_w(j, &y)).collect();
+    let yb: f64 = (0..m).map(|i| y[i] * b[i]).sum();
+    let mut scale = 1.0 + (0..m).map(|i| (y[i] * b[i]).abs()).sum::<f64>();
     let mut beta = yb;
     for j in ns..n {
         let wj = w[j];
@@ -1683,13 +1722,24 @@ impl SearchEnv for HighsEnv<'_, '_> {
         match r {
             SearchResult::DomainInfeasible => self.analyse_conflict(),
             SearchResult::LpInfeasible => {
-                let proofs: Vec<_> = match (self.conf.is_some(), self.eval.ray.take()) {
+                use crate::profile::{incr, Ctr};
+                let ray = self.eval.ray.take();
+                if self.conf.is_some() {
+                    incr(Ctr::HighsMipSearchProofCalls);
+                    if ray.is_none() {
+                        incr(Ctr::HighsMipSearchProofNoRay);
+                    }
+                }
+                let proofs: Vec<_> = match (self.conf.is_some(), ray) {
                     (true, Some(ray)) => [1.0, -1.0]
                         .iter()
                         .filter_map(|&sgn| farkas_proof_row(&ctx, &ray, sgn))
                         .collect(),
                     _ => Vec::new(),
                 };
+                if self.conf.is_some() && proofs.is_empty() {
+                    incr(Ctr::HighsMipSearchProofNoRow);
+                }
                 self.analyse_infeasible_lp(proofs)
             }
             _ => {}
@@ -2447,6 +2497,10 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             &self.q,
         );
         cf.added += added.len() as u64;
+        crate::profile::incr(crate::profile::Ctr::HighsMipSearchDomConflictCalls);
+        if !added.is_empty() {
+            crate::profile::incr(crate::profile::Ctr::HighsMipSearchDomConflictHits);
+        }
         self.reset_conflict_ages();
     }
 
@@ -2479,6 +2533,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             self.reset_conflict_ages();
             self.generate_conflict(&inds, &vals, rhs);
             if !added.is_empty() {
+                crate::profile::incr(crate::profile::Ctr::HighsMipSearchProofHits);
                 break;
             }
         }
@@ -2716,6 +2771,64 @@ pub(super) fn run<'a>(
             .as_ref()
             .map_or((0, 0), |c| (c.conflict_cuts, c.pool_cuts)),
     })
+}
+
+#[cfg(test)]
+mod proof_tests {
+    use super::*;
+
+    /// HiGHS `storeDualInfProof` skips a row whose ray weight needs its infinite side
+    /// instead of giving up on the proof. Working form `A [x; s] = b`, `x in [0,1]^2`:
+    /// row 0 `x0 + x1 - s0 = 0`, `s0 >= 3` (the infeasible row); row 1 `x0 - s1 = 0`,
+    /// `s1 <= 5` (a row with only an upper side). The ray `y = (1, 0.5)` gives row 1's
+    /// slack the weight `-0.5`, which needs `s1`'s missing lower side. Before the fix
+    /// the whole proof was `None`; now row 1 is left out and the proof is row 0,
+    /// `-(x0 + x1) <= -3`, which separates the box. Soundness: every point satisfying
+    /// the rows (structurals sampled in `[-6, 6]^2`, far past their box, since the
+    /// proof must not rely on them) satisfies the proof.
+    #[test]
+    fn proof_row_drops_a_row_whose_needed_side_is_infinite() {
+        let (m, n, ns) = (2, 4, 2);
+        // columns x0 x1 s0 s1
+        let a = [1.0, 1.0, -1.0, 0.0, 1.0, 0.0, 0.0, -1.0];
+        let csc = SparseCols::from_dense(&a, m, n);
+        let b = [0.0, 0.0];
+        let l = [0.0, 0.0, 3.0, -INF];
+        let u = [1.0, 1.0, INF, 5.0];
+        let (inds, vals, rhs) =
+            proof_row_from_dual(&csc, m, n, ns, &b, &l, &u, vec![1.0, 0.5]).expect("a proof");
+        // The proof row is violated by every point of the structural box.
+        let max_act = inds
+            .iter()
+            .zip(&vals)
+            .map(|(&j, &v)| if v > 0.0 { v * u[j] } else { v * l[j] })
+            .sum::<f64>();
+        let min_act = inds
+            .iter()
+            .zip(&vals)
+            .map(|(&j, &v)| if v > 0.0 { v * l[j] } else { v * u[j] })
+            .sum::<f64>();
+        assert!(max_act >= min_act);
+        assert!(
+            min_act > rhs,
+            "proof {vals:?} <= {rhs} does not separate the box"
+        );
+        let mut checked = 0;
+        for i0 in -24..=24 {
+            for i1 in -24..=24 {
+                let x = [i0 as f64 * 0.25, i1 as f64 * 0.25];
+                let s0 = x[0] + x[1];
+                let s1 = x[0];
+                if s0 < l[2] || s1 > u[3] {
+                    continue;
+                }
+                let act: f64 = inds.iter().zip(&vals).map(|(&j, &v)| v * x[j]).sum();
+                assert!(act <= rhs + 1e-12, "row-feasible {x:?} violates the proof");
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "only {checked} row-feasible points checked");
+    }
 }
 
 #[cfg(test)]

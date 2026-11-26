@@ -891,6 +891,16 @@ counters!(
     // domains propagate.
     HighsMipSearchConflictCuts,
     HighsMipSearchPropagatedPoolCuts,
+    // Conflict-path fidelity (c513 differential vs HiGHS `HighsDomain::conflictAnalysis`):
+    // LP-infeasible nodes reaching the dual-proof step, those without a verified ray,
+    // those whose ray gave no proof row, and analyses that added at least one conflict;
+    // propagation-infeasible analyses and those that added one.
+    HighsMipSearchProofCalls,
+    HighsMipSearchProofNoRay,
+    HighsMipSearchProofNoRow,
+    HighsMipSearchProofHits,
+    HighsMipSearchDomConflictCalls,
+    HighsMipSearchDomConflictHits,
     // `DISCOPT_MILP_SYM_LEX`: verified formulation automorphisms, candidates
     // checked, and the lexicographic-leader rows appended.
     MilpSymLexGenerators,
