@@ -1039,6 +1039,22 @@ counters!(
     DualPrepRejectDualInf,
     // #1510: a nonbasic column parked at an INFINITE bound (no vertex value).
     DualPrepRejectInfBound,
+    // `SimplexOptions::dual_phase1`: what happened to a warm start refused as dual
+    // infeasible (HiGHS `HEkkDual::solve`'s phase choice). `Phase1` runs dual phase 1
+    // on the artificial-bound LP and `Phase1Ok` reached a basis the true LP accepts;
+    // `Shift` re-solved with shifted costs (`correctDualInfeasibilities`) and
+    // `ShiftOk` cleaned that up to a true optimum; `Legacy` fell to the primal warm
+    // solve the start used to take. `Free`: a nonbasic free column was infeasible.
+    DualInfStart,
+    DualInfStartPhase1,
+    DualInfStartPhase1Ok,
+    DualInfStartShift,
+    DualInfStartShiftOk,
+    DualInfStartFree,
+    DualInfStartLegacy,
+    // `SimplexOptions::dual_iter_limit_exit`: a warm dual run that spent the solve's
+    // whole `max_iter` returned `IterLimit` instead of a cold re-solve.
+    DualIterLimitExit,
     // #2212: a start whose `col_status` and `basic_vars` disagree (a column marked
     // BASIC but unlisted, listed twice, or listed but not marked BASIC). Counted
     // apart from `DualPrepRejectShape` (which it also bumps) so a panel can show the

@@ -308,6 +308,19 @@ pub struct SimplexOptions {
     /// Default `false`. The native spatial kernel sets it when
     /// `DISCOPT_NATIVE_WARM_START=2`.
     pub warm_flip_boxed: bool,
+    /// A warm start that is dual infeasible after the boxed flips is solved the way
+    /// HiGHS's dual simplex solves it (`HEkkDual::solve`), instead of being handed
+    /// to the primal warm solve: dual phase 1 on the artificial-bound LP, then
+    /// phase 2 from the basis it reaches, with any residual (or small) infeasibility
+    /// removed by shifting costs and cleaned up afterwards. See
+    /// `dual::dual_infeasible_start`. A member of the HiGHS configuration
+    /// (`DISCOPT_LP_DUAL_PHASE1`, else `DISCOPT_HIGHS_CONFIG`).
+    pub dual_phase1: bool,
+    /// A warm dual run that spends the solve's whole `max_iter` returns `IterLimit`,
+    /// as HiGHS does, instead of re-solving cold under the same budget. A stall-cap
+    /// trip below `max_iter` still falls back cold. A member of the HiGHS
+    /// configuration (`DISCOPT_LP_DUAL_ITER_LIMIT_EXIT`, else `DISCOPT_HIGHS_CONFIG`).
+    pub dual_iter_limit_exit: bool,
 }
 
 impl SimplexOptions {
@@ -360,6 +373,8 @@ impl Default for SimplexOptions {
             subtol_ladder: dual::subtol_ladder_default(),
             cold_dual_start: false,
             warm_flip_boxed: dual::warm_flip_boxed_default(),
+            dual_phase1: dual::dual_phase1_default(),
+            dual_iter_limit_exit: dual::dual_iter_limit_exit_default(),
         }
     }
 }

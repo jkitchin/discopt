@@ -50,7 +50,8 @@ pub fn enabled() -> bool {
 
 /// The default of the configuration's LP-level members (`DISCOPT_LP_DUAL_NOISE_ROWS`,
 /// `DISCOPT_LP_DUAL_PERTURB_FIRST`, `DISCOPT_LP_WARM_FLIP_BOXED`,
-/// `DISCOPT_LP_SUBTOL_LADDER`) in `SimplexOptions::default()`, i.e. for every LP solved
+/// `DISCOPT_LP_SUBTOL_LADDER`, `DISCOPT_LP_DUAL_PHASE1`,
+/// `DISCOPT_LP_DUAL_ITER_LIMIT_EXIT`) in `SimplexOptions::default()`, i.e. for every LP solved
 /// outside the MILP engine (spatial B&B, NLP-BB, the Python LP bindings): ON only when
 /// `DISCOPT_HIGHS_CONFIG=1` is set explicitly. The graduation was measured on MILP
 /// solves only; the MILP driver turns them on itself (`dual::milp_lp_members`).
