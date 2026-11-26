@@ -2043,9 +2043,13 @@ def milp_iis_arrays(
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
     iis_engine: Optional[str] = None,
+    threads: Optional[int] = None,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
+
+    ``threads`` (portfolio only): the portfolio's thread budget, shared out among the
+    members; see :func:`_portfolio_iis`.
 
     ``arrays`` is ``(A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)``:
     a CSR matrix; row bounds with ``±_INF`` (1e20) for "none"; ``row_groups``
@@ -2097,10 +2101,13 @@ def milp_iis_arrays(
             filter_limit,
             grace=grace,
             grace_window=grace_window,
+            threads=threads,
         )
     else:
         if grace != math.inf or grace_window is not None:
             raise ValueError("grace= / grace_window= need portfolio=")
+        if threads is not None:
+            raise ValueError("threads= needs portfolio=; a single order runs in-process")
         res = _milp_iis_arrays(
             arrays, **kwargs, order=order, total_time_limit=filter_limit, t_start=t_start
         )
@@ -2989,6 +2996,11 @@ def _portfolio_child() -> None:
         os._exit(3)
 
     threading.Thread(target=_orphan_watch, daemon=True).start()
+    # Before any solve: this member's share of the caller's thread budget, not
+    # HiGHS's automatic scheduler (see pin_highs_threads).
+    from discopt._iis_backend import pin_highs_threads
+
+    pin_highs_threads(int(job["highs_threads"]))
     deadline_wall = job["deadline_wall"]
     total = None if deadline_wall is None else max(0.0, deadline_wall - time.time())
     try:
@@ -3025,9 +3037,14 @@ def _portfolio_iis(
     total_time_limit: Optional[float],
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
+    threads: Optional[int] = None,
 ) -> MilpIIS:
     """Run one deletion filter per order in ``portfolio``, each in its own process,
     against one shared budget, and return the smallest complete result.
+
+    ``threads``: the thread budget for the whole portfolio (default: every core).
+    Each member's HiGHS scheduler gets ``max(1, threads // workers)`` threads, set
+    before its first solve (:func:`discopt._iis_backend.pin_highs_threads`).
 
     Each member is an ordinary :func:`milp_iis` run, so each result is sound on its
     own (confirmed infeasible under both presolve configurations, certificates
@@ -3068,6 +3085,12 @@ def _portfolio_iis(
     n_workers = min(len(orders), os.cpu_count() or 1) if workers is None else int(workers)
     if n_workers < 1:
         raise ValueError(f"workers must be >= 1, got {workers}")
+    budget_threads = (os.cpu_count() or 1) if threads is None else int(threads)
+    if budget_threads < 1:
+        raise ValueError(f"threads must be >= 1, got {threads}")
+    # Each member's HiGHS gets an equal share, so all the members together stay
+    # within the thread budget.
+    member_threads = max(1, budget_threads // n_workers)
     if not grace >= 1.0:
         raise ValueError(f"grace must be >= 1, got {grace}")
     if grace_window is not None:
@@ -3118,6 +3141,7 @@ def _portfolio_iis(
                         deadline_wall=member_deadline,
                         result_path=result_path,
                         discopt_dir=_DISCOPT_DIR,
+                        highs_threads=member_threads,
                     )
                     pickle.dump(job, proc.stdin)
                     # Kept open: the member exits on EOF, so it cannot outlive us.
