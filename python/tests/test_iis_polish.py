@@ -246,14 +246,29 @@ def test_relax_trades_an_uncertifiable_binary_integrality_for_one_bound(monkeypa
 
 def test_relax_restores_a_needed_integrality_and_leaves_complete_answers_alone(monkeypatch):
     """2x = 1 with x binary: the relaxed point x = 0.5 names x, which is held
-    again, so the answer is unchanged. A complete answer is never relaxed."""
+    again, so the answer is unchanged. A complete answer is never relaxed by
+    this pass. The answer handed in as complete here holds a redundant
+    integrality (its two rows are LP-infeasible), which is the closing pass's
+    business: opted out the answer stands, by default it is exchanged, dropped
+    and the two rows are returned with a certificate each."""
     monkeypatch.delenv("DISCOPT_IIS_RELAX_INT", raising=False)
     arr = _arrays([[2]], [1], [1], 1, [0], [1], [True])
     out = _post(arr, _anytime([0], [], [0]))
     assert out.integrality == [0] and out.bounds == [] and out.n_relaxed == 0
     arr2 = _arrays([[1, 1], [1, 1]], [3, -INF], [INF, 2], 2, [0, 0], [10, 10], [True, False])
-    done = MilpIIS(constraints=[0, 1], bounds=[], integrality=[0], complete=True)
-    assert _post(arr2, done).integrality == [0]
+
+    def done():
+        return MilpIIS(constraints=[0, 1], bounds=[], integrality=[0], complete=True)
+
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "0")
+    kept = _post(arr2, done())
+    assert kept.integrality == [0] and kept.n_relaxed == 0
+    monkeypatch.delenv("DISCOPT_IIS_CLOSE")
+    closed = _post(arr2, done())
+    assert closed.n_relaxed == 0 and closed.n_exchanged == 1
+    assert closed.integrality == [] and closed.bounds == []
+    assert sorted(closed.constraints) == [0, 1]
+    assert _checked(arr2, closed) == _n_elements(closed) == 2
 
 
 def test_relaxed_set_is_kept_only_when_confirmed(monkeypatch):
@@ -421,8 +436,15 @@ def _polish_parity(arr):
     )
 
 
-def test_without_the_closing_pass_the_held_integralities_stay_uncertified(monkeypatch):
+def test_closing_pass_is_the_default_and_zero_opts_out(monkeypatch):
     monkeypatch.delenv("DISCOPT_IIS_CLOSE", raising=False)
+    assert E._close_enabled()
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "0")
+    assert not E._close_enabled()
+
+
+def test_without_the_closing_pass_the_held_integralities_stay_uncertified(monkeypatch):
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "0")
     arr = _parity()
     out = _polish_parity(arr)
     assert sorted(out.integrality) == [0, 1] and out.n_exchanged == 0

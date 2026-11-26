@@ -309,9 +309,26 @@ def _independent_confirm(model, res, engine):
     return eng.confirm_infeasible(set(res.constraints), set(res.bounds), set(res.integrality))
 
 
-def test_flags_default_off_leave_the_engine_untouched(engine_name, monkeypatch):
+DEFAULT_ON = {"master": True, "lex": False, "orbit": True, "confined": True, "implied_int": True}
+
+
+def test_the_shipped_defaults_and_their_opt_outs(monkeypatch):
+    """Four switches are default ON with ``=0`` as the opt-out; the ordering rows
+    (``DISCOPT_IIS_BLOCK_LEX``) and nothing else are an opt-in (``=1``)."""
     for f in FLAGS:
         monkeypatch.delenv(f, raising=False)
+    assert im._block_flags() == DEFAULT_ON
+    for f in FLAGS:
+        monkeypatch.setenv(f, "0")
+    assert not any(im._block_flags().values())
+    for f in FLAGS:
+        monkeypatch.setenv(f, "1")
+    assert all(im._block_flags().values())
+
+
+def test_flags_opted_out_leave_the_engine_untouched(engine_name, monkeypatch):
+    for f in FLAGS:
+        monkeypatch.setenv(f, "0")
     assert not any(im._block_flags().values())
     model, _ = cover_model(2)
     res = im.milp_iis_arrays(_arrays_arg(model), iis_engine=engine_name, total_time_limit=120.0)

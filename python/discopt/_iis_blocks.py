@@ -69,8 +69,10 @@ instances (``no-ip-65059``, ``hole9``, ``hole10``), on 2 of 43 MIPLIB 2017
 infeasible instances (both ``no-ip``) and on none of 219 general MIPLIB instances.
 The usual refusals are "no linking row" and "a single block". A smaller answer was
 measured on the ``no-ip`` family only; on ``hole9`` the answer is the same size
-with fewer full solves. Hence every switch in :func:`discopt._iis_milp._block_flags`
-is an opt-in, default OFF.
+with fewer full solves. On the 50-pair panel of 2026-11-26 the stack changed one
+answer (a certified IIS where there was none) and made none worse, so the switches
+in :func:`discopt._iis_milp._block_flags` are default ON, except the ordering rows
+(``DISCOPT_IIS_BLOCK_LEX``), which cost more than they returned and stay an opt-in.
 """
 
 from __future__ import annotations

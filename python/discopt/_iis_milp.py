@@ -1337,8 +1337,9 @@ def _relax_integrality(
 
 
 def _close_enabled() -> bool:
-    """``DISCOPT_IIS_CLOSE`` (default OFF; row in
-    ``docs/dev/flag-retirement-audit.md``): the closing pass of :func:`_polish`.
+    """``DISCOPT_IIS_CLOSE`` (default ON since its 50-pair panel, ``=0`` opts
+    out; row in ``docs/dev/flag-retirement-audit.md``): the closing pass of
+    :func:`_polish`.
 
     The competition checker certifies a held integrality only by a point that
     violates it *inside the column's box* (a relaxed integrality keeps its
@@ -1349,9 +1350,9 @@ def _close_enabled() -> bool:
     (:func:`_exchange_integrality`), which can make the answer *larger* by
     count and certifiable, and (2) removal-tests each row or bound that the
     forced-violation repair could not certify, dropping it when the set stays
-    infeasible. The changed set replaces the answer only when
-    :meth:`_Engine.confirm_infeasible` confirms it."""
-    return os.environ.get("DISCOPT_IIS_CLOSE", "0") == "1"
+    infeasible. It runs on complete answers only. The changed set replaces the
+    answer only when :meth:`_Engine.confirm_infeasible` confirms it."""
+    return os.environ.get("DISCOPT_IIS_CLOSE", "1") != "0"
 
 
 def _exchange_integrality(
@@ -1506,7 +1507,11 @@ def _polish(
                     moves = 1
         except _OutOfTime:
             pass  # the sweep or its confirmation ran out of time: the answer stands
-    close = _close_enabled() and deadline is not None
+    # Complete answers only: an anytime answer makes no minimality claim, and its
+    # remaining time is better spent on certificates (measured on
+    # neos-3426989-dives, 7127 elements at the limit: 0 certificates with the
+    # pass running against 76 without).
+    close = _close_enabled() and deadline is not None and res.complete
     n_exchanged = n_close_dropped = 0
     if close and ints:
         assert deadline is not None
@@ -2469,14 +2474,21 @@ def milp_iis_arrays(
 
 
 def _block_flags() -> dict[str, bool]:
-    """The block-master stack's flags (all default OFF; see
-    ``docs/dev/flag-retirement-audit.md``):
+    """The block-master stack's flags (rows in
+    ``docs/dev/flag-retirement-audit.md``). Four are default ON since the 50-pair
+    panel of 2026-11-26 and ``=0`` opts each out; ``DISCOPT_IIS_BLOCK_LEX`` is a
+    default-OFF opt-in (``=1``).
 
     - ``DISCOPT_IIS_BLOCK_MASTER``: arm the exact block-master oracle
       (:mod:`discopt._iis_blocks`) on models with its structure.
     - ``DISCOPT_IIS_BLOCK_LEX``: ordering rows over the blocks interchangeable in
       the probed set -- an independent cross-check of the answer's proof, and
-      feasible points for sets outside the master's rule.
+      feasible points for sets outside the master's rule. Default OFF: each
+      ordering-row solve costs about five plain probes (hole9: 197 calls, 38-40 s
+      of a 41-43 s member against 22 s without it) and the certified answers on
+      the no-ip family are the same without it. What would make it the default:
+      solving the ordering model only for a probe the plain route leaves
+      undecided, or warm-starting it from the previous probe's point.
     - ``DISCOPT_IIS_ORBIT_QX``: delete whole orbits first (QuickXplain).
     - ``DISCOPT_IIS_BLOCK_CONFINED``: confine single-element deletions to one
       block per class, so the others stay interchangeable.
@@ -2484,11 +2496,11 @@ def _block_flags() -> dict[str, bool]:
       over integers when its rows imply integrality.
     """
     return {
-        "master": os.environ.get("DISCOPT_IIS_BLOCK_MASTER", "0") == "1",
+        "master": os.environ.get("DISCOPT_IIS_BLOCK_MASTER", "1") != "0",
         "lex": os.environ.get("DISCOPT_IIS_BLOCK_LEX", "0") == "1",
-        "orbit": os.environ.get("DISCOPT_IIS_ORBIT_QX", "0") == "1",
-        "confined": os.environ.get("DISCOPT_IIS_BLOCK_CONFINED", "0") == "1",
-        "implied_int": os.environ.get("DISCOPT_IIS_IMPLIED_INT", "0") == "1",
+        "orbit": os.environ.get("DISCOPT_IIS_ORBIT_QX", "1") != "0",
+        "confined": os.environ.get("DISCOPT_IIS_BLOCK_CONFINED", "1") != "0",
+        "implied_int": os.environ.get("DISCOPT_IIS_IMPLIED_INT", "1") != "0",
     }
 
 
