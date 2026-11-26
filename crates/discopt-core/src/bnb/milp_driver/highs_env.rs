@@ -957,6 +957,9 @@ pub(super) struct HighsEnv<'a, 'b> {
     /// The last evaluation stored duals of the current LP (`last_dual`).
     dual_fresh: bool,
     in_lp: std::collections::HashSet<Vec<(u32, i64)>>,
+    /// LP cut rows selected from the conflict `cutpool` (signature -> pool index):
+    /// HiGHS `lpCutRemoved` when the row leaves the LP, so the cut ages again.
+    pool_lp: std::collections::HashMap<Vec<(u32, i64)>, i32>,
     pub cut_rows_added: usize,
     pub cut_rows_deleted: usize,
     /// Root cuts the pool started with (step 2.1).
@@ -1086,7 +1089,11 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     }
 
     /// Append `cuts` (over the current columns) to the search's LP as persistent rows.
-    fn append_cut_rows(&mut self, cuts: &[GomoryCut]) {
+    ///
+    /// `idx[k]` is `cuts[k]`'s conflict-`cutpool` index when it was selected from it;
+    /// a selected cut that does not enter (no room, already a row) is released at once.
+    fn append_cut_rows(&mut self, cuts: &[GomoryCut], idx: &[Option<i32>]) {
+        debug_assert_eq!(cuts.len(), idx.len());
         if cuts.is_empty() {
             return;
         }
@@ -1095,16 +1102,29 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         let lp = self.lp.get_or_insert_with(|| SearchLp::from_base(base));
         let room = search_cut_cap(base.m_w).saturating_sub(lp.rows.len());
         let mut add: Vec<GomoryCut> = Vec::new();
-        for cut in cuts {
+        let mut released: Vec<i32> = Vec::new();
+        for (cut, &k) in cuts.iter().zip(idx) {
             if add.len() >= room {
-                break;
+                released.extend(k);
+                continue;
             }
             let c = lp.to_base(cut, n0);
             if let Some(rc) = self.refp.as_mut() {
                 rc.cut("lp-row", self.nodes, &c, &rc.x.clone());
             }
-            if self.in_lp.insert(cut_signature(&c)) {
+            let sig = cut_signature(&c);
+            if self.in_lp.insert(sig.clone()) {
+                if let Some(k) = k {
+                    self.pool_lp.insert(sig, k);
+                }
                 add.push(c);
+            } else {
+                released.extend(k);
+            }
+        }
+        if let Some(cf) = self.conf.as_mut() {
+            for k in released {
+                cf.cutpool.lp_cut_removed(k);
             }
         }
         if add.is_empty() {
@@ -1219,7 +1239,11 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             return;
         }
         for r in &gone {
-            self.in_lp.remove(&cut_signature(&r.cut));
+            let sig = cut_signature(&r.cut);
+            self.in_lp.remove(&sig);
+            if let (Some(k), Some(cf)) = (self.pool_lp.remove(&sig), self.conf.as_mut()) {
+                cf.cutpool.lp_cut_removed(k);
+            }
         }
         let d = delete_cut_rows(&lp.csc, lp.m, lp.n, &lp.b, &mut gone, &mut kept);
         let col_map = d.col_map.clone();
@@ -2082,6 +2106,34 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 rhs: cut.rhs,
             });
         }
+        // `separationRound` ends with `cutpool.separate`: the conflict cuts this LP
+        // point violates, scored and filtered for parallelism; a cut it passes over
+        // ages, and is deleted past the age limit.
+        let mut from_pool: Vec<(i32, GomoryCut)> = Vec::new();
+        if let Some(cf) = self.conf.as_mut() {
+            let ns = ctx.ns;
+            let mut cutset = Vec::new();
+            let mut obs =
+                DomainObservers(vec![(&mut cf.gdom, cf.cpi), (&mut self.eval.dom, cf.cpi)]);
+            let sel =
+                cf.cutpool
+                    .separate(&mut obs, &x[..ns], &fl[..ns], &fu[..ns], 1e-6, &mut cutset);
+            for c in sel {
+                // `vals . x <= rhs` as `coeffs . x >= rhs` over the working columns.
+                let mut coeffs = vec![0.0; ctx.n_w];
+                for (&j, &v) in c.inds.iter().zip(&c.vals) {
+                    coeffs[j as usize] = -v;
+                }
+                from_pool.push((
+                    c.index,
+                    GomoryCut {
+                        coeffs,
+                        rhs: -c.rhs,
+                    },
+                ));
+            }
+        }
+        rows.extend(from_pool.iter().map(|(_, c)| c.clone()));
         self.sep_calls += 1;
         let ref_cur = self.refp.as_ref().map(|rc| rc.current(self.lp.as_ref()));
         if let (Some(rc), Some(xc)) = (self.refp.as_mut(), ref_cur.as_ref()) {
@@ -2126,6 +2178,12 @@ impl SearchEnv for HighsEnv<'_, '_> {
             for cut in implied.into_iter().chain(lg.new_cuts) {
                 self.pool_add(cut);
             }
+            // The selected pool cuts served this node's lift only: out of the LP.
+            if let Some(cf) = self.conf.as_mut() {
+                for (k, _) in &from_pool {
+                    cf.cutpool.lp_cut_removed(*k);
+                }
+            }
             return false;
         }
         // Step 2.1: the pool holds cuts over the base columns; the LP gets the pool
@@ -2141,14 +2199,29 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 rc.cut("node-new-base", self.nodes, c, &xb);
             }
         }
-        let mut add: Vec<GomoryCut> = pick.iter().map(|&(_, k)| self.pool[k].clone()).collect();
+        let mut add: Vec<(GomoryCut, Option<i32>)> = pick
+            .iter()
+            .map(|&(_, k)| (self.pool[k].clone(), None))
+            .collect();
+        add.extend(from_pool.into_iter().map(|(k, c)| (c, Some(k))));
         for cut in implied.into_iter().chain(new_base) {
             self.pool_add(cut.clone());
-            add.push(cut);
+            add.push((cut, None));
         }
-        add.truncate(SEARCH_CUTS_PER_NODE);
+        if add.len() > SEARCH_CUTS_PER_NODE {
+            let over: Vec<i32> = add
+                .drain(SEARCH_CUTS_PER_NODE..)
+                .filter_map(|(_, k)| k)
+                .collect();
+            if let Some(cf) = self.conf.as_mut() {
+                for k in over {
+                    cf.cutpool.lp_cut_removed(k);
+                }
+            }
+        }
+        let (add, idx): (Vec<GomoryCut>, Vec<Option<i32>>) = add.into_iter().unzip();
         let rows0 = self.cut_rows_added;
-        self.append_cut_rows(&add);
+        self.append_cut_rows(&add, &idx);
         if self.cut_rows_added > rows0 {
             // `separationRound`: cuts went into the LP, so its resolve ages with
             // deletion (`HighsSeparation.cpp:122-124`).
@@ -2356,6 +2429,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             dual_fresh: false,
             lp: None,
             in_lp: std::collections::HashSet::new(),
+            pool_lp: std::collections::HashMap::new(),
             cut_rows_added: 0,
             cut_rows_deleted: 0,
             seeded_pool: 0,
@@ -2442,7 +2516,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     /// tightened on the global domain (`tightenCoefficients`) and added to the cut
     /// pool, which both domains propagate (`HighsCutGeneration.cpp:1208-1299`). The
     /// cut is valid wherever the proof is: it is a valid inequality of the proof row
-    /// over the global box. It also joins node separation's pool.
+    /// over the global box.
     fn generate_conflict(&mut self, inds: &[usize], vals: &[f64], rhs: f64) {
         let ns = self.ctx.ns;
         let is_int = self.ctx.is_int_full;
@@ -2499,15 +2573,10 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             return;
         }
         cf.conflict_cuts += 1;
-        // Node separation's pool holds `coeffs . x >= rhs` over the working columns.
-        let mut coeffs = vec![0.0f64; self.ctx.n_w];
-        for (&c, &v) in cinds.iter().zip(&cvals) {
-            coeffs[c as usize] = -v;
-        }
-        let gc = GomoryCut { coeffs, rhs: -crhs };
-        if self.pool_sigs.insert(cut_signature(&gc)) {
-            self.pool.push(gc);
-        }
+        // Node separation reaches the cut through `cutpool.separate` (HiGHS
+        // `separationRound`), which ages it out once it stops being violated. It used
+        // to be copied into the never-pruned `pool` as well, whose per-node scan grew
+        // with the run (market split, 80k nodes: 5.2x the wall without conflicts).
     }
 
     /// HiGHS `conflictPool.performAging()` (before each dive).

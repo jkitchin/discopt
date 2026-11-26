@@ -12805,6 +12805,60 @@ def _ipx_lift_point_refusal(source_model, result) -> Optional[str]:
     return None if verdict.ok else (verdict.reason or "refused")
 
 
+def _ipx_lift_report_source_objective(
+    source_model, result: "SolveResult", entry_args: dict, is_maximize: bool
+) -> "SolveResult":
+    """``result`` with its objective re-read from the UN-LIFTED model at its point.
+
+    #2252 follow-up. Call only after :func:`_ipx_lift_point_refusal` passed. The
+    lift's objective is the lifted MILP's linear expansion, evaluated on bits and
+    McCormick product columns that each sit inside the engine's 1e-6 row
+    tolerance; on integer ``x`` with objective ``x - 1/x`` it reported
+    ``1.4999999986`` at ``x = 2``, a value no point attains (the #1331 class).
+    ``result.objective`` claims the returned ``x`` achieves it, so it is the source
+    model's objective there. The lift's bound stays: the lifted MILP is an exact
+    formulation solved to a tolerance that only enlarges its feasible set. A
+    certificate is kept only when the re-read pair still closes the caller's gap.
+    """
+    from discopt.validation.feasibility import verify_point
+
+    xd = getattr(result, "x", None)
+    if not xd or getattr(result, "status", None) not in ("optimal", "feasible"):
+        return result
+    flat = np.concatenate(
+        [
+            np.atleast_1d(np.asarray(xd[v.name], dtype=np.float64)).ravel()
+            for v in source_model._variables
+        ]
+    )
+    verdict = verify_point(source_model, flat, with_objective=True)
+    if not verdict.ok or verdict.objective is None:
+        # The refusal check above verified this very point; reaching here means the
+        # objective alone could not be evaluated, which is not a value to report.
+        raise RuntimeError(
+            f"integer-bilinear lift: verified point has no source objective ({verdict.reason})"
+        )
+    obj = float(verdict.objective)
+    if result.objective is not None and obj == float(result.objective):
+        return result
+    result.objective = obj
+    bound = getattr(result, "bound", None)
+    result.gap = _relative_gap_from_objective_bound(obj, bound)
+    if result.status == "optimal" and bound is not None:
+        abs_tol = entry_args.get("abs_gap_tolerance")
+        closed = _recertify_gap_closed(
+            obj,
+            float(bound),
+            is_maximize,
+            float(entry_args.get("gap_tolerance", 1e-4)),
+            _DEFAULT_ABS_GAP_TOL if abs_tol is None else float(abs_tol),
+        )
+        if not closed:
+            result.status = "feasible"
+            result.gap_certified = False
+    return result
+
+
 def _ipx_strip_unverified(result: "SolveResult", why: str) -> "SolveResult":
     """``result`` with its incumbent withdrawn; its dual bound is kept.
 
@@ -12849,7 +12903,7 @@ def _ipx_lift_checked(entry_args: dict, solve_t0: float, is_maximize: bool) -> "
     lifted = _run("lift", time_limit - (time.perf_counter() - solve_t0))
     why = _ipx_lift_point_refusal(source, lifted)
     if why is None:
-        return lifted
+        return _ipx_lift_report_source_objective(source, lifted, entry_args, is_maximize)
     logger.warning(
         "integer-bilinear lift: the lifted MILP's incumbent fails verify_point on the "
         "un-lifted model (%s); solving the un-lifted model on the time left",
@@ -12928,6 +12982,10 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         # model refuses; the un-lifted slice below then runs as for any lift
         # that did not certify.
         lifted = _ipx_strip_unverified(lifted, _why_lift)
+    else:
+        lifted = _ipx_lift_report_source_objective(
+            entry_args["model"], lifted, entry_args, is_maximize
+        )
     if _result_certifies(lifted):
         return _done(lifted)
     spent = int(getattr(lifted, "node_count", 0) or 0)
@@ -12956,6 +13014,10 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         _why_final = _ipx_lift_point_refusal(entry_args["model"], final)
         if _why_final is not None:
             final = _ipx_strip_unverified(final, _why_final)
+        else:
+            final = _ipx_lift_report_source_objective(
+                entry_args["model"], final, entry_args, is_maximize
+            )
     return _done(_merge_route_and_fallback(merged, final, is_maximize))
 
 
