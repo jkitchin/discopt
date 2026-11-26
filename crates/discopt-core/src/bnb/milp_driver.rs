@@ -20926,6 +20926,8 @@ mod root_probe_tests {
                     y: &sol.dual,
                     basic_vars: &sol.basis.basic_vars,
                     deadline: None,
+                    open_nodes: None,
+                    col_dual: None,
                 });
             }
             if keep.is_empty() {
