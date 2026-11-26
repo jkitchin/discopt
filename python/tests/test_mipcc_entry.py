@@ -137,7 +137,7 @@ def test_record_line_reports_irreducibility_and_uncertified_elements(tmp_path, m
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("mipcc: {")]
     assert len(lines) == 1
     rec = json.loads(lines[0][len("mipcc: ") :])
-    assert rec["complete"] is True and rec["proven_irreducible"] is True
+    assert rec["complete"] is True and rec["proven"] is True
     assert rec["size"] == 2 and rec["n_uncertified"] == 0
 
 
