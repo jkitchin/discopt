@@ -45,7 +45,9 @@ from discopt._optional_highs import run_checked, wrap_callback
 _T_LAUNCH = time.perf_counter()  # earliest point this process can see
 
 # Portfolio wait: the library default, "fast" (see _iis_milp.PORTFOLIO_WAITS:
-# the other members stop clamp(t, 10, 30) s after the first completes at t).
+# the other members stop clamp(t, 10, 30) s after the first completes at t, but
+# not before half the budget has elapsed). MIPCC_PORTFOLIO_WAIT=scaled is the
+# opt-in that trades size for time (see _iis_milp.PORTFOLIO_WAITS).
 PORTFOLIO_WAIT = "fast"
 
 # Competition tolerance (SOLUTION_FORMAT.md, "Certificates"). Judging uses it.
@@ -221,6 +223,7 @@ def solution_json(data: dict, res=None) -> dict:
         if entry:
             out_cols[cn[j]] = entry
     solution_json.n_bad = n_bad  # type: ignore[attr-defined]
+    solution_json.n_good = len(good)  # type: ignore[attr-defined]
     return {"rows": out_rows, "columns": out_cols}
 
 
@@ -426,6 +429,9 @@ def _run(
     from discopt._iis_milp import _resolve_iis_engine
 
     engine = _resolve_iis_engine(None)
+    wait = os.environ.get("MIPCC_PORTFOLIO_WAIT", PORTFOLIO_WAIT)
+    if wait not in PORTFOLIO_WAITS:
+        raise ValueError(f"MIPCC_PORTFOLIO_WAIT={wait!r}: not one of {sorted(PORTFOLIO_WAITS)}")
     try:
         res = milp_iis_arrays(
             arrays,
@@ -435,8 +441,9 @@ def _run(
             threads=threads,
             total_time_limit=max(engine_budget - elapsed, 0.5),
             t_start=time.perf_counter(),
-            grace=PORTFOLIO_WAITS[PORTFOLIO_WAIT][0],
-            grace_window=PORTFOLIO_WAITS[PORTFOLIO_WAIT][1],
+            grace=PORTFOLIO_WAITS[wait][0],
+            grace_window=PORTFOLIO_WAITS[wait][1],
+            grace_floor=PORTFOLIO_WAITS[wait][2],
         )
     except TimeoutError as exc:
         # No subsystem was confirmed in the budget: the whole model (already
@@ -491,6 +498,10 @@ def _run(
                 relaxed=res.n_relaxed,
                 closed=[res.n_exchanged, res.n_close_dropped],
                 proven=res.proven_irreducible,
+                rehold=res.n_rehold,
+                # Kept elements written with no certificate (a complete answer
+                # with some is not shown irreducible to the checker).
+                n_uncertified=size - getattr(solution_json, "n_good", 0),
                 wall=round(time.perf_counter() - t0, 2),
             )
         ),

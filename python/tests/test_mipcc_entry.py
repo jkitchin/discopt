@@ -126,6 +126,21 @@ def test_readme_example_gives_a_certified_iis_in_the_competition_format(tmp_path
     assert _check(mipcc.read_mps(inst), doc) == 2  # both kept rows certified
 
 
+def test_record_line_reports_irreducibility_and_uncertified_elements(tmp_path, monkeypatch, capsys):
+    """The bench record says whether the answer was proven irreducible and how
+    many kept elements were written with no certificate (pre-#2339 main gave
+    complete answers with, e.g., 14 of 20 uncertified on MIPcc27 osun)."""
+    inst = _readme_example(tmp_path)
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
+    monkeypatch.setenv("MIPCC_THREADS", "2")
+    assert mipcc.main([inst, str(tmp_path / "sol.json")]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("mipcc: {")]
+    assert len(lines) == 1
+    rec = json.loads(lines[0][len("mipcc: ") :])
+    assert rec["complete"] is True and rec["proven"] is True
+    assert rec["size"] == 2 and rec["n_uncertified"] == 0
+
+
 def test_certificate_rule_matches_the_checker():
     data = dict(
         A=__import__("scipy.sparse").sparse.csr_matrix(np.array([[1.0, 1.0], [1.0, 1.0]])),
@@ -406,3 +421,32 @@ def test_highs_backend_refuses_loudly_when_highs_rejects_the_model(monkeypatch):
             np.array([1.0]),
             np.array([False]),
         )
+
+
+def test_portfolio_wait_opt_in_selects_the_scaled_wait(tmp_path, monkeypatch, capsys):
+    """MIPCC_PORTFOLIO_WAIT=scaled is the opt-in that trades size for time (no
+    floor, clamp(10 t, 10, 300) s after the first completion); the default keeps
+    the fast wait's floor, and an unknown name refuses loudly (the entry's
+    failure path: traceback on stderr, the whole model as the answer)."""
+    import discopt._iis_milp as engine
+
+    seen = []
+    real = engine.milp_iis_arrays
+
+    def spy(*a, **k):
+        seen.append((k["grace"], k["grace_window"], k["grace_floor"]))
+        return real(*a, **k)
+
+    monkeypatch.setattr(engine, "milp_iis_arrays", spy)
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
+    inst = _readme_example(tmp_path)
+    monkeypatch.delenv("MIPCC_PORTFOLIO_WAIT", raising=False)
+    assert mipcc.main([inst, str(tmp_path / "a.json")]) == 0
+    monkeypatch.setenv("MIPCC_PORTFOLIO_WAIT", "scaled")
+    assert mipcc.main([inst, str(tmp_path / "b.json")]) == 0
+    assert seen == [engine.PORTFOLIO_WAITS["fast"], (11.0, (10.0, 300.0), 0.0)]
+    monkeypatch.setenv("MIPCC_PORTFOLIO_WAIT", "nope")
+    capsys.readouterr()
+    assert mipcc.main([inst, str(tmp_path / "c.json")]) == 0
+    err = capsys.readouterr().err
+    assert "ValueError: MIPCC_PORTFOLIO_WAIT='nope'" in err and len(seen) == 2

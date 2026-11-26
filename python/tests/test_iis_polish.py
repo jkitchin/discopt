@@ -7,6 +7,7 @@ competition checker's rule with its safety margin), not with the engine's own
 """
 
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -486,3 +487,377 @@ def test_closing_pass_leaves_a_certified_answer_alone(monkeypatch):
     res = milp_iis_arrays(arr, total_time_limit=30.0)
     assert res.integrality == [0] and res.n_exchanged == 0 and res.n_close_dropped == 0
     assert _checked(arr, res) == _n_elements(res)
+
+
+# Re-hold move (_rehold). x, y binary, z free continuous:
+#   R0: x + y = 1, R1: x - y = 0  -- infeasible only with an integrality (2y = 1);
+#   R2: x - z >= 0, R3: z >= 0.6  -- with R0, R1 infeasible even continuously.
+# An integrality-first filter without the SAT core (ICB-n) frees both
+# integralities, since the rows stay infeasible, and then needs all four rows
+# (size 4). Holding the integralities again lets R2 and R3 go: {R0, R1, one int}.
+_RH_ROWS = [[1, 1, 0], [1, -1, 0], [1, 0, -1], [0, 0, 1]]
+_RH_LO = [1, 0, 0, 0.6]
+_RH_HI = [1, 0, INF, INF]
+
+
+def _rehold_model():
+    return _arrays(_RH_ROWS, _RH_LO, _RH_HI, 3, [0, 0, -INF], [1, 1, INF], [True, True, False])
+
+
+def test_rehold_trades_rows_for_an_integrality(monkeypatch):
+    """MIPcc27 stein45inf: the integrality-first answer kept 209 rows + 16
+    integralities (225); re-holding gave 190 + 22 (212, Gurobi 213)."""
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    off = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    assert off.complete and sorted(off.constraints) == [0, 1, 2, 3] and off.integrality == []
+    monkeypatch.delenv("DISCOPT_IIS_REHOLD")
+    on = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    assert on.complete and sorted(on.constraints) == [0, 1]
+    assert len(on.integrality) == 1 and on.bounds == []
+    assert on.n_rehold == 1
+    assert _checked(arr, on) == _n_elements(on) == 3
+
+
+def test_rehold_is_kept_only_when_confirmed(monkeypatch):
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    res = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    monkeypatch.delenv("DISCOPT_IIS_REHOLD")
+    monkeypatch.setenv("DISCOPT_IIS_ADD_ONE", "0")
+    calls = []
+
+    def refuse(self, *a, **k):
+        calls.append(a)
+        return None
+
+    monkeypatch.setattr(E._Engine, "confirm_infeasible", refuse)
+    out = _polish(
+        arr, res, cert_tol=1e-6, time_limit=10.0, engine="highs", deadline=time.perf_counter() + 60
+    )
+    assert len(calls) == 1
+    assert sorted(out.constraints) == [0, 1, 2, 3] and out.n_rehold == 0
+
+
+def test_rehold_probe_cap_and_clock_discard_the_pass(monkeypatch):
+    """The probe cap skips the pass before any solve (deterministic); reaching
+    the stop raises _OutOfTime, which _polish turns into 'the answer stands'."""
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    res = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    A, lo, hi, groups, lb, ub, is_int = arr
+    eng = E._Engine(A, lo, hi, lb, ub, is_int, groups, 10.0, False, engine="highs")
+    c, b, i = set(res.constraints), set(res.bounds), set(res.integrality)
+    n0 = eng.n_solves
+    got, pend, decided = E._rehold(eng, c, b, i, time.perf_counter() + 60, max_probes=5)
+    assert got is None and pend == {} and eng.n_solves == n0
+    with pytest.raises(E._OutOfTime):
+        E._rehold(eng, c, b, i, time.perf_counter() - 1.0)
+
+
+def test_rehold_share_saturates(monkeypatch):
+    """#1153 role 2: the re-hold stop is capped by a constant."""
+    stops = {}
+    real = E._rehold
+
+    def spy(eng, cons, bounds, ints, stop_at, *a, **k):
+        stops["rehold"] = stop_at - time.perf_counter()
+        return real(eng, cons, bounds, ints, stop_at, *a, **k)
+
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    res = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    monkeypatch.delenv("DISCOPT_IIS_REHOLD")
+    monkeypatch.setattr(E, "_rehold", spy)
+    kw = dict(cert_tol=1e-6, time_limit=6000.0, engine="highs")
+    out = _polish(arr, res, deadline=time.perf_counter() + 6000.0, **kw)
+    assert 0.0 < stops["rehold"] <= E._REHOLD_CAP_S
+    assert out.n_rehold == 1
+
+
+def test_rehold_reuses_the_answers_certificates(monkeypatch):
+    """A known point that certifies its element on the re-held set skips that
+    element's probe; the result is unchanged."""
+    arr = _rehold_model()
+    monkeypatch.setenv("DISCOPT_IIS_REHOLD", "0")
+    res = milp_iis_arrays(arr, order="ICB-n", total_time_limit=60.0)
+    A, lo, hi, groups, lb, ub, is_int = arr
+    out = {}
+    for known in (None, res.certificates):
+        eng = E._Engine(A, lo, hi, lb, ub, is_int, groups, 10.0, False, engine="highs")
+        c, b, i = set(res.constraints), set(res.bounds), set(res.integrality)
+        got, pend, decided = E._rehold(eng, c, b, i, time.perf_counter() + 60, known=known)
+        out[known is None] = (got, eng.n_solves, set(pend))
+    assert out[True][0] == out[False][0] == ({0, 1}, set(), {1})
+    assert out[False][1] < out[True][1]
+    keys = {("constraint", 0), ("constraint", 1), ("integrality", 1)}
+    assert out[False][2] == out[True][2] == keys
+
+
+def test_rehold_frees_an_integrality_its_box_alone_keeps_infeasible():
+    """MIPcc27 stein45inf (gate, branch a97e46b): re-hold kept integrality zz02
+    because relaxing it jointly with its box was feasible (zz02 = -1), while
+    relaxing it alone, box kept, is infeasible: the checker reported the answer
+    not minimal (215 of 216 certified). Here x is integer in [0, 1], y free;
+    R0: x >= 1.5, R1: x + y <= 1.2, R2: y >= 0. Holding x makes R0 alone
+    infeasible; freeing x with its box gives x = 1.5, outside it, so the
+    integrality is tried alone: it goes, its box becomes elements, and the
+    bound stage keeps only x <= 1."""
+    arr = _arrays(
+        [[1, 0], [1, 1], [0, 1]],
+        [1.5, -INF, 0],
+        [INF, 1.2, INF],
+        2,
+        [0, -INF],
+        [1, INF],
+        [True, False],
+    )
+    eng = _engine(arr)
+    got, pend, decided = E._rehold(eng, {0, 1, 2}, set(), set(), time.perf_counter() + 60)
+    assert got == ({0}, {(0, "upper")}, set()) and decided
+    assert eng.confirm_infeasible(*got, stop_at=time.perf_counter() + 60) is True
+    res = MilpIIS(
+        constraints=sorted(got[0]),
+        bounds=sorted(got[1]),
+        integrality=sorted(got[2]),
+        certificates=E._check_certificates(pend, eng, *got, 1e-6),
+        complete=True,
+    )
+    assert _checked(arr, res) == _n_elements(res) == 2
+
+
+# Two disjoint infeasible pairs: x >= 2 / x <= 1 (rows 0, 1) and y >= 2 / y <= 1
+# (rows 2, 3); row 4 (x + y <= 30) is never needed.
+_PAIRS = _arrays(
+    [[1, 0], [1, 0], [0, 1], [0, 1], [1, 1]],
+    [2, -INF, 2, -INF, -INF],
+    [INF, 1, INF, 1, 30],
+    2,
+    [0, 0],
+    [10, 10],
+    [False, False],
+)
+
+
+def _answer(cons):
+    return MilpIIS(constraints=sorted(cons), bounds=[], integrality=[], certificates={})
+
+
+def test_add_one_also_runs_from_the_answer_the_rehold_move_replaced(monkeypatch):
+    """Re-hold and add-one are greedy, so the path matters: from the answer
+    {0,1,2,3} the re-hold move goes to {2,3,4}, where add-one finds nothing, but
+    add-one from {0,1,2,3} reaches {0,1}. The post-pass keeps the smaller.
+    (Measured: domset-hexgrid_03_052 re-hold then add-one 171, add-one alone 159.)
+    Before the change the answer was {2,3,4}."""
+    for v in ("DISCOPT_IIS_REHOLD", "DISCOPT_IIS_ADD_ONE"):
+        monkeypatch.delenv(v, raising=False)
+    starts = []
+
+    def fake_rehold(eng, cons, bounds, ints, stop_at, known=None):
+        return ({2, 3, 4}, set(), set()), {}, True
+
+    def fake_add_one(eng, cons, bounds, ints, stop_at):
+        starts.append(frozenset(cons))
+        if set(cons) == {0, 1, 2, 3}:
+            return ({0, 1}, set(), set()), {}, True, 1
+        return None, {}, True, 1
+
+    monkeypatch.setattr(E, "_rehold", fake_rehold)
+    monkeypatch.setattr(E, "_add_one", fake_add_one)
+    out = _polish(
+        _PAIRS,
+        _answer({0, 1, 2, 3}),
+        cert_tol=1e-6,
+        time_limit=10.0,
+        engine="highs",
+        deadline=time.perf_counter() + 60.0,
+    )
+    assert starts == [frozenset({2, 3, 4}), frozenset({0, 1, 2, 3})]
+    assert out.constraints == [0, 1] and out.n_rehold == 0 and out.n_add_one_moves == 1
+    assert out.n_add_one_tried == 2
+    assert _checked(_PAIRS, out) == 2  # the repair certifies the winner
+
+
+def test_add_one_from_both_starts_keeps_the_rehold_path_on_a_tie(monkeypatch):
+    for v in ("DISCOPT_IIS_REHOLD", "DISCOPT_IIS_ADD_ONE"):
+        monkeypatch.delenv(v, raising=False)
+    # The fakes return a non-minimal {2, 3, 4}; the closing pass would drop row
+    # 4 and hide which path was kept.
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "0")
+
+    def fake_rehold(eng, cons, bounds, ints, stop_at, known=None):
+        return ({2, 3, 4}, set(), set()), {}, True
+
+    def fake_add_one(eng, cons, bounds, ints, stop_at):
+        if set(cons) == {0, 1, 2, 3}:  # a 3-element answer from the replaced one
+            return ({0, 1, 4}, set(), set()), {}, True, 1
+        return None, {}, True, 1
+
+    monkeypatch.setattr(E, "_rehold", fake_rehold)
+    monkeypatch.setattr(E, "_add_one", fake_add_one)
+    out = _polish(
+        _PAIRS,
+        _answer({0, 1, 2, 3}),
+        cert_tol=1e-6,
+        time_limit=10.0,
+        engine="highs",
+        deadline=time.perf_counter() + 60.0,
+    )
+    assert out.constraints == [2, 3, 4] and out.n_rehold == 1 and out.n_add_one_moves == 0
+
+
+def test_rank_answers_keeps_distinct_complete_alternatives_smallest_first():
+    a = _answer({0, 1})
+    b = _answer({0, 1, 4})
+    b2 = _answer({0, 1, 4})
+    c = _answer({1, 2, 3, 4})
+    anytime = replace(_answer({2, 3}), complete=False)
+    best = E._rank_answers([(0, c), (1, b), (2, anytime), (3, b2), (4, a)])
+    assert best is a
+    assert [r.constraints for r in best.alternatives] == [[0, 1, 4], [1, 2, 3, 4]]
+
+
+def test_the_smallest_answer_after_the_post_pass_wins(monkeypatch):
+    """The portfolio's smallest answer is not always the smallest after the
+    post-pass (stein45inf: 225 -> 212 but 237 -> 205), so the other complete
+    answers are polished too and the smallest result is kept. Before the change
+    only the smallest member answer was polished."""
+    after = {(0, 1, 4): [0, 1, 4], (1, 2, 3, 4): [2, 3]}
+    polished = []
+
+    def fake_polish(arrays, res, **kw):
+        polished.append(tuple(res.constraints))
+        return replace(res, constraints=after[tuple(res.constraints)])
+
+    monkeypatch.setattr(E, "_polish", fake_polish)
+    monkeypatch.delenv("DISCOPT_IIS_POLISH_ALTERNATIVES", raising=False)
+    res = _answer({0, 1, 4})
+    res.members = [{"order": "ICB"}]
+    res.alternatives = [_answer({1, 2, 3, 4})]
+    kw = dict(cert_tol=1e-6, time_limit=10.0, engine="highs")
+    first = E._polish(_PAIRS, res, **kw)
+    out = E._polish_alternatives(_PAIRS, res, first, deadline=time.perf_counter() + 60.0, **kw)
+    assert out.constraints == [2, 3] and out.members == [{"order": "ICB"}]
+    assert out.alternatives is None and polished == [(0, 1, 4), (1, 2, 3, 4)]
+    # Opt-out, and no budget: the first answer stands.
+    monkeypatch.setenv("DISCOPT_IIS_POLISH_ALTERNATIVES", "0")
+    out0 = E._polish_alternatives(_PAIRS, res, first, deadline=time.perf_counter() + 60.0, **kw)
+    assert out0.constraints == [0, 1, 4] and out0.alternatives is None
+    monkeypatch.delenv("DISCOPT_IIS_POLISH_ALTERNATIVES")
+    out1 = E._polish_alternatives(_PAIRS, res, first, deadline=None, **kw)
+    assert out1.constraints == [0, 1, 4]
+
+
+def _counting_moves(monkeypatch, rehold_to=None):
+    """Fake re-hold (moves to ``rehold_to`` when given) and add-one (never moves);
+    returns the list of sets add-one ran from."""
+    for v in ("DISCOPT_IIS_REHOLD", "DISCOPT_IIS_ADD_ONE"):
+        monkeypatch.delenv(v, raising=False)
+    starts = []
+
+    def fake_rehold(eng, cons, bounds, ints, stop_at, known=None):
+        if rehold_to is None:
+            return None, {}, True
+        return (set(rehold_to), set(), set()), {}, True
+
+    def fake_add_one(eng, cons, bounds, ints, stop_at):
+        starts.append(frozenset(cons))
+        return None, {}, True, 1
+
+    monkeypatch.setattr(E, "_rehold", fake_rehold)
+    monkeypatch.setattr(E, "_add_one", fake_add_one)
+    return starts
+
+
+def _alt_polish(res, **kw):
+    return _polish(
+        _PAIRS,
+        res,
+        cert_tol=1e-6,
+        time_limit=10.0,
+        engine="highs",
+        deadline=time.perf_counter() + 60.0,
+        **kw,
+    )
+
+
+def test_an_alternative_the_rehold_move_cannot_change_stops_unless_smaller(monkeypatch):
+    """An alternative's post-pass pays only when it ends smaller than the
+    incumbent. One the re-hold move leaves unchanged and that is not already
+    smaller stops before the add-one move (measured, hexgrid: three such
+    alternatives spent ~70 s each and ended unchanged). Before the change the
+    add-one move ran from every alternative."""
+    starts = _counting_moves(monkeypatch)
+    res = _answer({1, 2, 3, 4})
+    out = _alt_polish(res, beat=3)
+    assert out is res and starts == []
+    # Already smaller than the incumbent: it continues.
+    _alt_polish(res, beat=5)
+    assert starts == [frozenset({1, 2, 3, 4})]
+    # No incumbent (the first post-pass): it continues.
+    _alt_polish(res)
+    assert len(starts) == 2
+
+
+def test_an_alternative_the_rehold_move_changed_continues(monkeypatch):
+    """hexgrid's winner: 308 -> 171 by the re-hold move, not smaller than the
+    incumbent's 169, then 159 by the add-one move from 308."""
+    starts = _counting_moves(monkeypatch, rehold_to={0, 1, 4})
+    _alt_polish(_answer({0, 1, 2, 3}), beat=2)
+    assert starts == [frozenset({0, 1, 4}), frozenset({0, 1, 2, 3})]
+
+
+def test_the_add_one_move_does_not_repeat_a_sweep_from_the_same_set(monkeypatch):
+    """Two answers the re-hold move takes to the same set would sweep it twice
+    (a sweep that finds no move costs its whole share, ~28 s on bf1355-075).
+    Before the change the sweep ran from every start."""
+    starts = _counting_moves(monkeypatch, rehold_to={0, 1, 4})
+    swept: set = set()
+    _alt_polish(_answer({0, 1, 2, 3}), swept=swept)
+    _alt_polish(_answer({0, 1, 2, 3, 4}), swept=swept)
+    assert starts == [
+        frozenset({0, 1, 4}),
+        frozenset({0, 1, 2, 3}),
+        frozenset({0, 1, 2, 3, 4}),
+    ]
+
+
+def test_post_passes_run_in_member_processes_and_the_smallest_wins():
+    """The portfolio answer's and the alternatives' post-passes run at once in
+    member processes (the portfolio's workers are idle by then); each result is
+    confirmed in its process, the smallest is kept, the members record stays.
+    Before the change there was no parallel post-pass."""
+    pre = _answer({0, 1, 2, 3})
+    pre.members = [{"order": "ICB"}]
+    pre.alternatives = [_answer({0, 1, 2, 3, 4})]
+    kw = dict(cert_tol=1e-6, time_limit=10.0, engine="highs")
+    got = E._polish_parallel(
+        _PAIRS, [pre, pre.alternatives[0]], [None, 4], 2, time.perf_counter() + 60.0, kw
+    )
+    assert len(got) == 2 and all(g is not None for g in got)
+    # The portfolio answer's post-pass moves (add-one from {0,1,2,3} reaches a pair).
+    assert len(got[0].constraints) == 2 and set(got[0].constraints) < {0, 1, 2, 3}
+    # Not smaller than beat=4, and re-hold cannot change it: pruned, unchanged.
+    assert got[1].constraints == [0, 1, 2, 3, 4]
+    out = E._polish_answers_parallel(_PAIRS, pre, 2, time.perf_counter() + 60.0, kw)
+    assert len(out.constraints) == 2 and out.members == [{"order": "ICB"}]
+    assert out.alternatives is None
+
+
+def test_post_passed_answers_rank_a_fully_certified_one_first_under_the_closing_pass(
+    monkeypatch,
+):
+    """The alternatives' post-passes pick the winner with the portfolio's rule:
+    under the closing pass a smaller answer missing a witness loses to a fully
+    certified one (it is not an IIS under the checker's rule)."""
+    small = MilpIIS(constraints=[0, 1], bounds=[], integrality=[], certificates={})
+    big = MilpIIS(
+        constraints=[0, 1, 2],
+        bounds=[],
+        integrality=[],
+        certificates={("constraint", k): np.zeros(2) for k in range(3)},
+    )
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "1")
+    assert E._post_key(big) < E._post_key(small)
+    monkeypatch.setenv("DISCOPT_IIS_CLOSE", "0")
+    assert E._post_key(small) < E._post_key(big)

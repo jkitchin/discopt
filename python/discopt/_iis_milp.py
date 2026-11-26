@@ -96,10 +96,42 @@ _ROLL_MIN_S = 2.0
 #: neos859080 / mod008inf / hole10 / jjliu_clique with the same sizes, except
 #: jjliu_clique 277 vs 266 (its ICB member completed ~90 s after ICB-r).
 #: ``"all"`` is for the smallest set regardless of time.
-PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]]]] = {
-    "fast": (2.0, (10.0, 30.0)),
-    "all": (math.inf, None),
+#:
+#: The third entry is a *floor* (``grace_floor``, a fraction of the portfolio's
+#: budget): a completion before ``floor * budget`` does not cut the others off
+#: before that point (they still stop as soon as every member has finished). The
+#: clamped wait above was sized on 60-300 s sweeps; with a 600 s budget it
+#: discarded members that finish well inside the budget. Measured on MIPcc27's
+#: jjliu_clique at 600 s (6 threads, every member allowed to finish): ICB-r 279
+#: at 36 s, ICB / CIB 265 at 82 s, CIB-n 255 at 135 s, CIB-l 266 at 143 s; the
+#: fast wait shipped 279. The floor costs at most ``floor * budget`` of wall
+#: time, and only while some member is still running.
+#: The floor saturates at :data:`_GRACE_FLOOR_CAP_S` (#1153: a carve of the
+#: caller's budget must stop growing). The cap is what binds at the competition
+#: budget (``MIPCC_TIME_LIMIT`` 3600 s: 0.5 x the ~3130 s filter budget would be
+#: ~1560 s). It is sized from the latest useful completion measured: with every
+#: member allowed to finish (600 s, 6 threads), stein45inf's ICB beat the first
+#: finisher at 232 s (225 vs ICB-n's 229 at 188 s) and jjliu_clique's CIB-n at
+#: 135 s (255 vs 279 at 36 s); no other member beat those. 300 s covers both with
+#: ~30% headroom. Members still running past it (jjliu's ICB-n, incomplete at the
+#: deadline) are the ones a longer floor would only idle on.
+PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]], float]] = {
+    "fast": (2.0, (10.0, 30.0), 0.5),
+    "all": (math.inf, None, 0.0),
+    "scaled": (11.0, (10.0, 300.0), 0.0),
 }
+#: ``"scaled"`` is the opt-in for when time weighs against size: no floor, the
+#: other members get ``clamp(10 t, 10, 300)`` s after the first completes at t.
+#: Not the default because it gives up a size win (the goal is size parity with
+#: the reference): replaying the member completion times of three 600 s
+#: MIPcc27 smallset sweeps (~140 runs), the floor ended the portfolios at 10976 s
+#: in total and kept every winning member; this rule at ~6400 s lost jnh10's
+#: (its winner completed at ~27 s, the first member at ~1 s), the base clamp at
+#: 3554 s lost 12. What would change that: a scoring rule that weighs time.
+
+#: Ceiling, in seconds, of the fast wait's floor (see :data:`PORTFOLIO_WAITS`).
+_GRACE_FLOOR_CAP_S = 300.0
+
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -178,10 +210,14 @@ class MilpIIS:
     n_exchanged: int = 0
     n_close_dropped: int = 0
     n_relaxed: int = 0  # integralities the anytime relaxation (_relax_integrality) traded away
+    n_rehold: int = 0  # elements the re-hold move (_rehold) removed from a complete answer
     # Portfolio runs only: one entry per member, in portfolio order, with keys
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
     # and a timed-out member's own TimeoutError message.
     members: Optional[list] = None
+    # Portfolio runs only: the other members' distinct complete answers, smallest
+    # first, for the post-pass to polish too (:func:`_polish_alternatives`).
+    alternatives: Optional[list] = None
 
 
 class _Engine:
@@ -1192,6 +1228,121 @@ def _add_one(
     return (new_c, new_b, new_i), pending, decided, tried
 
 
+#: Re-hold move (:func:`_rehold`): its extent is a probe count (deterministic),
+#: and its share of the time left is only a stop -- a pass cut short by it is
+#: discarded. Measured on MIPcc27 stein45inf (complete 225 = 209 rows + 16
+#: integralities, Gurobi 213 = 189 + 24): re-holding every integrality and
+#: re-filtering gave 212 = 190 + 22 in 254 probes, 82 s (0.32 s a probe, host
+#: load ~50). The share saturates at ``_REHOLD_CAP_S`` (#1153 role 2): 300 s is
+#: ~3.5x that pass, and a set too large to filter inside it is skipped by the
+#: probe count before any solve.
+_REHOLD_FRACTION = 0.5
+_REHOLD_CAP_S = 300.0
+_REHOLD_MAX_PROBES = 2000
+
+
+def _rehold(
+    eng: _Engine,
+    cons: set[int],
+    bounds: set,
+    ints: set[int],
+    stop_at: float,
+    max_probes: int = _REHOLD_MAX_PROBES,
+    known: Optional[dict] = None,
+) -> tuple[Optional[tuple[set[int], set, set[int]]], dict, bool]:
+    """Re-hold move on a complete answer: hold every integrality of a column the
+    answer's constraints touch, re-run the constraint deletion filter, then the
+    integrality filter (each integrality jointly with its column's box, as the
+    integrality phase does), then the bounds.
+
+    Why it can shrink a minimal set: an integrality-first filter frees
+    integralities while every constraint is present, and each one it frees can
+    make several constraints necessary. Holding them again lets the constraint
+    filter drop those, and the integralities are then freed only where the
+    smaller row set allows it. The size counts each element once, so trading k
+    integralities for more than k constraints is a smaller IIS.
+
+    Irreducibility of the result: a constraint kept by the first stage was
+    needed with *more* integralities held, so it stays needed once some are
+    freed (the system only relaxes); the integrality and bound stages run on
+    the final constraints.
+
+    Returns ``(new_set or None, pending, decided)``: ``new_set`` only when it is
+    strictly smaller; ``pending`` the probe points of the kept elements
+    (candidate certificates, valid for the final set because it only relaxes
+    the system they were found in); ``decided`` whether every probe behind the
+    new set was decided. Skipped (``None``) when no integrality would be
+    re-held or the pass needs more than ``max_probes`` probes. Reaching
+    ``stop_at`` raises :class:`_OutOfTime`, so the caller discards the pass.
+    Probes run under the engine's policy, so the caller must confirm the new
+    set (:meth:`_Engine.confirm_infeasible`).
+
+    ``known`` (the answer's certificates) skips probes: an element whose point
+    is a strong certificate (:func:`_check_certificates`) on the set a stage
+    starts from is necessary, and stays so while that stage only removes
+    elements, so it is kept without a solve. Checked once per stage, by
+    arithmetic. Measured on stein45inf's ICB-n answer: 39 of 258 probes."""
+    A = eng.A
+    supp: set[int] = set()
+    for c in cons:
+        for r in np.asarray(eng.row_groups[c]).ravel():
+            supp.update(A.indices[A.indptr[r] : A.indptr[r + 1]].tolist())
+    extra = {int(j) for j in supp if eng.is_int[j] and j not in ints}
+    if not extra or len(cons) + len(ints) + len(extra) + len(bounds) > max_probes:
+        return None, {}, True
+    new_i = set(ints) | extra
+    new_b = {b for b in bounds if b[0] not in new_i}
+    new_c = set(cons)
+    pending: dict[tuple, np.ndarray] = {}
+    decided = True
+
+    def probe(c2: set[int], b2: set, i2: set[int]) -> tuple[Optional[bool], Optional[np.ndarray]]:
+        if time.perf_counter() >= stop_at:
+            raise _OutOfTime
+        return eng.probe(c2, b2, i2)
+
+    known = known or {}
+    s_tol = min(_STRONG_OTHERS, 1e-6)
+
+    def certified(c2: set[int], b2: set, i2: set[int]) -> dict:
+        # The known points that certify their element on the set a stage starts from.
+        got = _check_certificates(known, eng, c2, b2, i2, s_tol, _STRONG_OWN)
+        pending.update(got)
+        return got
+
+    skip = certified(new_c, new_b, new_i)
+    for q in sorted(cons):
+        if ("constraint", q) in skip:
+            continue
+        v, x = probe(new_c - {q}, new_b, new_i)
+        if v is True:
+            new_c.discard(q)
+        elif v is None:
+            decided = False
+        elif x is not None:
+            pending[("constraint", q)] = x
+    skip = certified(new_c, new_b, new_i)
+    for j in sorted(new_i):
+        if ("integrality", j) in skip:
+            continue
+        if not _filter_integrality(probe, eng, j, new_c, new_b, new_i, pending):
+            decided = False
+    skip = certified(new_c, new_b, new_i)
+    for jb in sorted(new_b):
+        if ("bound", jb[0], jb[1]) in skip:
+            continue
+        v, x = probe(new_c, new_b - {jb}, new_i)
+        if v is True:
+            new_b.discard(jb)
+        elif v is None:
+            decided = False
+        elif x is not None:
+            pending[("bound", jb[0], jb[1])] = x
+    if len(new_c) + len(new_b) + len(new_i) >= len(cons) + len(bounds) + len(ints):
+        return None, {}, True
+    return (new_c, new_b, new_i), pending, decided
+
+
 #: Integrality relaxation of an anytime answer (:func:`_relax_integrality`):
 #: counterexample rounds per stage (each round restores at least one element, so
 #: the cap only bounds a stage that would restore one at a time; it fixes the
@@ -1407,28 +1558,46 @@ def _polish(
     time_limit: float,
     engine: str,
     deadline: Optional[float],
+    beat: Optional[int] = None,
+    swept: Optional[set] = None,
 ) -> MilpIIS:
     """Post-pass on the answer: on an anytime (incomplete) answer the
     integrality relaxation (:func:`_relax_integrality`, at most
     ``_RELAX_FRACTION`` of the time left, at most ``_RELAX_CAP_S``; the filter
     stops ``_POLISH_RESERVE_FRACTION`` of the budget, at most
     ``_POLISH_RESERVE_CAP_S``, early to leave it room); on a complete one the
-    add-one move (:func:`_add_one`; only with an overall budget, capped at
-    ``_ADD_ONE_FRACTION`` of the time left, at most ``_ADD_ONE_CAP_S``); then a
+    re-hold move (:func:`_rehold`; only with an overall budget, capped at
+    ``_REHOLD_FRACTION`` of the time left, at most ``_REHOLD_CAP_S``) and then
+    the add-one move (:func:`_add_one`; likewise, capped at
+    ``_ADD_ONE_FRACTION`` of the time then left, at most ``_ADD_ONE_CAP_S``); then a
     forced-violation certificate for every kept element that still has none
-    (:meth:`_Engine.forced_point`, margins :data:`_FORCED_MARGINS`).
+    (:meth:`_Engine.forced_point`, margins :data:`_FORCED_MARGINS`). When the
+    re-hold move replaced the answer, the add-one move runs from both the new
+    and the replaced answer and the smaller result is kept (both moves are
+    greedy, so the path matters).
 
-    Soundness: a set the add-one move changed replaces the answer only when
+    ``beat`` and ``swept`` are for a post-pass on an alternative answer
+    (:func:`_polish_alternatives`), which only pays when it ends smaller than
+    ``beat``: when the re-hold move leaves the answer unchanged and it is not
+    already smaller than ``beat``, the pass stops there and returns ``res``; and
+    the add-one move does not run from a set in ``swept`` (the sets it already
+    ran from, which it updates), since the sweep from a set is repeated work.
+
+    Soundness: a set the re-hold or add-one move changed replaces the answer only when
     :meth:`_Engine.confirm_infeasible` confirms it under both presolve
     configurations, as for every answer; otherwise the answer stands unchanged.
     The same holds for a set the relaxation changed.
     A certificate is kept only when :func:`_check_certificates` accepts it by
     arithmetic on the final set. Needs ``res.bounds`` to be every bound the set
-    applies, i.e. ``include_bounds=True``. ``DISCOPT_IIS_ADD_ONE=0`` /
+    applies, i.e. ``include_bounds=True``. ``DISCOPT_IIS_REHOLD=0`` /
+    ``DISCOPT_IIS_ADD_ONE=0`` /
     ``DISCOPT_IIS_CERT_REPAIR=0`` / ``DISCOPT_IIS_RELAX_INT=0`` are opt-outs for
     A/B measurement."""
     add_one = (
         os.environ.get("DISCOPT_IIS_ADD_ONE", "1") != "0" and res.complete and deadline is not None
+    )
+    rehold = (
+        os.environ.get("DISCOPT_IIS_REHOLD", "1") != "0" and res.complete and deadline is not None
     )
     relax = (
         os.environ.get("DISCOPT_IIS_RELAX_INT", "1") != "0"
@@ -1437,7 +1606,7 @@ def _polish(
         and bool(res.integrality)
     )
     repair = os.environ.get("DISCOPT_IIS_CERT_REPAIR", "1") != "0"
-    if not add_one and not relax and not repair and not _close_enabled():
+    if not add_one and not relax and not repair and not rehold and not _close_enabled():
         return res
     t0 = time.perf_counter()
     if deadline is not None and deadline - t0 < 4 * _MIN_SOLVE_S:
@@ -1464,7 +1633,7 @@ def _polish(
     cons, bounds, ints = set(res.constraints), set(res.bounds), set(res.integrality)
     pending: dict[tuple, np.ndarray] = dict(res.certificates)
     proven = res.proven_irreducible
-    tried = moves = n_relaxed = 0
+    tried = moves = n_relaxed = n_rehold = 0
     s_tol = min(cert_tol, _STRONG_OTHERS)
     if relax:
         assert deadline is not None
@@ -1488,11 +1657,13 @@ def _polish(
                     cons, bounds, ints = got
         except _OutOfTime:
             pass  # the relaxation or its confirmation ran out of time: the answer stands
-    if add_one:
+    before_rehold: Optional[tuple] = None  # the answer a re-hold move replaced
+    if rehold:
         assert deadline is not None
-        share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
+        share = min(_REHOLD_FRACTION * max(deadline - t0, 0.0), _REHOLD_CAP_S)
+        t_r = time.perf_counter()
         try:
-            got, pend, decided, tried = _add_one(eng, cons, bounds, ints, t0 + share)
+            got, pend, decided = _rehold(eng, cons, bounds, ints, t_r + share, known=pending)
             if got is not None:
                 t_c = time.perf_counter()
                 verdict = eng.confirm_infeasible(
@@ -1501,12 +1672,66 @@ def _polish(
                     presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
                 )
                 if verdict is True:
+                    n_rehold = len(cons) + len(bounds) + len(ints) - sum(len(g) for g in got)
+                    before_rehold = (cons, bounds, ints, proven)
                     cons, bounds, ints = got
                     pending.update(pend)
                     proven = proven and decided
-                    moves = 1
         except _OutOfTime:
-            pass  # the sweep or its confirmation ran out of time: the answer stands
+            pass  # the pass or its confirmation ran out of time: the answer stands
+    if (
+        beat is not None
+        and rehold
+        and before_rehold is None
+        and len(cons) + len(bounds) + len(ints) >= beat
+    ):
+        # An alternative the re-hold move cannot change and that is not already
+        # smaller than the incumbent: stop. Measured on MIPcc27 smallset, every
+        # alternative that ended smaller than the incumbent had either been
+        # changed by the re-hold move or was already smaller (see
+        # _polish_alternatives).
+        return res
+    if add_one:
+        assert deadline is not None
+        # Both moves are greedy, so the path matters: when the re-hold move
+        # replaced the answer, the add-one move also runs from the answer it
+        # replaced, and the smaller result is kept. Measured (MIPcc27 smallset
+        # domset-hexgrid_03_052, from a 308-element member answer): re-hold then
+        # add-one 171, add-one alone 159.
+        starts = [(cons, bounds, ints, proven, n_rehold)]
+        if before_rehold is not None:
+            starts.append((*before_rehold, 0))
+        ends = []
+        for c0, b0, i0, pr0, nr0 in starts:
+            end = (c0, b0, i0, pr0, nr0, 0)
+            if swept is not None:
+                sweep_key = (frozenset(c0), frozenset(b0), frozenset(i0))
+                if sweep_key in swept:
+                    ends.append(end)
+                    continue
+                swept.add(sweep_key)
+            t0 = time.perf_counter()
+            share = min(_ADD_ONE_FRACTION * max(deadline - t0, 0.0), _ADD_ONE_CAP_S)
+            try:
+                got, pend, decided, n_tried = _add_one(eng, c0, b0, i0, t0 + share)
+                tried += n_tried
+                if got is not None:
+                    t_c = time.perf_counter()
+                    verdict = eng.confirm_infeasible(
+                        *got,
+                        stop_at=min(deadline, t_c + share),
+                        presolve=("off",) if eng.proven_on(*got) else ("choose", "off"),
+                    )
+                    if verdict is True:
+                        pending.update(pend)  # stale ones fail the final arithmetic check
+                        end = (*got, pr0 and decided, nr0, 1)
+            except _OutOfTime:
+                pass  # the sweep or its confirmation ran out of time: its start stands
+            ends.append(end)
+        # Ties keep the first (the re-hold path), so the move is never undone for nothing.
+        cons, bounds, ints, proven, n_rehold, moves = min(
+            ends, key=lambda e: len(e[0]) + len(e[1]) + len(e[2])
+        )
     # Complete answers only: an anytime answer makes no minimality claim, and its
     # remaining time is better spent on certificates (measured on
     # neos-3426989-dives, 7127 elements at the limit: 0 certificates with the
@@ -1610,7 +1835,80 @@ def _polish(
         n_relaxed=n_relaxed,
         n_exchanged=n_exchanged,
         n_close_dropped=n_close_dropped,
+        n_rehold=n_rehold,
     )
+
+
+def _polish_alternatives(
+    arrays: tuple,
+    res: MilpIIS,
+    out: MilpIIS,
+    *,
+    cert_tol: float,
+    time_limit: float,
+    engine: str,
+    deadline: Optional[float],
+    swept: Optional[set] = None,
+) -> MilpIIS:
+    """After the post-pass on the portfolio's smallest answer (``out`` is
+    ``_polish(res)``), run it on each other distinct complete member answer
+    (``res.alternatives``, smallest first) while time is left, and return the
+    smallest result. The smallest answer before the post-pass is not the
+    smallest after it. Measured on MIPcc27 stein45inf, member answers -> post-
+    pass: ICB 225 -> 212, ICB-n 229 -> 216, ICB-r 237 -> 205 (reference 213).
+
+    An alternative's post-pass only pays when it ends smaller than the best so
+    far, so it gets ``beat`` (it stops after the re-hold move when that move did
+    not change an answer that is not already smaller) and the shared ``swept``
+    (the add-one move does not repeat a sweep from the same set). Measured per
+    stage, MIPcc27 smallset: on domset-hexgrid_03_052 the three alternatives the
+    re-hold move could not change (232, 233, 240 against 169) spent ~70 s each
+    and ended unchanged; the one it changed (308 -> 171) ended at 159 through the
+    add-one move from 308. On stein45inf the winner (237 -> 205) was already
+    smaller after the re-hold move.
+
+    Soundness: every candidate is a member's answer, confirmed by that member,
+    changed only by :func:`_polish`, which adopts a change only when
+    :meth:`_Engine.confirm_infeasible` confirms it. Ties keep ``out``.
+    ``DISCOPT_IIS_POLISH_ALTERNATIVES=0`` is the opt-out for A/B measurement."""
+    alts = res.alternatives or []
+    if (
+        not alts
+        or deadline is None
+        or not out.complete
+        or os.environ.get("DISCOPT_IIS_POLISH_ALTERNATIVES", "1") == "0"
+    ):
+        return replace(out, alternatives=None) if out.alternatives else out
+    best = out
+    for alt in alts:
+        now = time.perf_counter()
+        if deadline - now < 4 * _MIN_SOLVE_S:
+            break
+        # Each post-pass gets the overall deadline: its stages carry their own
+        # fraction-and-ceiling shares. A sub-deadline starved them: at half the time
+        # left, hexgrid's 308-element answer got ~8 s of add-one and stayed at 171
+        # (with the overall deadline, 159).
+        got = _polish(
+            arrays,
+            alt,
+            cert_tol=cert_tol,
+            time_limit=time_limit,
+            engine=engine,
+            deadline=deadline,
+            beat=_iis_size(best),
+            swept=swept,
+        )
+        if _post_key(got) < _post_key(best):
+            best = got
+    return replace(best, members=res.members, alternatives=None)
+
+
+def _post_key(res: MilpIIS) -> tuple:
+    """How post-passed answers rank: smaller first, but under the closing pass an
+    answer with a checked witness for every element outranks a smaller one
+    without (the same rule as :func:`_rank_answers`)."""
+    uncertified = _close_enabled() and len(res.certificates) != _iis_size(res)
+    return (uncertified, _iis_size(res))
 
 
 #: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof and
@@ -2356,7 +2654,9 @@ def milp_iis(
         raise ValueError(
             f"portfolio_wait must be one of {sorted(PORTFOLIO_WAITS)}, got {portfolio_wait!r}"
         )
-    grace, grace_window = PORTFOLIO_WAITS[portfolio_wait] if portfolio else (math.inf, None)
+    grace, grace_window, grace_floor = (
+        PORTFOLIO_WAITS[portfolio_wait] if portfolio else (math.inf, None, 0.0)
+    )
     return milp_iis_arrays(
         arrays,
         include_bounds=include_bounds,
@@ -2372,6 +2672,7 @@ def milp_iis(
         t_start=t_start,
         grace=grace,
         grace_window=grace_window,
+        grace_floor=grace_floor,
         iis_engine=iis_engine,
     )
 
@@ -2394,6 +2695,7 @@ def milp_iis_arrays(
     grace_window: Optional[tuple[float, float]] = None,
     iis_engine: Optional[str] = None,
     threads: Optional[int] = None,
+    grace_floor: float = 0.0,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
@@ -2408,8 +2710,8 @@ def milp_iis_arrays(
     Element ids in the result are the ``row_groups`` keys and column indices.
     ``t_start`` (``time.perf_counter()``) is when the budget began, so time the
     caller spent before the call counts against ``total_time_limit``.
-    ``grace`` / ``grace_window`` (portfolio only): see :func:`_portfolio_iis`;
-    the default waits for every member.
+    ``grace`` / ``grace_window`` / ``grace_floor`` (portfolio only): see
+    :func:`_portfolio_iis`; the default waits for every member.
     """
     iis_engine = _resolve_iis_engine(iis_engine)
     if t_start is None:
@@ -2452,10 +2754,11 @@ def milp_iis_arrays(
             grace=grace,
             grace_window=grace_window,
             threads=threads,
+            grace_floor=grace_floor,
         )
     else:
-        if grace != math.inf or grace_window is not None:
-            raise ValueError("grace= / grace_window= need portfolio=")
+        if grace != math.inf or grace_window is not None or grace_floor != 0.0:
+            raise ValueError("grace= / grace_window= / grace_floor= need portfolio=")
         if threads is not None:
             raise ValueError("threads= needs portfolio=; a single order runs in-process")
         res = _milp_iis_arrays(
@@ -2463,13 +2766,46 @@ def milp_iis_arrays(
         )
     if not include_bounds:
         return res  # the post-pass needs every applied bound listed (see _polish)
-    return _polish(
+    deadline = None if total_time_limit is None else t_start + float(total_time_limit)
+    alts = res.alternatives or []
+    n_par = min(1 + len(alts), (os.cpu_count() or 1) if workers is None else int(workers))
+    if (
+        portfolio is not None
+        and alts
+        and deadline is not None
+        and n_par > 1
+        and res.complete
+        and os.environ.get("DISCOPT_IIS_POLISH_ALTERNATIVES", "1") != "0"
+        and os.environ.get("DISCOPT_IIS_POLISH_PARALLEL", "1") != "0"
+    ):
+        budget_threads = (os.cpu_count() or 1) if threads is None else int(threads)
+        return _polish_answers_parallel(
+            arrays,
+            res,
+            n_par,
+            deadline,
+            dict(cert_tol=cert_tol, time_limit=time_limit, engine=iis_engine),
+            highs_threads=max(1, budget_threads // n_par),
+        )
+    swept: set = set()  # the sets the add-one move ran from, across the post-passes
+    out = _polish(
         arrays,
         res,
         cert_tol=cert_tol,
         time_limit=time_limit,
         engine=iis_engine,
-        deadline=None if total_time_limit is None else t_start + float(total_time_limit),
+        deadline=deadline,
+        swept=swept,
+    )
+    return _polish_alternatives(
+        arrays,
+        res,
+        out,
+        cert_tol=cert_tol,
+        time_limit=time_limit,
+        engine=iis_engine,
+        deadline=deadline,
+        swept=swept,
     )
 
 
@@ -3609,7 +3945,11 @@ def _milp_iis_arrays(
 #: complete; kedron 12 in 10 s vs 14.5 s. In the 60 s sweep it changed no
 #: completion (its exact confirmations need ~20 s each on otra), so it costs a
 #: core there and nothing else.
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l")
+#: ``CIB-n`` (rows first, no SAT core) joins with the wait floor: at 600 s on
+#: jjliu_clique it completes at 135 s with 255 against the next best 265 (ICB /
+#: CIB) and Gurobi's 265; measured earlier at 60 s it also gave domset-hexgrid
+#: 308 -> 171 and enlight4 19 -> 18.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l", "CIB-n")
 
 
 def _normalize_portfolio(portfolio: Any) -> Optional[tuple[str, ...]]:
@@ -3700,9 +4040,20 @@ def _portfolio_child() -> None:
     deadline_wall = job["deadline_wall"]
     total = None if deadline_wall is None else max(0.0, deadline_wall - time.time())
     try:
-        res = _milp_iis_arrays(
-            job["arrays"], **job["kwargs"], order=job["order"], total_time_limit=total
-        )
+        if job.get("polish") is not None:
+            # A post-pass job (_polish_parallel): the answer to polish and its
+            # keywords; the deadline is the job's, on this process's clock.
+            assert deadline_wall is not None
+            res = _polish(
+                job["arrays"],
+                job["polish"],
+                **job["kwargs"],
+                deadline=time.perf_counter() + max(0.0, deadline_wall - time.time()),
+            )
+        else:
+            res = _milp_iis_arrays(
+                job["arrays"], **job["kwargs"], order=job["order"], total_time_limit=total
+            )
         out: tuple = ("ok", res)
     except TimeoutError as e:
         out = ("timeout", str(e))
@@ -3710,6 +4061,139 @@ def _portfolio_child() -> None:
         out = ("error", e)
     with open(job["result_path"], "wb") as f:
         pickle.dump(out, f)
+
+
+def _polish_answers_parallel(
+    arrays: tuple,
+    res: MilpIIS,
+    n_workers: int,
+    deadline: float,
+    kwargs: dict,
+    highs_threads: int = 1,
+) -> MilpIIS:
+    """The post-pass on the portfolio's answer and on each of its alternatives
+    (see :func:`_polish_alternatives`) at once, in member processes: the
+    portfolio's workers are idle by then, and run one after another the
+    alternatives' post-passes took most of the time left (MIPcc27 smallset
+    stein45inf, 600 s: the winning alternative's re-hold move needs ~120 s and
+    was cut off after two others). The alternatives get ``beat`` = the portfolio
+    answer's size, which prunes exactly what the incumbent after its post-pass
+    would: an alternative is never smaller than the portfolio answer, so it is
+    smaller than neither. Returns the smallest result (ties: the portfolio
+    answer, then portfolio order); a post-pass that did not return in time
+    counts as its unpolished answer, which its member confirmed.
+    ``DISCOPT_IIS_POLISH_PARALLEL=0`` runs them one after another instead."""
+    alts = list(res.alternatives or [])
+    answers = [res] + alts
+    betas: list[Optional[int]] = [None] + [_iis_size(res)] * len(alts)
+    got = _polish_parallel(
+        arrays, answers, betas, n_workers, deadline, kwargs, highs_threads=highs_threads
+    )
+    best = got[0] if got[0] is not None else replace(res, alternatives=None)
+    for g in got[1:]:
+        if g is not None and _post_key(g) < _post_key(best):
+            best = g
+    return replace(best, members=res.members, alternatives=None)
+
+
+def _polish_parallel(
+    arrays: tuple,
+    answers: list[MilpIIS],
+    betas: list[Optional[int]],
+    n_workers: int,
+    deadline: float,
+    kwargs: dict,
+    highs_threads: int = 1,
+) -> list[Optional[MilpIIS]]:
+    """Run :func:`_polish` on each of ``answers`` (with ``beat=betas[k]``) in
+    portfolio member processes, at most ``n_workers`` at a time, all against the
+    overall ``deadline`` (``time.perf_counter()`` clock), each with
+    ``highs_threads`` HiGHS threads as a portfolio member gets. Returns each result, or
+    ``None`` for a post-pass that did not return by the deadline (it is killed)
+    or was never started (too little time left). An error in a post-pass is
+    re-raised, as for a portfolio member."""
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    wall_deadline = time.time() + (deadline - time.perf_counter())
+    margin = min(
+        _PORTFOLIO_MARGIN_S, _PORTFOLIO_MARGIN_FRACTION * max(deadline - time.perf_counter(), 0.0)
+    )
+    boot = (
+        f"import sys; sys.path[:0] = {list(sys.path)!r}; "
+        "from discopt._iis_milp import _portfolio_child; _portfolio_child()"
+    )
+    out: list[Optional[MilpIIS]] = [None] * len(answers)
+    todo = list(range(len(answers)))
+    running: dict[int, tuple[Any, str, Any]] = {}
+    with tempfile.TemporaryDirectory(prefix="discopt_iis_polish_") as tmp:
+        try:
+            while todo or running:
+                while (
+                    todo
+                    and len(running) < n_workers
+                    and wall_deadline - time.time() >= 4 * _MIN_SOLVE_S
+                ):
+                    k = todo.pop(0)
+                    result_path = os.path.join(tmp, f"polish{k}.pkl")
+                    err = open(os.path.join(tmp, f"polish{k}.err"), "w+b")
+                    proc = subprocess.Popen(
+                        [sys.executable, "-c", boot],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=err,
+                    )
+                    assert proc.stdin is not None
+                    job = dict(
+                        arrays=arrays,
+                        polish=replace(answers[k], alternatives=None, members=None),
+                        kwargs=dict(kwargs, beat=betas[k]),
+                        order=None,
+                        deadline_wall=wall_deadline - margin,
+                        result_path=result_path,
+                        discopt_dir=_DISCOPT_DIR,
+                        highs_threads=highs_threads,
+                    )
+                    pickle.dump(job, proc.stdin)
+                    proc.stdin.flush()  # kept open: the child exits on EOF
+                    running[k] = (proc, result_path, err)
+                if not running:
+                    break  # the rest never start: too little time left
+                finished = [k for k, r in running.items() if r[0].poll() is not None]
+                if not finished:
+                    if time.time() >= wall_deadline:
+                        break  # the rest are killed below
+                    time.sleep(0.02)
+                    continue
+                for k in finished:
+                    proc, result_path, err = running.pop(k)
+                    assert proc.stdin is not None
+                    proc.stdin.close()
+                    if proc.returncode != 0 or not os.path.exists(result_path):
+                        err.seek(0)
+                        tail = err.read().decode(errors="replace").strip()[-2000:]
+                        err.close()
+                        raise RuntimeError(
+                            f"compute_iis post-pass {k} exited without a result "
+                            f"(exit code {proc.returncode}):\n{tail}"
+                        )
+                    err.close()
+                    with open(result_path, "rb") as f:
+                        kind, payload = pickle.load(f)
+                    if kind == "error":
+                        raise payload
+                    if kind == "ok":
+                        out[k] = payload
+        finally:
+            for proc, _, err in running.values():
+                proc.kill()
+                proc.wait()
+                assert proc.stdin is not None
+                proc.stdin.close()
+                err.close()
+    return out
 
 
 def _grace_extra(
@@ -3724,6 +4208,24 @@ def _grace_extra(
     return extra
 
 
+def _grace_cutoff(
+    t_done: float,
+    grace: float,
+    window: Optional[tuple[float, float]],
+    floor: float,
+    total_time_limit: Optional[float],
+) -> float:
+    """Elapsed time at which a portfolio stops its other members once one
+    completes at ``t_done``: ``t_done + _grace_extra(...)``, but never before
+    ``min(floor * total_time_limit, _GRACE_FLOOR_CAP_S)`` (see
+    :data:`PORTFOLIO_WAITS`)."""
+    end = t_done + _grace_extra(t_done, grace, window)
+    if total_time_limit is not None:
+        floor_s = min(floor * float(total_time_limit), _GRACE_FLOOR_CAP_S)
+        end = max(end, floor_s)
+    return end
+
+
 def _portfolio_iis(
     arrays: tuple,
     kwargs: dict,
@@ -3734,6 +4236,7 @@ def _portfolio_iis(
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
     threads: Optional[int] = None,
+    grace_floor: float = 0.0,
 ) -> MilpIIS:
     """Run one deletion filter per order in ``portfolio``, each in its own process,
     against one shared budget, and return the smallest complete result.
@@ -3762,6 +4265,11 @@ def _portfolio_iis(
     proportional wait cut off improvements on fast instances (bell3ainf: first
     at 4 s, Gurobi's size at 17 s) and idled for minutes on slow ones
     (neos859080: complete at ~285 s, waited to ~570 s).
+    ``grace_floor`` (a fraction in ``[0, 1)``; used only with ``total_time_limit``):
+    the cut-off is never earlier than ``grace_floor * total_time_limit`` (capped
+    at ``_GRACE_FLOOR_CAP_S``) after the start, so an early completion does not
+    stop members that finish well inside a large budget (see
+    :data:`PORTFOLIO_WAITS`). ``0`` disables it.
     """
     import os
     import pickle
@@ -3793,6 +4301,8 @@ def _portfolio_iis(
         lo_w, hi_w = (float(v) for v in grace_window)
         if not (0.0 <= lo_w <= hi_w) or not math.isfinite(grace):
             raise ValueError(f"grace_window needs 0 <= lo <= hi and a finite grace: {grace_window}")
+    if not 0.0 <= grace_floor < 1.0:
+        raise ValueError(f"grace_floor must be in [0, 1), got {grace_floor}")
 
     # perf_counter is per-process; members get an absolute wall-clock deadline.
     wall0 = time.time() - (time.perf_counter() - t_start)
@@ -3878,7 +4388,9 @@ def _portfolio_iis(
                     )
                     if payload.complete and math.isfinite(grace):
                         t_done = time.time() - wall0
-                        grace_end = wall0 + t_done + _grace_extra(t_done, grace, grace_window)
+                        grace_end = wall0 + _grace_cutoff(
+                            t_done, grace, grace_window, grace_floor, total_time_limit
+                        )
                         cutoff = grace_end if cutoff is None else min(cutoff, grace_end)
         finally:
             for i, (proc, t0, _, err) in running.items():
@@ -3896,16 +4408,42 @@ def _portfolio_iis(
             "compute_iis: no portfolio member confirmed a subsystem infeasible "
             f"within total_time_limit ({why})"
         )
+    best = _rank_answers(done)
+    best.members = members
+    return best
+
+
+def _rank_answers(done: list[tuple[int, MilpIIS]]) -> MilpIIS:
+    """The smallest complete member answer (any answer if none is complete;
+    ties: portfolio order), carrying the other distinct complete answers,
+    smallest first, as ``alternatives``."""
     pool = [(i, r) for i, r in done if r.complete] or done
     if _close_enabled():
         # Under the closing pass an answer with a checked witness for every
         # element outranks a smaller one without: the latter is not an IIS
         # under the checker's rule (see :func:`_close_enabled`).
-        _, best = min(
-            pool,
-            key=lambda ir: (len(ir[1].certificates) != _iis_size(ir[1]), _iis_size(ir[1]), ir[0]),
-        )
+        ranked = [
+            r
+            for _, r in sorted(
+                pool,
+                key=lambda ir: (
+                    len(ir[1].certificates) != _iis_size(ir[1]),
+                    _iis_size(ir[1]),
+                    ir[0],
+                ),
+            )
+        ]
     else:
-        _, best = min(pool, key=lambda ir: (_iis_size(ir[1]), ir[0]))
-    best.members = members
+        ranked = [r for _, r in sorted(pool, key=lambda ir: (_iis_size(ir[1]), ir[0]))]
+    best = ranked[0]
+    seen = {_answer_key(best)}
+    best.alternatives = []
+    for r in ranked[1:]:
+        if r.complete and _answer_key(r) not in seen:
+            seen.add(_answer_key(r))
+            best.alternatives.append(r)
     return best
+
+
+def _answer_key(res: MilpIIS) -> tuple:
+    return (frozenset(res.constraints), frozenset(res.bounds), frozenset(res.integrality))
