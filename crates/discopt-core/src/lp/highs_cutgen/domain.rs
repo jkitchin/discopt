@@ -1849,11 +1849,6 @@ impl Domain {
         }
     }
 
-    /// The feasibility tolerance bounds are compared with.
-    pub fn feastol(&self) -> f64 {
-        self.feastol
-    }
-
     /// Apply symmetry-handling tightenings `(column, is_lower, value)` with
     /// `Reason::Unspecified`, a non-resolvable leaf of conflict analysis
     /// (`DISCOPT_MILP_SYM_DYNAMIC`; see [`super::sym_dynamic`]). Stops at an
