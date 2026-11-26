@@ -857,6 +857,294 @@ class DAEBuilder:
             result = result + t
         return result
 
+    # ── Post-solve mesh diagnostics (#2365) ──
+
+    def _node_taus(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(nodes, cp)``: the element's node set ``[0, cp...]`` and its collocation points."""
+        from discopt.dae.polynomials import legendre_roots, radau_roots
+
+        cs = self._cs
+        cp = radau_roots(cs.ncp) if cs.scheme == "radau" else legendre_roots(cs.ncp)
+        return np.concatenate([[0.0], cp]), cp
+
+    def error_estimate(
+        self,
+        result,
+        *,
+        atol: float = 1e-6,
+        rtol: float = 1e-3,
+        check_per_interval: int = 2,
+        bound_tol: float = 1e-9,
+        warn: bool = True,
+    ):
+        """Estimate the discretization error of a solve, per element and state (#2365).
+
+        The collocation equations hold only at the collocation points. This
+        evaluates the *defect* of each state's collocation polynomial,
+        ``r(t) = x_p'(t) - f(t, x_p(t), z_p(t), u)``, at ``check_per_interval``
+        points inside every gap between the element's nodes, using the solved
+        values of every variable the right-hand side refers to (parameters being
+        estimated included). The per-element estimate is ``h_i * max |r|``: to
+        first order, a bound on the state error element ``i`` adds.
+
+        It also records every check point at which the polynomial leaves the
+        state's declared bounds (by more than ``bound_tol * (1 + |bound|)``)
+        while the nodes stay inside, which is how undershoot through a fast
+        transient shows up.
+
+        Parameters
+        ----------
+        result : SolveResult
+            Result of solving the model this builder discretized.
+        atol, rtol : float
+            An element is out of tolerance for a state component when
+            ``h_i * max |r| > atol + rtol * max_t |x(t)|``.
+        check_per_interval : int
+            Check points per gap between consecutive nodes.
+        bound_tol : float
+            Relative slack before a polynomial value counts as outside a bound.
+        warn : bool
+            Emit a :class:`~discopt.dae.mesh.MeshAdequacyWarning` when any
+            element is flagged.
+
+        Returns
+        -------
+        MeshErrorEstimate
+        """
+        from discopt.dae.mesh import (
+            BoundExcursion,
+            MeshErrorEstimate,
+            _evaluate,
+            _flat_solution,
+            check_points,
+            lagrange_matrices,
+            warn_if_inadequate,
+        )
+        from discopt.dae.polynomials import lagrange_basis
+
+        if not self._discretized:
+            raise RuntimeError("Call discretize() before error_estimate()")
+        if self._ode_rhs is None:
+            raise RuntimeError("No ODE RHS set; there is nothing to estimate.")
+
+        cs = self._cs
+        nfe, ncp = cs.nfe, cs.ncp
+        x_flat = _flat_solution(self._model, result)
+        nodes, cp = self._node_taus()
+        pts = check_points(nodes, check_per_interval)  # (P,) on [0, 1]
+        P = pts.size
+        L, dL = lagrange_matrices(nodes, pts)  # (P, ncp+1)
+        h = np.asarray(self._h_vec, dtype=np.float64)
+        eb = self._element_boundaries()
+        t_chk = eb[:-1, None] + h[:, None] * pts[None, :]  # (nfe, P)
+
+        def node_vals(name):
+            return np.asarray(result.value(self._vars[name]), dtype=np.float64)
+
+        # Interpolated states (values and time derivatives) at the check points.
+        x_chk: dict[str, np.ndarray] = {}
+        dx_chk: dict[str, np.ndarray] = {}
+        state_vals: dict[str, np.ndarray] = {}
+        for sv in self._states:
+            v = node_vals(sv.name)  # (nfe, ncp+1[, nc])
+            state_vals[sv.name] = v
+            x_chk[sv.name] = np.einsum("pk,ik...->ip...", L, v)
+            dx_chk[sv.name] = np.einsum("pk,ik...->ip...", dL, v) / h.reshape(
+                (nfe, 1) + (1,) * (v.ndim - 2)
+            )
+
+        # Algebraics live on the collocation points only: interpolate through them.
+        La = (
+            np.ones((P, 1))
+            if ncp == 1
+            else np.array([[lagrange_basis(cp, float(t), k) for k in range(ncp)] for t in pts])
+        )
+        z_chk = {
+            av.name: np.einsum("pk,ik...->ip...", La, node_vals(av.name)) for av in self._algebraics
+        }
+
+        def as_dict(arrs: dict[str, np.ndarray], specs):
+            out: dict[str, Any] = {}
+            for spec in specs:
+                a = arrs[spec.name]
+                out[spec.name] = (
+                    Constant(a)
+                    if spec.n_components == 1
+                    else [
+                        Constant(np.ascontiguousarray(a[..., c])) for c in range(spec.n_components)
+                    ]
+                )
+            return out
+
+        ctrl: dict[str, Any] = {}
+        for cvar in self._controls:
+            u = node_vals(cvar.name)  # (nfe[, nc])
+            ctrl[cvar.name] = (
+                Constant(u.reshape(nfe, 1))
+                if cvar.n_components == 1
+                else [Constant(u[:, c].reshape(nfe, 1)) for c in range(cvar.n_components)]
+            )
+
+        derivs = self._ode_rhs(
+            Constant(t_chk), as_dict(x_chk, self._states), as_dict(z_chk, self._algebraics), ctrl
+        )
+        validate_ode_rhs_keys(derivs.keys(), self._states, builder="collocation ODE")
+
+        error: dict[str, np.ndarray] = {}
+        scaled: dict[str, np.ndarray] = {}
+        excursions: list[BoundExcursion] = []
+        element_error = np.zeros(nfe)
+        for sv in self._states:
+            nc = sv.n_components
+            if nc == 1:
+                f = _evaluate(derivs[sv.name], self._model, x_flat, (nfe, P))[..., None]
+            else:
+                f = np.stack(
+                    [
+                        _evaluate(derivs[sv.name][c], self._model, x_flat, (nfe, P))
+                        for c in range(nc)
+                    ],
+                    axis=-1,
+                )
+            dx = dx_chk[sv.name].reshape(nfe, P, nc)
+            xc = x_chk[sv.name].reshape(nfe, P, nc)
+            err = h[:, None] * np.max(np.abs(dx - f), axis=1)  # (nfe, nc)
+            scale = np.max(np.abs(state_vals[sv.name].reshape(nfe, ncp + 1, nc)), axis=(0, 1))
+            sc = err / (atol + rtol * scale[None, :])
+            element_error = np.maximum(element_error, np.max(sc, axis=1))
+            error[sv.name] = err[:, 0] if nc == 1 else err
+            scaled[sv.name] = sc[:, 0] if nc == 1 else sc
+
+            lb, ub = sv.bounds
+            for bound, side in ((lb, -1.0), (ub, 1.0)):
+                if not np.isfinite(bound) or abs(bound) >= 1e19:
+                    continue
+                slack = bound_tol * (1.0 + abs(bound))
+                out = (xc - bound) * side > slack  # (nfe, P, nc)
+                for i, p, c in zip(*np.nonzero(out)):
+                    excursions.append(
+                        BoundExcursion(
+                            state=sv.name,
+                            component=None if nc == 1 else int(c),
+                            element=int(i),
+                            t=float(t_chk[i, p]),
+                            value=float(xc[i, p, c]),
+                            bound=float(bound),
+                        )
+                    )
+
+        est = MeshErrorEstimate(
+            element_boundaries=eb.copy(),
+            ncp=ncp,
+            error=error,
+            scaled=scaled,
+            element_error=element_error,
+            bound_excursions=excursions,
+            atol=atol,
+            rtol=rtol,
+            n_check=P,
+        )
+        if warn:
+            warn_if_inadequate(est, stacklevel=3)
+        return est
+
+    def evaluate_state(self, result, name: str, t) -> np.ndarray:
+        """Numeric value of state ``name``'s collocation polynomial at times ``t``.
+
+        Parameters
+        ----------
+        result : SolveResult
+            Result of solving the model this builder discretized.
+        name : str
+            State name.
+        t : float or array_like
+            Times; each is evaluated in the element that contains it (times
+            outside the horizon extrapolate the first/last element).
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``t.shape`` for a scalar state, ``t.shape + (n_components,)``
+            for a vector state.
+        """
+        from discopt.dae.polynomials import lagrange_basis
+
+        if not self._discretized:
+            raise RuntimeError("Call discretize() before evaluate_state()")
+        if name not in self._vars:
+            raise KeyError(f"Unknown state {name!r}")
+        tt = np.asarray(t, dtype=np.float64)
+        v = np.asarray(result.value(self._vars[name]), dtype=np.float64)
+        tp = self._element_points()
+        out = []
+        for tv in tt.reshape(-1):
+            e = self._locate_element(float(tv))
+            w = np.array([lagrange_basis(tp[e], float(tv), k) for k in range(self._cs.ncp + 1)])
+            out.append(np.tensordot(w, v[e], axes=(0, 0)))
+        arr = np.array(out)
+        return arr.reshape(tt.shape + v.shape[2:])
+
+    def warm_start_from(self, other: DAEBuilder, result) -> dict:
+        """An ``initial_solution`` for this builder's variables from another mesh's solve.
+
+        ``other`` is a discretized builder with the same states, algebraics and
+        controls (typically the same problem on a coarser mesh, see
+        :func:`~discopt.dae.refine_mesh`), and ``result`` its solve. States are
+        the old collocation polynomials evaluated at this builder's node times;
+        algebraics the old polynomials through the collocation points; controls
+        the old value of the element that contains this element's midpoint.
+
+        Returns
+        -------
+        dict
+            ``{Variable: np.ndarray}``, suitable for ``model.solve(initial_solution=...)``.
+        """
+        from discopt.dae.polynomials import lagrange_basis
+
+        if not (self._discretized and other._discretized):
+            raise RuntimeError("Both builders must be discretized before warm_start_from()")
+        mine = {s.name for s in self._states}, {a.name for a in self._algebraics}
+        theirs = {s.name for s in other._states}, {a.name for a in other._algebraics}
+        ctrl_mine = {c.name for c in self._controls}
+        ctrl_theirs = {c.name for c in other._controls}
+        if mine != theirs or ctrl_mine != ctrl_theirs:
+            raise ValueError(
+                "warm_start_from: the builders declare different states, algebraics or "
+                f"controls ({mine}, {ctrl_mine} vs {theirs}, {ctrl_theirs})."
+            )
+
+        guess: dict = {}
+        tp = self._element_points()  # (nfe, ncp+1)
+        for sv in self._states:
+            val = other.evaluate_state(result, sv.name, tp)
+            guess[self._vars[sv.name]] = val.reshape(self._vars[sv.name].shape)
+
+        o_tp = other._element_points()
+        for av in self._algebraics:
+            ov = np.asarray(result.value(other._vars[av.name]), dtype=np.float64)
+            new = np.zeros(self._vars[av.name].shape)
+            for i in range(self._cs.nfe):
+                for j in range(self._cs.ncp):
+                    t = float(tp[i, j + 1])
+                    e = other._locate_element(t)
+                    cpt = o_tp[e, 1:]
+                    w = np.array(
+                        [
+                            1.0 if other._cs.ncp == 1 else lagrange_basis(cpt, t, k)
+                            for k in range(other._cs.ncp)
+                        ]
+                    )
+                    new[i, j, ...] = np.tensordot(w, ov[e], axes=(0, 0))
+            guess[self._vars[av.name]] = new
+
+        eb = self._element_boundaries()
+        mid = 0.5 * (eb[:-1] + eb[1:])
+        for cvar in self._controls:
+            ov = np.asarray(result.value(other._vars[cvar.name]), dtype=np.float64)
+            idx = [other._locate_element(float(t)) for t in mid]
+            guess[self._vars[cvar.name]] = ov[idx].copy()
+        return guess
+
     # ── Internal helpers ──
 
     def _element_boundaries(self) -> np.ndarray:

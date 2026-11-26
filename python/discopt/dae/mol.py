@@ -401,6 +401,39 @@ class MOLBuilder:
             raise RuntimeError("Call discretize() first")
         return self._time_builder
 
+    def _collocation_builder(self, what: str) -> DAEBuilder:
+        if self._time_builder is None:
+            raise RuntimeError(f"Call discretize() before {what}()")
+        if not isinstance(self._time_builder, DAEBuilder):
+            raise TypeError(
+                f"{what}() needs a collocation time discretization "
+                "(time_method='collocation'); this MOLBuilder uses finite differences."
+            )
+        return self._time_builder
+
+    def error_estimate(self, result, **kwargs):
+        """Per-element collocation error estimate of a solve (#2365).
+
+        Forwards to :meth:`DAEBuilder.error_estimate`; each field is a vector
+        state with one component per interior spatial point, so the estimate of
+        field ``u`` has shape ``(nfe, npts)``. Only the *temporal*
+        discretization error is estimated; the spatial finite-difference error
+        is not.
+        """
+        return self._collocation_builder("error_estimate").error_estimate(result, **kwargs)
+
+    def warm_start_from(self, other: MOLBuilder, result) -> dict:
+        """An ``initial_solution`` from the solve of ``other`` on a different time mesh.
+
+        Forwards to :meth:`DAEBuilder.warm_start_from`. Both builders must use
+        the same fields and spatial grid.
+        """
+        if other._spatial_set.npts != self._spatial_set.npts:
+            raise ValueError("warm_start_from: the spatial grids differ")
+        return self._collocation_builder("warm_start_from").warm_start_from(
+            other._collocation_builder("warm_start_from"), result
+        )
+
     # ── Internal helpers ──
 
     def _compute_initial(self, fv: FieldVar, z_pts: np.ndarray) -> np.ndarray | None:
