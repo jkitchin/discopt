@@ -46,7 +46,8 @@ _T_LAUNCH = time.perf_counter()  # earliest point this process can see
 
 # Portfolio wait: the library default, "fast" (see _iis_milp.PORTFOLIO_WAITS:
 # the other members stop clamp(t, 10, 30) s after the first completes at t, but
-# not before half the budget has elapsed).
+# not before half the budget has elapsed). MIPCC_PORTFOLIO_WAIT=scaled is the
+# opt-in that trades size for time (see _iis_milp.PORTFOLIO_WAITS).
 PORTFOLIO_WAIT = "fast"
 
 # Competition tolerance (SOLUTION_FORMAT.md, "Certificates"). Judging uses it.
@@ -428,6 +429,9 @@ def _run(
     from discopt._iis_milp import _resolve_iis_engine
 
     engine = _resolve_iis_engine(None)
+    wait = os.environ.get("MIPCC_PORTFOLIO_WAIT", PORTFOLIO_WAIT)
+    if wait not in PORTFOLIO_WAITS:
+        raise ValueError(f"MIPCC_PORTFOLIO_WAIT={wait!r}: not one of {sorted(PORTFOLIO_WAITS)}")
     try:
         res = milp_iis_arrays(
             arrays,
@@ -437,9 +441,9 @@ def _run(
             threads=threads,
             total_time_limit=max(engine_budget - elapsed, 0.5),
             t_start=time.perf_counter(),
-            grace=PORTFOLIO_WAITS[PORTFOLIO_WAIT][0],
-            grace_window=PORTFOLIO_WAITS[PORTFOLIO_WAIT][1],
-            grace_floor=PORTFOLIO_WAITS[PORTFOLIO_WAIT][2],
+            grace=PORTFOLIO_WAITS[wait][0],
+            grace_window=PORTFOLIO_WAITS[wait][1],
+            grace_floor=PORTFOLIO_WAITS[wait][2],
         )
     except TimeoutError as exc:
         # No subsystem was confirmed in the budget: the whole model (already

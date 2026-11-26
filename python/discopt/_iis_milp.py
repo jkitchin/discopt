@@ -118,7 +118,16 @@ _ROLL_MIN_S = 2.0
 PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]], float]] = {
     "fast": (2.0, (10.0, 30.0), 0.5),
     "all": (math.inf, None, 0.0),
+    "scaled": (11.0, (10.0, 300.0), 0.0),
 }
+#: ``"scaled"`` is the opt-in for when time weighs against size: no floor, the
+#: other members get ``clamp(10 t, 10, 300)`` s after the first completes at t.
+#: Not the default because it gives up a size win (the goal is size parity with
+#: the reference): replaying the member completion times of three 600 s
+#: MIPcc27 smallset sweeps (~140 runs), the floor ended the portfolios at 10976 s
+#: in total and kept every winning member; this rule at ~6400 s lost jnh10's
+#: (its winner completed at ~27 s, the first member at ~1 s), the base clamp at
+#: 3554 s lost 12. What would change that: a scoring rule that weighs time.
 
 #: Ceiling, in seconds, of the fast wait's floor (see :data:`PORTFOLIO_WAITS`).
 _GRACE_FLOOR_CAP_S = 300.0

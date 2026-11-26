@@ -421,3 +421,32 @@ def test_highs_backend_refuses_loudly_when_highs_rejects_the_model(monkeypatch):
             np.array([1.0]),
             np.array([False]),
         )
+
+
+def test_portfolio_wait_opt_in_selects_the_scaled_wait(tmp_path, monkeypatch, capsys):
+    """MIPCC_PORTFOLIO_WAIT=scaled is the opt-in that trades size for time (no
+    floor, clamp(10 t, 10, 300) s after the first completion); the default keeps
+    the fast wait's floor, and an unknown name refuses loudly (the entry's
+    failure path: traceback on stderr, the whole model as the answer)."""
+    import discopt._iis_milp as engine
+
+    seen = []
+    real = engine.milp_iis_arrays
+
+    def spy(*a, **k):
+        seen.append((k["grace"], k["grace_window"], k["grace_floor"]))
+        return real(*a, **k)
+
+    monkeypatch.setattr(engine, "milp_iis_arrays", spy)
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
+    inst = _readme_example(tmp_path)
+    monkeypatch.delenv("MIPCC_PORTFOLIO_WAIT", raising=False)
+    assert mipcc.main([inst, str(tmp_path / "a.json")]) == 0
+    monkeypatch.setenv("MIPCC_PORTFOLIO_WAIT", "scaled")
+    assert mipcc.main([inst, str(tmp_path / "b.json")]) == 0
+    assert seen == [engine.PORTFOLIO_WAITS["fast"], (11.0, (10.0, 300.0), 0.0)]
+    monkeypatch.setenv("MIPCC_PORTFOLIO_WAIT", "nope")
+    capsys.readouterr()
+    assert mipcc.main([inst, str(tmp_path / "c.json")]) == 0
+    err = capsys.readouterr().err
+    assert "ValueError: MIPCC_PORTFOLIO_WAIT='nope'" in err and len(seen) == 2
