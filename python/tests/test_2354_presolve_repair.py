@@ -23,6 +23,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 DATA = pathlib.Path(__file__).parent / "data" / "milp_2354_presolve_repair.npz"
 
@@ -43,9 +44,24 @@ print("COUNTERS", ctr["MilpPresolveRepairAttempts"], ctr["MilpPresolveRepaired"]
 """
 
 
-def test_postsolved_point_is_repaired_and_verifies(tmp_path):
+# The fixture reaches the repair only on the search trajectory it was captured on.
+# With conflict analysis ON (#2350's default), the reduced search finds a different
+# incumbent, and that incumbent passes the original-row check directly, so no repair
+# runs. The "repair" arm pins the capture-time trajectory to exercise the repair. The
+# "default" arm holds the shipped defaults to the same result and point check.
+_ARMS = {
+    "repair": {"DISCOPT_MILP_CONFLICT": "0", "DISCOPT_MILP_CLIQUE_DOMAIN": "0"},
+    "default": {},
+}
+
+
+@pytest.mark.parametrize("arm", sorted(_ARMS))
+def test_postsolved_point_is_repaired_and_verifies(tmp_path, arm):
     xfile = tmp_path / "x.npy"
     env = dict(os.environ, DISCOPT_MILP_PRESOLVE_LOG="1", RAYON_NUM_THREADS="1")
+    for k in ("DISCOPT_MILP_CONFLICT", "DISCOPT_MILP_CLIQUE_DOMAIN"):
+        env.pop(k, None)
+    env.update(_ARMS[arm])
     # The repair counters accumulate only under DISCOPT_PROFILE; the probe reads the
     # cumulative totals (`profile_counters_py`), which the end-of-solve dump leaves intact.
     env["DISCOPT_PROFILE"] = "1"
@@ -58,13 +74,21 @@ def test_postsolved_point_is_repaired_and_verifies(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr[-4000:]
     log = proc.stderr
+    # Neither arm may give up on the reduced search and re-solve the original cold.
+    assert "failed verification; solving the original" not in log
+    assert "repair did not verify" not in log
+    if arm == "repair":
+        _assert_repair_path(proc)
+    _assert_point_verifies(proc, xfile)
+
+
+def _assert_repair_path(proc):
+    log = proc.stderr
     # The fixture must still reach the path under test (CLAUDE.md section 6). If a
     # presolve change stops it from failing verification, this test no longer
     # exercises the repair and has to be re-captured.
     assert "postsolved point failed verification" in log, log[-4000:]
     assert "repaired by the fixed-integer LP" in log, log[-4000:]
-    assert "failed verification; solving the original" not in log
-    assert "repair did not verify" not in log
     # The instrument must see the path the log shows (section 6): a counter reading 0
     # here would let a probe report "no repairs" on a run that made one.
     ctr = next(s for s in proc.stdout.splitlines() if s.startswith("COUNTERS"))
@@ -72,6 +96,8 @@ def test_postsolved_point_is_repaired_and_verifies(tmp_path):
     assert attempts >= 1 and repaired >= 1, ctr
     assert seeded == 0, ctr
 
+
+def _assert_point_verifies(proc, xfile):
     line = next(s for s in proc.stdout.splitlines() if s.startswith("RESULT"))
     _, status, obj, bound, _nodes = line.split()
     obj, bound = float(obj), float(bound)
