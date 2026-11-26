@@ -717,6 +717,30 @@ def test_rank_answers_keeps_distinct_complete_alternatives_smallest_first():
     assert [r.constraints for r in best.alternatives] == [[0, 1, 4], [1, 2, 3, 4]]
 
 
+def test_rank_answers_keeps_every_other_confirmed_answer_as_a_fallback():
+    """#2225: the MIPcc27 entry needs somewhere to go when the checker's own
+    settings reject the answer, short of the whole model. Every other distinct
+    member answer, incomplete ones too, is confirmed infeasible and is kept."""
+    a = _answer({0, 1})
+    c = _answer({1, 2, 3, 4})
+    anytime = replace(_answer({2, 3}), complete=False)
+    dup = _answer({0, 1})
+    best = E._rank_answers([(0, c), (1, anytime), (2, dup), (3, a)])
+    assert best is dup
+    assert [r.constraints for r in best.alternatives] == [[1, 2, 3, 4]]
+    assert [r.constraints for r in best.fallbacks] == [[2, 3]]
+
+
+def test_with_fallbacks_drops_the_answer_and_duplicates_and_ranks_the_rest():
+    best = _answer({0, 1})
+    pool = [None, _answer({1, 2, 3, 4}), _answer({0, 1}), _answer({2, 3}), _answer({2, 3})]
+    pool[1].alternatives = [_answer({5})]
+    out = E._with_fallbacks(best, pool)
+    assert out.constraints == [0, 1]
+    assert [r.constraints for r in out.fallbacks] == [[2, 3], [1, 2, 3, 4]]
+    assert all(r.alternatives is None and r.fallbacks is None for r in out.fallbacks)
+
+
 def test_the_smallest_answer_after_the_post_pass_wins(monkeypatch):
     """The portfolio's smallest answer is not always the smallest after the
     post-pass (stein45inf: 225 -> 212 but 237 -> 205), so the other complete

@@ -322,12 +322,12 @@ def test_the_answer_is_written_before_the_checker_settings_solve(tmp_path, monke
     out = tmp_path / "sol.json"
     seen = {}
 
-    def checking(data, res, time_limit):
+    def checking(data, sub, time_limit):
         seen["on_disk"] = json.loads(out.read_text())
         seen["time_limit"] = time_limit
         raise RuntimeError("checker-settings solve failed")
 
-    monkeypatch.setattr(mipcc, "checker_rejects", checking)
+    monkeypatch.setattr(mipcc, "checker_verdict", checking)
     monkeypatch.setenv("MIPCC_TIME_LIMIT", "3600")
     assert mipcc.main([inst, str(out)]) == 0  # the failure is reported, exit 0
     assert seen["on_disk"]["rows"]["c3"] == {"action": "relax"}  # the answer, not {}
@@ -337,6 +337,146 @@ def test_the_answer_is_written_before_the_checker_settings_solve(tmp_path, monke
     assert "answer is the confirmed subsystem" in printed
     assert "full model" not in printed
     assert seen["time_limit"] <= mipcc.CHECKER_SOLVE_CAP_S
+
+
+def _gap_data():
+    """A model with two conflicts (#2225 held-out run, netlib gran): rows 0-1,
+    ``x >= 1`` and ``x <= 1 - 8e-6``, are infeasible in truth but feasible within
+    the checker's absolute 1e-5; rows 2-4, ``y1 + y2 >= 3``, ``y1 <= 1``,
+    ``y2 <= 1``, are infeasible to the checker too."""
+    import scipy.sparse as sp
+
+    A = sp.csr_matrix(
+        np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+    )
+    big = 1e20
+    return dict(
+        A=A,
+        row_lo=np.array([1.0, -big, 3.0, -big, -big]),
+        row_hi=np.array([big, 1.0 - 8e-6, big, 1.0, 1.0]),
+        col_lb=np.array([-10.0, 0.0, 0.0]),
+        col_ub=np.array([10.0, 10.0, 10.0]),
+        is_int=np.zeros(3, dtype=bool),
+        row_names=["g1", "g2", "c1", "c2", "c3"],
+        col_names=["x", "y1", "y2"],
+    )
+
+
+def test_checker_verdict_mirrors_the_checker_on_a_tolerance_gap():
+    """The gap pair is "feasible" to the checker's solve (with a point within 1e-5),
+    the clear conflict "infeasible"."""
+    from types import SimpleNamespace
+
+    data = _gap_data()
+    gap = SimpleNamespace(constraints=[0, 1], bounds=[], integrality=[])
+    v, x = mipcc.checker_verdict(data, gap, 30.0)
+    assert v == "feasible" and x is not None
+    assert abs(x[0] - 1.0) <= 1e-5
+    clear = SimpleNamespace(constraints=[2, 3, 4], bounds=[], integrality=[])
+    assert mipcc.checker_verdict(data, clear, 30.0)[0] == "infeasible"
+
+
+def test_a_rejected_answer_is_repaired_not_replaced_by_the_full_model():
+    """#2225 held-out run (netlib qual / gran): the engine's answer is infeasible in
+    truth but feasible within the checker's 1e-5, and pre-fix main then wrote the
+    whole model. With no confirmed fallback, the entry adds back the elements the
+    checker's point violates and filters the result with the checker's own solve:
+    here exactly the clear conflict, which the checker passes."""
+    import time
+    from types import SimpleNamespace
+
+    data = _gap_data()
+    res = SimpleNamespace(
+        constraints=[0, 1], bounds=[], integrality=[], certificates={}, fallbacks=None
+    )
+    log: dict = {}
+    got = mipcc._checked_answer(data, res, time.perf_counter() + 60.0, log)
+    assert got is not None and log["chosen"] == "repair", log
+    assert got.constraints == [2, 3, 4] and got.bounds == [] and got.integrality == []
+    assert mipcc.checker_verdict(data, got, 30.0)[0] == "infeasible"
+
+
+def test_a_rejected_answer_falls_back_to_a_confirmed_alternative():
+    """A confirmed fallback the checker passes is preferred to a repair."""
+    import time
+    from types import SimpleNamespace
+
+    data = _gap_data()
+    alt = SimpleNamespace(constraints=[2, 3, 4], bounds=[], integrality=[], certificates={})
+    res = SimpleNamespace(
+        constraints=[0, 1], bounds=[], integrality=[], certificates={}, fallbacks=[alt]
+    )
+    log: dict = {}
+    assert mipcc._checked_answer(data, res, time.perf_counter() + 60.0, log) is alt
+    assert log == {"verdicts": ["feasible", "infeasible"], "chosen": "fallback 1"}
+
+
+def test_the_entry_writes_a_checker_infeasible_answer_on_a_tolerance_gap(tmp_path, monkeypatch):
+    """End to end on the gap model (as an MPS file): pre-fix main wrote the whole
+    model (``{}``); now the answer on disk is one the checker's solve finds
+    infeasible, and smaller than the whole model."""
+    m = dm.Model("gap")
+    x = m.continuous("x", lb=-10, ub=10)
+    y1 = m.continuous("y1", lb=0, ub=10)
+    y2 = m.continuous("y2", lb=0, ub=10)
+    m.subject_to(x >= 1, name="g1")
+    m.subject_to(x <= 1 - 8e-6, name="g2")
+    m.subject_to(y1 + y2 >= 3, name="c1")
+    m.subject_to(y1 <= 1, name="c2")
+    m.subject_to(y2 <= 1, name="c3")
+    m.minimize(0 * x)
+    inst = str(tmp_path / "gap.mps")
+    m.to_mps(inst)
+    data = mipcc.read_mps(inst)
+    assert data["row_hi"][data["row_names"].index("g2")] == 1 - 8e-6  # read exactly
+    out = tmp_path / "sol.json"
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
+    monkeypatch.setenv("MIPCC_THREADS", "2")
+    assert mipcc.main([inst, str(out)]) == 0
+    doc = json.loads(out.read_text())
+    assert doc != {}  # not the whole model
+    kept = [r for r in data["row_names"] if doc["rows"][r].get("action", "keep") == "keep"]
+    assert kept == ["c1", "c2", "c3"], kept
+
+
+def test_a_checker_solve_error_is_a_predicted_failure(tmp_path, monkeypatch, capsys):
+    """#2225 held-out run (chinneck misc06inf): HiGHS ended the checker-settings
+    solve of the answer in ``kError`` ("untransformed violations"), pre-fix main
+    raised, and the answer stayed on disk -- and the official checker, making the
+    same solve, scored it UNKNOWN (a failure). Stub: the solve of the answer's
+    two rows errors; any other set solves normally. The entry must not write the
+    answer the checker errs on."""
+    inst = _readme_example(tmp_path)
+    out = tmp_path / "sol.json"
+    real = mipcc.run_checked
+    errored = []
+
+    def run(h):
+        if h.getLp().num_row_ == 2:  # the answer {c1, c2}
+            errored.append(1)
+            return highspy.HighsStatus.kError  # no solve: no status, no point
+        return real(h)
+
+    monkeypatch.setattr(mipcc, "run_checked", run)
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
+    monkeypatch.setenv("MIPCC_THREADS", "2")
+    assert mipcc.main([inst, str(out)]) == 0
+    assert errored
+    doc = json.loads(out.read_text())
+    printed = capsys.readouterr().out
+    assert "run failed" not in printed
+    # Not the answer {c1, c2} the checker errs on: c3 is added back (a set the
+    # checker's solve finds infeasible), or at worst the whole model.
+    assert doc == {} or doc["rows"]["c3"]["action"] == "keep"
+    assert doc != {}  # the repair found a smaller one
 
 
 def test_entry_uses_highs_for_iis_probes_when_installed(tmp_path, monkeypatch, capsys):
@@ -384,12 +524,18 @@ _BIG_ENTRY = (
 
 
 @pytest.mark.requires_highs
-def test_a_matrix_entry_past_1e15_is_read_and_explained(tmp_path, monkeypatch):
+def test_a_matrix_entry_past_1e15_is_read_and_explained(tmp_path, monkeypatch, capsys):
     """MIPLIB control30-5-10-4 has entries up to 6e23. The checker reads them
     (``large_matrix_value=inf``); the entry used to refuse the file at the reader,
     and past the reader HiGHS's ``passModel`` refused the model unchecked, so the
     engine reported "could not prove the model infeasible" in under a second.
-    Here ``3.6e15 x >= 1e16`` with ``x <= 1`` is the IIS; ``y >= 2`` is not."""
+    Here ``3.6e15 x >= 1e16`` with ``x <= 1`` is the IIS; ``y >= 2`` is not.
+
+    The checker's *solve* of a subsystem, though, passes the model with HiGHS's
+    default ``large_matrix_value`` (1e15), so it cannot decide any subsystem that
+    keeps c1: measured, the official checker scores the IIS {c1, x <= 1} UNKNOWN
+    (a failure). The entry predicts that (#2225) and writes the whole model,
+    which the checker accepts; the engine's answer is still in the record line."""
     inst = tmp_path / "big.mps"
     inst.write_text(_BIG_ENTRY)
     out = tmp_path / "sol.json"
@@ -397,10 +543,14 @@ def test_a_matrix_entry_past_1e15_is_read_and_explained(tmp_path, monkeypatch):
     monkeypatch.setenv("MIPCC_THREADS", "2")
     monkeypatch.setenv("DISCOPT_IIS_ENGINE", "highs")
     assert mipcc.main([str(inst), str(out)]) == 0
-    doc = json.loads(out.read_text())
-    assert doc["rows"]["c1"]["action"] == "keep"
-    assert doc["rows"]["c2"] == {"action": "relax"}
-    assert doc["columns"]["x"]["upper_bound"]["action"] == "keep"
+    printed = capsys.readouterr().out
+    assert "do not find any confirmed subsystem infeasible" in printed, printed
+    assert json.loads(out.read_text()) == {}
+    data = mipcc.read_mps(str(inst))
+    from types import SimpleNamespace
+
+    iis = SimpleNamespace(constraints=[0], bounds=[(0, "upper")], integrality=[])
+    assert mipcc.checker_verdict(data, iis, 30.0)[0] == "unknown"
 
 
 @pytest.mark.requires_highs
