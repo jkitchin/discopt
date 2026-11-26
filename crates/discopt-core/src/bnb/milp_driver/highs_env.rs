@@ -61,6 +61,10 @@ mod refcheck;
 thread_local! {
     /// Searches run on this thread (tests prove the route fired).
     pub(super) static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The simplex `max_iter` each node evaluation of the search solved under
+    /// ([`node_iter_limit_enabled`]'s regression test).
+    pub(super) static NODE_MAX_ITER: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Limits and tolerances for [`run`].
@@ -93,6 +97,10 @@ pub(super) struct Limits {
     pub submip: bool,
     /// LP iterations the driver spent before the search (root LP and cut loop).
     pub iters_before: i64,
+    /// Root LP solves behind `iters_before` (their mean is `avgrootlpiters`).
+    pub root_solves: usize,
+    /// [`node_iter_limit_enabled`]: HiGHS's node iteration limit on the search's LPs.
+    pub node_iter_limit: bool,
     /// `MilpOptions::max_stall_nodes` (0 = none).
     pub max_stall_nodes: usize,
     /// `MilpOptions::max_leaves` (0 = none).
@@ -395,6 +403,50 @@ impl<'a> Debugger<'a> {
 
 /// `mipdata_->feastol` in `HighsSeparation::separate`'s progress test.
 const FEASTOL_SEPA: f64 = 1e-6;
+
+/// `DISCOPT_HIGHS_NODE_ITER_LIMIT`: the search's LP solves run under HiGHS's node
+/// iteration limit. `processNodes` sets `iterlimit = max(10000, 10 * max(avgiter,
+/// avgrootlpiters), 3 * firstrootlpiters / 2)` on the worker's LP before each dive
+/// (`HighsMipSolver.cpp`, HiGHS 1.16 `f3f113d`), and it holds until set again, so
+/// it also bounds the next node's evaluation, strong-branching probes and separation
+/// re-solves; before the first node the root's `max(10000, 10 * avgrootlpiters)`
+/// holds. Here it is the simplex's `max_iter` (capped by the driver's own), a per
+/// simplex-run cap where HiGHS's counts the whole solve. A solve that reaches it ends
+/// `IterLimit`, which a node takes as untrusted: it stays open on the bound it
+/// inherited and is never fathomed (HiGHS's `kError`; its 200-iteration IPM rescue
+/// is not ported). Read once per search, garbage refused. Entry evidence (neos17, 2,000
+/// nodes, deterministic, with [`search_sepa_enabled`]): 1,244,493 primal phase-1
+/// pivots against 35,192 without it, from warm starts the dual refuses as dual
+/// infeasible (`DualPrepRejectDualInf` 104 against 74) that fall to a warm primal
+/// solve grinding to the 100,000-pivot default; `NodeLpSolve` took 209 of 213 s.
+/// With the limit (same build, 3 interleaved reps, load ~11): phase-1 pivots
+/// 1,244,493 -> 171,123, LP iterations 223,557 -> 133,877, wall 115.2 +/- 10.4 s ->
+/// 24.5 +/- 2.7 s (separation off: 11.3 +/- 1.2 s), same incumbent and bound at the
+/// cap; neos-911970 unchanged (713,488 -> 715,507 iterations, 41.6 -> 40.5 s).
+///
+/// Default OFF until its §5 panel; the row is in `docs/dev/flag-retirement-audit.md`.
+pub(super) fn node_iter_limit_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_NODE_ITER_LIMIT") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!(
+                "DISCOPT_HIGHS_NODE_ITER_LIMIT={other:?} is not recognized (expected 1 or 0)"
+            ),
+        },
+    }
+}
+
+/// HiGHS's node iteration limit (see [`node_iter_limit_enabled`]).
+pub(super) fn node_iteration_limit(
+    avgiter: f64,
+    avg_root_iters: f64,
+    first_root_iters: i64,
+) -> usize {
+    let iterlimit = (10.0 * avgiter.max(avg_root_iters)) as i64;
+    10_000i64.max(iterlimit).max((3 * first_root_iters) / 2) as usize
+}
 
 /// `DISCOPT_HIGHS_SEARCH_SEPA`: node separation in the search is HiGHS's
 /// `HighsSeparation::separationRound` on the root's persistent separation subsystem
@@ -922,7 +974,15 @@ impl SearchLp {
 
 /// The working LP the search's components see: the driver's, or the search's own once
 /// it carries cut rows.
-fn make_ctx<'x>(base: &NodeCtx<'x>, lp: &'x Option<SearchLp>) -> NodeCtx<'x> {
+fn make_ctx<'x>(
+    base: &NodeCtx<'x>,
+    lp: &'x Option<SearchLp>,
+    simplex: &'x Option<SimplexOptions>,
+) -> NodeCtx<'x> {
+    let base = &NodeCtx {
+        simplex: simplex.as_ref().unwrap_or(base.simplex),
+        ..*base
+    };
     let Some(lp) = lp else { return *base };
     NodeCtx {
         b_w: &lp.b,
@@ -1018,6 +1078,12 @@ pub(super) struct HighsEnv<'a, 'b> {
     /// then runs [`RootSeparation::round_node`] on the search's LP. `None` runs
     /// discopt's node GMI.
     hsep: Option<&'a mut crate::lp::highs_cutgen::bridge::RootSeparation>,
+    /// [`node_iter_limit_enabled`]: the simplex options of the search's LP solves,
+    /// `max_iter` the node iteration limit; `None` uses the driver's.
+    node_simplex: Option<SimplexOptions>,
+    /// `mipdata_->avgrootlpiters` and `firstrootlpiters`.
+    avg_root_iters: f64,
+    first_root_iters: i64,
     /// Pool index of each search-LP cut row that came from [`Self::hsep`] (by the
     /// base-form cut's signature), reported back when the row leaves the LP.
     hsep_ids: std::collections::HashMap<Vec<(u32, i64)>, i32>,
@@ -1307,7 +1373,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         };
         let iters = self.eval.lp_iters + self.eval.sb_iters;
         let rc = {
-            let ctx = make_ctx(self.ctx, &self.lp);
+            let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
             if x.len() != ctx.n_w || y.len() != ctx.m_w {
                 return false;
             }
@@ -1345,7 +1411,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         // conflict / dual-proof cuts in their own cutpool (#2350), so it is separated
         // here too, as `separate` does on the default path.
         if let Some(cf) = self.conf.as_mut() {
-            let n_w = make_ctx(self.ctx, &self.lp).n_w;
+            let n_w = make_ctx(self.ctx, &self.lp, &self.node_simplex).n_w;
             let mut cutset = Vec::new();
             let mut obs =
                 DomainObservers(vec![(&mut cf.gdom, cf.cpi), (&mut self.eval.dom, cf.cpi)]);
@@ -1376,7 +1442,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             return false;
         }
         // `lp->resolveLp(&propdomain)` over the node's box, then `performAging(true)`.
-        let ctx = make_ctx(self.ctx, &self.lp);
+        let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
         let (fl, fu) = self.eval.lp_box(&ctx);
         let start = super::highs_eval::fit_basis_to_box(
             self.eval.basis.clone(),
@@ -1386,6 +1452,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         );
         let nl = node_lp(&ctx, start, &fl, &fu);
         self.eval.lp_iters += nl.sol.iters as i64;
+        self.eval.note_solve(&nl.sol);
         self.resolved_untrusted = true;
         if let NodeLpVerdict::Bound { .. } = nl.verdict {
             self.resolved_untrusted = false;
@@ -1658,6 +1725,19 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     fn dual_bound(&self, inc: f64) -> f64 {
         inc.min(self.lift(self.q.best_lower_bound()))
             .min(self.lift(self.eval.unresolved_floor))
+    }
+
+    /// `setIterationLimit(limit)` on the search's LP (see
+    /// [`node_iter_limit_enabled`]); a no-op when the flag is off.
+    fn set_iteration_limit(&mut self, limit: usize) {
+        if !self.lim.node_iter_limit {
+            self.node_simplex = None;
+            return;
+        }
+        let mut o = self.ctx.simplex.clone();
+        o.max_iter = o.max_iter.min(limit);
+        crate::profile::incr(crate::profile::Ctr::HighsMipSearchIterLimitSet);
+        self.node_simplex = Some(o);
     }
 
     fn optlim(&self) -> f64 {
@@ -2003,7 +2083,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
         if let Some(d) = self.dbg.as_mut() {
             d.best = None;
         }
-        let ctx = make_ctx(self.ctx, &self.lp);
+        let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
+        #[cfg(test)]
+        NODE_MAX_ITER.with(|v| v.borrow_mut().push(ctx.simplex.max_iter));
         let ns = self.ctx.ns;
         let ref_in = self.refp.as_ref().map(|rc| {
             rc.contains(
@@ -2117,7 +2199,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             child_rule: ChildSelectionRule::RootSol,
             inheuristic: false,
         };
-        let ctx = make_ctx(self.ctx, &self.lp);
+        let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
         let ns = self.ctx.ns;
         let ref_box = self.refp.as_ref().map(|_| {
             (
@@ -2237,6 +2319,13 @@ impl SearchEnv for HighsEnv<'_, '_> {
         });
         (s, a)
     }
+    fn avg_solve_iters(&self) -> f64 {
+        self.eval.avg_solve_iters
+    }
+    fn set_node_iteration_limit(&mut self, avgiter: f64) {
+        let limit = node_iteration_limit(avgiter, self.avg_root_iters, self.first_root_iters);
+        self.set_iteration_limit(limit);
+    }
     fn separate(&mut self) -> bool {
         // `separateAndStoreBasis` with discopt's node separation: node-local Gomory
         // rounds plus the pool cuts this node violates, on a copy of the node LP; the
@@ -2247,7 +2336,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
         if self.hsep.is_some() && self.cut_lp {
             return self.separate_highs();
         }
-        let ctx = make_ctx(self.ctx, &self.lp);
+        let ctx = make_ctx(self.ctx, &self.lp, &self.node_simplex);
         let ctx = &ctx;
         if !ctx.node_gmi {
             return false;
@@ -2683,6 +2772,13 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             stall_nodes: 0,
             conf: None,
             hsep: None,
+            node_simplex: None,
+            avg_root_iters: if lim.root_solves > 0 {
+                lim.iters_before as f64 / lim.root_solves as f64
+            } else {
+                0.0
+            },
+            first_root_iters: lim.iters_before,
             hsep_ids: std::collections::HashMap::new(),
             hsep_iters: 0,
             root_obj: f64::NEG_INFINITY,
@@ -3071,6 +3167,10 @@ pub(super) fn run<'a>(
     }
     env.hsep = hsep;
     env.root_obj = root_bound;
+    // The root's `setIterationLimit(max(10000, 10 * avgrootlpiters))`, in force until
+    // the first `processNodes` sets the node limit.
+    let root_limit = 10_000usize.max((10.0 * env.avg_root_iters) as usize);
+    env.set_iteration_limit(root_limit);
     if !top_level {
         // `DISCOPT_MILP_PREINC_SCORE` acts on the top-level search only.
         env.preinc_score = false;

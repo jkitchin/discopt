@@ -92,6 +92,11 @@ pub(super) struct HighsEval {
     /// share (`lpiterations`, `sblpiterations`); heuristics' share (`heurlpiterations`).
     pub lp_iters: i64,
     pub sb_iters: i64,
+    /// `HighsLpRelaxation::avgSolveIters` / `numSolved`: the running mean of the
+    /// simplex iterations over the search LP's optimal solves (node evaluations,
+    /// strong-branching probes, separation re-solves), as `getAvgSolveIters` reads it.
+    pub avg_solve_iters: f64,
+    pub num_solved: u64,
     pub heur_iters: i64,
     /// The root LP solution (`getRootLpSol`), set by the search after the root.
     pub root_sol: Vec<f64>,
@@ -148,6 +153,8 @@ impl HighsEval {
             pending_lift: None,
             lp_iters: 0,
             sb_iters: 0,
+            avg_solve_iters: 0.0,
+            num_solved: 0,
             heur_iters: 0,
             root_sol: Vec::new(),
             subrootsol: Vec::new(),
@@ -222,6 +229,19 @@ impl HighsEval {
         self.found.push((x, v));
     }
 
+    /// `HighsLpRelaxation::run`'s `kOptimal` arm: `++numSolved; avgSolveIters +=
+    /// (itercount - avgSolveIters) / numSolved`.
+    pub fn note_solve(&mut self, sol: &crate::lp::simplex::LpSolve) {
+        if sol.status == LpStatus::IterLimit {
+            crate::profile::incr(crate::profile::Ctr::HighsMipSearchIterLimitHits);
+        }
+        if sol.status == LpStatus::Optimal {
+            self.num_solved += 1;
+            self.avg_solve_iters +=
+                (sol.iters as f64 - self.avg_solve_iters) / self.num_solved as f64;
+        }
+    }
+
     /// The post-LP part of `evaluateNodeImpl` for one LP outcome: updates `node` and
     /// returns the result, or `None` when reduced-cost fixing and propagation changed
     /// columns and the node must be evaluated again.
@@ -241,6 +261,7 @@ impl HighsEval {
         self.branch_hint = None;
         self.unbounded = false;
         self.lp_iters += nl.sol.iters as i64;
+        self.note_solve(&nl.sol);
         match nl.verdict {
             NodeLpVerdict::InfeasibleProved => {
                 self.stats.lp_infeasible += 1;

@@ -883,6 +883,7 @@ impl HighsEval {
             let iters = nl.sol.iters as i64;
             self.lp_iters += iters;
             self.sb_iters += iters;
+            self.note_solve(&nl.sol);
             let oc = ctx.obj_const;
             match nl.verdict {
                 NodeLpVerdict::Bound { bound, integral } => {
@@ -1051,6 +1052,11 @@ pub(super) mod e2e {
         pub cfg_hsep: bool,
         /// [`RootSeparation::separator_state`] after the search (with `cfg_hsep`).
         pub hsep_state: Option<(i64, i64, i64, u64)>,
+        /// Run the search under HiGHS's node iteration limit
+        /// (`highs_env::node_iter_limit_enabled`).
+        pub cfg_iter_limit: bool,
+        /// The simplex `max_iter` of each node evaluation of this search.
+        pub node_max_iter: Vec<usize>,
     }
 
     thread_local! {
@@ -1070,10 +1076,15 @@ pub(super) mod e2e {
         if !armed {
             return;
         }
-        let (cfg_gap_tol, cfg_no_initial, cfg_hsep) = E2E.with(|e| {
+        let (cfg_gap_tol, cfg_no_initial, cfg_hsep, cfg_iter_limit) = E2E.with(|e| {
             let e = e.borrow();
             let r = e.as_ref().unwrap();
-            (r.cfg_gap_tol, r.cfg_no_initial, r.cfg_hsep)
+            (
+                r.cfg_gap_tol,
+                r.cfg_no_initial,
+                r.cfg_hsep,
+                r.cfg_iter_limit,
+            )
         });
         let mut hsep = cfg_hsep.then(|| {
             let mut hs =
@@ -1097,6 +1108,8 @@ pub(super) mod e2e {
             heur_effort: false,
             submip: false,
             iters_before: 0,
+            root_solves: 0,
+            node_iter_limit: cfg_iter_limit,
             max_stall_nodes: 0,
             max_leaves: 0,
             max_work: None,
@@ -1116,6 +1129,7 @@ pub(super) mod e2e {
             .incumbent()
             .filter(|(_, v)| !cfg_no_initial && *v < INFEAS_SENTINEL - 1.0)
             .map(|(x, v)| (x.to_vec(), v));
+        highs_env::NODE_MAX_ITER.with(|v| v.borrow_mut().clear());
         match highs_env::run(
             ctx,
             &lim,
@@ -1141,6 +1155,8 @@ pub(super) mod e2e {
             None => res.bound = f64::INFINITY,
         }
         res.hsep_state = hsep.as_ref().map(|h| h.separator_state());
+        res.cfg_iter_limit = cfg_iter_limit;
+        res.node_max_iter = highs_env::NODE_MAX_ITER.with(|v| std::mem::take(&mut *v.borrow_mut()));
         E2E.with(|e| *e.borrow_mut() = Some(res));
     }
 }

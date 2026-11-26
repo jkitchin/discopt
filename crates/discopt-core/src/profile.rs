@@ -950,6 +950,10 @@ counters!(
     // separation subsystem, and the cut rows they added to the search LP.
     HighsMipSearchSepaRounds,
     HighsMipSearchSepaRows,
+    // `DISCOPT_HIGHS_NODE_ITER_LIMIT`: node iteration limits set, and search LP
+    // solves that ended at an iteration limit.
+    HighsMipSearchIterLimitSet,
+    HighsMipSearchIterLimitHits,
     // `DISCOPT_MILP_SYM_LEX`: verified formulation automorphisms, candidates
     // checked, and the lexicographic-leader rows appended.
     MilpSymLexGenerators,
