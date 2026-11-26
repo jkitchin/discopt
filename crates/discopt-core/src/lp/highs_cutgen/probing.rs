@@ -661,13 +661,89 @@ pub struct PresolveProbing {
 /// better than the cutoff).
 pub fn probe_and_attach(
     dom: &mut Domain,
-    mut table: CliqueTable,
+    table: CliqueTable,
     cands: &[usize],
     presolve: Option<PresolveProbing>,
 ) -> ProbeStats {
+    probe_and_attach_with(dom, table, cands, presolve, None)
+}
+
+/// What the root separation's probing (`DISCOPT_HIGHS_SEPA_ROOT_PROBE`) leaves for the
+/// search: HiGHS's `mipdata_->implications` and the global domain's bounds after
+/// presolve probing and the root rounds' `separateImpliedBounds`. HiGHS runs presolve
+/// probing once and the tree reads the root's implications; a search handed this runs
+/// neither presolve probing nor `HighsImplications::rebuild` again.
+#[derive(Clone, Debug)]
+pub struct RootProbed {
+    /// The implications, with `hasProbed` for the columns the root probed.
+    pub implics: Implications,
+    /// The root probing domain's global lower bounds.
+    pub col_lower: Vec<f64>,
+    /// The root probing domain's global upper bounds.
+    pub col_upper: Vec<f64>,
+}
+
+/// [`probe_and_attach`], or, with `prior`, the search start after the root separation
+/// probed: its global reductions are applied to `dom` (then propagated and made the
+/// baseline), its implications (with `hasProbed`) are kept, `table` keeps its
+/// `numCliqueEntriesAfterFirstPresolve`, `presolve` must be `None`, and only `cands`
+/// not probed yet are probed.
+pub fn probe_and_attach_with(
+    dom: &mut Domain,
+    mut table: CliqueTable,
+    cands: &[usize],
+    presolve: Option<PresolveProbing>,
+    prior: Option<RootProbed>,
+) -> ProbeStats {
     let n = dom.col_lower.len();
-    let mut implics = Implications::new(n);
     let nnz = dom.num_model_nonzeros() as i64;
+    let had_prior = prior.is_some();
+    let mut implics = match prior {
+        None => Implications::new(n),
+        Some(rp) => {
+            assert!(
+                presolve.is_none(),
+                "presolve probing ran at the root; HiGHS runs it once"
+            );
+            assert_eq!(
+                rp.col_lower.len(),
+                n,
+                "root probing's domain has the search's columns"
+            );
+            for j in 0..n {
+                if dom.infeasible() {
+                    break;
+                }
+                if rp.col_lower[j] > dom.col_lower[j] {
+                    dom.change_bound(
+                        DomainChange {
+                            boundval: rp.col_lower[j],
+                            column: j,
+                            boundtype: BoundType::Lower,
+                        },
+                        Reason::Unspecified,
+                    );
+                }
+                if !dom.infeasible() && rp.col_upper[j] < dom.col_upper[j] {
+                    dom.change_bound(
+                        DomainChange {
+                            boundval: rp.col_upper[j],
+                            column: j,
+                            boundtype: BoundType::Upper,
+                        },
+                        Reason::Unspecified,
+                    );
+                }
+            }
+            if !dom.infeasible() {
+                dom.propagate();
+            }
+            if !dom.infeasible() {
+                dom.commit_as_global();
+            }
+            rp.implics
+        }
+    };
     crate::profile::record_max(
         crate::profile::Ctr::MilpCliqueTableCliques0,
         table.num_cliques() as u64,
@@ -685,9 +761,15 @@ pub fn probe_and_attach(
     }
     // `numCliqueEntriesAfterFirstPresolve`, and `nextCleanupCall = numNonzero()`
     // (`HighsImplications::rebuild`).
-    let entries0 = table.num_entries() as i64;
-    table.set_num_entries_after_presolve(entries0 as i32);
-    implics.next_cleanup_call = nnz;
+    let entries0 = if had_prior {
+        table.num_entries_after_presolve() as i64
+    } else {
+        table.num_entries() as i64
+    };
+    if !had_prior {
+        table.set_num_entries_after_presolve(entries0 as i32);
+        implics.next_cleanup_call = nnz;
+    }
     if !dom.infeasible() {
         let mut p = Prober::new(dom, &mut table, &mut implics);
         let mut next = p.implics.next_cleanup_call;

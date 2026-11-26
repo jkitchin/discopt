@@ -797,6 +797,18 @@ impl RootSeparation {
         self.probe_on = on;
     }
 
+    /// The root separation's probing state for the search (`mipdata_->implications`
+    /// and the global domain's bounds after the root's probing), `None` when root
+    /// probing never ran or its domain went infeasible.
+    pub fn root_probed(&self) -> Option<super::probing::RootProbed> {
+        let rp = self.root_probe.as_ref().filter(|p| !p.dom.infeasible())?;
+        Some(super::probing::RootProbed {
+            implics: rp.implics.clone(),
+            col_lower: rp.dom.col_lower.clone(),
+            col_upper: rp.dom.col_upper.clone(),
+        })
+    }
+
     /// Whether root probing proved the model rows infeasible over the root box.
     pub fn root_probe_infeasible(&self) -> bool {
         self.root_probe.as_ref().is_some_and(|p| p.dom.infeasible())

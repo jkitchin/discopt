@@ -3143,7 +3143,11 @@ pub(super) fn run<'a>(
     dbg: Option<Debugger<'a>>,
     seed_pool: Vec<GomoryCut>,
     top_level: bool,
-    cliques: Option<(crate::lp::highs_cutgen::clique::CliqueTable, Vec<f64>)>,
+    cliques: Option<(
+        crate::lp::highs_cutgen::clique::CliqueTable,
+        Vec<f64>,
+        Option<crate::lp::highs_cutgen::probing::RootProbed>,
+    )>,
     mut hsep: Option<&'a mut crate::lp::highs_cutgen::bridge::RootSeparation>,
 ) -> Option<Outcome> {
     #[cfg(test)]
@@ -3193,7 +3197,7 @@ pub(super) fn run<'a>(
     // first (`separateImpliedBounds`' probing loop over the root LP's fractional
     // binaries), on the domain at its global baseline.
     let mut probe_infeasible = false;
-    if let Some((t, x)) = cliques {
+    if let Some((t, x, root_probed)) = cliques {
         assert_eq!(
             t.num_cols(),
             ctx.ns,
@@ -3210,17 +3214,23 @@ pub(super) fn run<'a>(
             .filter(|&j| ctx.is_int[j] && (x[j] - x[j].round()).abs() > feastol)
             .collect();
         // HiGHS probes every binary in presolve first (`HPresolve::runProbing`), at
-        // its default `random_seed = 0`.
-        let pp = crate::lp::highs_cutgen::probing::PresolveProbing {
-            submip: lim.submip,
-            random_seed: 0,
-            nrows: ctx.n_orig_rows.min(ctx.m_w),
-        };
-        let st = crate::lp::highs_cutgen::probing::probe_and_attach(
+        // its default `random_seed = 0`, once: when the root separation already ran
+        // it (`DISCOPT_HIGHS_SEPA_ROOT_PROBE`), the search takes the root's
+        // implications and global reductions instead of probing from scratch.
+        let pp =
+            root_probed
+                .is_none()
+                .then_some(crate::lp::highs_cutgen::probing::PresolveProbing {
+                    submip: lim.submip,
+                    random_seed: 0,
+                    nrows: ctx.n_orig_rows.min(ctx.m_w),
+                });
+        let st = crate::lp::highs_cutgen::probing::probe_and_attach_with(
             &mut env.eval.dom,
             t,
             &cands,
-            Some(pp),
+            pp,
+            root_probed,
         );
         {
             use crate::profile::{incr_by, Ctr};

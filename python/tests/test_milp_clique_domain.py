@@ -139,13 +139,24 @@ C513 = Path(__file__).parent / "data" / "c513_lex_hpre.mps.gz"
 
 
 @pytest.mark.correctness
-def test_c513_tables_and_node_probing(monkeypatch):
+@pytest.mark.parametrize("root_probe", ["default", "0"])
+def test_c513_tables_and_node_probing(monkeypatch, root_probe):
     """``c513_lex_hpre`` (an infeasible subsystem, 144 binaries): presolve probing fills
     the clique table to HiGHS 1.16's size (404 cliques / 808 entries after its presolve,
     measured with ``threads=1``, no symmetry), node separation probes and separates
-    implied-bound cuts, and no incumbent is reported for the infeasible program."""
-    for k in FLAGS:
+    implied-bound cuts, and no incumbent is reported for the infeasible program.
+
+    Presolve probing runs once, as in HiGHS. With root probing on (the default since
+    #2360, ``DISCOPT_HIGHS_SEPA_ROOT_PROBE``) it runs in the root separation, so the
+    table the search receives (``MilpCliqueTableCliques0``) is already the probed one,
+    and the search takes the root's implications instead of presolve-probing the 144
+    binaries again. Before that hand-off the search re-ran presolve probing on top of
+    the root's (183 search presolve probes measured). With ``=0`` the search receives
+    the root's unprobed table and does the presolve probing itself."""
+    for k in FLAGS + ("DISCOPT_HIGHS_SEPA_ROOT_PROBE",):
         monkeypatch.delenv(k, raising=False)
+    if root_probe != "default":
+        monkeypatch.setenv("DISCOPT_HIGHS_SEPA_ROOT_PROBE", root_probe)
     monkeypatch.setenv("DISCOPT_PROFILE", "1")
     monkeypatch.setenv("DISCOPT_LP_ENGINE", "rust")
     monkeypatch.setenv("DISCOPT_MILP_CLIQUE_DOMAIN", "1")
@@ -155,11 +166,19 @@ def test_c513_tables_and_node_probing(monkeypatch):
     c = dict(_rust.profile_counters_py())
     assert r.objective is None, (r.status, r.objective)
     assert r.status != "optimal", r.status
-    assert c.get("MilpCliqueTableCliques0", 0) < 50, c.get("MilpCliqueTableCliques0")
     assert c.get("MilpCliqueTableCliques1", 0) >= 380, c.get("MilpCliqueTableCliques1")
-    assert c.get("MilpProbePresolve", 0) >= 144, c.get("MilpProbePresolve")
     assert c.get("MilpProbeNode", 0) > 0, "node separation never probed"
     assert c.get("MilpImpliedBoundCuts", 0) > 0, "no implied-bound cut was separated"
+    if root_probe == "default":
+        assert c.get("MilpRootProbePresolve", 0) >= 144, c.get("MilpRootProbePresolve")
+        assert c.get("MilpCliqueTableCliques0", 0) >= 380, c.get("MilpCliqueTableCliques0")
+        # The top-level search does not presolve-probe again; what remains are
+        # heuristic sub-MIPs whose own root separation did not probe (33 measured).
+        assert c.get("MilpProbePresolve", 0) < 144, c.get("MilpProbePresolve")
+    else:
+        assert c.get("MilpRootProbePresolve", 0) == 0, c.get("MilpRootProbePresolve")
+        assert c.get("MilpCliqueTableCliques0", 0) < 50, c.get("MilpCliqueTableCliques0")
+        assert c.get("MilpProbePresolve", 0) >= 144, c.get("MilpProbePresolve")
 
 
 @pytest.mark.correctness
@@ -188,6 +207,12 @@ def test_defaults_on_and_zero_opts_out(monkeypatch):
         c = dict(_rust.profile_counters_py())
         assert r.status == "optimal" and r.gap_certified, (arm, r.status)
         assert r.objective == pytest.approx(ref.objective, abs=1e-6), arm
-        seen[arm] = (c.get("MilpCliqueDomainCalls", 0), c.get("MilpProbeProbed", 0))
-    assert seen["default"][0] > 0 and seen["default"][1] > 0, seen
+        # Probing the search's implications came from: its own, or (root probing on,
+        # the default since #2360) the root separation's, which the search inherits
+        # with `hasProbed` set, so it has nothing left to probe on kp-b.
+        probed = c.get("MilpProbeProbed", 0)
+        root = c.get("MilpRootProbePresolve", 0) + c.get("MilpRootProbeProbed", 0)
+        seen[arm] = (c.get("MilpCliqueDomainCalls", 0), probed, root)
+    assert seen["default"][0] > 0 and seen["default"][1] + seen["default"][2] > 0, seen
+    seen["both=0"] = seen["both=0"][:2]
     assert seen["both=0"] == (0, 0), seen

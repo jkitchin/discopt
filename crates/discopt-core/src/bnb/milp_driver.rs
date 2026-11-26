@@ -8964,8 +8964,8 @@ fn solve_milp_node_search(
                 let cliques = if highs_env::clique_domain_enabled() {
                     highs_sep
                         .as_ref()
-                        .and_then(|h| h.clique_table())
-                        .map(|t| (t, r0.solution[..ns.min(r0.solution.len())].to_vec()))
+                        .and_then(|h| h.clique_table().map(|t| (t, h.root_probed())))
+                        .map(|(t, rp)| (t, r0.solution[..ns.min(r0.solution.len())].to_vec(), rp))
                 } else {
                     None
                 };
