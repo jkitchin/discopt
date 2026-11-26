@@ -98,8 +98,8 @@ pub fn propagate_implied_bounds(model: &ModelRepr, bounds: &mut [Interval]) -> I
 /// A linear row, normalised to scalar bound indices.
 #[derive(Debug, Clone)]
 struct LinearRow {
-    /// `(bound_index, coeff)` pairs in arena-id order. Coefficients
-    /// with absolute value below 1e-15 are dropped.
+    /// `(bound_index, coeff)` pairs in arena-id order. Exact zeros are
+    /// dropped; every other coefficient is kept.
     terms: Vec<(usize, f64)>,
     /// Constant offset of the row (`c0` in `Σ c_i x_i + c0`).
     constant: f64,
@@ -120,7 +120,11 @@ fn extract_linear_row(model: &ModelRepr, body: ExprId) -> Option<LinearRow> {
         }
         let leaf = m.factors[0].0;
         let bidx = leaf_scalar_bound_index(&model.arena, model, leaf)?;
-        if m.coeff.abs() <= 1e-15 {
+        // Only an exact zero leaves the row: dropping a tiny nonzero term would
+        // ignore its activity (`1e-16 y` with `y` in `[-1e16, 0]` is worth 1), so a
+        // bound derived without it can cut feasible points (#2362 sweep). Tiny terms
+        // stay in the activity; `propagate_row` only declines to divide by them.
+        if m.coeff == 0.0 {
             continue;
         }
         terms.push((bidx, m.coeff));
@@ -154,6 +158,9 @@ fn leaf_scalar_bound_index(arena: &ExprArena, model: &ModelRepr, leaf: ExprId) -
 // ─────────────────────────────────────────────────────────────
 // Per-row propagation
 // ─────────────────────────────────────────────────────────────
+
+/// HiGHS's `small_matrix_value` default (`HighsOptions.h:787`).
+const SMALL_MATRIX_VALUE: f64 = 1e-9;
 
 /// Tighten variable bounds from a single linear row.
 ///
@@ -200,6 +207,14 @@ fn propagate_row(
     }
 
     for &(idx, c) in &row.terms {
+        // HiGHS's `small_matrix_value` (`HighsOptions.h:787`, applied at
+        // `HighsMatrixUtils.cpp:257`): a coefficient this small is never a pivot for
+        // a bound. `rest` below carries the round-off of the activity sum
+        // (`0.1 + 0.2 - 0.3 = 5.6e-17`), and dividing it by `|c| <= 1e-9` turns that
+        // into a bound far inside the feasible set. Skipping only weakens (#2362).
+        if c.abs() <= SMALL_MATRIX_VALUE {
+            continue;
+        }
         let b = bounds[idx];
         let (own_lo, own_hi) = scaled_interval(c, b.lo, b.hi);
         // Activity of the rest of the row.
@@ -291,6 +306,98 @@ mod tests {
             left: a,
             right: b,
         })
+    }
+
+    fn one_row_model(terms: &[(f64, f64, f64)], sense: ConstraintSense, rhs: f64) -> ModelRepr {
+        let mut arena = ExprArena::new();
+        let mut body = None;
+        let mut variables = Vec::new();
+        for (i, &(c, lb, ub)) in terms.iter().enumerate() {
+            let v = scalar_var(&mut arena, &format!("x{i}"), i);
+            let t = lin(&mut arena, c, v);
+            body = Some(match body {
+                None => t,
+                Some(b) => add(&mut arena, b, t),
+            });
+            variables.push(vinfo(&format!("x{i}"), i, lb, ub));
+        }
+        let body = body.unwrap();
+        ModelRepr {
+            objective: body,
+            arena,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense,
+                rhs,
+                name: None,
+            }],
+            n_vars: terms.len(),
+            variables,
+        }
+    }
+
+    /// #2362 sweep. Two misfires of a tiny coefficient, each checked against a point
+    /// that satisfies the row:
+    /// - dividing round-off by it: `0.1 x0 + 0.2 x1 + c y <= 0.3` at `x0 = x1 = 1`
+    ///   leaves `0.3 - (0.1 + 0.2) = -5.6e-17`, so `y <= -5.6e-17 / c`, which empties
+    ///   `y in [0, 1]` although `y = 0` is feasible (to 6e-17);
+    /// - dropping it: `x + 1e-16 y <= 1` with `y in [-1e16, 0]` allows `x = 2`.
+    #[test]
+    fn a_tiny_coefficient_never_bounds_a_feasible_point_away() {
+        let mut checked = 0;
+        for c in [1e-12, -1e-12, 1e-16, 1e-10] {
+            for sense in [ConstraintSense::Le, ConstraintSense::Eq] {
+                let (s, r) = if c > 0.0 { (1.0, 0.3) } else { (-1.0, -0.3) };
+                let model = one_row_model(
+                    &[(0.1 * s, 1.0, 1.0), (0.2 * s, 1.0, 1.0), (c, 0.0, 1.0)],
+                    if s < 0.0 && sense == ConstraintSense::Le {
+                        ConstraintSense::Ge
+                    } else {
+                        sense
+                    },
+                    r,
+                );
+                let mut bounds: Vec<Interval> = model
+                    .variables
+                    .iter()
+                    .map(|v| Interval::new(v.lb[0], v.ub[0]))
+                    .collect();
+                propagate_implied_bounds(&model, &mut bounds);
+                assert!(
+                    bounds[2].lo <= 0.0 && bounds[2].hi >= 0.0,
+                    "c={c} {sense:?}: y in [{}, {}] lost y = 0",
+                    bounds[2].lo,
+                    bounds[2].hi
+                );
+                checked += 1;
+            }
+        }
+        // The dropped term: x + 1e-16 y <= 1, (x, y) = (2, -1e16) is feasible.
+        let model = one_row_model(
+            &[(1.0, 0.0, 10.0), (1e-16, -1e16, 0.0)],
+            ConstraintSense::Le,
+            1.0,
+        );
+        let mut bounds = vec![Interval::new(0.0, 10.0), Interval::new(-1e16, 0.0)];
+        propagate_implied_bounds(&model, &mut bounds);
+        assert!(bounds[0].hi >= 2.0, "x <= {} cuts (2, -1e16)", bounds[0].hi);
+        checked += 1;
+        // Control: a real coefficient still propagates (x + 0.5 y <= 1 -> x <= 1).
+        let model = one_row_model(
+            &[(1.0, 0.0, 10.0), (0.5, 0.0, 1.0)],
+            ConstraintSense::Le,
+            1.0,
+        );
+        let mut bounds = vec![Interval::new(0.0, 10.0), Interval::new(0.0, 1.0)];
+        propagate_implied_bounds(&model, &mut bounds);
+        assert!(
+            (bounds[0].hi - 1.0).abs() < 1e-12,
+            "control: x <= {}",
+            bounds[0].hi
+        );
+        checked += 1;
+        assert_eq!(checked, 10);
     }
 
     /// `2 x + y ≤ 10` with `x ∈ [0, 10], y ∈ [0, 10]` should not

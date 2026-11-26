@@ -86,7 +86,7 @@ const SMALL_MATRIX_VALUE: f64 = 1e-9;
 /// certified a dual bound 2065 past the true optimum. Refusing to propagate through
 /// such an entry only weakens propagation, so it is always sound; its contribution
 /// to the activity is still counted.
-fn is_noise_coef(a: f64) -> bool {
+pub(crate) fn is_noise_coef(a: f64) -> bool {
     a.abs() <= SMALL_MATRIX_VALUE
 }
 
@@ -1743,7 +1743,11 @@ impl Domain {
                 } else {
                     BoundType::Lower
                 };
-                self.check_change_bound(bt, col, capacity / cost[col], Reason::Objective);
+                // Not through a noise cost (`is_noise_coef`): `capacity / cost` would
+                // amplify the round-off of `capacity` by `1 / |cost|` (#2362 sweep).
+                if !is_noise_coef(cost[col]) {
+                    self.check_change_bound(bt, col, capacity / cost[col], Reason::Objective);
+                }
                 break;
             }
         } else {
@@ -1837,6 +1841,12 @@ impl Domain {
                     break;
                 }
                 for &col in &nz[obj.partition_starts()[np]..] {
+                    // HiGHS has no rule here (it keeps every `cost != 0`,
+                    // `HighsObjectiveFunction.cpp:25`); its matrix rule is applied to the
+                    // cost as to a row entry (`is_noise_coef`, #2362 sweep).
+                    if is_noise_coef(cost[col]) {
+                        continue;
+                    }
                     let changed = if cost[col] > 0.0 {
                         self.check_change_bound(
                             BoundType::Upper,
@@ -4677,6 +4687,49 @@ mod tests {
         // Both paths must have run, the long one many times.
         assert!(checked > 1000, "{checked}");
         assert!(long_checked > 500, "{long_checked}");
+    }
+
+    #[test]
+    fn objective_propagation_never_divides_by_a_noise_cost() {
+        // #2362 sweep. min x0 + c x1, x0 in [0, 1]. The cutoff sits 1e-12 from the
+        // objective's lower bound, the size of the round-off an incrementally updated
+        // activity carries (6.9e-12 measured on 2122). Every point within 1e-9 of the
+        // cutoff must survive, and `capacity / c` for a noise `c` bounded x1 1e5 inside
+        // them. A real cost (the control) is still propagated.
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &[],
+            vec![],
+            vec![],
+            vec![false; 2],
+        ));
+        let mut checked = 0;
+        for c in [1e-17, 5.55e-17, 1e-10, 1e-3] {
+            // (x1's box, cutoff): one infinite contribution (x1 the infinite column,
+            // `capacity / c`), and none (`(capacity + lb c) / c`).
+            for (l1, u1, cutoff) in [(-INF, 1e6, -1e-12), (0.0, 1e6, 1e-12)] {
+                let (lb, ub) = ([0.0, l1], [1.0, u1]);
+                let obj = ObjectiveFunction::new(&[1.0, c], &[false; 2], &lb, &ub);
+                let mut d = Domain::new(Arc::clone(&model), &lb, &ub, 1e-6, 1e-9);
+                d.set_upper_limit(cutoff);
+                d.setup_objective_propagation(Arc::new(obj));
+                d.propagate();
+                assert!(!d.infeasible(), "c={c} l1={l1}");
+                if is_noise_coef(c) {
+                    // x = (0, x1) is within 1e-9 of the cutoff for x1 in [l1', 1e6]
+                    // with c x1 <= cutoff + 1e-9.
+                    let keep = ((cutoff + 1e-9) / c).min(1e6);
+                    assert!(d.col_upper[1] >= keep, "c={c} l1={l1}: {}", d.col_upper[1]);
+                } else {
+                    assert!(
+                        d.col_upper[1] < 1e6,
+                        "c={c}: the control propagated nothing"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 8);
     }
 
     #[test]

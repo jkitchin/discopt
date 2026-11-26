@@ -22,7 +22,7 @@
 //! `getBestVub`/`getBestVlb` can break exact ties differently.
 
 use super::cdouble::CDouble;
-use super::domain::OpenNodeCounts;
+use super::domain::{is_noise_coef, OpenNodeCounts};
 use super::stdalgo::partition;
 use super::transformed_lp::{VarBound, VbEntry};
 
@@ -218,7 +218,10 @@ impl VarBoundStore {
             }
             for j in nbin..ntotal {
                 let col = inds[perm[j]] as usize;
-                if d.is_fixed(col) {
+                // Not through a noise coefficient (`is_noise_coef`): dividing the
+                // round-off of `impliedub` by it implies a bound arbitrarily far inside
+                // the true one (#2362 sweep).
+                if d.is_fixed(col) || is_noise_coef(vals[perm[j]]) {
                     continue;
                 }
                 let colub = CDouble::new(d.ub[col]) - d.lb[col];
@@ -337,10 +340,12 @@ impl VarBoundStore {
             let implied_activity = CDouble::new(rhs) - minact - vals[perm[i]].abs();
             for j in nbin..len {
                 let col = inds[perm[j]] as usize;
-                if d.is_fixed(col) {
+                let vj = vals[perm[j]];
+                // As in `extract_from_complemented`: no vbound through a noise
+                // coefficient (#2362 sweep).
+                if d.is_fixed(col) || is_noise_coef(vj) {
                     continue;
                 }
-                let vj = vals[perm[j]];
                 if vj > 0.0 {
                     let mut implcolub = (implied_activity + vj * d.lb[col]).to_f64() / vj;
                     if d.is_int[col] {
@@ -393,6 +398,54 @@ fn with_counts(mut v: Vec<VbEntry>, open: Option<&dyn OpenNodeCounts>) -> Vec<Vb
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2362 sweep. `y + a x <= 1 - 1e-12` (y binary, x in [0, 10]) is satisfied within
+    /// tolerance by y = 1 and any x; the `-1e-12` is presolve round-off. Through a noise
+    /// `a` the extractor divided it by `a` and recorded `y = 1 => x <= -1e5`, a vbound
+    /// that cuts off every such point. A real coefficient (the control) still derives one.
+    #[test]
+    fn no_variable_bound_through_a_noise_coefficient() {
+        // A second binary (y1, coefficient 1) because the cut extractor needs two.
+        let lb = [0.0, 0.0, 0.0];
+        let ub = [1.0, 1.0, 10.0];
+        let is_int = [true, true, false];
+        let d = Domain {
+            lb: &lb,
+            ub: &ub,
+            is_int: &is_int,
+        };
+        let inds = [0i32, 1, 2];
+        let mut checked = 0;
+        for (a, want) in [
+            (1e-17, false),
+            (-5.55e-17, false),
+            (1e-10, false),
+            (1e-3, true),
+        ] {
+            for cut in [false, true] {
+                let mut store = VarBoundStore::new(3, 1e-6);
+                let up = if a > 0.0 {
+                    1.0 - 1e-12
+                } else {
+                    1.0 - 1e-12 + 10.0 * a
+                };
+                let up = if want { 0.5 } else { up };
+                if cut {
+                    store.extract_from_cut(&d, &inds, &[1.0, 1.0, a], up);
+                } else {
+                    store.extract_from_model_row(&d, &inds, &[1.0, 1.0, a], -INF, up, 1e-9);
+                }
+                assert_eq!(
+                    store.len() > 0,
+                    want,
+                    "a={a} cut={cut}: {} vbounds",
+                    store.len()
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 8);
+    }
 
     /// Every derived bound must hold at every integer point of a small box that
     /// satisfies the source row (CLAUDE.md §5 feasible-point sampling, exhaustive).

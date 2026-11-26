@@ -75,6 +75,11 @@ pub struct EliminationStats {
     pub candidates_examined: usize,
 }
 
+/// HiGHS's `small_matrix_value` default (`HighsOptions.h:787`; entries at or below
+/// it are dropped from the matrix, `HighsMatrixUtils.cpp:257`). No bound, fixing or
+/// elimination pivots on a coefficient this small (#2362 sweep).
+const SMALL_MATRIX_VALUE: f64 = 1e-9;
+
 /// Run M10 variable elimination on `model`.
 ///
 /// Pure function: input is not modified. The caller decides whether
@@ -194,7 +199,9 @@ pub fn eliminate_variables_until(
                     break;
                 }
             }
-            if other_var_terms || leaf_count == 0 || coeff == 0.0 {
+            // `value` divides the row's residual, round-off included, by `coeff`; a
+            // noise coefficient turns that round-off into the fixed value (#2362).
+            if other_var_terms || leaf_count == 0 || coeff.abs() <= SMALL_MATRIX_VALUE {
                 continue;
             }
 
@@ -327,6 +334,63 @@ mod tests {
             lb: vec![lb],
             ub: vec![ub],
         }
+    }
+
+    /// #2362 sweep. `0.1 + 0.2 + c x == 0.3`, `x` in `[-1, 1]`: the row's residual
+    /// is the round-off `0.3 - 0.30000000000000004`, so `value = -5.6e-17 / c`. For a
+    /// noise `c` that fixes `x` at `-5.6e-5` (or `-5.6e-7`), away from the `x = 0` the
+    /// row states and from every other point it admits to tolerance. The control
+    /// (`c = 1e-3`, value `-5.6e-14`) is still fixed.
+    #[test]
+    fn never_fixes_through_a_noise_coefficient() {
+        let mut checked = 0;
+        for c in [1e-12, -1e-10, 1e-3] {
+            let mut arena = ExprArena::new();
+            let x = scalar_var(&mut arena, "x", 0);
+            let cn = arena.add(ExprNode::Constant(c));
+            let cx = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: cn,
+                right: x,
+            });
+            let k1 = arena.add(ExprNode::Constant(0.1));
+            let k2 = arena.add(ExprNode::Constant(0.2));
+            let k = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: k1,
+                right: k2,
+            });
+            let body = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: k,
+                right: cx,
+            });
+            let model = ModelRepr {
+                arena,
+                objective: x,
+                objective_sense: ObjectiveSense::Minimize,
+                constraints: vec![ConstraintRepr {
+                    body,
+                    sense: ConstraintSense::Eq,
+                    rhs: 0.3,
+                    name: None,
+                }],
+                variables: vec![vinfo("x", -1.0, 1.0)],
+                n_vars: 1,
+            };
+            let (out, stats) = eliminate_variables(&model);
+            let noise = c.abs() <= SMALL_MATRIX_VALUE;
+            assert_eq!(stats.variables_fixed, usize::from(!noise), "c={c}");
+            let v = &out.variables[0];
+            assert!(
+                v.lb[0] <= 1e-9 && v.ub[0] >= -1e-9,
+                "c={c}: x in [{}, {}] excludes x = 0",
+                v.lb[0],
+                v.ub[0]
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
     }
 
     #[test]

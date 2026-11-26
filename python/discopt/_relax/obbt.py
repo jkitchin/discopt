@@ -1866,7 +1866,10 @@ def propagate_equality_defined_bounds(
                 if rhs is None:
                     continue
                 for pos, (coeff, sub) in enumerate(terms):
-                    if abs(coeff) < 1e-30:
+                    # ``(rhs - rest) / coeff`` below: a noise coefficient (HiGHS's
+                    # ``small_matrix_value`` 1e-9, ``HighsOptions.h:787``) makes the
+                    # round-off of ``rest`` the bound, past the relative margin (#2362).
+                    if abs(coeff) <= 1e-9:
                         continue
                     vi = _scalar_flat_index(sub, model)
                     if vi is None or vi >= n_vars:
