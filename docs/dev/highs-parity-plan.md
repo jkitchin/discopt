@@ -1622,6 +1622,24 @@ and is re-written by P4.1.**
   orbital reduction) is mildly positive (-1.2 % nodes, `p0201` 186 -> 92, `neos-911970` bound
   closer to the optimum), and adding dynamic orbitopal fixing changes no outcome (it fires on
   one row). Graduation decisions are the owner's; rows in `flag-retirement-audit.md`.
+  **`no-ip-65059` under the dynamic stack (2026-11-25, `fe736687f`).** Rust engine, 1 thread,
+  600 s, one job at a time. Each job started at a 1-min load below 14, but the load rose to
+  27-31 during the runs, so no wall times are claimed. The full dynamic stack
+  (`SYM_DYNAMIC` + `SYM_ORBITAL` + `ORBITOPAL` + `CONFLICT`) hit the time limit
+  **without certifying**, at 52,318 nodes:
+  - 210,882 conflicts, 11,626 proof conflicts, 336 global conflict fixings.
+  - Orbitopal fixing worked on 2 orbitopes. The profile dump, taken at 39 of the 70 search
+    runs, shows 44,256 fixings over 52,316 nodes.
+  - Dynamic lex and orbital reduction received no generators: every generator moves an
+    orbitope entry.
+
+  Without orbitopal (`SYM_DYNAMIC` + `SYM_ORBITAL` + `CONFLICT`), it also hit the time limit
+  without certifying, at 74,580 nodes:
+  - 17 generators; 16,788 dynamic-lex fixings and 57,986 orbital fixings.
+  - 181,711 conflicts, 20,371 proof conflicts, 232 global conflict fixings.
+
+  The static stack certified at 12,730 nodes. On this instance the dynamic stack does not
+  reproduce that result.
 - [x] **P4.8 — Dimension-reducing MILP presolve with postsolve. DEFERRED 2026-11-06 (owner).** *(≤ 3 iterations, last:
   worth ≤ 2 instances / 1.7× in HiGHS's own ablation, §1c)*. Scope: reuse P2.4's LP
   reductions + integer-aware rounding, `presolve/substitute.rs` where it applies. Flag
