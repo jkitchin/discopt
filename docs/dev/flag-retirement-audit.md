@@ -178,7 +178,9 @@ in the audit.
 
 **Terminology (PR #2196 review).** A "dual loss" (`d2_flag_panel.py`) is an instance neither arm certified whose ON median final gap at the time limit is worse than OFF's by more than OFF's own run-to-run spread: a performance measure. Bound validity is bar 1 (no bound past the oracle), checked separately.
 
-<!-- live-solver-math-gates: 69 -->
+<!-- live-solver-math-gates: 71 -->
+
+_69 -> 71 (2026-11-26, #2351 consolidated into #2360): `HIGHS_SEARCH_SEPA` (HiGHS node `separationRound` in the search) and `HIGHS_NODE_ITER_LIMIT` (HiGHS node LP iteration limit) added default OFF, rows under "Rows added 2026-11-26 (HiGHS search-node separation)". `SEARCH_SEPA` is on the bundle panel with `MILP_SYM_LEX`; `NODE_ITER_LIMIT` has left the bundle and waits on the capped-dual IterLimit fix._
 
 _69 -> 69 (2026-11-26): `HIGHS_SEPA_ROOT_PROBE` added and graduated to default ON in the same PR on its §5 panel, under bar 2(a) as a neutral faithful port of HiGHS's root probing (row under "Rows added 2026-11-26"); `=0` restores the unprobed root separation._
 
