@@ -6813,6 +6813,8 @@ fn solve_milp_node_search(
     }
 
     let mut lp_iters = 0usize;
+    // Root LP solves behind `lp_iters` at the search's start (`avgrootlpiters`).
+    let mut root_solves = 0usize;
     // Pivots spent by improving dives (`DISCOPT_MILP_IMPROVE_DIVE`), budgeted against
     // `lp_iters` by `improve_dive_batch_eligible`.
     let mut improve_dive_iters = 0usize;
@@ -7264,6 +7266,7 @@ fn solve_milp_node_search(
                     }
                 };
                 lp_iters += root.iters;
+                root_solves += 1;
                 if root.status != LpStatus::Optimal {
                     break;
                 }
@@ -8832,6 +8835,8 @@ fn solve_milp_node_search(
                     nodes_before: tm.stats().total_nodes,
                     submip: in_sub_mip(),
                     iters_before: lp_iters as i64,
+                    root_solves,
+                    node_iter_limit: highs_env::node_iter_limit_enabled(),
                 };
                 // The best verified point so far: the tree's, or the root
                 // evaluation's heuristic candidate.
@@ -15573,6 +15578,107 @@ mod tests {
                 && tot.sb_iters > 900,
             "probe fired too little: problems {problems} optimal {optimal} {tot:?}"
         );
+    }
+
+    /// `DISCOPT_HIGHS_NODE_ITER_LIMIT`: every node evaluation of the search solves
+    /// under HiGHS's node iteration limit (`processNodes`' `setIterationLimit`, HiGHS
+    /// 1.16), and without the flag under the driver's own `max_iter`. Before the fix
+    /// the search had no node limit: on neos17 (2,000 nodes, with
+    /// `DISCOPT_HIGHS_SEARCH_SEPA`) warm primal solves ran up to the 100,000-pivot
+    /// default, 1,244,493 phase-1 pivots in all against 35,192 without separation.
+    #[test]
+    fn highs_search_node_lps_run_under_the_node_iteration_limit() {
+        use super::highs_branch::e2e::{E2eResult, E2E};
+        let mut seed = 17u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut checked_on, mut checked_off) = (0usize, 0usize);
+        for _ in 0..20 {
+            let ns = rnd(10, 16) as usize;
+            let m = rnd(6, 10) as usize;
+            let l = vec![0.0; ns];
+            let u: Vec<f64> = (0..ns).map(|_| rnd(1, 8) as f64).collect();
+            let c: Vec<f64> = (0..ns).map(|_| -(rnd(1, 9) as f64) - 0.5).collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            for i in 0..m {
+                for col in cols.iter_mut() {
+                    if rnd(0, 2) != 0 {
+                        col.push((i, rnd(1, 7) as f64));
+                    }
+                }
+                b.push(rnd(5, 30) as f64 + 0.5);
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let o = opts(ns, (0..ns).collect());
+            let base = o.simplex.max_iter;
+            assert!(
+                base > 10_000,
+                "the driver's max_iter {base} must exceed the floor"
+            );
+            for on in [false, true] {
+                let csc = SparseCols::from_csc(cp.clone(), rix.clone(), rvx.clone());
+                E2E.with(|e| {
+                    *e.borrow_mut() = Some(E2eResult {
+                        cfg_iter_limit: on,
+                        ..Default::default()
+                    })
+                });
+                let _ =
+                    solve_milp_node_search(csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, None, None, None);
+                let h = E2E.with(|e| e.borrow_mut().take().unwrap());
+                let seen = h.node_max_iter.clone();
+                if !h.ran {
+                    continue;
+                }
+                // Tiny LPs: every term of the limit is below its 10,000 floor.
+                let want = if on { 10_000 } else { base };
+                for &mi in &seen {
+                    assert_eq!(mi, want, "node LP max_iter with the limit {on}");
+                }
+                if on {
+                    checked_on += seen.len();
+                } else {
+                    checked_off += seen.len();
+                }
+            }
+        }
+        assert!(
+            checked_on > 0 && checked_off > 0,
+            "no node evaluation checked: on {checked_on}, off {checked_off}"
+        );
+    }
+
+    #[test]
+    fn highs_node_iteration_limit_formula() {
+        use highs_env::node_iteration_limit as lim;
+        // `max(10000, 10 * max(avgiter, avgrootlpiters), 3 * firstrootlpiters / 2)`.
+        assert_eq!(lim(0.0, 0.0, 0), 10_000);
+        assert_eq!(lim(2_000.0, 100.0, 0), 20_000);
+        assert_eq!(lim(100.0, 2_000.0, 0), 20_000);
+        assert_eq!(lim(10.0, 10.0, 20_001), 30_001);
+        // `HighsInt iterlimit = 10 * max(...)` truncates.
+        assert_eq!(lim(1_234.56, 0.0, 0), 12_345);
     }
 
     /// The search starts its separators fresh, as HiGHS's does: `HighsMipWorker`
