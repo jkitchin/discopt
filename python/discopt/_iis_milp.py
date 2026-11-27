@@ -2839,6 +2839,7 @@ def milp_iis_arrays(
         )
     if not include_bounds:
         return res  # the post-pass needs every applied bound listed (see _polish)
+    deadline = None if total_time_limit is None else t_start + float(total_time_limit)
     t_portfolio = time.perf_counter()
     if portfolio is not None:
         return _stamp_timing(
@@ -2848,8 +2849,7 @@ def milp_iis_arrays(
                 portfolio,
                 workers,
                 threads,
-                t_start,
-                total_time_limit,
+                deadline,
                 cert_tol,
                 time_limit,
                 iis_engine,
@@ -2864,8 +2864,7 @@ def milp_iis_arrays(
         portfolio,
         workers,
         threads,
-        t_start,
-        total_time_limit,
+        deadline,
         cert_tol,
         time_limit,
         iis_engine,
@@ -2895,14 +2894,13 @@ def _post_pass(
     portfolio: Optional[Sequence[str]],
     workers: Optional[int],
     threads: Optional[int],
-    t_start: float,
-    total_time_limit: Optional[float],
+    deadline: Optional[float],
     cert_tol: float,
     time_limit: float,
     iis_engine: str,
 ) -> MilpIIS:
-    """The post-passes of :func:`milp_iis_arrays` on the filter's answer ``res``."""
-    deadline = None if total_time_limit is None else t_start + float(total_time_limit)
+    """The post-passes of :func:`milp_iis_arrays` on the filter's answer ``res``,
+    against ``milp_iis_arrays``'s ``deadline``."""
     alts = res.alternatives or []
     n_par = min(1 + len(alts), (os.cpu_count() or 1) if workers is None else int(workers))
     if (
