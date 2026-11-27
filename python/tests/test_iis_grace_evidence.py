@@ -101,6 +101,7 @@ def test_entry_passes_the_evidence_floor_exit(tmp_path, monkeypatch):
     monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
     monkeypatch.delenv("MIPCC_PORTFOLIO_WAIT", raising=False)
     assert mipcc.main([str(mps), str(tmp_path / "a.json")]) == 0
-    monkeypatch.setenv("MIPCC_PORTFOLIO_WAIT", "evidence")
+    monkeypatch.setenv("MIPCC_PORTFOLIO_WAIT", "fast")
     assert mipcc.main([str(mps), str(tmp_path / "b.json")]) == 0
-    assert seen == [None, (10.0, 60.0)]
+    assert mipcc.PORTFOLIO_WAIT == "evidence"
+    assert seen == [(10.0, 60.0), None]

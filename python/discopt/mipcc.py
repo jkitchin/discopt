@@ -44,13 +44,17 @@ from discopt._optional_highs import run_checked, wrap_callback
 
 _T_LAUNCH = time.perf_counter()  # earliest point this process can see
 
-# Portfolio wait: the library default, "fast" (see _iis_milp.PORTFOLIO_WAITS:
-# the other members stop clamp(t, 10, 30) s after the first completes at t, but
-# not before half the budget has elapsed). MIPCC_PORTFOLIO_WAIT=scaled is the
-# opt-in that trades size for time (see _iis_milp.PORTFOLIO_WAITS), and
-# MIPCC_PORTFOLIO_WAIT=evidence the fast wait whose floor ends early, at
-# t + max(10 t, 60) s (see _iis_milp.PORTFOLIO_FLOOR_EXITS).
-PORTFOLIO_WAIT = "fast"
+# Portfolio wait: "evidence" (see _iis_milp.PORTFOLIO_WAITS and
+# PORTFOLIO_FLOOR_EXITS): the library's "fast" wait (the other members stop
+# clamp(t, 10, 30) s after the first completes at t, but not before the floor),
+# whose 300 s floor ends early, at t + max(10 t, 60) s. Measured 2026-11-27 on 20
+# MIPcc27 smallset instances (3600 s budget, interleaved A/B against "fast"):
+# the same size and completeness on all 20, 4003 s of wall time against 6264 s
+# (kedron 300 s -> 64 s; the instances whose first answer comes after ~30 s are
+# capped by the floor under both and unchanged within 2 s).
+# MIPCC_PORTFOLIO_WAIT=fast keeps the whole floor; =scaled is the opt-in that
+# trades size for time.
+PORTFOLIO_WAIT = "evidence"
 
 # Competition tolerance (SOLUTION_FORMAT.md, "Certificates"). Judging uses it.
 CHECK_TOL = 1e-5
