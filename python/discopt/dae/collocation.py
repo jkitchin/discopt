@@ -191,8 +191,12 @@ class DAEBuilder:
             ``local_limit`` (#2366). Declare such a bound slightly outside the
             reachable values instead, e.g. ``lb=-1e-8`` on the state's scale; a
             mesh whose stage values undershoot it needs refining where the input
-            switches on. ``solver="pounce"`` names the pinned columns in a
-            warning and ``result.pinned_bounds`` when it does not converge.
+            switches on. When ``solver="pounce"`` stalls on such a bound it
+            re-solves once with the bound moved outward by ``1e-8*max(1,|b|)``,
+            projects the point back inside, and reports it only if it converged
+            and passes discopt's 1e-6 feasibility check; either way it warns
+            and sets ``result.pinned_bounds``. Declaring ``lb=-1e-8`` saves the
+            stalled first solve.
         initial : float or np.ndarray, optional
             Initial condition at ``t0``. If given, the state is fixed at this
             value at the first time point.

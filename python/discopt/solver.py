@@ -19851,6 +19851,7 @@ def solve_model(
             if _prereform_model is not None and model is _factorable_lift_output
             else model
         )
+        _cont_pinned: list = []
         _cont_result = _solve_continuous(
             _local_nlp_model,
             time_limit,
@@ -19859,6 +19860,7 @@ def solve_model(
             nlp_solver,
             initial_point=initial_point,
             warm_start=warm_start,
+            pinned_out=_cont_pinned,
         )
         # A local NLP on a model we could NOT certify convex (classification
         # failed/timed out, leaving convexity unknown) is best-effort only. If it
@@ -19895,6 +19897,26 @@ def solve_model(
                 )
                 + "; no dual bound by design)"
             )
+            # #2366: the same "no strict interior" report as ``solver="pounce"``'s
+            # NLP arm, on this route's backend (Ipopt included). Report only: this
+            # best-effort path makes no second solve.
+            if _cont_result.status != "optimal" and _cont_pinned and _cont_pinned[0] is not None:
+                import warnings as _pin_warnings
+
+                _cont_result.pinned_bounds = _cont_pinned[0]
+                _pin_warnings.warn(
+                    _cont_pinned[0].message(
+                        _cont_result.status,
+                        solver=f"The local {nlp_solver} NLP",
+                        options_kw=(
+                            "ipopt_options"
+                            if nlp_solver in ("ipopt", "cyipopt")
+                            else "pounce_options"
+                        ),
+                    ),
+                    UserWarning,
+                    stacklevel=3,
+                )
             return _withhold_local_optimality_certificate(_cont_result)
         logger.info(
             "Local NLP on convexity-unknown continuous model returned error; "
@@ -28470,6 +28492,8 @@ def _solve_continuous(
     midpath_out: Optional[list] = None,
     withhold_diverging: bool = False,
     pinned_out: Optional[list] = None,
+    widen_columns: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    widened_out: Optional[list] = None,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B).
 
@@ -28495,6 +28519,13 @@ def _solve_continuous(
     :class:`discopt._pinned_bounds.PinnedBoundReport` (or ``None``) whenever the
     NLP did not report a clean success: the final iterate's columns that sit at a
     bound which equality rows also determine (#2366).
+    ``widen_columns`` (``solver="pounce"`` only, #2366) is a pair of boolean
+    masks over the model's own flat columns: the NLP runs with those columns'
+    lower / upper bounds moved outward by ``_PINNED_SLAB_RTOL * max(1, |b|)``,
+    and the returned point is projected back onto the declared box before
+    anything judges it. ``widened_out``, when a list is passed, receives whether
+    that projected point passes :func:`_check_constraint_feasibility` at its
+    default (discopt's 1e-6) tolerance, or ``None`` when there was no point.
 
     ``warm_start`` is the dual half of ``Model.solve(warm_start=...)`` (#1247):
     ``{"x", "constraint_duals", "bound_duals_lower", "bound_duals_upper",
@@ -28537,6 +28568,21 @@ def _solve_continuous(
             python_time=wall_time - jax_time,
         )
     lb, ub = tightened_lb, tightened_ub
+    _widened_lo = _widened_hi = None
+    if widen_columns is not None:
+        # #2366: the bound-slab retry. Masks cover the model's own columns; a
+        # solve-time auxiliary column is never widened.
+        _widened_lo = np.zeros(lb.size, dtype=bool)
+        _widened_hi = np.zeros(ub.size, dtype=bool)
+        _n_own = min(lb.size, np.asarray(widen_columns[0]).size)
+        _widened_lo[:_n_own] = np.asarray(widen_columns[0], dtype=bool)[:_n_own]
+        _widened_hi[:_n_own] = np.asarray(widen_columns[1], dtype=bool)[:_n_own]
+        _widened_lo &= (lb > -1e19) & (ub > lb)
+        _widened_hi &= (ub < 1e19) & (ub > lb)
+        lb = lb.copy()
+        ub = ub.copy()
+        lb[_widened_lo] -= _PINNED_SLAB_RTOL * np.maximum(1.0, np.abs(lb[_widened_lo]))
+        ub[_widened_hi] += _PINNED_SLAB_RTOL * np.maximum(1.0, np.abs(ub[_widened_hi]))
     lb_clipped, ub_clipped = _clip_start_box(lb, ub)
     if initial_point is not None:
         # #1721: the start was flattened against the user's columns; a
@@ -28726,6 +28772,28 @@ def _solve_continuous(
             midpath_out.append(not converged)
     if raw_status_out is not None:
         raw_status_out.append(nlp_result.raw_status)
+
+    if _widened_lo is not None and _widened_hi is not None:
+        # #2366: the slab retry solved a box wider than the declared one. Project
+        # the point back onto the declared box (only the widened columns can lie
+        # outside it) and re-evaluate the objective there, so everything below --
+        # duals, the false-primal screen, the reported objective -- judges the
+        # point the user gets. The strict check decides whether the caller may
+        # adopt it.
+        _verified: Optional[bool] = None
+        if nlp_result.x is not None:
+            from discopt._relax.primal_heuristics import _check_constraint_feasibility
+
+            _xp = np.asarray(nlp_result.x, dtype=np.float64).copy()
+            _decl_lb = np.asarray(raw_lb, dtype=np.float64)
+            _decl_ub = np.asarray(raw_ub, dtype=np.float64)
+            _xp[_widened_lo] = np.maximum(_xp[_widened_lo], _decl_lb[_widened_lo])
+            _xp[_widened_hi] = np.minimum(_xp[_widened_hi], _decl_ub[_widened_hi])
+            nlp_result.x = _xp
+            nlp_result.objective = float(evaluator.evaluate_objective(_xp))
+            _verified = bool(_check_constraint_feasibility(evaluator, _xp))
+        if widened_out is not None:
+            widened_out.append(_verified)
 
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - jax_time
@@ -29122,6 +29190,60 @@ POUNCE_ROUTE_LP = "pounce:lp-ipm"
 POUNCE_ROUTE_QP = "pounce:qp-ipm"
 POUNCE_ROUTE_NLP = "pounce:nlp"
 
+#: Relative width of the slab the #2366 retry adds outside a pinned bound:
+#: ``b -> b - _PINNED_SLAB_RTOL * max(1, |b|)``. It is Ipopt's own default
+#: ``bound_relax_factor``, applied to the pinned variables' bounds only (never to
+#: the slack bounds of inequality rows, which is what discopt's
+#: ``bound_relax_factor = 0`` incumbent default exists to protect, #945).
+#: Measured on the #2366 reproducer (graded 39-element mesh, coverage ``lb=0``):
+#: with ``t_CO_star`` and ``t_CO2_star`` widened by 1e-8 the fit reaches
+#: ``local_optimal``, objective 223.586908 (``lb=-1e-8`` everywhere: 223.586905)
+#: in 5.1 s, and the projected point violates no row by more than 1.3e-8.
+_PINNED_SLAB_RTOL = 1e-8
+
+
+def _pinned_retry_enabled() -> bool:
+    """Whether ``solver="pounce"`` retries a pinned-bound stall once (#2366).
+
+    **Default ON.** ``DISCOPT_POUNCE_PINNED_RETRY=0`` is the opt-out: it keeps
+    the route at exactly one interior-point solve (plus the #1768 continuation),
+    which is what a reader studying a single solve's iterates wants. It is not the
+    default because the retry turns a stall the user cannot act on without
+    re-declaring bounds into a converged fit whose point is verified inside the
+    declared box; nothing about the retry can produce a certificate, since this
+    route reports none.
+    """
+    return os.environ.get("DISCOPT_POUNCE_PINNED_RETRY", "1") != "0"
+
+
+def _pinned_slab_masks(model: Model, report: Any) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Lower/upper masks over ``model``'s flat columns for the #2366 retry.
+
+    Every column of a variable that has a pinned column on a side is widened on
+    that side, not only the pinned columns. Measured on the #2366 reproducer:
+    widening only the 281 columns pinned at the stalled iterate did not converge
+    (``iteration_limit`` from the user's start, ``local_limit`` with row violation
+    3.8e-4 from the stalled iterate), because the iterate's pinned set is that of
+    the wrong parameters; widening the two variables they belong to converged.
+    ``None`` when no model variable is named (only solve-time auxiliaries).
+    """
+    sides = {(g.variable, g.side) for g in report.groups if g.variable != "<auxiliary>"}
+    if not sides:
+        return None
+    n = sum(int(v.size) for v in model._variables)
+    lo = np.zeros(n, dtype=bool)
+    hi = np.zeros(n, dtype=bool)
+    offset = 0
+    for v in model._variables:
+        size = int(v.size)
+        if (v.name, "lower") in sides:
+            lo[offset : offset + size] = True
+        if (v.name, "upper") in sides:
+            hi[offset : offset + size] = True
+        offset += size
+    return lo, hi
+
+
 #: Ipopt's ``Infeasible_Problem_Detected``: the NLP converged to a point of
 #: locally minimal infeasibility.
 _IPOPT_INFEASIBLE_PROBLEM = 2
@@ -29287,7 +29409,14 @@ def _solve_pounce_route(
       filter line-search NLP interior-point method, once. When POUNCE reports
       success one barrier update early (:func:`_pounce_midpath`), it is continued
       once from its own point with the rows rescaled there (#1768); a
-      continuation that does not finish the path reports ``local_limit``.
+      continuation that does not finish the path reports ``local_limit``. When
+      it stops unconverged with columns pressed against a bound that equality
+      rows also determine (no strict interior, #2366), it is re-solved once from
+      the same start with those variables' bounds moved outward by
+      ``_PINNED_SLAB_RTOL * max(1, |b|)``; the retry's point is projected back
+      onto the declared box and adopted only when it converged and the
+      projection passes discopt's 1e-6 feasibility check
+      (``DISCOPT_POUNCE_PINNED_RETRY=0`` disables it).
 
     Convexity of a QP is proved by discopt, not taken from POUNCE's own PSD check:
     that check scales its tolerance by ``max|Q_ij|`` and ignores the box, so it
@@ -29549,8 +29678,58 @@ def _solve_pounce_route(
             result.solver_stats = stats
             return result
 
+    def _map_nlp_status(result: SolveResult, raw_status: list, midpath: list) -> None:
+        """The NLP arm's status vocabulary: what a local solve may claim."""
+        if result.status == "optimal" and midpath and midpath[0]:
+            # #1768: POUNCE's scaled test passed one barrier update early (the
+            # multipliers inflate its complementarity scaling), and the continuation
+            # did not finish the path. Every inequality is slack by ``mu / lambda``:
+            # not an established stationary point, so not ``local_optimal``.
+            result.status = "local_limit"
+        elif (
+            result.status == "optimal"
+            and raw_status
+            and raw_status[0] == _IPOPT_SOLVED_TO_ACCEPTABLE
+        ):
+            # #1618 B-05b: Ipopt/POUNCE code 1 (``Solved_To_Acceptable_Level``) met only
+            # the *acceptable* tolerances, whose dual-infeasibility default is 1e10 -- a
+            # point with an unscaled dual infeasibility of 1.6e4 passed. That is not an
+            # established stationary point, so it is not ``local_optimal`` (which the
+            # status vocabulary defines as one); it is a point from a local search that
+            # stopped short of its convergence test: ``local_limit``.
+            result.status = "local_limit"
+        elif result.status == "optimal":
+            result.status = "local_optimal"
+        elif result.status == "infeasible" or (
+            result.status == "error" and raw_status and raw_status[0] == _IPOPT_INFEASIBLE_PROBLEM
+        ):
+            # The NLP engine converged to a point of locally minimal infeasibility
+            # (Ipopt code 2, which the backend reports as ``error``). On a nonconvex
+            # model that is not a proof, so the claim is the local one.
+            result.status = "local_infeasible"
+            result.error = None
+        elif result.status == "iteration_limit" and result.x:
+            result.status = "local_limit"
+        elif result.status == "unbounded" or (
+            result.status == "error" and raw_status and raw_status[0] == _IPOPT_DIVERGING_ITERATES
+        ):
+            # Diverging iterates with no point to hand back (``_solve_continuous``
+            # already turned the with-a-point case into ``local_limit``, #2053). The
+            # backend maps code 4 to ``error``; ``unbounded`` is kept for a backend that
+            # labels it so. Divergence suggests, but does not prove, unboundedness.
+            from discopt import status as _st
+
+            result.status = "error"
+            result.termination = _st.TERMINATION_DIVERGING
+            result.error = (
+                "POUNCE's NLP iterates diverged; that suggests, but does not prove, an "
+                "objective unbounded below on the feasible set."
+            )
+
     # NLP arm: the filter line-search IPM over the declared box -- once, plus at
-    # most one continuation from its own point when it stopped mid-path (#1768).
+    # most one continuation from its own point when it stopped mid-path (#1768),
+    # plus at most one bound-slab retry when it stalled against bounds that
+    # equality rows pin it to (#2366).
     raw_status: list = []
     midpath: list = []
     pinned: list = []
@@ -29570,56 +29749,96 @@ def _solve_pounce_route(
         withhold_diverging=True,
         pinned_out=pinned,
     )
-    result.wall_time = time.perf_counter() - t_start
-    if result.status == "optimal" and midpath and midpath[0]:
-        # #1768: POUNCE's scaled test passed one barrier update early (the
-        # multipliers inflate its complementarity scaling), and the continuation
-        # did not finish the path. Every inequality is slack by ``mu / lambda``:
-        # not an established stationary point, so not ``local_optimal``.
-        result.status = "local_limit"
-    elif result.status == "optimal" and raw_status and raw_status[0] == _IPOPT_SOLVED_TO_ACCEPTABLE:
-        # #1618 B-05b: Ipopt/POUNCE code 1 (``Solved_To_Acceptable_Level``) met only
-        # the *acceptable* tolerances, whose dual-infeasibility default is 1e10 -- a
-        # point with an unscaled dual infeasibility of 1.6e4 passed. That is not an
-        # established stationary point, so it is not ``local_optimal`` (which the
-        # status vocabulary defines as one); it is a point from a local search that
-        # stopped short of its convergence test: ``local_limit``.
-        result.status = "local_limit"
-    elif result.status == "optimal":
-        result.status = "local_optimal"
-    elif result.status == "infeasible" or (
-        result.status == "error" and raw_status and raw_status[0] == _IPOPT_INFEASIBLE_PROBLEM
-    ):
-        # The NLP engine converged to a point of locally minimal infeasibility
-        # (Ipopt code 2, which the backend reports as ``error``). On a nonconvex
-        # model that is not a proof, so the claim is the local one.
-        result.status = "local_infeasible"
-        result.error = None
-    elif result.status == "iteration_limit" and result.x:
-        result.status = "local_limit"
-    elif result.status == "unbounded" or (
-        result.status == "error" and raw_status and raw_status[0] == _IPOPT_DIVERGING_ITERATES
-    ):
-        # Diverging iterates with no point to hand back (``_solve_continuous``
-        # already turned the with-a-point case into ``local_limit``, #2053). The
-        # backend maps code 4 to ``error``; ``unbounded`` is kept for a backend that
-        # labels it so. Divergence suggests, but does not prove, unboundedness.
-        from discopt import status as _st
-
-        result.status = "error"
-        result.termination = _st.TERMINATION_DIVERGING
-        result.error = (
-            "POUNCE's NLP iterates diverged; that suggests, but does not prove, an "
-            "objective unbounded below on the feasible set."
+    _map_nlp_status(result, raw_status, midpath)
+    report = pinned[0] if pinned else None
+    route = POUNCE_ROUTE_NLP
+    if result.status != "local_optimal" and report is not None:
+        # #2366: the final iterate shows columns pinned at a bound by equality
+        # rows -- no strict interior there, so the barrier cannot converge. Re-solve
+        # once, from the same start, with those variables' bounds moved outward by
+        # a 1e-8 slab, then project onto the declared box. The retry is adopted only
+        # when it converged AND the projected point passes discopt's own 1e-6
+        # feasibility check; otherwise the first result stands, with the report.
+        masks = _pinned_slab_masks(model, report)
+        retried: Optional[SolveResult] = None
+        verified: list = []
+        if (
+            masks is not None
+            and _pinned_retry_enabled()
+            and _remaining() >= _POUNCE_MIDPATH_MIN_CONTINUATION_TIME
+        ):
+            r_status: list = []
+            r_midpath: list = []
+            retried = _solve_continuous(
+                model,
+                _remaining(),
+                options,
+                time.perf_counter(),
+                "pounce",
+                initial_point=initial_point,
+                warm_start=warm_start,
+                tighten_bounds=False,
+                raw_status_out=r_status,
+                pounce_scaling=resolved_scaling,
+                equilibrate_rows=True,
+                midpath_out=r_midpath,
+                withhold_diverging=True,
+                widen_columns=masks,
+                widened_out=verified,
+            )
+            _map_nlp_status(retried, r_status, r_midpath)
+        widened = ", ".join(
+            f"{g.variable} {'lb' if g.side == 'lower' else 'ub'}"
+            for g in report.groups
+            if g.variable != "<auxiliary>"
         )
-    # #2366: say why an unconverged solve may have degenerated, when its final
-    # iterate shows columns pinned at a bound by equality rows.
-    if result.status != "local_optimal" and pinned and pinned[0] is not None:
-        result.pinned_bounds = pinned[0]
-        warnings.warn(pinned[0].message(result.status), UserWarning, stacklevel=3)
+        if (
+            retried is not None
+            and retried.status == "local_optimal"
+            and retried.x is not None
+            and verified
+            and verified[0] is True
+        ):
+            stats = dict(retried.solver_stats or {})
+            for key, val in (result.solver_stats or {}).items():
+                stats[f"first_solve/{key}"] = val
+            retried.solver_stats = stats
+            result = retried
+            route = f"{POUNCE_ROUTE_NLP} [#2366 bound-slab retry: {widened}]"
+            warnings.warn(
+                f"solver='pounce': the first solve stopped without converging, with "
+                f"{report.n_columns} columns pinned at a bound that equality rows also "
+                f"determine ({'; '.join(g.describe() for g in report.groups[:4])}). It was "
+                f"re-solved once with the bounds of {widened} moved outward by "
+                f"{_PINNED_SLAB_RTOL:g}*max(1,|b|); that converged, and the point, projected "
+                "back onto the declared box, satisfies every row and bound to discopt's "
+                "1e-6 tolerance, so it is reported (#2366). Declaring such a bound slightly "
+                "outside the reachable values (e.g. lb=-1e-8) avoids the first solve; "
+                "DISCOPT_POUNCE_PINNED_RETRY=0 disables the retry. result.pinned_bounds "
+                "holds the first solve's report.",
+                UserWarning,
+                stacklevel=3,
+            )
+        else:
+            text = report.message(result.status)
+            if retried is not None:
+                text += (
+                    f" A retry with the bounds of {widened} moved outward by "
+                    f"{_PINNED_SLAB_RTOL:g}*max(1,|b|) did not help (status "
+                    f"{retried.status!r}"
+                    + (
+                        ", projected point outside discopt's 1e-6 tolerance"
+                        if verified and verified[0] is False
+                        else ""
+                    )
+                    + "); the first solve's result is reported."
+                )
+            warnings.warn(text, UserWarning, stacklevel=3)
+        result.pinned_bounds = report
+    result.wall_time = time.perf_counter() - t_start
     _strip_local_claims(result)
     result.convex_fast_path = False
-    result.algorithm_route = POUNCE_ROUTE_NLP
+    result.algorithm_route = route
     return result
 
 
