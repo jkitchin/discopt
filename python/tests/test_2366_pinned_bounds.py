@@ -185,10 +185,13 @@ def test_retry_budget_is_capped_at_the_first_solves_wall(monkeypatch):
     assert r.status == "local_optimal"
     assert [widened for _, _, widened in calls] == [False, True]
     (_, first_wall, _), (retry_budget, _, _) = calls
-    # The cap is taken just after the first call returns, so it cannot exceed the
-    # wrapper's measurement of that call by more than the wrapper's own overhead.
-    assert retry_budget <= first_wall + 1e-3
-    assert retry_budget >= solver_mod._POUNCE_MIDPATH_MIN_CONTINUATION_TIME
+    # The cap is the first call's wall, floored at the continuation minimum (a
+    # first solve faster than the floor still leaves the retry that much), taken
+    # just after the first call returns: it cannot exceed the wrapper's
+    # measurement by more than the wrapper's own overhead.
+    floor = solver_mod._POUNCE_MIDPATH_MIN_CONTINUATION_TIME
+    assert retry_budget <= max(first_wall, floor) + 1e-3
+    assert retry_budget >= floor
 
 
 @pytest.mark.smoke
