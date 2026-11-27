@@ -47,7 +47,9 @@ _T_LAUNCH = time.perf_counter()  # earliest point this process can see
 # Portfolio wait: the library default, "fast" (see _iis_milp.PORTFOLIO_WAITS:
 # the other members stop clamp(t, 10, 30) s after the first completes at t, but
 # not before half the budget has elapsed). MIPCC_PORTFOLIO_WAIT=scaled is the
-# opt-in that trades size for time (see _iis_milp.PORTFOLIO_WAITS).
+# opt-in that trades size for time (see _iis_milp.PORTFOLIO_WAITS), and
+# MIPCC_PORTFOLIO_WAIT=evidence the fast wait whose floor ends early, at
+# t + max(10 t, 60) s (see _iis_milp.PORTFOLIO_FLOOR_EXITS).
 PORTFOLIO_WAIT = "fast"
 
 # Competition tolerance (SOLUTION_FORMAT.md, "Certificates"). Judging uses it.
@@ -643,7 +645,12 @@ def _run(
     if on_disk is None:
         on_disk = {}
     data = read_mps(instance)
-    from discopt._iis_milp import DEFAULT_PORTFOLIO, PORTFOLIO_WAITS, milp_iis_arrays
+    from discopt._iis_milp import (
+        DEFAULT_PORTFOLIO,
+        PORTFOLIO_FLOOR_EXITS,
+        PORTFOLIO_WAITS,
+        milp_iis_arrays,
+    )
 
     m = data["row_lo"].size
     arrays = (
@@ -676,6 +683,7 @@ def _run(
             grace=PORTFOLIO_WAITS[wait][0],
             grace_window=PORTFOLIO_WAITS[wait][1],
             grace_floor=PORTFOLIO_WAITS[wait][2],
+            grace_floor_exit=PORTFOLIO_FLOOR_EXITS[wait],
         )
     except TimeoutError as exc:
         # No subsystem was confirmed in the budget: the whole model (already
