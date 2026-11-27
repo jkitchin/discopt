@@ -43,6 +43,7 @@ from __future__ import annotations
 import math
 import os
 import time
+import warnings
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Optional, Sequence
@@ -212,7 +213,7 @@ class MilpIIS:
     n_relaxed: int = 0  # integralities the anytime relaxation (_relax_integrality) traded away
     n_rehold: int = 0  # elements the re-hold move (_rehold) removed from a complete answer
     # Portfolio runs only: one entry per member, in portfolio order, with keys
-    # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
+    # order / outcome ("ok" | "timeout" | "abandoned" | "died") / size / complete / wall,
     # and a timed-out member's own TimeoutError message.
     members: Optional[list] = None
     # Portfolio runs only: the other members' distinct complete answers, smallest
@@ -4177,8 +4178,9 @@ def _polish_parallel(
     overall ``deadline`` (``time.perf_counter()`` clock), each with
     ``highs_threads`` HiGHS threads as a portfolio member gets. Returns each result, or
     ``None`` for a post-pass that did not return by the deadline (it is killed)
-    or was never started (too little time left). An error in a post-pass is
-    re-raised, as for a portfolio member."""
+    or was never started (too little time left), and for one that died (killed
+    from outside, or a ``MemoryError``; a :class:`RuntimeWarning` names it). Any
+    other error in a post-pass is re-raised, as for a portfolio member."""
     import pickle
     import subprocess
     import sys
@@ -4242,14 +4244,27 @@ def _polish_parallel(
                         err.seek(0)
                         tail = err.read().decode(errors="replace").strip()[-2000:]
                         err.close()
-                        raise RuntimeError(
+                        # As for a portfolio member: a post-pass killed from outside
+                        # leaves its input answer, which is already sound, in place
+                        # (``None``, as for one that ran out of time).
+                        warnings.warn(
                             f"compute_iis post-pass {k} exited without a result "
-                            f"(exit code {proc.returncode}):\n{tail}"
+                            f"(exit code {proc.returncode}):\n{tail}",
+                            RuntimeWarning,
+                            stacklevel=2,
                         )
+                        continue
                     err.close()
                     with open(result_path, "rb") as f:
                         kind, payload = pickle.load(f)
                     if kind == "error":
+                        if isinstance(payload, MemoryError):
+                            warnings.warn(
+                                f"compute_iis post-pass {k}: {payload!r}",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
+                            continue
                         raise payload
                     if kind == "ok":
                         out[k] = payload
@@ -4316,8 +4331,12 @@ def _portfolio_iis(
     own (confirmed infeasible under both presolve configurations, certificates
     checked); the portfolio only chooses among them. Choice: the smallest
     *complete* result, ties to the earlier order in ``portfolio``; if no member
-    completed, the smallest anytime result. :class:`TimeoutError` only when every
-    member timed out; any other member exception is re-raised.
+    completed, the smallest anytime result. A member that dies (killed from
+    outside, such as by the OOM killer, or a ``MemoryError``) is recorded with
+    outcome ``"died"`` and a :class:`RuntimeWarning`, and the others carry on;
+    :class:`RuntimeError` only when no member returned an answer and at least one
+    died, :class:`TimeoutError` when every member timed out. Any other member
+    exception is re-raised.
 
     Members are fresh ``python -c`` interpreters fed a pickled job, not
     ``multiprocessing`` children: a spawned child re-imports the caller's
@@ -4392,6 +4411,7 @@ def _portfolio_iis(
         for o in orders
     ]
     cutoff = hard_end
+    deaths: list[str] = []
     with tempfile.TemporaryDirectory(prefix="discopt_iis_portfolio_") as tmp:
         try:
             while todo or running:
@@ -4437,14 +4457,29 @@ def _portfolio_iis(
                         err.seek(0)
                         tail = err.read().decode(errors="replace").strip()[-2000:]
                         err.close()
-                        raise RuntimeError(
+                        # A member killed from outside (the OOM killer: exit -9 on
+                        # no-ip-65059 with 6 members in a 7.75 GiB VM) says nothing
+                        # about the others, each of which is sound on its own. Record
+                        # it, warn, and let the survivors finish; it is raised only
+                        # if no member returns an answer.
+                        died = (
                             f"compute_iis portfolio member {orders[i]!r} exited without a "
                             f"result (exit code {proc.returncode}):\n{tail}"
                         )
+                        members[i].update(outcome="died", message=died)
+                        deaths.append(died)
+                        warnings.warn(died, RuntimeWarning, stacklevel=2)
+                        continue
                     err.close()
                     with open(result_path, "rb") as f:
                         kind, payload = pickle.load(f)
                     if kind == "error":
+                        if isinstance(payload, MemoryError):
+                            died = f"compute_iis portfolio member {orders[i]!r}: {payload!r}"
+                            members[i].update(outcome="died", message=died)
+                            deaths.append(died)
+                            warnings.warn(died, RuntimeWarning, stacklevel=2)
+                            continue
                         raise payload
                     if kind == "timeout":
                         members[i].update(outcome="timeout", message=payload)
@@ -4469,6 +4504,12 @@ def _portfolio_iis(
                 members[i].update(outcome="abandoned", wall=round(time.time() - t0, 3))
 
     done = [(i, r) for i, r in enumerate(results) if r is not None]
+    if not done and deaths:
+        raise RuntimeError(
+            "compute_iis: no portfolio member returned an answer; "
+            + f"{len(deaths)} died:\n"
+            + "\n".join(deaths)
+        )
     if not done:
         why = "; ".join(f"{mb['order']}: {mb.get('message') or mb['outcome']}" for mb in members)
         raise TimeoutError(
