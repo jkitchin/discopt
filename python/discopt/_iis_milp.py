@@ -213,9 +213,18 @@ class MilpIIS:
     n_relaxed: int = 0  # integralities the anytime relaxation (_relax_integrality) traded away
     n_rehold: int = 0  # elements the re-hold move (_rehold) removed from a complete answer
     # Portfolio runs only: one entry per member, in portfolio order, with keys
-    # order / outcome ("ok" | "timeout" | "abandoned" | "died") / size / complete / wall,
-    # and a timed-out member's own TimeoutError message.
+    # order / outcome ("ok" | "timeout" | "abandoned" | "died") / size / complete / wall
+    # (the member's own run time) / t_done (seconds from the run's ``t_start`` to the
+    # member's end), and a timed-out member's own TimeoutError message.
     members: Optional[list] = None
+    # Portfolio runs only (set by :func:`milp_iis_arrays`): where the wall time
+    # went. ``first_complete_s`` / ``winner_done_s`` are seconds from ``t_start``
+    # to the first complete member and to the member whose answer was polished;
+    # ``portfolio_s`` to the end of the portfolio (its grace wait included);
+    # ``post_s`` the post-pass; ``winner`` that member's order; ``pre_post_size``
+    # its size before the post-pass. Lets a run say how much of its wall time
+    # was spent waiting for an answer that did not change.
+    timing: Optional[dict] = None
     # Portfolio runs only: the other members' distinct complete answers, smallest
     # first, for the post-pass to polish too (:func:`_polish_alternatives`).
     alternatives: Optional[list] = None
@@ -2830,6 +2839,69 @@ def milp_iis_arrays(
         )
     if not include_bounds:
         return res  # the post-pass needs every applied bound listed (see _polish)
+    t_portfolio = time.perf_counter()
+    if portfolio is not None:
+        return _stamp_timing(
+            _post_pass(
+                arrays,
+                res,
+                portfolio,
+                workers,
+                threads,
+                t_start,
+                total_time_limit,
+                cert_tol,
+                time_limit,
+                iis_engine,
+            ),
+            res,
+            t_start,
+            t_portfolio,
+        )
+    return _post_pass(
+        arrays,
+        res,
+        portfolio,
+        workers,
+        threads,
+        t_start,
+        total_time_limit,
+        cert_tol,
+        time_limit,
+        iis_engine,
+    )
+
+
+def _stamp_timing(out: MilpIIS, res: MilpIIS, t_start: float, t_portfolio: float) -> MilpIIS:
+    """``out`` (the post-passed answer) with :attr:`MilpIIS.timing` filled in from
+    the portfolio result ``res``; see that field."""
+    members = res.members or []
+    done = [m["t_done"] for m in members if m.get("complete") and m.get("t_done") is not None]
+    winner = next((m for m in members if m["order"] == res.order), None)
+    timing = dict(
+        first_complete_s=round(min(done), 3) if done else None,
+        winner_done_s=None if winner is None else winner.get("t_done"),
+        portfolio_s=round(t_portfolio - t_start, 3),
+        post_s=round(time.perf_counter() - t_portfolio, 3),
+        winner=res.order,
+        pre_post_size=_iis_size(res),
+    )
+    return replace(out, timing=timing)
+
+
+def _post_pass(
+    arrays: tuple,
+    res: MilpIIS,
+    portfolio: Optional[Sequence[str]],
+    workers: Optional[int],
+    threads: Optional[int],
+    t_start: float,
+    total_time_limit: Optional[float],
+    cert_tol: float,
+    time_limit: float,
+    iis_engine: str,
+) -> MilpIIS:
+    """The post-passes of :func:`milp_iis_arrays` on the filter's answer ``res``."""
     deadline = None if total_time_limit is None else t_start + float(total_time_limit)
     alts = res.alternatives or []
     n_par = min(1 + len(alts), (os.cpu_count() or 1) if workers is None else int(workers))
@@ -4407,7 +4479,14 @@ def _portfolio_iis(
     running: dict[int, tuple[Any, float, str, Any]] = {}
     results: list[Optional[MilpIIS]] = [None] * len(orders)
     members: list[dict] = [
-        {"order": o, "outcome": "not started", "size": None, "complete": None, "wall": None}
+        {
+            "order": o,
+            "outcome": "not started",
+            "size": None,
+            "complete": None,
+            "wall": None,
+            "t_done": None,
+        }
         for o in orders
     ]
     cutoff = hard_end
@@ -4453,6 +4532,7 @@ def _portfolio_iis(
                     assert proc.stdin is not None
                     proc.stdin.close()
                     members[i]["wall"] = round(time.time() - t0, 3)
+                    members[i]["t_done"] = round(time.time() - wall0, 3)
                     if proc.returncode != 0 or not os.path.exists(result_path):
                         err.seek(0)
                         tail = err.read().decode(errors="replace").strip()[-2000:]
@@ -4501,7 +4581,11 @@ def _portfolio_iis(
                 assert proc.stdin is not None
                 proc.stdin.close()
                 err.close()
-                members[i].update(outcome="abandoned", wall=round(time.time() - t0, 3))
+                members[i].update(
+                    outcome="abandoned",
+                    wall=round(time.time() - t0, 3),
+                    t_done=round(time.time() - wall0, 3),
+                )
 
     done = [(i, r) for i, r in enumerate(results) if r is not None]
     if not done and deaths:
