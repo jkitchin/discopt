@@ -195,8 +195,9 @@ class DAEBuilder:
             re-solves once with the bound moved outward by ``1e-8*max(1,|b|)``,
             projects the point back inside, and reports it only if it converged
             and passes discopt's 1e-6 feasibility check; either way it warns
-            and sets ``result.pinned_bounds``. Declaring ``lb=-1e-8`` saves the
-            stalled first solve.
+            and sets ``result.pinned_bounds``. The re-solve may take as long
+            as the stalled first solve, so the call can take up to twice its
+            wall time; declaring ``lb=-1e-8`` saves the stalled solve.
         initial : float or np.ndarray, optional
             Initial condition at ``t0``. If given, the state is fixed at this
             value at the first time point.

@@ -29416,7 +29416,9 @@ def _solve_pounce_route(
       ``_PINNED_SLAB_RTOL * max(1, |b|)``; the retry's point is projected back
       onto the declared box and adopted only when it converged and the
       projection passes discopt's 1e-6 feasibility check
-      (``DISCOPT_POUNCE_PINNED_RETRY=0`` disables it).
+      (``DISCOPT_POUNCE_PINNED_RETRY=0`` disables it). The retry's budget is the
+      first solve's wall time (and never past ``time_limit``), so it at most
+      doubles the call.
 
     Convexity of a QP is proved by discopt, not taken from POUNCE's own PSD check:
     that check scales its tolerance by ``max|Q_ij|`` and ignores the box, so it
@@ -29733,11 +29735,12 @@ def _solve_pounce_route(
     raw_status: list = []
     midpath: list = []
     pinned: list = []
+    t_first = time.perf_counter()
     result = _solve_continuous(
         model,
         _remaining(),
         options,
-        time.perf_counter(),
+        t_first,
         "pounce",
         initial_point=initial_point,
         warm_start=warm_start,
@@ -29749,6 +29752,7 @@ def _solve_pounce_route(
         withhold_diverging=True,
         pinned_out=pinned,
     )
+    first_wall = time.perf_counter() - t_first
     _map_nlp_status(result, raw_status, midpath)
     report = pinned[0] if pinned else None
     route = POUNCE_ROUTE_NLP
@@ -29759,7 +29763,11 @@ def _solve_pounce_route(
         # a 1e-8 slab, then project onto the declared box. The retry is adopted only
         # when it converged AND the projected point passes discopt's own 1e-6
         # feasibility check; otherwise the first result stands, with the report.
+        # Its budget is capped at the first solve's wall time, so a retry that
+        # does not help at most doubles the call: measured on the #2366
+        # reproducer, a retry that converges takes 4-5 s after a 48-72 s stall.
         masks = _pinned_slab_masks(model, report)
+        retry_budget = min(_remaining(), max(first_wall, _POUNCE_MIDPATH_MIN_CONTINUATION_TIME))
         retried: Optional[SolveResult] = None
         verified: list = []
         if (
@@ -29771,7 +29779,7 @@ def _solve_pounce_route(
             r_midpath: list = []
             retried = _solve_continuous(
                 model,
-                _remaining(),
+                retry_budget,
                 options,
                 time.perf_counter(),
                 "pounce",
@@ -29799,6 +29807,14 @@ def _solve_pounce_route(
             and verified
             and verified[0] is True
         ):
+            # ``local_optimal`` here is a deliberate claim, not the #1618 pattern of
+            # a point that stopped short of its convergence test. The retry met its
+            # full convergence test on the slab-widened problem; projecting moves
+            # the point by at most ``_PINNED_SLAB_RTOL * max(1, |b|)``, so it is a
+            # stationary point of the declared problem to within that slab. That is
+            # the gap Ipopt itself carries when it reports ``Solve_Succeeded`` under
+            # its default ``bound_relax_factor = 1e-8`` (and projects onto the
+            # original bounds), and the projected point is verified feasible above.
             stats = dict(retried.solver_stats or {})
             for key, val in (result.solver_stats or {}).items():
                 stats[f"first_solve/{key}"] = val

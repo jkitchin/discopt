@@ -162,6 +162,36 @@ def test_unconverged_solve_off_the_bound_is_not_reported():
 
 
 @pytest.mark.smoke
+def test_retry_budget_is_capped_at_the_first_solves_wall(monkeypatch):
+    """The retry may not spend more than the first solve did, so a retry that does
+    not help at most doubles the call (#2378 review)."""
+    import time
+
+    import discopt.solver as solver_mod
+
+    real = solver_mod._solve_continuous
+    calls: list[tuple[float, float, bool]] = []
+
+    def recording(model, time_limit, *args, **kwargs):
+        t0 = time.perf_counter()
+        out = real(model, time_limit, *args, **kwargs)
+        calls.append(
+            (time_limit, time.perf_counter() - t0, kwargs.get("widen_columns") is not None)
+        )
+        return out
+
+    monkeypatch.setattr(solver_mod, "_solve_continuous", recording)
+    r, _ = _solve(_pulse_fit(0.0))
+    assert r.status == "local_optimal"
+    assert [widened for _, _, widened in calls] == [False, True]
+    (_, first_wall, _), (retry_budget, _, _) = calls
+    # The cap is taken just after the first call returns, so it cannot exceed the
+    # wrapper's measurement of that call by more than the wrapper's own overhead.
+    assert retry_budget <= first_wall + 1e-3
+    assert retry_budget >= solver_mod._POUNCE_MIDPATH_MIN_CONTINUATION_TIME
+
+
+@pytest.mark.smoke
 def test_skip_convex_check_local_nlp_reports_too():
     """The ``skip_convex_check`` local-NLP arm (where ``nlp_solver="ipopt"`` runs a
     single solve) attaches the same report. Run on its POUNCE backend, which shares
