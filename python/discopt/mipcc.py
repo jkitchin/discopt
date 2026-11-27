@@ -724,6 +724,7 @@ def _run(
             flush=True,
         )
         return 0
+    engine_res = res  # its members/timing describe the run, whichever set is written
     if chosen is not res:
         doc = solution_json(data, chosen)
         write_atomic(solution, doc)
@@ -755,6 +756,20 @@ def _run(
                 # Kept elements written with no certificate (a complete answer
                 # with some is not shown irreducible to the checker).
                 n_uncertified=size - getattr(solution_json, "n_good", 0),
+                # Where the wall time went: the portfolio's members (order, outcome,
+                # size, complete, seconds from the engine's start to their end) and
+                # the engine's phase times (MilpIIS.timing).
+                members=[
+                    [
+                        m.get("order"),
+                        m.get("outcome"),
+                        m.get("size"),
+                        m.get("complete"),
+                        m.get("t_done"),
+                    ]
+                    for m in (getattr(engine_res, "members", None) or [])
+                ],
+                timing=getattr(engine_res, "timing", None),
                 wall=round(time.perf_counter() - t0, 2),
             )
         ),
