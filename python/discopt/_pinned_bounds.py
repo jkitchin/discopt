@@ -28,6 +28,16 @@ a column on a guess changes the feasible set. So this module does not change the
 model. It reports the signature after a solve that did not converge, so the user
 learns why and what to change.
 
+``solver="pounce"`` also acts on the report, without fixing anything: it re-solves
+once with every pinned variable's bound on the pinned side moved outward by
+``solver._PINNED_SLAB_RTOL * max(1, |b|)`` (1e-8, Ipopt's default
+``bound_relax_factor``, but on those bounds only), projects the point back onto
+the declared box, and adopts it only when the re-solve converged and the
+projected point passes discopt's 1e-6 feasibility check. That restores a strict
+interior without a proof, because the feasible set the user gets is the declared
+one: the slab only shapes the path. On the reproducer above it turns
+``iteration_limit`` (48 s) into ``local_optimal`` at objective 223.586908.
+
 The test is deliberately simple, and it is a hint, not a proof: a column counts
 when it is not fixed, sits within ``rtol * max(1, |bound|)`` of a finite bound at
 the final iterate, and appears in at least one equality row's Jacobian structure.
@@ -95,12 +105,16 @@ class PinnedBoundReport:
             relax = min(relax, float(self.constr_viol_tol))
         return relax
 
-    def message(self, status: str) -> str:
+    def message(
+        self, status: str, solver: str = "solver='pounce'", options_kw: str = "pounce_options"
+    ) -> str:
+        """The warning text. ``solver`` names the solve that stopped and
+        ``options_kw`` the ``Model.solve`` keyword its NLP options go through."""
         shown = "; ".join(g.describe() for g in self.groups[:8])
         if len(self.groups) > 8:
             shown += f"; and {len(self.groups) - 8} more groups"
         text = (
-            f"solver='pounce' stopped with status {status!r}, and {self.n_columns} "
+            f"{solver} stopped with status {status!r}, and {self.n_columns} "
             f"columns of its final iterate are within {self.rtol:g}*max(1,|bound|) of a "
             f"bound while equality rows also involve them: {shown}. If the equalities "
             "determine those columns exactly at the bound (for example a state that "
@@ -125,7 +139,7 @@ class PinnedBoundReport:
         text += (
             " Remedies: declare the bound slightly outside the values the model reaches "
             "(for a DAE state, e.g. lb=-1e-8 on the state's scale instead of 0), or pass "
-            "pounce_options={'bound_relax_factor': 1e-8, 'constr_viol_tol': 1e-8}. A "
+            f"{options_kw}={{'bound_relax_factor': 1e-8, 'constr_viol_tol': 1e-8}}. A "
             "collocation mesh whose stage values undershoot the bound makes even the "
             "first remedy infeasible; refine the mesh where the input switches on. "
             "result.pinned_bounds holds this report."
