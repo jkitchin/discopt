@@ -42,6 +42,7 @@ reduced model concludes nothing (the caller falls back to its other routes).
 from __future__ import annotations
 
 import math
+import sys
 from fractions import Fraction as F
 from functools import lru_cache
 from typing import Optional
@@ -483,7 +484,13 @@ class Model:
 
         def ex(v):
             """A coefficient: must be exact (else the reduction is not applied)."""
-            f = float(v)
+            try:
+                f = float(v)
+            except OverflowError:
+                # Beyond the float range (the lcm row scaling of decimal-exact
+                # rationals can reach it: MIPcc27's dell, a 1e400-scale datum).
+                # Not representable, so no conclusion -- as for any inexact one.
+                raise ValueError("coefficient beyond the float range") from None
             if F(f) != v:
                 raise ValueError("coefficient not exactly representable")
             return f
@@ -493,13 +500,19 @@ class Model:
             relaxed model is infeasible, so is the exact one)."""
             if v is None:
                 return math.inf
-            f = float(v)
+            try:
+                f = float(v)
+            except OverflowError:  # |v| beyond the float range: round outward
+                return math.inf if v > 0 else -sys.float_info.max
             return f if F(f) >= v else math.nextafter(f, math.inf)
 
         def down(v):
             if v is None:
                 return -math.inf
-            f = float(v)
+            try:
+                f = float(v)
+            except OverflowError:  # |v| beyond the float range: round outward
+                return -math.inf if v < 0 else sys.float_info.max
             return f if F(f) <= v else math.nextafter(f, -math.inf)
 
         rlo, rhi = [], []
