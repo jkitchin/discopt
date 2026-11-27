@@ -307,3 +307,31 @@ def test_decimal_models_never_concluded_infeasible_when_feasible():
             n_true += 1
             assert on == "kInfeasible", args
     assert n_checked >= 150 and n_true >= 20, (n_checked, n_true)
+
+
+def test_export_beyond_float_range_is_no_conclusion_not_a_crash():
+    """MIPcc27's dell: the lcm row scaling of decimal-exact rationals (#2375) put
+    a coefficient past the float range, ``float(Fraction)`` raised OverflowError
+    out of ``export``, a portfolio member re-raised it and mipcc answered the full
+    model (1220 kept, was 157). Such a coefficient is not representable, so the
+    route draws no conclusion; an out-of-range side or bound rounds outward."""
+    A = sp.csr_matrix(np.array([[1.0, 1.0]]))
+    m = Model(A, np.array([1.0]), np.array([2.0]), np.zeros(2), np.ones(2), np.zeros(2, bool))
+    huge = Fraction(10**400)
+    m.rows[0][0] = huge
+    with pytest.raises(ValueError, match="float range"):
+        m.export()
+
+    m = Model(A, np.array([1.0]), np.array([2.0]), np.zeros(2), np.ones(2), np.zeros(2, bool))
+    m.rhi[0], m.rlo[0] = huge, -huge
+    m.ub[1], m.lb[1] = huge, -huge
+    _, rlo, rhi, lb, ub, _ = m.export()
+    assert rhi[0] == np.inf and rlo[0] == -np.inf
+    assert ub[1] == np.inf and lb[1] == -np.inf
+
+    # Out of range on the "wrong" side still rounds outward, never inward.
+    m = Model(A, np.array([1.0]), np.array([2.0]), np.zeros(2), np.ones(2), np.zeros(2, bool))
+    m.rhi[0], m.rlo[0] = -huge, huge
+    _, rlo, rhi, _, _, _ = m.export()
+    assert Fraction(float(rhi[0])) >= -huge and Fraction(float(rlo[0])) <= huge
+    assert np.isfinite(rhi[0]) and np.isfinite(rlo[0])
