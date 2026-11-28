@@ -120,6 +120,24 @@ PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]], float]] =
     "fast": (2.0, (10.0, 30.0), 0.5),
     "all": (math.inf, None, 0.0),
     "scaled": (11.0, (10.0, 300.0), 0.0),
+    "evidence": (2.0, (10.0, 30.0), 0.5),
+}
+#: Early exit from the floor, per wait (``None``: the floor holds to its end).
+#: ``(k, c)`` ends the floor at ``t + max(k * t, c)`` once a member completes at
+#: ``t``, so the floor still bounds it but no longer pads every run to it.
+#: ``"evidence"`` is ``"fast"`` with ``(10, 60)``, sized on the member completion
+#: times of 208 portfolio runs (five MIPcc27 smallset sweeps under the 300 s floor
+#: plus the 3600 s timing probe of 2026-11-27): the smallest complete answer
+#: arrived at most 6.7 t after the first completion at t when that exceeded the
+#: base wait (jjliu_clique: 19 s, 149 s), and at most 28 s after it (jnh10: 1 s,
+#: 29 s). Replayed, the rule keeps the smallest answer in all 208 and ends the
+#: waits at 16654 s in total against the floor's 27409 s; ``(3, 60)`` lost
+#: jjliu_clique's (+10 elements) and ``(10, 30)`` keeps jnh10 by 2 s.
+PORTFOLIO_FLOOR_EXITS: dict[str, Optional[tuple[float, float]]] = {
+    "fast": None,
+    "all": None,
+    "scaled": None,
+    "evidence": (10.0, 60.0),
 }
 #: ``"scaled"`` is the opt-in for when time weighs against size: no floor, the
 #: other members get ``clamp(10 t, 10, 300)`` s after the first completes at t.
@@ -2730,6 +2748,7 @@ def milp_iis(
     grace, grace_window, grace_floor = (
         PORTFOLIO_WAITS[portfolio_wait] if portfolio else (math.inf, None, 0.0)
     )
+    grace_floor_exit = PORTFOLIO_FLOOR_EXITS[portfolio_wait] if portfolio else None
     return milp_iis_arrays(
         arrays,
         include_bounds=include_bounds,
@@ -2746,6 +2765,7 @@ def milp_iis(
         grace=grace,
         grace_window=grace_window,
         grace_floor=grace_floor,
+        grace_floor_exit=grace_floor_exit,
         iis_engine=iis_engine,
     )
 
@@ -2769,6 +2789,7 @@ def milp_iis_arrays(
     iis_engine: Optional[str] = None,
     threads: Optional[int] = None,
     grace_floor: float = 0.0,
+    grace_floor_exit: Optional[tuple[float, float]] = None,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
@@ -2828,10 +2849,18 @@ def milp_iis_arrays(
             grace_window=grace_window,
             threads=threads,
             grace_floor=grace_floor,
+            grace_floor_exit=grace_floor_exit,
         )
     else:
-        if grace != math.inf or grace_window is not None or grace_floor != 0.0:
-            raise ValueError("grace= / grace_window= / grace_floor= need portfolio=")
+        if (
+            grace != math.inf
+            or grace_window is not None
+            or grace_floor != 0.0
+            or grace_floor_exit is not None
+        ):
+            raise ValueError(
+                "grace= / grace_window= / grace_floor= / grace_floor_exit= need portfolio="
+            )
         if threads is not None:
             raise ValueError("threads= needs portfolio=; a single order runs in-process")
         res = _milp_iis_arrays(
@@ -4366,14 +4395,19 @@ def _grace_cutoff(
     window: Optional[tuple[float, float]],
     floor: float,
     total_time_limit: Optional[float],
+    floor_exit: Optional[tuple[float, float]] = None,
 ) -> float:
     """Elapsed time at which a portfolio stops its other members once one
     completes at ``t_done``: ``t_done + _grace_extra(...)``, but never before
     ``min(floor * total_time_limit, _GRACE_FLOOR_CAP_S)`` (see
-    :data:`PORTFOLIO_WAITS`)."""
+    :data:`PORTFOLIO_WAITS`). ``floor_exit=(k, c)`` ends that floor early, at
+    ``t_done + max(k * t_done, c)`` (see :data:`PORTFOLIO_FLOOR_EXITS`)."""
     end = t_done + _grace_extra(t_done, grace, window)
     if total_time_limit is not None:
         floor_s = min(floor * float(total_time_limit), _GRACE_FLOOR_CAP_S)
+        if floor_exit is not None:
+            k, c = floor_exit
+            floor_s = min(floor_s, t_done + max(k * t_done, c))
         end = max(end, floor_s)
     return end
 
@@ -4389,6 +4423,7 @@ def _portfolio_iis(
     grace_window: Optional[tuple[float, float]] = None,
     threads: Optional[int] = None,
     grace_floor: float = 0.0,
+    grace_floor_exit: Optional[tuple[float, float]] = None,
 ) -> MilpIIS:
     """Run one deletion filter per order in ``portfolio``, each in its own process,
     against one shared budget, and return the smallest complete result.
@@ -4426,6 +4461,8 @@ def _portfolio_iis(
     at ``_GRACE_FLOOR_CAP_S``) after the start, so an early completion does not
     stop members that finish well inside a large budget (see
     :data:`PORTFOLIO_WAITS`). ``0`` disables it.
+    ``grace_floor_exit=(k, c)`` ends the floor at ``t + max(k * t, c)`` once a
+    member completes at ``t`` (see :data:`PORTFOLIO_FLOOR_EXITS`).
     """
     import os
     import pickle
@@ -4459,6 +4496,10 @@ def _portfolio_iis(
             raise ValueError(f"grace_window needs 0 <= lo <= hi and a finite grace: {grace_window}")
     if not 0.0 <= grace_floor < 1.0:
         raise ValueError(f"grace_floor must be in [0, 1), got {grace_floor}")
+    if grace_floor_exit is not None:
+        k_x, c_x = (float(v) for v in grace_floor_exit)
+        if not (k_x >= 0.0 and c_x >= 0.0):
+            raise ValueError(f"grace_floor_exit needs k >= 0 and c >= 0: {grace_floor_exit}")
 
     # perf_counter is per-process; members get an absolute wall-clock deadline.
     wall0 = time.time() - (time.perf_counter() - t_start)
@@ -4569,7 +4610,12 @@ def _portfolio_iis(
                     if payload.complete and math.isfinite(grace):
                         t_done = time.time() - wall0
                         grace_end = wall0 + _grace_cutoff(
-                            t_done, grace, grace_window, grace_floor, total_time_limit
+                            t_done,
+                            grace,
+                            grace_window,
+                            grace_floor,
+                            total_time_limit,
+                            grace_floor_exit,
                         )
                         cutoff = grace_end if cutoff is None else min(cutoff, grace_end)
         finally:

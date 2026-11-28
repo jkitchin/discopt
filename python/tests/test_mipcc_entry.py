@@ -594,7 +594,7 @@ def test_portfolio_wait_opt_in_selects_the_scaled_wait(tmp_path, monkeypatch, ca
     assert mipcc.main([inst, str(tmp_path / "a.json")]) == 0
     monkeypatch.setenv("MIPCC_PORTFOLIO_WAIT", "scaled")
     assert mipcc.main([inst, str(tmp_path / "b.json")]) == 0
-    assert seen == [engine.PORTFOLIO_WAITS["fast"], (11.0, (10.0, 300.0), 0.0)]
+    assert seen == [engine.PORTFOLIO_WAITS[mipcc.PORTFOLIO_WAIT], (11.0, (10.0, 300.0), 0.0)]
     monkeypatch.setenv("MIPCC_PORTFOLIO_WAIT", "nope")
     capsys.readouterr()
     assert mipcc.main([inst, str(tmp_path / "c.json")]) == 0
